@@ -204,6 +204,61 @@ pub(super) fn app_suspended(sql: &SqlStorage) -> R<bool> {
     .is_empty())
 }
 
+/// One of ADR 0010's unpublish triggers fired for the whole room, inside the caller's transaction (M6 step 6): the
+/// app is unpublished ([`unpublish_app`]), and if there was a configuration to unpublish, audited as `app.unpublished`
+/// by Podster with `{ reason, ..details }` and told to the room's managers as the event `app.unpublished` with the
+/// trigger's code as its reason. **The unpublish is Podster's act,** whoever's command fired it: that command's own
+/// audit row records who acted. A room with no release configuration has nothing to unpublish and records nothing
+/// here. Answers whether it unpublished.
+///
+/// Every trigger about the whole room goes through here, decision 218's release switch included, so the record of an
+/// unpublish is the same whatever fired it. After the transaction commits, the room's `fetch` runs the release
+/// bookkeeping, since the epoch moved, and arms, as it does after every request that isn't a read.
+pub(super) fn unpublish_for(
+    sql: &SqlStorage,
+    trigger: UnpublishTrigger,
+    details: Value,
+    now: i64,
+) -> R<bool> {
+    if !unpublish_app(sql, trigger, None, now)? {
+        return Ok(false);
+    }
+    let mut record = json!({ "reason": trigger.code() });
+    if let (Some(record), Value::Object(details)) = (record.as_object_mut(), details) {
+        record.extend(details);
+    }
+    audit_as(
+        sql,
+        moderation::PODSTER,
+        moderation::PODSTER_KIND,
+        "app.unpublished",
+        "app",
+        None,
+        Some(record.to_string()),
+        now,
+    )?;
+    record_event(
+        sql,
+        "app.unpublished",
+        moderation::PODSTER,
+        None,
+        &Transition {
+            reason: Some(trigger.code()),
+            ..Transition::NONE
+        },
+        roles::room_managers(sql, moderation::PODSTER)?,
+        now,
+    )?;
+    Ok(true)
+}
+
+/// The room's release epoch now, or `None` with no release configuration (or none readable yet).
+pub(super) fn release_epoch(sql: &SqlStorage) -> Option<i64> {
+    rows(sql, "SELECT release_epoch FROM release_config", vec![])
+        .ok()
+        .and_then(|found| found.first().map(|config| int(&config["release_epoch"])))
+}
+
 /// Unpublishes the room's app, inside the caller's transaction: core's `unpublish` on the room's own state, written
 /// back whole. The epoch goes up, every host goes to nothing with its version up, the kept script and any commit in
 /// flight are forgotten, the trigger is recorded with the epoch it raised to, each release that was live or served

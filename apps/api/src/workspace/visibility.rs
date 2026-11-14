@@ -282,6 +282,14 @@ pub(super) fn handle_set_visibility(
                 vec![],
             )?;
             new_handle = None;
+            // Only a public room releases: going private unpublishes the room's app (ADR 0010, M6 step 6), and going
+            // public again restores nothing.
+            super::takedown::unpublish_for(
+                sql,
+                podster_core::release::UnpublishTrigger::RoomMadePrivate,
+                json!({}),
+                now,
+            )?;
             // Public claimants stay unless the owner ticked "also end public claims" (decision 151). Then each leaves through
             // the departure rules, in this transaction.
             if end_public_claims {

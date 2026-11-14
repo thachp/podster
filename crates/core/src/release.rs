@@ -762,6 +762,23 @@ impl UnpublishTrigger {
     }
 }
 
+/// Whether a repository's link in `status` unpublishes the room's app, as `UnpublishTrigger::RepositoryNotReady`
+/// (ADR 0010: "its link is no longer ready"). A link that isn't ready refuses every new release at the recheck,
+/// whatever this says; this decides only whether what is up comes down too.
+///
+/// **Decided by the architect on 2026-11-13, for the owner to review: as ADR 0010 is written, every status but
+/// `Ready`.** `Degraded` comes back to `Ready` once its settings are fixed, and an unpublish retires the app's label,
+/// so a transient settings change costs the room its app's address for good. The owner's alternative, `Suspended`
+/// only, is `Degraded => false` here, and nothing else changes.
+pub fn link_status_unpublishes(status: crate::repositories::LinkStatus) -> bool {
+    use crate::repositories::LinkStatus;
+    match status {
+        LinkStatus::Ready => false,
+        LinkStatus::Degraded => true,
+        LinkStatus::Suspended => true,
+    }
+}
+
 /// The trigger's own change to the room's serve state: the epoch up by one, every host to nothing with its version up,
 /// and the kept script forgotten, so nothing can be rolled back to afterwards. The scripts to delete are what the hosts
 /// served, what was kept, and, when an unpublish lands between a commit and its marker, what was live before that

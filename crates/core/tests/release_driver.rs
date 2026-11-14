@@ -44,8 +44,14 @@ fn every_other_state_is_not_the_drivers() {
 
 #[test]
 fn each_step_has_its_own_code() {
-    let codes = [DriveStep::Start, DriveStep::Upload, DriveStep::Commit].map(DriveStep::code);
-    assert_eq!(codes, ["start", "upload", "commit"]);
+    let codes = [
+        DriveStep::Start,
+        DriveStep::Upload,
+        DriveStep::Commit,
+        DriveStep::Marker,
+    ]
+    .map(DriveStep::code);
+    assert_eq!(codes, ["start", "upload", "commit", "marker"]);
 }
 
 // --- what came of a step ---------------------------------------------------------------------------------------------
@@ -436,4 +442,113 @@ fn the_owner_is_the_organization_else_the_person_else_the_room() {
         assert!(!is_read_owner_key(key), "{key}");
     }
     assert!(is_read_owner_key(&format!("org:{}", "a".repeat(128))));
+}
+
+// --- another release's flight (ruling 7) -----------------------------------------------------------------------------
+
+const OWN: &str = "rel_own";
+const OTHER: &str = "rel_other";
+
+#[test]
+fn only_a_commit_waits_for_another_releases_flight() {
+    assert_eq!(IN_FLIGHT_WAITING, "release_in_flight");
+    assert!(waits_uncounted(IN_FLIGHT_WAITING));
+    // Another's flight: the commit waits; a start or an upload goes on beside it.
+    assert!(waits_in_flight(OWN, Some(OTHER), DriveStep::Commit));
+    for step in [DriveStep::Start, DriveStep::Upload, DriveStep::Marker] {
+        assert!(!waits_in_flight(OWN, Some(OTHER), step), "{step:?}");
+    }
+    // Its own flight is its commit's retry, and no flight is nothing to wait for.
+    assert!(!waits_in_flight(OWN, Some(OWN), DriveStep::Commit));
+    assert!(!waits_in_flight(OWN, None, DriveStep::Commit));
+}
+
+#[test]
+fn a_wait_for_another_flight_is_looked_at_again_after_the_first_wait() {
+    assert_eq!(in_flight_due(NOW), NOW + DRIVE_FIRST_WAIT_MS);
+    assert_eq!(in_flight_due(i64::MAX), i64::MAX);
+}
+
+#[test]
+fn a_step_that_answered_an_uncounted_wait_is_never_ended_by_the_cap() {
+    for attempts in [
+        1,
+        MAX_DRIVE_ATTEMPTS - 1,
+        MAX_DRIVE_ATTEMPTS,
+        MAX_DRIVE_ATTEMPTS + 5,
+    ] {
+        // What the cap alone would say for the same step.
+        let capped = drive_outcome(
+            DriveStep::Commit,
+            Some(DriveStep::Commit),
+            attempts,
+            attempts - 1,
+            None,
+            NOW,
+        );
+        if attempts >= MAX_DRIVE_ATTEMPTS {
+            assert_eq!(capped, DriveOutcome::GiveUp, "{attempts}");
+        }
+        assert_eq!(
+            uncounted_outcome(
+                DriveStep::Commit,
+                Some(DriveStep::Commit),
+                Some(IN_FLIGHT_WAITING),
+                None,
+                NOW
+            ),
+            Some(DriveOutcome::Retry {
+                at: in_flight_due(NOW)
+            }),
+            "{attempts}"
+        );
+    }
+    // A time the step named, later than the first wait, is kept; an earlier one isn't.
+    let later = NOW + 10 * DRIVE_FIRST_WAIT_MS;
+    assert_eq!(
+        uncounted_outcome(
+            DriveStep::Commit,
+            Some(DriveStep::Commit),
+            Some(READ_SHARE_WAITING),
+            Some(later),
+            NOW
+        ),
+        Some(DriveOutcome::Retry { at: later })
+    );
+    assert_eq!(
+        uncounted_outcome(
+            DriveStep::Commit,
+            Some(DriveStep::Commit),
+            Some(IN_FLIGHT_WAITING),
+            Some(NOW + 1),
+            NOW
+        ),
+        Some(DriveOutcome::Retry {
+            at: in_flight_due(NOW)
+        })
+    );
+}
+
+#[test]
+fn any_other_answer_or_a_release_that_moved_is_the_caps_to_decide() {
+    for code in [
+        None,
+        Some("standing_unknown"),
+        Some("release_reads_budget"),
+        Some(ATTEMPTS_EXHAUSTED),
+        Some("release_in_flight "),
+    ] {
+        assert_eq!(
+            uncounted_outcome(DriveStep::Commit, Some(DriveStep::Commit), code, None, NOW),
+            None,
+            "{code:?}"
+        );
+    }
+    // The release moved on, or out of the driver's hands: not a wait at all.
+    for after in [None, Some(DriveStep::Upload)] {
+        assert_eq!(
+            uncounted_outcome(DriveStep::Commit, after, Some(IN_FLIGHT_WAITING), None, NOW),
+            None
+        );
+    }
 }

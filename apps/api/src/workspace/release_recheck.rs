@@ -658,6 +658,22 @@ impl Workspace {
     /// said.
     pub(super) async fn release_reads(&self, release_id: &str) -> R<Reads> {
         let sql = self.state.storage().sql();
+        // Test builds only: a room a test gave `test_release_reads_seen` counts each round of outside reads, so a test
+        // can show that none was made.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_reads_seen'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            exec(
+                &sql,
+                "INSERT INTO test_release_reads_seen (release_id) VALUES (?)",
+                vec![release_id.into()],
+            )?;
+        }
         let read_at = release_now(&sql);
         let people = people(&sql, release_id, read_at)?.ok_or_else(ApiError::not_found)?;
         let org = room_owner_org(&sql)?;

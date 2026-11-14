@@ -5,8 +5,10 @@
 //!
 //! - **Which step** ([`drive_step`]): a queued release is started; an uploading release whose upload the room hasn't
 //!   recorded is uploaded; one whose upload is recorded is committed (staged, then confirmed). Anything else is not the
-//!   driver's: an ended release, one that is live (the marker's wait is not built), and one whose upload is uncertain
-//!   (nothing makes one yet).
+//!   driver's: an ended release, one that is live (its marker's wait is [`DriveStep::Marker`], leased for the release in
+//!   flight by `crate::release_marker`'s rules), and one whose upload is uncertain (nothing makes one yet).
+//! - **Another release's flight** ([`waits_in_flight`]): a commit waits for it under [`IN_FLIGHT_WAITING`], counting no
+//!   attempt (`m6-plan.md`, the driver's ruling 7).
 //! - **What came of a step** ([`drive_outcome`]): the release moved on to another step, or out of the driver's hands,
 //!   or it is where it was and waits. Only the release's state after the step decides that, never what the step's
 //!   answer said of itself.
@@ -84,14 +86,46 @@ const _: () = assert!(MAX_RELEASE_READS_PER_HOUR - MAX_OWNER_READS_PER_HOUR >= M
 /// attempt. It counts no attempt ([`waits_uncounted`]). **Proposed.**
 pub const READ_SHARE_WAITING: &str = "release_reads_share";
 
-/// The code a release waits under while another release's commit or rollback waits for its marker (`m6-plan.md`
-/// ruling 7). Its wait is not built yet; it is named here so the two uncounted waits share one rule.
-const IN_FLIGHT_WAITING: &str = "release_in_flight";
+/// The code a release waits under, at its commit, while another release's commit or rollback waits for its marker
+/// (`m6-plan.md`, the driver's ruling 7). It counts no attempt ([`waits_uncounted`]), so it never ends a release by the
+/// cap: the other flight ends by its own marker's bounds.
+pub const IN_FLIGHT_WAITING: &str = "release_in_flight";
 
 /// The waits that count no driver attempt, take no upload slot and so never end a release by the cap: the read share's
-/// and the marker's ([`READ_SHARE_WAITING`] and `release_in_flight`). Nothing else.
+/// and the marker's ([`READ_SHARE_WAITING`] and [`IN_FLIGHT_WAITING`]). Nothing else.
 pub fn waits_uncounted(code: &str) -> bool {
     matches!(code, READ_SHARE_WAITING | IN_FLIGHT_WAITING)
+}
+
+/// Whether a release at `step` waits for another release's flight: only its commit, and only while the room's flight
+/// (`flight`, the release record it is for) is open and isn't its own. Its own flight is its commit's retry. A start
+/// or an upload goes on beside another's flight: neither touches what the hosts serve.
+pub fn waits_in_flight(own: &str, flight: Option<&str>, step: DriveStep) -> bool {
+    step == DriveStep::Commit && flight.is_some_and(|flight| flight != own)
+}
+
+/// When a release waiting [`IN_FLIGHT_WAITING`] is looked at again, if nothing wakes it sooner: the first wait from
+/// `now`. The flight's end wakes it at once; this is the bound when nothing does, and it only reads the room's rows.
+pub fn in_flight_due(now: i64) -> i64 {
+    now.saturating_add(DRIVE_FIRST_WAIT_MS)
+}
+
+/// What came of a step that answered a wait counting no attempt (`code`, [`waits_uncounted`]) and left the release at
+/// the step it was at: a retry at [`in_flight_due`] or the step's own time, whichever is later, and **never the end by
+/// the cap.** `None` for anything else, which [`drive_outcome`] decides.
+pub fn uncounted_outcome(
+    before: DriveStep,
+    after: Option<DriveStep>,
+    code: Option<&str>,
+    retry_at: Option<i64>,
+    now: i64,
+) -> Option<DriveOutcome> {
+    (after == Some(before) && code.is_some_and(waits_uncounted)).then(|| {
+        let at = in_flight_due(now);
+        DriveOutcome::Retry {
+            at: retry_at.map_or(at, |named| named.max(at)),
+        }
+    })
 }
 
 /// The owner a room's reads are charged to, as the key the deployment's budget keeps: `org:` the room's organization,
@@ -161,6 +195,9 @@ pub enum DriveStep {
     Upload,
     /// An uploading release whose upload is recorded: the stage and the confirm (`/internal/release-commit-live`).
     Commit,
+    /// A live release whose flight is open: one fetch of its marker through its default host, and what came of it
+    /// (`crate::release_marker`). Never from [`drive_step`]: the room leases it for the release in flight alone.
+    Marker,
 }
 
 impl DriveStep {
@@ -170,6 +207,7 @@ impl DriveStep {
             DriveStep::Start => "start",
             DriveStep::Upload => "upload",
             DriveStep::Commit => "commit",
+            DriveStep::Marker => "marker",
         }
     }
 }

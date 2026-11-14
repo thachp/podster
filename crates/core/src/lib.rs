@@ -19,6 +19,7 @@ pub mod public_claims;
 pub mod rate_limit;
 pub mod release;
 pub mod release_driver;
+pub mod release_marker;
 pub mod release_status;
 pub mod release_tree;
 pub mod removal;

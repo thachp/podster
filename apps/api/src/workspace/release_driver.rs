@@ -4,7 +4,11 @@
 //! in `podster_core::release_driver`; here is only what it reads, writes and calls.
 //!
 //! **One release at a time,** the room's oldest that is queued or uploading, as ADR 0010 has the room run its release
-//! jobs in the order it committed them. The rest wait behind it.
+//! jobs in the order it committed them. The rest wait behind it. **Beside it, the release in flight's marker**
+//! (`release_marker`): once a release is committed live, the alarm waits for its switch and fetches its marker until
+//! it is served or set back, before the head's next step. A head that reaches its commit while another release's
+//! flight is open waits `release_in_flight`, counting no attempt and taking no upload slot, and that flight's end
+//! wakes it (the driver's ruling 7).
 //!
 //! **A pass of the alarm** ([`Workspace::release_drive_pass`]):
 //!
@@ -53,10 +57,11 @@ use podster_core::release::{
     is_release_id, window_start, ReleaseState, IN_FLIGHT_EXEMPTION_MS, READ_WINDOW_MS,
 };
 use podster_core::release_driver::{
-    drive_outcome, drive_step, drive_wait_ms, lease_holds, may_lease, read_owner_key,
-    read_share_due, stalls_after, step_still_current, upload_slot, waits_uncounted, DriveOutcome,
-    DriveStep, ATTEMPTS_EXHAUSTED, DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS,
-    MAX_ATTEMPT_READS, READ_SHARE_WAITING,
+    drive_outcome, drive_step, drive_wait_ms, in_flight_due, lease_holds, may_lease,
+    read_owner_key, read_share_due, stalls_after, step_still_current, uncounted_outcome,
+    upload_slot, waits_in_flight, waits_uncounted, DriveOutcome, DriveStep, ATTEMPTS_EXHAUSTED,
+    DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS, IN_FLIGHT_WAITING, MAX_ATTEMPT_READS,
+    READ_SHARE_WAITING,
 };
 
 /// The room's path for one step of the driver. Nothing outside the Worker reaches it: the room's alarm sends it to the
@@ -71,7 +76,7 @@ const UPLOAD_ATTEMPTS: &str = "release_upload_attempts";
 /// nothing from there.
 pub(super) const LEASE_LOST: &str = "release_drive_lease_lost";
 /// `last_code` when the room moved under a step, and the release is looked at afresh.
-const MOVED: &str = "release_driver_moved";
+pub(super) const MOVED: &str = "release_driver_moved";
 /// `last_code` for a step that left the release where it was and gave no code of its own.
 const NO_PROGRESS: &str = "release_step_no_progress";
 
@@ -100,6 +105,41 @@ pub(super) fn enabled(sql: &SqlStorage, from_alarm: bool) -> bool {
     {
         let _ = (sql, from_alarm);
         true
+    }
+}
+
+/// Test builds only: a test changes the room at a named point of a step, by leaving statements for the room to run
+/// there, in `test_release_at (point, statement)`: `reserved` (an upload's tree reads reserved, before GitHub's token
+/// is asked for), `opened` (the token minted, before the trees are read) and `staged` (a commit staged, before its
+/// outside reads). Each runs once. A statement that fails is logged by its code, and the step goes on.
+#[cfg(feature = "failpoints")]
+pub(super) fn test_at(sql: &SqlStorage, point: &str) {
+    let found = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_at'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty());
+    if !found {
+        return;
+    }
+    let ran = rows(
+        sql,
+        "SELECT statement FROM test_release_at WHERE point = ? ORDER BY rowid",
+        vec![point.into()],
+    )
+    .and_then(|statements| {
+        for row in statements {
+            exec(sql, row["statement"].as_str().unwrap_or_default(), vec![])?;
+        }
+        exec(
+            sql,
+            "DELETE FROM test_release_at WHERE point = ?",
+            vec![point.into()],
+        )
+    });
+    if ran.is_err() {
+        console_error!("release: a test's statement failed: code=test_release_at_failed");
     }
 }
 
@@ -139,7 +179,7 @@ fn head(sql: &SqlStorage) -> R<Option<Head>> {
 }
 
 /// The room's release epoch and its app's hold generation, which a step's record compares with the lease's.
-fn epoch_and_hold(sql: &SqlStorage) -> R<(i64, i64)> {
+pub(super) fn epoch_and_hold(sql: &SqlStorage) -> R<(i64, i64)> {
     let epoch = rows(sql, "SELECT release_epoch FROM release_config", vec![])?
         .first()
         .map_or(0, |row| int(&row["release_epoch"]));
@@ -219,7 +259,7 @@ pub(super) fn record_pass(sql: &SqlStorage, failed: bool, now: i64) -> R<()> {
 
 /// Writes the job's row for a release, made if it isn't there: when it is next due and why it waits. Any lease is
 /// cleared.
-fn set_job(
+pub(super) fn set_job(
     sql: &SqlStorage,
     release_id: &str,
     next_attempt_at: Option<i64>,
@@ -257,7 +297,7 @@ pub(super) fn read_owner(sql: &SqlStorage) -> R<String> {
     .ok_or_else(|| ApiError::internal("a room with no owner to charge its reads to"))
 }
 
-fn room_id(sql: &SqlStorage) -> String {
+pub(super) fn room_id(sql: &SqlStorage) -> String {
     rows(sql, "SELECT id FROM workspace", vec![])
         .ok()
         .and_then(|found| found.first().and_then(|row| text(&row["id"])))
@@ -266,7 +306,8 @@ fn room_id(sql: &SqlStorage) -> String {
 
 /// When the driver next needs the room's alarm, by the Worker's clock at `real_now`, or `None`.
 ///
-/// - The head's next attempt, or now if it has none on record.
+/// - The head's next attempt, or now if it has none on record; and the same for the release in flight's marker
+///   (`release_marker`), whichever is sooner.
 /// - **The hour's end of every upload under way,** so an upload that outlives it is ended then, whoever asks. After a
 ///   failed bookkeeping run, not before its next try is due (`DRIVE_FIRST_WAIT_MS`), so a run that keeps failing doesn't
 ///   bring the alarm straight back.
@@ -287,6 +328,11 @@ pub(super) fn due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
     let failures = drive_failures(sql)?;
     let now = release_now(sql);
     let mut due: Option<i64> = head(sql)?.map(|head| head.next_attempt_at.unwrap_or(now));
+    // The release in flight's marker, beside the head's steps.
+    if let Some(flight) = release_marker::flight(sql)? {
+        let at = flight.next_attempt_at.unwrap_or(now);
+        due = Some(due.map_or(at, |head| head.min(at)));
+    }
     let started = rows(
         sql,
         "SELECT min(coalesce(upload_started_at, updated_at)) AS since FROM release WHERE state IN ('uploading', 'uncertain')",
@@ -357,6 +403,22 @@ fn lease(
     let Some(step) = drive_step(head.state, head.uploaded) else {
         return Ok(answer("none", None, None));
     };
+    // Before the cap: another release's flight is waited for, counting no attempt (the driver's ruling 7). It ends by
+    // its own marker's bounds, and its end wakes this release.
+    let flight = rows(sql, "SELECT in_flight_release FROM release_config", vec![])?
+        .first()
+        .and_then(|row| text(&row["in_flight_release"]));
+    if waits_in_flight(&head.id, flight.as_deref(), step) {
+        let at = in_flight_due(now);
+        set_job(sql, &head.id, Some(at), Some(IN_FLIGHT_WAITING), now)?;
+        console_log!(
+            "release: a commit waits for another release's flight: room={} release={} code={}",
+            room_id(sql),
+            head.id,
+            IN_FLIGHT_WAITING
+        );
+        return Ok(answer("waiting", Some(IN_FLIGHT_WAITING), Some(at)));
+    }
     // Before the cap: a wait that counts no attempt never ends a release, and takes no upload slot.
     if let Some((code, at)) =
         uncounted.filter(|(code, _)| step == DriveStep::Start && waits_uncounted(code))
@@ -466,7 +528,11 @@ fn record(
     };
     let after = drive_step(state, recorded);
     let stalled = u32::try_from(int(&job["stalls"]).max(0)).unwrap_or(u32::MAX);
-    let outcome = drive_outcome(before, after, attempts, stalled, retry_at, now);
+    // A wait that counts no attempt, answered by the step itself (another release's flight opened after the lease), is
+    // never ended by the cap; anything else is the cap's and the backoff's.
+    let uncounted = uncounted_outcome(before, after, code, retry_at, now);
+    let outcome =
+        uncounted.unwrap_or_else(|| drive_outcome(before, after, attempts, stalled, retry_at, now));
     let (name, code, next) = match outcome {
         DriveOutcome::Next => ("next", None, Some(now)),
         DriveOutcome::Done => ("done", None, None),
@@ -477,13 +543,15 @@ fn record(
         }
     };
     set_job(sql, release_id, next, code, now)?;
+    let stalls = if uncounted.is_some() {
+        stalled
+    } else {
+        stalls_after(before, after, stalled)
+    };
     exec(
         sql,
         "UPDATE release_job SET stalls = ? WHERE release_id = ?",
-        vec![
-            i64::from(stalls_after(before, after, stalled)).into(),
-            release_id.into(),
-        ],
+        vec![i64::from(stalls).into(), release_id.into()],
     )?;
     console_log!(
         "release: a drive step: room={} release={} step={} outcome={} code={}",
@@ -527,10 +595,13 @@ impl Workspace {
         if !expired.is_empty() {
             bookkeeping(&self.state);
         }
-        let Some(due) = head(&sql)?.filter(|head| head.next_attempt_at.is_none_or(|at| at <= now))
-        else {
+        // The release in flight's marker goes first, when it is due: it is what ends the flight others wait on.
+        let flight_due = release_marker::flight(&sql)?
+            .is_some_and(|flight| flight.next_attempt_at.is_none_or(|at| at <= now));
+        let head_due = head(&sql)?.filter(|head| head.next_attempt_at.is_none_or(|at| at <= now));
+        if !flight_due && head_due.is_none() {
             return Ok(json!({ "outcome": "not_due" }));
-        };
+        }
         // Behind `RELEASES`, exactly `true`, and the gate on the release path. With release allowed, a deployment with no
         // content provider idles too: every upload would wait for one, and none would be worth an attempt.
         let idle = if !(crate::releases::setting(&self.env).await.allows_release()
@@ -541,6 +612,39 @@ impl Workspace {
             Some(NO_PROVIDER)
         } else {
             None
+        };
+        if flight_due {
+            // The stop for the whole content domain, read from its home before the transaction: set, it ends the
+            // flight with its own cause (`release_marker::lease`). An answer that can't be read decides nothing.
+            let stopped = idle.is_none()
+                && matches!(
+                    crate::content_stop::read_from(&self.env).await,
+                    crate::content_stop::Stop::Stopped
+                );
+            let leased: Rc<RefCell<Option<release_marker::Leased>>> = Rc::new(RefCell::new(None));
+            let slot = leased.clone();
+            let store = sql.clone();
+            transaction_sync(&self.state, move || {
+                *slot.borrow_mut() = Some(release_marker::lease(
+                    &store,
+                    idle,
+                    stopped,
+                    release_now(&store),
+                )?);
+                Ok(())
+            })?;
+            let leased = leased.borrow_mut().take();
+            return match leased {
+                Some(Ok((release_id, attempt))) => {
+                    self.run_leased(how, &release_id, DriveStep::Marker, attempt)
+                        .await
+                }
+                Some(Err(answer)) => Ok(answer),
+                None => Ok(json!({ "outcome": "none" })),
+            };
+        }
+        let Some(due) = head_due else {
+            return Ok(json!({ "outcome": "not_due" }));
         };
         // The read share, only for a queued release the driver would otherwise start. A question that can't be answered
         // fails the pass, which writes nothing and is asked again after its backoff.
@@ -570,15 +674,26 @@ impl Workspace {
                 _ => json!({ "outcome": "none" }),
             });
         };
+        self.run_leased(how, &release_id, step, attempt).await
+    }
+
+    /// A step just leased: handed to a request of the room's own, or, in test builds, run in the pass.
+    async fn run_leased(
+        &self,
+        how: Pass,
+        release_id: &str,
+        step: DriveStep,
+        attempt: u32,
+    ) -> R<Value> {
         match how {
             Pass::HandOff => {
-                self.hand_off(&release_id, attempt)?;
+                self.hand_off(release_id, attempt)?;
                 Ok(
                     json!({ "release_id": release_id, "outcome": "handed_off", "step": step.code(), "attempt": attempt }),
                 )
             }
             #[cfg(feature = "failpoints")]
-            Pass::Inline => self.drive(&release_id, attempt).await,
+            Pass::Inline => self.drive(release_id, attempt).await,
         }
     }
 
@@ -674,12 +789,17 @@ impl Workspace {
                     Some("start") => DriveStep::Start,
                     Some("upload") => DriveStep::Upload,
                     Some("commit") => DriveStep::Commit,
+                    Some("marker") => DriveStep::Marker,
                     _ => return Err(ApiError::internal("a lease with no step")),
                 }
             }
             // Another lease, none, or its own run out: this step is someone else's now, or done.
             _ => return Ok(json!({ "release_id": release_id, "outcome": "stale" })),
         };
+        // The marker's fetch is a step of its own, with a record of its own (`release_marker`).
+        if before == DriveStep::Marker {
+            return self.marker_step(release_id, attempt, &lease).await;
+        }
         let release = release_row(&sql, release_id)?.ok_or_else(ApiError::not_found)?;
         let state = state_of(&release)?;
         let recorded = match release["script_name"].as_str() {
@@ -699,6 +819,9 @@ impl Workspace {
                         DriveStep::Start => self.start_upload_of(id, release, Some(&lease)).await,
                         DriveStep::Upload => self.upload_of(id, release, Some(&lease)).await,
                         DriveStep::Commit => self.commit_live_of(id, release, Some(&lease)).await,
+                        DriveStep::Marker => {
+                            Err(ApiError::internal("a marker step run as a command"))
+                        }
                     },
                 }
             }

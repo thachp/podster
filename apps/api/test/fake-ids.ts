@@ -20,6 +20,7 @@ export const FAKE_ID_BLOCKS = {
   "merge-task": { block: 1, tag: "mt" },
   "provisioning": { block: 2, tag: "pv" },
   "release-driver": { block: 3, tag: "rd" },
+  "release-marker": { block: 9, tag: "rm" },
   "release-read": { block: 4, tag: "rr" },
   "release-upload": { block: 5, tag: "ru" },
   "repo-access": { block: 6, tag: "ra" },

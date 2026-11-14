@@ -370,6 +370,23 @@ CREATE INDEX release_upload_attempt_at ON release_upload_attempt (at);
 ALTER TABLE release_job ADD COLUMN stalls INTEGER NOT NULL DEFAULT 0 CHECK (typeof(stalls) = 'integer' AND stalls >= 0);
 CREATE TABLE release_drive_failure (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1), last_failed_at INTEGER NOT NULL);
+", "
+CREATE TABLE release_job_next (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
+  next_attempt_at INTEGER CHECK (next_attempt_at IS NULL OR typeof(next_attempt_at) = 'integer'),
+  leased_step TEXT CHECK (leased_step IS NULL OR leased_step IN ('start', 'upload', 'commit', 'marker')),
+  leased_epoch INTEGER CHECK (leased_epoch IS NULL OR typeof(leased_epoch) = 'integer'),
+  leased_hold INTEGER CHECK (leased_hold IS NULL OR typeof(leased_hold) = 'integer'),
+  last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64), updated_at INTEGER NOT NULL,
+  stalls INTEGER NOT NULL DEFAULT 0 CHECK (typeof(stalls) = 'integer' AND stalls >= 0),
+  live_at INTEGER CHECK (live_at IS NULL OR typeof(live_at) = 'integer'),
+  switched_at INTEGER CHECK (switched_at IS NULL OR typeof(switched_at) = 'integer'),
+  CHECK ((leased_step IS NULL) = (leased_epoch IS NULL)), CHECK ((leased_step IS NULL) = (leased_hold IS NULL)),
+  CHECK (switched_at IS NULL OR live_at IS NOT NULL)) WITHOUT ROWID;
+INSERT INTO release_job_next (release_id, attempts, next_attempt_at, leased_step, leased_epoch, leased_hold, last_code, updated_at, stalls)
+  SELECT release_id, attempts, next_attempt_at, leased_step, leased_epoch, leased_hold, last_code, updated_at, stalls FROM release_job;
+DROP TABLE release_job;
+ALTER TABLE release_job_next RENAME TO release_job;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

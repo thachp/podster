@@ -63,15 +63,33 @@ export function rejected(result, label, statuses = [400, 401, 403, 404]) {
 }
 
 export class Target {
-  constructor(base, { pollMs }) {
+  /** `onRequest`, if given, hears of each request sent, retries included: its URL, method, start, status or error, and milliseconds. */
+  constructor(base, { pollMs, onRequest }) {
     this.base = base.replace(/\/$/, "");
     this.pollMs = pollMs;
+    this.onRequest = onRequest;
+  }
+
+  /** One request, timed for `onRequest`. An error is heard of by its name only, then thrown as it was. */
+  async #timed(url, init) {
+    if (!this.onRequest) return fetch(url, init);
+    const at = new Date().toISOString();
+    const begun = performance.now();
+    const heard = (outcome) => this.onRequest({ url: url?.url ?? String(url), method: (init.method ?? url?.method ?? "GET").toUpperCase(), at, ms: Math.round(performance.now() - begun), ...outcome });
+    try {
+      const response = await fetch(url, init);
+      heard({ status: response.status });
+      return response;
+    } catch (error) {
+      heard({ error: error?.name ?? "Error" });
+      throw error;
+    }
   }
 
   /** A limit that's reached waits it out, as a real client would. No run should need this for long. */
   async fetch(url, { retry = true, ...init } = {}) {
     for (let attempt = 0; ; attempt++) {
-      const response = await fetch(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      const response = await this.#timed(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
       // `retry: false` returns a refusal as it is, for a caller that can't wait out the limit.
       if (response.status !== 429 || attempt >= 2 || !retry) return response;
       const wait = Math.min(Number(response.headers.get("retry-after")) || 60, 70);

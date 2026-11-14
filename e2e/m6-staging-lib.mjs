@@ -516,3 +516,28 @@ export function m6Fields(value, keys, at = "") {
  */
 export const M6_EVENT = /^(release|deploy|deployment|app|app_hostname|hostname|content_domain|app_report)[._]/;
 export const m6EventTypes = (events) => [...new Set(events.map((event) => event?.type).filter((type) => typeof type === "string" && M6_EVENT.test(type)))];
+
+// ---- each request's timing ----
+
+/**
+ * Where a request went, for the log: its path with the IDs in it as they are, and never its query, which can carry a
+ * code or a token. A host other than staging's is named, without its query either.
+ */
+export function requestPath(url) {
+  try {
+    const parsed = new URL(String(url));
+    return parsed.origin === STAGING ? parsed.pathname : `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return "(unreadable URL)";
+  }
+}
+
+/** One request's line: when it started, its method and path, its status (or the error's name) and how long it took. */
+export const requestLine = ({ at, method, path, status, error, ms }) => `req  ${at} ${method} ${path} ${status ?? error ?? "no answer"} ${ms} ms`;
+
+/** The run's slowest requests, slowest first, on one line. */
+export function slowestLine(requests, count = 5) {
+  const slowest = [...requests].sort((a, b) => b.ms - a.ms).slice(0, count);
+  if (!slowest.length) return "Slowest requests: none was sent.";
+  return `Slowest ${slowest.length} of ${requests.length} requests: ${slowest.map(({ at, method, path, status, error, ms }) => `${method} ${path} ${status ?? error ?? "no answer"} ${ms} ms at ${at}`).join("; ")}.`;
+}

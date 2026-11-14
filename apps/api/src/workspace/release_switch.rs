@@ -125,9 +125,14 @@ impl Drop for Creating<'_> {
 }
 
 /// Whether the room has anything the deployment's own switch must take down (M6 step 6): a host whose desired script
-/// is set, a kept script, a commit in flight, or a release that hasn't ended. A room with nothing of these has nothing
-/// to unpublish, so the switch read again and again changes nothing, with no marker kept: while `RELEASES` is off no
-/// release can start, and switching it back on brings nothing back.
+/// is set, a kept script, a commit in flight, or a release that hasn't ended **and started under the room's epoch as it
+/// is now**. A room with nothing of these has nothing to unpublish, so the switch read again and again changes nothing,
+/// with no marker kept: while `RELEASES` is off no release can start, and switching it back on brings nothing back.
+///
+/// **A release left open from under an earlier epoch doesn't count.** It can never go live (its commit and recheck
+/// both refuse a moved epoch), and ending it is the release bookkeeping's. So when the bookkeeping after an unpublish
+/// fails, or the room stops before it runs, the next read of `false` finds nothing up and records nothing: one
+/// unpublish, one epoch, one audit row and one event for the one cause.
 fn has_anything_up(sql: &SqlStorage) -> R<bool> {
     if rows(sql, "SELECT 1 AS configured FROM release_config", vec![])?.is_empty() {
         return Ok(false);
@@ -142,7 +147,7 @@ fn has_anything_up(sql: &SqlStorage) -> R<bool> {
         &format!(
             "SELECT 1 AS up WHERE EXISTS (SELECT 1 FROM serve_state WHERE script_name IS NOT NULL)
                OR EXISTS (SELECT 1 FROM release_config WHERE kept_previous IS NOT NULL OR in_flight_release IS NOT NULL)
-               OR EXISTS (SELECT 1 FROM release WHERE state IN ({}))",
+               OR EXISTS (SELECT 1 FROM release r, release_config c WHERE r.state IN ({}) AND r.release_epoch = c.release_epoch)",
             open.join(", ")
         ),
         vec![],

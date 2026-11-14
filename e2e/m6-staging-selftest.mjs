@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, COMPARED_HEADERS, differences, edgeRefusal, expectedAnswer, fillPath, KEPT_KIND, KEPT_MARGIN_SECONDS, keptFile, keptProblem, keptRecord, M6_EVENT, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour,
-  operationsProblem, pairProblem, parseArgs, personOnly, PHASE_PLANS, PHASE_SIGN_UPS, PLAN, PLANNED_TOOLS, planFor, QUEUE_KEYS, queueRefusalProblem, runOutcome, schemas, scrub, secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
+  operationsProblem, pairProblem, parseArgs, personOnly, PHASE_PLANS, PHASE_SIGN_UPS, PLAN, PLANNED_TOOLS, planFor, QUEUE_KEYS, queueRefusalProblem, requestLine, requestPath, runOutcome, schemas, scrub, secretProblem, SESSION_SECONDS, SIGN_UPS, slowestLine, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
 } from "./m6-staging-lib.mjs";
 import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
@@ -238,8 +238,11 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   // are written only from that route, which is behind the switch. No room's event stream carries either.
   // Decision 218's PR C adds `app.unpublished`, written only when a room hears of a take of its organization's release
   // switch. Only an operator's set takes it, through that same route, so with release switched off nothing writes it.
-  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.failed", "release.live", "release.upload_started", "release_switch.granted", "release_switch.revoked"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, its unpublish by the release switch, a hostname's suspension, a release failed, started uploading and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
+  // Step 6 writes `app.unpublished` from more commands (archive, make private, an operator's room suspension), but only
+  // for a room with a release configuration, which nothing gives a room while release is switched off. Its contract PR
+  // adds `release.config_set`, written only by the room's release configuration route, which is behind the switch.
+  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.config_set", "release.failed", "release.live", "release.upload_started", "release_switch.granted", "release_switch.revoked"];
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, its unpublish, a hostname's suspension, a room's release configuration set, a release failed, started uploading and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 
@@ -298,6 +301,30 @@ check(toolAnswer('{"error":"Tool get_release_config not found"}', "get_release_c
   ]) check(/other than "tool not found"/.test(mcpErrorProblem(rpc(200, body)) ?? ""), `${label} isn't "tool not found", so it fails M6-S01e`);
   check(toolNotFound(toolAnswer("MCP error -32602: Tool get_release_config not found", "get_release_config")) && toolNotFound("Tool <tool> not found") && !toolNotFound("Tool get_release_config not found") && !toolNotFound("MCP error -32602: Tool <tool> not found, and more"), "\"tool not found\" is matched only whole, with the tool's own name taken out");
   for (const [label, shape] of [["a 401", rpc(401, { error: "invalid_token" })], ["a 429", rpc(429, { error: { code: "rate_limited" } })], ["a 200 that isn't JSON-RPC", rpc(200, { ok: true })], ["a JSON-RPC success", rpc(200, { jsonrpc: "2.0", id: 1, result: { content: [] } })], ["an HTML page", rpc(200, "<html>", "text/html")]]) check(mcpErrorProblem(shape) !== null, `${label} isn't counted as an MCP refusal`);
+}
+
+// ---- each request's timing ----
+{
+  check(requestPath(`${STAGING}/api/v1/agents/agt_1/disconnect?code=abc&state=xyz`) === "/api/v1/agents/agt_1/disconnect", "a request's path keeps its IDs and drops staging's host and the query");
+  check(requestPath("https://other.example/oauth/token?code=abc") === "https://other.example/oauth/token" && requestPath("not a url") === "(unreadable URL)", "another host is named without its query, and an unreadable URL is said to be one");
+  const at = "2026-11-13T10:00:00.000Z";
+  check(requestLine({ at, method: "POST", path: "/api/v1/agents/agt_1/disconnect", status: 200, ms: 312 }) === `req  ${at} POST /api/v1/agents/agt_1/disconnect 200 312 ms`, "a request's line is its start, method, path, status and milliseconds");
+  check(requestLine({ at, method: "POST", path: "/x", error: "TimeoutError", ms: 60_001 }) === `req  ${at} POST /x TimeoutError 60001 ms`, "a request with no answer names its error instead of a status");
+  const seven = [5, 70, 1, 60_001, 300, 2, 40].map((ms, i) => ({ at, method: "GET", path: `/r${i}`, status: 200, ms }));
+  check(slowestLine(seven) === `Slowest 5 of 7 requests: GET /r3 200 60001 ms at ${at}; GET /r4 200 300 ms at ${at}; GET /r1 200 70 ms at ${at}; GET /r6 200 40 ms at ${at}; GET /r0 200 5 ms at ${at}.` && seven[0].ms === 5, "the summary names the five slowest, slowest first, and leaves the list as it was");
+  check(slowestLine([]) === "Slowest requests: none was sent.", "a run that sent nothing says so");
+}
+
+/** Every request a stand-in run counted has its line, every line has its shape and no query, and the summary ends the run. */
+function timingProblem(res) {
+  const lines = (res.stdout ?? "").split("\n").filter((line) => line.startsWith("req  "));
+  const shaped = /^req {2}\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z [A-Z]+ \/[^\s?]* (\d{3}|[A-Za-z]+) \d+ ms$/;
+  if (lines.length !== res.requests) return `${lines.length} request line(s) for ${res.requests} request(s)`;
+  const odd = lines.find((line) => !shaped.test(line));
+  if (odd) return `a request line out of shape: ${odd}`;
+  const summary = new RegExp(`Slowest ${Math.min(5, lines.length)} of ${lines.length} requests: `);
+  if (lines.length && !summary.test(res.stdout)) return "no summary of the slowest requests";
+  return null;
 }
 
 // ---- the script's source ----
@@ -385,6 +412,7 @@ try {
   check(dropped.status === 1, `a run whose first sign-up's outcome is unknown exits 1, not ${dropped.status}`);
   check(/Whether staging took that sign-up is unknown/.test(dropped.stdout) && /Sign-ups asked for: 1, answered with a session: 0/.test(dropped.stdout) && /Checks shown on staging: 0/.test(dropped.stdout), "it says the sign-up's outcome is unknown, counts it, and shows nothing on staging");
   check(!dropped.stdout.includes(secret) && !dropped.stderr.includes(secret), "it never prints the secret");
+  check(timingProblem(dropped) === null && /POST \/api\/auth\/sign-up\/e2e TypeError \d+ ms/.test(dropped.stdout), `each request is logged with its timing, and the lost sign-up names its error: ${timingProblem(dropped) ?? "ok"}`);
   const down = standIn("edge-down");
   check(down.loaded && down.status === 2 && down.signUps === 0 && /No sign-up was taken/.test(down.stderr), `an edge that answers 502 fails the preflight: exit ${down.status}, ${down.signUps} sign-up request(s)`);
 
@@ -441,6 +469,7 @@ try {
   check(Boolean(record) && (statSync(kept).mode & 0o777) === 0o600 && record.deployed_commit === atBefore && /session_token=/.test(record.session ?? ""), "it keeps the session and the commit it was told, at mode 0600");
   check(!readFileSync(kept, "utf8").includes(secret), "the kept file never holds the sign-up secret");
   check(Boolean(record) && secretFree(first, [record.session, record.session.split("=")[1]]), "the first phase prints neither the secret nor the session");
+  check(timingProblem(first) === null && /^Slowest 5 of \d+ requests: /m.test(first.stdout), `the first phase logs each of its requests and ends with its five slowest: ${timingProblem(first) ?? "ok"}`);
   check(/Every test session was signed out but the owner's, kept in ~\/\.podster\/m6-staging\/s04\.json/.test(first.stdout) && !first.all.includes(home), "it says the session is kept, and where, without naming the runner's home");
   const again = phaseRun("before", atBefore);
   check(again.status === 2 && again.requests === 0 && /still usable/.test(again.stderr) && JSON.stringify(readKept(kept).record) === JSON.stringify(record), "a second first phase while the kept file is usable is refused before anything is sent, and the file is untouched");
@@ -472,6 +501,7 @@ try {
   const stale = phaseRun("after", atAfter);
   check(stale.status === 2 && stale.requests === 1 && stale.signOuts === 1 && /stale/.test(stale.stderr) && /sign-out answered 200/.test(stale.stderr) && !existsSync(kept), `a stale kept file is refused, its session signed out first, the one request sent, and the file deleted: ${stale.requests} request(s), ${stale.signOuts} sign-out(s)`);
   check(secretFree(stale, [shifted.session, shifted.session.split("=")[1]]), "that refusal prints neither the secret nor the session");
+  check((stale.stdout.match(/^req {2}\S+ POST \/api\/auth\/sign-out 200 \d+ ms$/gm) ?? []).length === stale.requests, "the stale session's sign-out, sent before the clients load, is logged too");
   writeKept(kept, shifted);
   const replaced = phaseRun("before", atBefore);
   check(replaced.status === 0 && /was stale, [^\n]*: its session's sign-out answered 200, and the file was deleted/.test(replaced.stdout) && readKept(kept).record?.signed_up_at > shifted.signed_up_at, "a first phase signs a stale file's session out, deletes the file and keeps its own");

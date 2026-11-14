@@ -47,7 +47,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, QUEUE_KEYS, queueRefusalProblem, runOutcome, scrub,
-  secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
+  requestLine, requestPath, secretProblem, SESSION_SECONDS, SIGN_UPS, slowestLine, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
 import { keptDirectoryProblem, readKept, removeKept, sweepKept, writeKept } from "./m6-staging-kept.mjs";
 
@@ -105,6 +105,20 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
   }
 }
 
+// ---- each request's timing ----
+
+/**
+ * Every request the run sends, retries included, each logged as it ends: when it started, its method, its path with IDs
+ * as they are, its status or error name, and its milliseconds. Never a body, a header, a cookie or a query. The slowest
+ * are named again at the end.
+ */
+const requests = [];
+function logRequest({ url, ...request }, hidden) {
+  const entry = { ...request, path: requestPath(url) };
+  requests.push(entry);
+  console.log(scrub(requestLine(entry), hidden));
+}
+
 // ---- M6-S04's kept file: every local check, before anything is sent ----
 
 /**
@@ -112,10 +126,16 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
  * request it sends; it never prints the session. Says how that went.
  */
 async function endStaleSession(session) {
+  const url = `${STAGING}/api/auth/sign-out`;
+  const at = new Date().toISOString();
+  const begun = performance.now();
+  const heard = (outcome) => logRequest({ url, method: "POST", at, ms: Math.round(performance.now() - begun), ...outcome }, [session]);
   try {
-    const res = await fetch(`${STAGING}/api/auth/sign-out`, { method: "POST", redirect: "manual", headers: { cookie: session, origin: STAGING, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(url, { method: "POST", redirect: "manual", headers: { cookie: session, origin: STAGING, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15_000) });
+    heard({ status: res.status });
     return `its session's sign-out answered ${res.status}`;
-  } catch {
+  } catch (error) {
+    heard({ error: error?.name ?? "Error" });
     return "its session's sign-out failed in transport";
   }
 }
@@ -166,7 +186,7 @@ const { eq, key, McpAgent, ok, Person, sleep, Target } = await import("./lib.mjs
 const POLL_MS = 2000;
 /** Between two requests of one caller's: the gateway allows a person 120 a minute, and this keeps well under it. */
 const PACE_MS = 600;
-const target = new Target(STAGING, { pollMs: POLL_MS });
+const target = new Target(STAGING, { pollMs: POLL_MS, onRequest: (request) => logRequest(request, secrets) });
 const RUN = `M6 staging ${new Date().toISOString().slice(0, 16)}`;
 const secrets = [signupSecret, kept?.session].filter(Boolean);
 const secret = (value) => {
@@ -653,6 +673,7 @@ try {
   await preflight();
 } catch (error) {
   console.error(scrub(`\nRefused: the signed-out preflight failed: ${cause(error)}.\nNo sign-up was taken.`, secrets));
+  say(slowestLine(requests));
   process.exit(2);
 }
 if (kept) sessions.push(kept.session);
@@ -679,4 +700,5 @@ say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Si
 if (signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
 if (outcome.unshown.length) say(`Not shown on staging, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
 say(`Left behind on staging: ${leftBehind.length ? leftBehind.join("; ") : "nothing"}. ${keptSession ? `Every test session was signed out but the owner's, kept in ${KEPT_SHOWN} for --after-deploy; it ends by itself ${SESSION_SECONDS / 3600} hours after its sign-up.` : "Every test session was signed out."}`);
+say(slowestLine(requests));
 process.exit(outcome.code);

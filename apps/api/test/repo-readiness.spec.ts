@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, expectNoAlarmSooner } from "./alarm.ts";
+import { alarmPass, alarmQuiet, expectNoAlarmSooner, nextAlarm } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // The M5 security review's F2 and F8: a ready link is read back once a day from the room's alarm, and a link that's
@@ -85,6 +85,60 @@ const checkedAgo = (id: string, ms: number, also?: (sql: any) => void) => inRoom
 const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
 const made: string[] = [];
 
+// The deployment's ceiling on unpublishes for a repository's link (the architect's ruling of 2026-11-14), in the
+// `Moderation` object, which every room of this file asks.
+const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
+const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+const hasTable = (sql: any, name: string) => sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = ?", name).one().n === 1;
+/** The labels this file adds to the app-label lookup table, which sizes the ceiling's share. */
+const COUNTED = `${IDS.tag}cnt`;
+/**
+ * Every test starts with the ceiling clear, its clock fixed, so a grant's hour can't run out under a slow run, and no
+ * room of this file's in the lookup table: no earlier test's grant or hold carries over.
+ */
+async function resetCeiling() {
+  await inModeration((sql) => {
+    for (const table of ["repo_unpublish_grant", "repo_unpublish_held", "repo_unpublish_trip"]) if (hasTable(sql, table)) sql.exec(`DELETE FROM ${table}`);
+    if (hasTable(sql, "takedown_finding")) sql.exec("DELETE FROM takedown_finding WHERE code IN ('installation_unconfirmed', 'repo_unpublish_held', 'repo_unpublish_stalled')");
+    sql.exec("DROP TABLE IF EXISTS test_rooms_uncounted");
+    sql.exec("DROP TABLE IF EXISTS test_clock");
+    sql.exec("CREATE TABLE test_clock (now INTEGER NOT NULL)");
+    sql.exec("INSERT INTO test_clock (now) VALUES (?)", Date.now());
+  });
+  await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label LIKE ?").bind(`${COUNTED}%`).run();
+}
+/** `n` rooms with apps in the lookup table, which makes the ceiling the smaller of 5 and 10% of them, rounded up. */
+async function roomsWithApps(n: number) {
+  for (let i = 0; i < n; i++) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(`${COUNTED}${i}`, `ws_${COUNTED}_${i}`).run();
+}
+/** The ceiling's state: grants, held rooms, whether it's tripped, and its findings, each held or stalled room by its ID. */
+const ceiling = () => inModeration((sql) => ({
+  granted: hasTable(sql, "repo_unpublish_grant") ? sql.exec("SELECT room FROM repo_unpublish_grant ORDER BY room").toArray().map((r: any) => r.room) : [],
+  held: hasTable(sql, "repo_unpublish_held") ? sql.exec("SELECT room FROM repo_unpublish_held ORDER BY room").toArray().map((r: any) => r.room) : [],
+  tripped: hasTable(sql, "repo_unpublish_trip") ? sql.exec("SELECT count(*) AS n FROM repo_unpublish_trip").one().n === 1 : false,
+  findings: hasTable(sql, "takedown_finding") ? sql.exec("SELECT code, subject, detail, seen FROM takedown_finding WHERE code IN ('installation_unconfirmed', 'repo_unpublish_held', 'repo_unpublish_stalled') ORDER BY code, subject").toArray() : [],
+}));
+/** Moves the ceiling's clock on, past the rolling hour its grants count for. */
+const anHourOn = () => inModeration((sql) => void sql.exec("UPDATE test_clock SET now = now + 3600001"));
+/** When room `id` next asks the ceiling by itself, from its durable storage, or null when no ask is outstanding. */
+const retryAt = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => (await state.storage.get("repo_unpublish_retry_at")) ?? null) as Promise<number | null>;
+/** Makes room `id`'s kept retry time come due now, as an hour passing would. Durable storage: no memory is involved. */
+const retryNow = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.put("repo_unpublish_retry_at", 0));
+/** Waits until a call is held at the stand-in's gate `gate`, then lets it go once `meanwhile` has run. No timer. */
+const atGate = async (gate: number, meanwhile: () => Promise<unknown>) => {
+  await fetch(`https://github-fake.example.com/gate-reached?repo=${gate}`);
+  await meanwhile();
+  await fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: gate }) });
+};
+/** What the room's own stand-in for the installation answers: GitHub's status, whether it named this installation, and `suspended_at`. */
+const installation = (id: string, status: number, idMatches: boolean, suspended: boolean | null) => inRoom(id, (sql) => {
+  sql.exec("CREATE TABLE IF NOT EXISTS test_installation_answer (status INTEGER, id_matches INTEGER, suspended INTEGER)");
+  sql.exec("DELETE FROM test_installation_answer");
+  sql.exec("INSERT INTO test_installation_answer VALUES (?, ?, ?)", status, idMatches ? 1 : 0, suspended === null ? null : suspended ? 1 : 0);
+});
+/** The room's answer to the reconcile's walk, which says whether an unpublish is still owed for its link. */
+const woken = async (id: string) => (await (await stub(id).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) })).json() as any).repo_unpublish_wanted;
+
 /**
  * M6 step 6: room `id` given an app, through the test pool, as nothing takes a release's request yet: a release
  * configuration at epoch 2 and, unless `up` is false, a served release on its default host and a queued one. The
@@ -148,6 +202,7 @@ beforeEach(async () => {
   REPO_ID = IDS.next();
   await fake("/agent-repo", { id: REPO_ID });
   await ready({ rulesets: "ready" });
+  await resetCeiling();
 });
 
 afterEach(async () => {
@@ -508,29 +563,33 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
   });
 
-  it("is never left behind by a recheck that fails after it: the link stays ready and the app stays up", async () => {
+  it("is never left half done by an unpublish that fails after the degrade: the app stays up until the next ask takes it down", async () => {
+    // The degrade commits alone, with its tokens marked; the unpublish is its own transaction after the ceiling's
+    // answer (the architect's ruling of 2026-11-14), and fails whole here, so nothing of it is left.
     const r = await room();
     const app = await withApp(r.id);
     await ready({ rulesets: "no_update" });
     await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_fail_after_unpublish (x INTEGER)"));
-    expect((await recheck(OPERATOR, r.id)).status).not.toBe(200);
-    expect(await link(r.id)).toMatchObject({ status: "ready" });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await link(r.id)).toMatchObject({ status: "degraded" });
     expect(await appState(r.id)).toEqual(appUp(app));
     await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_fail_after_unpublish"));
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
     expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
   });
 
-  it("still records the unpublish for a room with a configuration and nothing up, which only raises the epoch", async () => {
+  it("records no unpublish for a room with a configuration and nothing up, as the deployment's switch records none", async () => {
+    // Owed only with something up (core's `repo_unpublish_owed`): a release that hasn't ended under the room's epoch
+    // counts, so nothing in flight can go live after the link went off ready, and the recheck refuses new ones.
     const r = await room();
     await withApp(r.id, { up: false });
     await ready({ rulesets: "no_update" });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
     expect(await inRoom(r.id, (sql) => ({
       unpublish: sql.exec("SELECT cause, release_epoch FROM unpublish").toArray(),
-      queued: sql.exec("SELECT count(*) AS n FROM script_delete").one().n,
+      epoch: sql.exec("SELECT release_epoch FROM release_config").one().release_epoch,
       event: sql.exec("SELECT reason FROM event WHERE type = 'app.unpublished'").toArray(),
-    }))).toEqual({ unpublish: [{ cause: "repo_not_ready", release_epoch: 3 }], queued: 0, event: [{ reason: "repo_not_ready" }] });
+    }))).toEqual({ unpublish: [], epoch: 2, event: [] });
   });
 
   it("restores a repository made before these settings were set, once they're switched off by hand on GitHub", async () => {
@@ -563,5 +622,263 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     const down = await recheck(OPERATOR, r.id);
     expect([down.status, down.body?.error?.code]).toEqual([502, "provider_unavailable"]);
     expect((await link(r.id)).status).toBe("ready");
+  });
+});
+
+describe("the guard against a GitHub outage reading as every repository gone (the architect's ruling of 2026-11-14)", () => {
+  /** A room of its own repository, with an app up, as `room()` and `withApp` make them. */
+  async function roomWithApp() {
+    REPO_ID = IDS.next();
+    await fake("/agent-repo", { id: REPO_ID });
+    await ready({ rulesets: "ready" });
+    const r = await room();
+    return { ...r, repo: REPO_ID, app: await withApp(r.id) };
+  }
+  /** Both looks of the daily read-back, a minute apart, at room `r`'s repository answering that it's gone. */
+  async function bothLooks(r: { id: string; repo: number }) {
+    REPO_ID = r.repo;
+    await ready({ deleted: true });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    await aMinuteLater(r.id);
+    await alarmPass(stub(r.id));
+  }
+  /** Room `r`'s daily read-back finding a protection removed: one definite difference, which degrades at once. */
+  async function rulesChanged(r: { id: string; repo: number }) {
+    REPO_ID = r.repo;
+    await ready({ rulesets: "no_update" });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+  }
+
+  it("takes nothing as gone while the installation can't be read healthy: no link degraded, nothing unpublished, one finding", async () => {
+    // Three rooms whose repositories all answer 404, as in an incident, with the installation suspended, removed, or
+    // unreadable. Each room's two looks a minute apart would have degraded its link and retired its app's address.
+    const rooms = [await roomWithApp(), await roomWithApp(), await roomWithApp()];
+    const readings: [number, boolean, boolean | null][] = [[200, true, true], [404, false, null], [500, false, null]];
+    for (const [i, r] of rooms.entries()) {
+      await installation(r.id, ...readings[i]);
+      REPO_ID = r.repo;
+      await ready({ deleted: true });
+      await checkedAgo(r.id, DAY + 1);
+      await alarmPass(stub(r.id));
+      // No sighting was kept, so the next look is the hourly retry's: made due, and made.
+      await inRoom(r.id, (sql) => sql.exec("UPDATE repo_read SET at = at - 3700000 WHERE caller = 'readiness'"));
+      await alarmPass(stub(r.id));
+      expect((await readBack()).reads.map((read) => read.path)).toEqual([`/repositories/${r.repo}`, `/repositories/${r.repo}`]);
+    }
+    for (const r of rooms) {
+      expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+      // Undecided, as a read that couldn't be made: no sighting is kept for a second look to confirm.
+      expect(await goneSeen(r.id)).toBeNull();
+      expect(await tokens(r.id)).toEqual(["held"]);
+      expect(await events(r.id)).toEqual([]);
+      expect(await appState(r.id)).toEqual(appUp(r.app));
+    }
+    // One finding for the deployment, however many rooms and looks met it, with the last reading. Nothing asked the
+    // ceiling, since nothing was owed.
+    expect(await ceiling()).toEqual({
+      granted: [], held: [], tripped: false,
+      findings: [{ code: "installation_unconfirmed", subject: "provisioning_installation", detail: "installation_unreadable", seen: 6 }],
+    });
+  });
+
+  it("takes a single repository as gone when the installation reads healthy, and unpublishes its room's app (the control)", async () => {
+    const r = await roomWithApp();
+    await installation(r.id, 200, true, false);
+    await bothLooks(r);
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+    expect(await appState(r.id)).toEqual(appDown(r.app, "repository_gone"));
+    // It took one of the ceiling's places for the hour, and nobody was told anything.
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+    expect(await woken(r.id)).toBe(false);
+  });
+
+  it("stops at the ceiling: the rest are degraded but held up, with one finding, until an operator's recheck confirms one", async () => {
+    // 20 rooms with apps: a ceiling of 2 this hour, the smaller of 5 and 10% of 20.
+    await roomsWithApps(20);
+    const [a, b, c, d] = [await roomWithApp(), await roomWithApp(), await roomWithApp(), await roomWithApp()];
+    for (const r of [a, b, c, d]) await rulesChanged(r);
+    // Every link is degraded and every agent's token taken back: the ceiling holds only unpublishes.
+    for (const r of [a, b, c, d]) {
+      expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
+      expect(await tokens(r.id)).toEqual([]);
+    }
+    expect(await appState(a.id)).toEqual(appDown(a.app, "ruleset_missing"));
+    expect(await appState(b.id)).toEqual(appDown(b.app, "ruleset_missing"));
+    expect(await appState(c.id)).toEqual(appUp(c.app));
+    expect(await appState(d.id)).toEqual(appUp(d.app));
+    const heldFindings = (ids: string[]) => [...ids].sort().map((id) => ({ code: "repo_unpublish_held", subject: id, detail: null, seen: 1 }));
+    expect(await ceiling()).toEqual({ granted: [a.id, b.id].sort(), held: [c.id, d.id].sort(), tripped: true, findings: heldFindings([c.id, d.id]) });
+    // A held room keeps its retry in durable storage and its alarm armed for it, an hour on, not in a loop. Asked again
+    // once that comes, even with the hour's places freed, it is held again: only an operator or its cause clearing
+    // releases it.
+    expect(await retryAt(c.id)).not.toBeNull();
+    await expectNoAlarmSooner(stub(c.id), QUIET_MS);
+    expect(await nextAlarm(stub(c.id))).not.toBeNull();
+    await alarmPass(stub(c.id));
+    expect(await appState(c.id)).toEqual(appUp(c.app));
+    await anHourOn();
+    await retryNow(c.id);
+    await alarmPass(stub(c.id));
+    expect(await appState(c.id)).toEqual(appUp(c.app));
+    expect(await ceiling()).toMatchObject({ held: [c.id, d.id].sort(), tripped: true });
+    expect(await woken(c.id)).toBe(true);
+    // An operator's recheck of a held room is that operator's confirmation for it: it comes down. The other stays held.
+    expect((await recheck(OPERATOR, c.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await appState(c.id)).toEqual(appDown(c.app, "ruleset_missing"));
+    expect(await appState(d.id)).toEqual(appUp(d.app));
+    expect(await ceiling()).toMatchObject({ held: [d.id], tripped: true, findings: [{ code: "repo_unpublish_held", subject: d.id }] });
+    expect(await retryAt(c.id)).toBeNull();
+  });
+
+  it("resumes once the cause clears: nothing comes back, the held room stays up, and the next room is decided afresh", async () => {
+    await roomsWithApps(20);
+    const [a, b, c] = [await roomWithApp(), await roomWithApp(), await roomWithApp()];
+    for (const r of [a, b, c]) await rulesChanged(r);
+    expect(await ceiling()).toMatchObject({ held: [c.id], tripped: true });
+    // The rules are put back on the held room's repository, and an operator's recheck finds it right.
+    REPO_ID = c.repo;
+    await ready({ rulesets: "ready" });
+    expect((await recheck(OPERATOR, c.id)).body).toEqual({ status: "ready", reason: null });
+    expect(await woken(c.id)).toBe(false);
+    // Nothing that came down comes back, and the held room's app was never taken down.
+    expect(await appState(a.id)).toEqual(appDown(a.app, "ruleset_missing"));
+    expect(await appState(b.id)).toEqual(appDown(b.app, "ruleset_missing"));
+    expect(await appState(c.id)).toEqual(appUp(c.app));
+    // No room is held, so the trip clears and the finding goes. The count is a rolling hour: the hour's two grants stay.
+    expect(await ceiling()).toEqual({ granted: [a.id, b.id].sort(), held: [], tripped: false, findings: [] });
+    expect(await retryAt(c.id)).toBeNull();
+    // So the next room within that hour finds no place left, and is held.
+    const e = await roomWithApp();
+    await rulesChanged(e);
+    expect(await appState(e.id)).toEqual(appUp(e.app));
+    expect(await ceiling()).toMatchObject({ held: [e.id], tripped: true });
+    // An hour on the places are free again, but a tripped ceiling still holds this room until an operator confirms it
+    // or its cause clears. Confirmed, it comes down.
+    await anHourOn();
+    expect((await recheck(OPERATOR, e.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await appState(e.id)).toEqual(appDown(e.app, "ruleset_missing"));
+    // With nothing held and the hour gone, the next room comes down on its own ask.
+    const f = await roomWithApp();
+    await rulesChanged(f);
+    expect(await appState(f.id)).toEqual(appDown(f.app, "ruleset_missing"));
+    expect(await ceiling()).toEqual({ granted: [f.id], held: [], tripped: false, findings: [] });
+  });
+
+  it("asks from the room's rows, not its memory: a room stopped between the degrade and the ask asks at its next alarm", async () => {
+    // As if the room stopped right after the degrade committed: the link is off ready with the app up, and nothing else
+    // is kept anywhere. The room is armed for it, and its alarm asks.
+    const r = await roomWithApp();
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
+    expect(await retryAt(r.id)).toBeNull();
+    expect(await woken(r.id)).toBe(true);
+    await alarmPass(stub(r.id));
+    expect(await appState(r.id)).toEqual(appDown(r.app, "ruleset_missing"));
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+    // Nothing is owed any more, and nothing is kept for it.
+    expect(await retryAt(r.id)).toBeNull();
+    expect(await woken(r.id)).toBe(false);
+  });
+
+  it("asks again when the ceiling gave no answer, told to operators by the room's ID until it does", async () => {
+    const r = await roomWithApp();
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_ceiling_unanswered (x INTEGER)"));
+    await rulesChanged(r);
+    expect(await link(r.id)).toMatchObject({ status: "degraded" });
+    expect(await appState(r.id)).toEqual(appUp(r.app));
+    expect(await ceiling()).toEqual({ granted: [], held: [], tripped: false, findings: [{ code: "repo_unpublish_stalled", subject: r.id, detail: "no_answer", seen: 1 }] });
+    // The retry is kept durably and the alarm armed for it, so a restart loses nothing.
+    expect(await retryAt(r.id)).not.toBeNull();
+    expect(await nextAlarm(stub(r.id))).not.toBeNull();
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_ceiling_unanswered"));
+    await retryNow(r.id);
+    await alarmPass(stub(r.id));
+    expect(await appState(r.id)).toEqual(appDown(r.app, "ruleset_missing"));
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+    expect(await retryAt(r.id)).toBeNull();
+  });
+
+  it("asks again when the ceiling couldn't count the rooms with apps, told to operators by the room's ID", async () => {
+    const r = await roomWithApp();
+    await inModeration((sql) => void sql.exec("CREATE TABLE test_rooms_uncounted (x INTEGER)"));
+    await rulesChanged(r);
+    expect(await appState(r.id)).toEqual(appUp(r.app));
+    expect(await ceiling()).toEqual({ granted: [], held: [], tripped: false, findings: [{ code: "repo_unpublish_stalled", subject: r.id, detail: "undecided", seen: 1 }] });
+    expect(await retryAt(r.id)).not.toBeNull();
+    await inModeration((sql) => void sql.exec("DROP TABLE test_rooms_uncounted"));
+    await retryNow(r.id);
+    await alarmPass(stub(r.id));
+    expect(await appState(r.id)).toEqual(appDown(r.app, "ruleset_missing"));
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+  });
+
+  it("asks again after a granted unpublish failed, and is granted again within the hour without another place", async () => {
+    const r = await roomWithApp();
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_fail_after_unpublish (x INTEGER)"));
+    await rulesChanged(r);
+    expect(await link(r.id)).toMatchObject({ status: "degraded" });
+    expect(await appState(r.id)).toEqual(appUp(r.app));
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [{ code: "repo_unpublish_stalled", subject: r.id, detail: "unpublish_failed", seen: 1 }] });
+    expect(await retryAt(r.id)).not.toBeNull();
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_fail_after_unpublish"));
+    await retryNow(r.id);
+    await alarmPass(stub(r.id));
+    expect(await appState(r.id)).toEqual(appDown(r.app, "ruleset_missing"));
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+  });
+
+  it("releases a held room whose app came down another way: the archived room tells the ceiling, and the trip clears", async () => {
+    // No rooms counted: a ceiling of 1.
+    const [a, b] = [await roomWithApp(), await roomWithApp()];
+    for (const r of [a, b]) await rulesChanged(r);
+    expect(await ceiling()).toMatchObject({ granted: [a.id], held: [b.id], tripped: true });
+    const owner = OWNER;
+    const archived = await api(owner, "POST", `/v1/workspaces/${b.id}/archive`, { policy_version: await version(b.id) });
+    expect(archived.status, archived.text).toBe(200);
+    expect(await inRoom(b.id, (sql) => sql.exec("SELECT cause FROM unpublish").toArray())).toEqual([{ cause: "workspace_archived" }]);
+    // Nothing is owed now, and the ask it had outstanding is still kept: its alarm tells the ceiling it no longer waits.
+    await alarmPass(stub(b.id));
+    expect(await ceiling()).toEqual({ granted: [a.id], held: [], tripped: false, findings: [] });
+    expect(await retryAt(b.id)).toBeNull();
+  });
+
+  it("keeps a place used for the hour when the link healed between the grant and the unpublish, which then doesn't happen", async () => {
+    // No rooms counted: a ceiling of 1. The room is held at the stand-in's gate after its grant.
+    const r = await roomWithApp();
+    const gate = IDS.next();
+    await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_hold_before_unpublish (gate INTEGER)"); sql.exec("INSERT INTO test_hold_before_unpublish VALUES (?)", gate); });
+    REPO_ID = r.repo;
+    await ready({ rulesets: "no_update" });
+    await checkedAgo(r.id, DAY + 1);
+    const pass = alarmPass(stub(r.id));
+    // The link is set right again while the room waits between the grant and its unpublish's own check.
+    await atGate(gate, () => inRoom(r.id, (sql) => { sql.exec("UPDATE repo_link SET status = 'ready', status_reason = NULL"); sql.exec("DROP TABLE test_hold_before_unpublish"); }));
+    await pass;
+    expect(await appState(r.id)).toEqual(appUp(r.app));
+    expect(await retryAt(r.id)).toBeNull();
+    // The grant it didn't use still counts for the hour: the next room is held.
+    expect(await ceiling()).toEqual({ granted: [r.id], held: [], tripped: false, findings: [] });
+    const s2 = await roomWithApp();
+    await rulesChanged(s2);
+    expect(await appState(s2.id)).toEqual(appUp(s2.app));
+    expect(await ceiling()).toMatchObject({ granted: [r.id], held: [s2.id], tripped: true });
+  });
+
+  it("still confirms on a replayed operator recheck when the first one's ask got no answer", async () => {
+    const r = await roomWithApp();
+    REPO_ID = r.repo;
+    await ready({ rulesets: "no_update" });
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_ceiling_unanswered (x INTEGER)"));
+    const key = `rr-replay-${crypto.randomUUID()}`;
+    const first = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key });
+    expect(first.body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await appState(r.id)).toEqual(appUp(r.app));
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_ceiling_unanswered"));
+    const again = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key });
+    expect(again.body).toEqual(first.body);
+    expect(await appState(r.id)).toEqual(appDown(r.app, "ruleset_missing"));
+    // An operator's confirmation takes no place under the ceiling.
+    expect(await ceiling()).toEqual({ granted: [], held: [], tripped: false, findings: [] });
   });
 });

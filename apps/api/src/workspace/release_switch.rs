@@ -133,7 +133,7 @@ impl Drop for Creating<'_> {
 /// both refuse a moved epoch), and ending it is the release bookkeeping's. So when the bookkeeping after an unpublish
 /// fails, or the room stops before it runs, the next read of `false` finds nothing up and records nothing: one
 /// unpublish, one epoch, one audit row and one event for the one cause.
-fn has_anything_up(sql: &SqlStorage) -> R<bool> {
+pub(super) fn has_anything_up(sql: &SqlStorage) -> R<bool> {
     if rows(sql, "SELECT 1 AS configured FROM release_config", vec![])?.is_empty() {
         return Ok(false);
     }

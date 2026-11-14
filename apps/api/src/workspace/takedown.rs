@@ -1398,9 +1398,19 @@ impl Workspace {
             *slot.borrow_mut() = Some(check(&store, &body, now_ms())?);
             Ok(())
         })?;
+        // Whether an unpublish is owed for the repository's link: the room's alarm, which `arm` sets while one is, asks
+        // the deployment's ceiling, and the walk takes `false` from a room it holds as the cause cleared there
+        // (`crate::repo_ceiling`). One that couldn't be read is left out of the answer, so it can never release a hold.
+        let owed = super::repo_unpublish::owed(&sql).map(|owed| owed.is_some());
         self.arm(false, false).await?;
-        let answer = out.borrow_mut().take();
-        answer.ok_or_else(|| ApiError::internal("takedown check answered nothing"))
+        let mut answer = out
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| ApiError::internal("takedown check answered nothing"))?;
+        if let (Ok(owed), Value::Object(fields)) = (owed, &mut answer) {
+            fields.insert("repo_unpublish_wanted".into(), Value::Bool(owed));
+        }
+        Ok(answer)
     }
 
     /// The hostname's claim object tells the room its custom hostname was suspended (M6 step 4(a)). The applier is

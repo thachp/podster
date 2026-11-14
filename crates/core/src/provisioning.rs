@@ -514,6 +514,59 @@ pub fn gone_look(first_seen_at: Option<i64>, now: i64) -> GoneLook {
     }
 }
 
+/// What the provisioning App's own installation was read as, asked before a repository's "gone" counts (decided by the
+/// architect on 2026-11-14, for the owner to review). A GitHub incident, or the installation suspended or removed, would
+/// otherwise read as every repository gone at once, and retire every app's address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallationRead {
+    /// It answered, as itself, and isn't suspended.
+    Healthy,
+    /// It answered, as itself, suspended.
+    Suspended,
+    /// GitHub says there's no such installation.
+    Removed,
+    /// Anything else: no answer, a limit, a server's error, or an answer of another shape.
+    Unreadable,
+}
+
+impl InstallationRead {
+    /// The code an operator's finding carries.
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            InstallationRead::Healthy => "installation_healthy",
+            InstallationRead::Suspended => "installation_suspended",
+            InstallationRead::Removed => "installation_removed",
+            InstallationRead::Unreadable => "installation_unreadable",
+        }
+    }
+}
+
+/// Reads GitHub's answer to "Get an installation for the authenticated app", by the App's own JWT. `status` is `None`
+/// when there was no answer. `id_matches` is whether the body named the installation asked about, and `suspended`
+/// whether its `suspended_at` was null (`Some(false)`), a value (`Some(true)`), or missing or of another type (`None`).
+/// Only a `200` naming this installation with `suspended_at` present is read at all; a `404` is the installation gone.
+/// Everything else is unreadable, never healthy.
+pub fn installation_read(
+    status: Option<u16>,
+    id_matches: bool,
+    suspended: Option<bool>,
+) -> InstallationRead {
+    match (status, id_matches, suspended) {
+        (Some(200), true, Some(false)) => InstallationRead::Healthy,
+        (Some(200), true, Some(true)) => InstallationRead::Suspended,
+        (Some(404), _, _) => InstallationRead::Removed,
+        _ => InstallationRead::Unreadable,
+    }
+}
+
+/// Whether a "gone" answer about one repository may count toward [`gone_look`]: only while the installation itself was
+/// just read healthy. Otherwise "gone" is undecided, as a read that couldn't be made is, and nothing is degraded or
+/// unpublished on it.
+pub fn gone_may_count(installation: InstallationRead) -> bool {
+    matches!(installation, InstallationRead::Healthy)
+}
+
 /// The read-back of a repository [`repository_gone`] says isn't there: nothing in it but its ID.
 pub fn gone(repo_id: i64) -> Observed {
     Observed {
@@ -1191,6 +1244,50 @@ mod tests {
             gone_look(Some(1_000), 1_000 + GONE_SIGHTING_MAX_AGE_MS + 1),
             GoneLook::FirstSeen
         );
+    }
+
+    #[test]
+    fn an_installation_is_healthy_only_when_it_answered_as_itself_and_unsuspended() {
+        assert_eq!(
+            installation_read(Some(200), true, Some(false)),
+            InstallationRead::Healthy
+        );
+        assert_eq!(
+            installation_read(Some(200), true, Some(true)),
+            InstallationRead::Suspended
+        );
+        assert_eq!(
+            installation_read(Some(404), false, None),
+            InstallationRead::Removed
+        );
+        // Another installation's answer, a body with no `suspended_at`, no answer, a limit or a server's error: unread.
+        for (status, matches, suspended) in [
+            (Some(200), false, Some(false)),
+            (Some(200), true, None),
+            (None, true, Some(false)),
+            (Some(403), true, Some(false)),
+            (Some(429), true, Some(false)),
+            (Some(500), true, Some(false)),
+            (Some(301), true, Some(false)),
+        ] {
+            assert_eq!(
+                installation_read(status, matches, suspended),
+                InstallationRead::Unreadable,
+                "{status:?} {matches} {suspended:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gone_counts_only_while_the_installation_reads_healthy() {
+        assert!(gone_may_count(InstallationRead::Healthy));
+        for read in [
+            InstallationRead::Suspended,
+            InstallationRead::Removed,
+            InstallationRead::Unreadable,
+        ] {
+            assert!(!gone_may_count(read), "{read:?}");
+        }
     }
 
     #[test]

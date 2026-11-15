@@ -62,8 +62,10 @@ pub enum StoredCount {
 pub enum BudgetRefusal {
     /// `write_budget_spent`: the window's writes are used. `retry_after_ms` is how long until the window ends.
     Spent { retry_after_ms: i64 },
-    /// `write_budget_unknown`: the count couldn't be read, or what was read isn't a count this rule wrote. Nothing is
-    /// recorded, and the next write asks again.
+    /// `write_budget_unknown`: the count couldn't be read, or what was read is a count off this cap's windows whose
+    /// window, taken at this cap's length, hasn't ended yet (see [`admit_write`]). Nothing is recorded, and the next
+    /// write asks again. An off-window count refuses only until that window would have ended, so for at most two
+    /// windows, since one stamped more than a window ahead is stale. It never refuses for ever.
     Unknown,
 }
 
@@ -86,11 +88,25 @@ pub struct Admitted {
 
 /// Whether one more write may pass at `now_ms`, given what the counter holds.
 ///
-/// - A count from an earlier window is spent: the write opens a new window.
-/// - A count from this window, or from a later one (the clock went back), is held to: the write is admitted only if
-///   it is under the cap, and a refusal waits for that window's end.
-/// - A count whose window isn't aligned to the cap's windows wasn't written by this rule under this cap, so it is
-///   unknown and refuses, as an unreadable one does.
+/// A stored count is stale, and stands for a fresh window with no writes, when either holds (the architect's ruling
+/// of 2026-11-14, for the owner to review):
+///
+/// - **Its window has ended:** `window_start_ms + window_ms <= now_ms`, with the window taken at this cap's length,
+///   since the length it was counted under isn't stored. For a count on this cap's windows that is exactly "from an
+///   earlier window". For one off them, as after the window's length changed, it is the moment that window would
+///   have ended under the current length.
+/// - **It is stamped more than one window ahead:** `window_start_ms - now_ms > window_ms`, a clock reading that
+///   can't be right. Up to one window ahead, it is held to, as a clock that went back a little.
+///
+/// Otherwise:
+///
+/// - A count on this cap's windows, from this window or from the next (the clock went back), is held to: the write
+///   is admitted only if it is under the cap, and a refusal waits for that window's end. That wait is at most two
+///   windows: the rest of this one, and the held one.
+/// - A count off this cap's windows wasn't written by this rule under this cap, so while its window lasts it is
+///   unknown and refuses, as an unreadable one does: it fails closed until that window would have ended, and then is
+///   stale. An off-window count can't be stuck, because both its end and how far ahead it may be are bounded by one
+///   window.
 pub fn admit_write(
     cap: WriteCap,
     stored: StoredCount,
@@ -104,11 +120,12 @@ pub fn admit_write(
             window_start_ms,
             writes,
         } => {
-            if window_start_ms.rem_euclid(cap.window_ms) != 0 {
-                return Err(BudgetRefusal::Unknown);
-            }
-            if window_start_ms < current {
+            let ended = window_end(window_start_ms, cap.window_ms) <= now_ms;
+            let too_far_ahead = window_start_ms.saturating_sub(now_ms) > cap.window_ms;
+            if ended || too_far_ahead {
                 (current, 0)
+            } else if window_start_ms.rem_euclid(cap.window_ms) != 0 {
+                return Err(BudgetRefusal::Unknown);
             } else {
                 (window_start_ms, writes)
             }

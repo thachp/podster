@@ -158,28 +158,139 @@ fn an_unreadable_count_refuses_and_records_nothing() {
     }
 }
 
+fn counted(window_start_ms: i64, writes: u32) -> StoredCount {
+    StoredCount::Counted {
+        window_start_ms,
+        writes,
+    }
+}
+
+fn fresh(now: i64) -> Result<Admitted, BudgetRefusal> {
+    Ok(Admitted {
+        window_start_ms: window_start(now, HOUR),
+        writes: 1,
+    })
+}
+
 #[test]
-fn a_count_not_on_this_caps_windows_is_unknown() {
-    for start in [5 * HOUR + 1, 5 * HOUR - 1, 1, -1] {
+fn a_count_off_this_caps_windows_that_overlaps_now_is_unknown() {
+    // Each window, taken at this cap's length, still runs at 5h + 10 ms. A full count is refused as unknown, not
+    // as spent, and an empty one is refused too.
+    for start in [5 * HOUR + 1, 5 * HOUR - 1, 4 * HOUR + 11, 6 * HOUR - 1] {
+        for writes in [0, 3, u32::MAX] {
+            assert_eq!(
+                admit_write(cap(3), counted(start, writes), 5 * HOUR + 10),
+                Err(BudgetRefusal::Unknown),
+                "{start} {writes}"
+            );
+        }
+    }
+    // A count kept under a shorter window, read under a longer one, while its window under the longer one lasts.
+    assert_eq!(
+        admit_write(cap(3), counted(HOUR / 2, 0), HOUR),
+        Err(BudgetRefusal::Unknown)
+    );
+}
+
+#[test]
+fn a_count_off_this_caps_windows_older_than_the_current_window_is_stale() {
+    // Left by a window of another length, long since ended: a fresh window with no writes, not a refusal for ever.
+    let now = 5 * HOUR + 10;
+    for start in [1, -1, HOUR / 2, 3 * HOUR + 7, 4 * HOUR + 10] {
         assert_eq!(
-            admit_write(
-                cap(3),
-                StoredCount::Counted {
-                    window_start_ms: start,
-                    writes: 0
-                },
-                5 * HOUR + 10
-            ),
-            Err(BudgetRefusal::Unknown),
+            admit_write(cap(3), counted(start, u32::MAX), now),
+            fresh(now),
             "{start}"
         );
     }
-    // A count kept under a shorter window, read under a longer one, is unknown too.
-    let half = StoredCount::Counted {
-        window_start_ms: HOUR / 2,
-        writes: 0,
-    };
-    assert_eq!(admit_write(cap(3), half, HOUR), Err(BudgetRefusal::Unknown));
+}
+
+#[test]
+fn a_count_off_this_caps_windows_is_unknown_only_until_its_window_would_have_ended() {
+    // Counted at 5h + 1 ms; under this cap's length its window ends at 6h + 1 ms.
+    let off = counted(5 * HOUR + 1, 3);
+    // One under.
+    assert_eq!(
+        admit_write(cap(3), off, 6 * HOUR),
+        Err(BudgetRefusal::Unknown)
+    );
+    // At.
+    assert_eq!(admit_write(cap(3), off, 6 * HOUR + 1), fresh(6 * HOUR + 1));
+    // One over.
+    assert_eq!(admit_write(cap(3), off, 6 * HOUR + 2), fresh(6 * HOUR + 2));
+}
+
+#[test]
+fn a_count_on_this_caps_windows_more_than_a_window_ahead_is_stale() {
+    // Stamped at 6h. The count is full, so held it refuses and stale it admits.
+    let ahead = counted(6 * HOUR, 3);
+    // Exactly one window ahead: held, and the wait is the rest of this window and all of the held one.
+    assert_eq!(
+        admit_write(cap(3), ahead, 5 * HOUR),
+        Err(BudgetRefusal::Spent {
+            retry_after_ms: 2 * HOUR
+        })
+    );
+    // One under a window ahead: held.
+    assert_eq!(
+        admit_write(cap(3), ahead, 5 * HOUR + 1),
+        Err(BudgetRefusal::Spent {
+            retry_after_ms: 2 * HOUR - 1
+        })
+    );
+    // One over a window ahead: a bad clock reading, so stale, and the write opens the current window.
+    assert_eq!(
+        admit_write(cap(3), ahead, 5 * HOUR - 1),
+        fresh(5 * HOUR - 1)
+    );
+    // Far ahead, to the end of the clock: stale, never a refusal for ever.
+    for start in [10 * HOUR, 1_000 * HOUR, window_start(i64::MAX, HOUR)] {
+        assert_eq!(
+            admit_write(cap(3), counted(start, 3), 5 * HOUR),
+            fresh(5 * HOUR),
+            "{start}"
+        );
+    }
+}
+
+#[test]
+fn a_count_off_this_caps_windows_more_than_a_window_ahead_is_stale() {
+    // Stamped at 6h + 1 ms, off this cap's windows.
+    let ahead = counted(6 * HOUR + 1, 3);
+    // Exactly one window ahead: unknown, until 7h + 1 ms at the latest.
+    assert_eq!(
+        admit_write(cap(3), ahead, 5 * HOUR + 1),
+        Err(BudgetRefusal::Unknown)
+    );
+    // One under a window ahead: unknown.
+    assert_eq!(
+        admit_write(cap(3), ahead, 5 * HOUR + 2),
+        Err(BudgetRefusal::Unknown)
+    );
+    // One over a window ahead: stale.
+    assert_eq!(admit_write(cap(3), ahead, 5 * HOUR), fresh(5 * HOUR));
+    // At the end of the clock: stale.
+    assert_eq!(
+        admit_write(cap(3), counted(i64::MAX, 3), 5 * HOUR),
+        fresh(5 * HOUR)
+    );
+}
+
+#[test]
+fn no_stored_count_refuses_for_longer_than_two_windows() {
+    // Whatever count was stored, if it refuses a write now, it admits one two windows later. Checked across stamps
+    // on and off this cap's windows, from three windows back to three ahead.
+    let now = 5 * HOUR + 10;
+    for offset in (-3 * HOUR..=3 * HOUR).step_by(997) {
+        let stored = counted(now + offset, 3);
+        if admit_write(cap(3), stored, now).is_err() {
+            assert_eq!(
+                admit_write(cap(3), stored, now + 2 * HOUR),
+                fresh(now + 2 * HOUR),
+                "{offset}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -7,6 +7,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort, local, prepareStack, startGateway } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-upload-check.mjs [--skip-build] [--big]
+
+Builds the API, starts the local stack, runs upload-check.mjs against it, then checks what reached the Workers' logs.
+--big adds 100 MB and reports the CPU the local Workers used. --skip-build reuses the last build.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
 const big = process.argv.includes("--big");

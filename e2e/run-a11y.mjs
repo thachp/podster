@@ -9,6 +9,14 @@ import { startBounded } from "./bounded.mjs";
 import { childEnv } from "./child-env.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-a11y.mjs [--skip-build] [--skip-web-build] [--browser=chromium|firefox|webkit]
+
+Builds the API and the dashboard, starts the gateway, the API and the dashboard's production build locally, then
+runs a11y.mjs against them. --skip-build reuses the last API build, and --skip-web-build the last dashboard build.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
 // Checked before anything builds, and `--browser firefox` is refused rather than quietly running Chromium.

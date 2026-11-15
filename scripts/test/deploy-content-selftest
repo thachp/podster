@@ -9,6 +9,15 @@
 #
 #   scripts/test/deploy-content-selftest
 set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/deploy-content-selftest
+
+Checks every refusal of scripts/deploy-content, and its report, deploy, probes and stops, in a scratch
+repository with stand-ins for npm, wrangler, gh and curl. Nothing reaches the network or Cloudflare. Needs jq and python3.
+EOF
+  exit 0
+fi
 . "$(dirname "$0")/lib.sh"
 
 # Every run has a hard bound. A case that hangs is killed, with everything it started, and fails by name, so a hang

@@ -22,6 +22,15 @@ import { fileURLToPath } from "node:url";
 import { localCertificate } from "./local-cert.mjs";
 import { freePort, groupGone, local, prepareStack, repo, run, startGateway } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-local.mjs [--skip-build] [--rehearse-cookies] [--rehearse-same-person] [--rehearse-test-people]
+       [--skip-managed] [journey options]
+
+Builds the API, runs the real gateway and the API under wrangler dev in e2e/.local, then the journey and the probe,
+and then, unless --skip-managed, a second stack with managed repositories on. --skip-build reuses the last build.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 const flags = process.argv.slice(2);

@@ -10,6 +10,14 @@ import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
 import { freePort } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-fasta2a-check.mjs --python <a venv's python with fasta2a==2.1.1 and uvicorn==0.38.0>
+
+Starts fasta2a with the trivial agent in fasta2a/ on 127.0.0.1, then runs apps/api's a2a-fasta2a.spec.ts against it.
+PODSTER_FASTA2A_PYTHON may name the python instead. The API's failpoints build must be current.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const at = process.argv.indexOf("--python");
 const python = at === -1 ? process.env.PODSTER_FASTA2A_PYTHON : process.argv[at + 1];

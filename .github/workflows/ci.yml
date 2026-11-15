@@ -248,6 +248,12 @@ jobs:
         working-directory: e2e
       - run: node static-check.mjs
         working-directory: e2e
+      # Every executable under scripts/ and every *staging*.mjs and run-*.mjs here, run with --help: each must exit 0 and
+      # print its usage, with child-env.mjs's environment and no child process, fetch or socket. Libraries are listed.
+      - run: node help-check.mjs --self-test
+        working-directory: e2e
+      - run: node help-check.mjs
+        working-directory: e2e
       # The API's and the gateway's specs, read without running them: a sleep, a wall-clock margin in an expectation, or
       # a spec that makes rooms and quiets none. What stays is in test-timing-allow.json, each with its reason.
       - run: node test-timing-check.mjs --self-test

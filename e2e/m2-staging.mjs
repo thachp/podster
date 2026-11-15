@@ -17,6 +17,14 @@ import { appendFileSync } from "node:fs";
 import { AuthAgent, key, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node m2-staging.mjs --base-url <gateway> [--big] [--verdict-wait-s <seconds>] [--allow-host <host>]
+
+M2's staging run: uploads, the scanner's verdict, downloads and the file steps. It writes rooms and files to the target.
+On staging, set PODSTER_E2E_SIGNUP_SECRET for test people, or PODSTER_E2E_COOKIE_A and PODSTER_E2E_COOKIE_B.
+Exit codes: 0 when nothing failed, 1 when something did, 2 for a refused argument or host.`);
+  process.exit(0);
+}
 const option = (name) => {
   const at = args.indexOf(name);
   return at === -1 ? undefined : args[at + 1];

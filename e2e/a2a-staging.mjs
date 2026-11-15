@@ -13,9 +13,15 @@
 //   switches the endpoint off after 3 failures in a row, with the task untouched;
 // - files (step 14): a ready input file downloads at /a2a/files with the agent's /a2a token, and only with that one. That
 //   needs the scanner, so a run without one, such as the local rehearsal, skips it.
+// - the engineer's steps (#394): ClaimRole, with a retried requestId, a reused one, `already_claimed` and a room the agent
+//   isn't in; SubmitTask with a commitSha on a task with no repository; and GetRepoAccess on that task, which answers
+//   `task_not_linked` while managed repositories are on, and exactly as an unknown method while they're off. It makes no
+//   repository and asks GitHub for nothing.
 //
 // The token and signing secret must never be shown: not in a read, and not in this script's own output, which it checks at
-// the end. A token is `e2eA2aTok_…` and a secret `a2asec_…`, so the local runner can look for both in the Workers' logs.
+// the end. A token is `e2eA2aTok_…` and a secret `a2asec_…`, so the local runner can look for both in the Workers' logs. A
+// repository token, which this run never gets, would be held and checked the same way, and so would anything shaped like
+// a GitHub token.
 //
 //   node a2a-staging.mjs --base-url <gateway> [--allow-host <host>]
 //
@@ -33,9 +39,18 @@
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { key, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(`Usage: node a2a-staging.mjs --base-url <gateway> [--allow-host <host>]
+
+The A2A run against a deployment, through @a2a-js/sdk. It writes a room, agents and tasks to the target.
+On staging, set PODSTER_E2E_SIGNUP_SECRET for a test person, or PODSTER_E2E_COOKIE_A for a signed-in person.
+Exit codes: 0 when nothing failed, 1 when something did, 2 for a refused argument or host.`);
+  process.exit(0);
+}
 const option = (name) => {
   const at = args.indexOf(name);
   return at === -1 ? undefined : args[at + 1];
@@ -163,11 +178,13 @@ async function a2aClient(token) {
 }
 
 /** One lifecycle call as plain JSON-RPC, which the SDK has no call for. */
-async function lifecycle(token, method, params, { activate = true } = {}) {
+async function lifecycle(token, method, params, { activate = true, requestId = true } = {}) {
   const headers = { authorization: `Bearer ${token}`, "content-type": "application/json", "A2A-Version": "1.0", ...(activate ? { "A2A-Extensions": LIFECYCLE } : {}) };
-  const res = await target.http("/a2a", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: `podster.lifecycle.v1.${method}`, params: { requestId: randomUUID(), ...params } }) });
+  const res = await target.http("/a2a", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: `podster.lifecycle.v1.${method}`, params: { ...(requestId ? { requestId: randomUUID() } : {}), ...params } }) });
   const body = await res.json().catch(() => null);
-  return { status: res.status, body, reason: body?.error?.data?.[0]?.reason ?? body?.error?.message, extensions: res.headers.get("A2A-Extensions") };
+  // Held before anything can print it: GetRepoAccess's answer is the one that would carry a repository token.
+  if (typeof body?.result?.token === "string") secrets.add(body.result.token);
+  return { status: res.status, body, reason: body?.error?.data?.[0]?.reason ?? body?.error?.message, code: body?.error?.data?.[0]?.metadata?.code, extensions: res.headers.get("A2A-Extensions"), cacheControl: res.headers.get("cache-control") };
 }
 
 const a2aId = (task) => `${room}:${task}`;
@@ -191,8 +208,8 @@ try {
 // Last, so it covers everything written before it. It never prints what it found, only that it found something.
 const output = written.join("");
 const leakedValues = [...secrets].filter((value) => output.includes(value)).length;
-const leakedShapes = (output.match(/a2asec_[0-9a-f]{8,}|e2eA2aTok_[0-9a-f]{8,}/g) ?? []).length;
-check(leakedValues === 0 && leakedShapes === 0, "no endpoint token or signing secret anywhere in this script's output", leakedValues || leakedShapes ? `${leakedValues} known values and ${leakedShapes} lookalikes found` : `${secrets.size} values checked`);
+const leakedShapes = (output.match(/a2asec_[0-9a-f]{8,}|e2eA2aTok_[0-9a-f]{8,}|\bgh[opsu]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/g) ?? []).length;
+check(leakedValues === 0 && leakedShapes === 0, "no endpoint token, signing secret or repository token anywhere in this script's output", leakedValues || leakedShapes ? `${leakedValues} known values and ${leakedShapes} lookalikes found` : `${secrets.size} values checked`);
 const count = (status) => results.filter((r) => r.status === status).length;
 console.log(`\n${count("ok")} passed, ${count("fail")} failed, ${count("skip")} skipped.${room ? ` Room ${room}.` : ""}`);
 process.exit(count("fail") || failedOutside ? 1 : 0);
@@ -213,11 +230,16 @@ async function run() {
   let leadToken;
   let guestClient;
   let leadClient;
+  /** The lifecycle methods the card names, as it says them: GetRepoAccess is among them only while managed repositories are on. */
+  let cardMethods;
 
   section("Discovery and OAuth");
   await step("discovery", async () => {
     const res = await target.http("/.well-known/agent-card.json");
-    const card = AgentCard.fromJSON(await res.json());
+    const raw = await res.json();
+    const card = AgentCard.fromJSON(raw);
+    const methods = (raw?.capabilities?.extensions ?? []).find((e) => e?.uri === LIFECYCLE)?.params?.methods;
+    if (Array.isArray(methods)) cardMethods = methods;
     const iface = card.supportedInterfaces?.[0];
     check(res.status === 200 && iface?.protocolBinding === "JSONRPC" && iface?.protocolVersion === "1.0" && iface?.url === `${base}/a2a`, "the card names one JSON-RPC 1.0 interface at /a2a", iface ? `${iface.protocolBinding} ${iface.protocolVersion} ${iface.url}` : `HTTP ${res.status}`);
     const scheme = card.securitySchemes?.podster?.scheme;
@@ -307,6 +329,9 @@ async function run() {
     check(declined.body?.result?.metadata?.[STATUS] === "open", "the guest declines another offer with a reason, and it goes back to open", declined.body?.result?.metadata?.[STATUS] ?? declined.reason);
   });
 
+  section("The engineer's steps (#394)");
+  await engineerSteps(owner, lead, cardMethods);
+
   section("Endpoint (step 11)");
   await endpoint(owner);
 
@@ -349,6 +374,96 @@ async function unreachable(owner, lead) {
     check(hides(admin.body, ...secrets) && !("signing_secret" in (admin.body ?? {})), "and the read holds no secret or token");
     const now = await lead.must("get_task", { workspace_id: room, task_id: task }, false);
     check(now.task.status === "offered" && now.task.assignee === agent.id, "the task is untouched: still offered to the agent", now.task.status);
+  });
+}
+
+/**
+ * The engineer's steps over A2A (#394), as an agent of its own, so a claimed opening changes nothing the other steps read.
+ * It claims an opening, refuses the claims MCP refuses, submits a commit on a task with no repository, and asks for that
+ * task's repository token. No repository is made and GitHub is asked nothing, so no token can be issued: the answer is a
+ * refusal while managed repositories are on, and while they're off the method answers as one that doesn't exist.
+ */
+async function engineerSteps(owner, lead, cardMethods) {
+  const agent = await McpAgent.connect(target, owner, "A2A staging engineer");
+  await owner.addAgent(room, agent, "guest");
+  let token;
+  await step("the engineer's /a2a token", async () => {
+    token = await a2aToken(owner, agent);
+    check(Boolean(token), "a third agent gets its own /a2a token");
+  });
+  if (!token) return skip("the engineer's steps", "no /a2a token");
+  const opening = async (inRoom = room) => (await owner.must("POST", `/v1/workspaces/${inRoom}/roles`, { title: "Engineer", responsibilities: "From the A2A staging run.", preset: "member", capacity: 1, policy_version: await owner.policyVersion(inRoom) })).id;
+  const invite = async (role) => owner.must("POST", `/v1/workspaces/${room}/roles/${role}/invites`, { principal_id: agent.id, policy_version: await owner.policyVersion(room) });
+  const filled = async (role, inRoom = room) => (await owner.must("GET", `/v1/workspaces/${inRoom}/roles`)).roles?.find((r) => r.id === role)?.filled;
+  const claim = (workspaceId, roleId, requestId = randomUUID()) => lifecycle(token, "ClaimRole", { workspaceId, roleId, requestId });
+
+  await step("ClaimRole", async () => {
+    const [role, another] = [await opening(), await opening()];
+    await invite(role);
+    await invite(another);
+    const requestId = randomUUID();
+    const first = await claim(room, role, requestId);
+    const held = first.body?.result;
+    check(held?.role_id === role && held?.principal_id === agent.id && held?.status === "active" && first.extensions === LIFECYCLE, "ClaimRole claims an opening the agent was invited to, as itself, with the extension active", held ? `${held.status}` : `${first.reason} ${first.code ?? ""}`);
+    const replay = await claim(room, role, requestId);
+    check(held !== undefined && isDeepStrictEqual(replay.body?.result, held), "the same requestId again answers the same claim", replay.body?.result ? "" : `${replay.reason} ${replay.code ?? ""}`);
+    const holding = await filled(role);
+    check(holding === 1, "and the opening holds one claim, not two", `filled ${holding}`);
+    const reused = await claim(room, another, requestId);
+    check(reused.body?.result === undefined && reused.reason === "INVALID_PARAMS" && reused.code === "idempotency_mismatch", "that requestId for another opening is refused as reused", `${reused.reason} ${reused.code ?? ""}`);
+    const second = await claim(room, another);
+    check(second.body?.result === undefined && second.reason === "UNSUPPORTED_OPERATION" && second.code === "already_claimed", "a second opening, while holding one, is refused already_claimed", `${second.reason} ${second.code ?? ""}`);
+    const untouched = await filled(another);
+    check(untouched === 0, "and claims nothing", `filled ${untouched}`);
+  });
+
+  await step("ClaimRole in a room the agent isn't in", async () => {
+    const elsewhere = await owner.createRoom(`A2A staging elsewhere ${new Date().toISOString().slice(0, 19)} ${key().slice(-6)}`);
+    console.log(`Second room ${elsewhere}.`);
+    const role = await opening(elsewhere);
+    const viaA2a = await claim(elsewhere, role);
+    const viaMcp = await agent.call("claim_role", { workspace_id: elsewhere, role_id: role, idempotency_key: key() });
+    const outside = new Set(["workspace_not_found", "access_revoked", "not_allowed"]);
+    check(viaA2a.body?.result === undefined && viaA2a.reason === "UNSUPPORTED_OPERATION" && outside.has(viaA2a.code) && !viaMcp.ok && viaMcp.code === viaA2a.code, "an opening in a room the agent isn't in is refused, with MCP's code", `A2A ${viaA2a.reason} ${viaA2a.code ?? ""}, MCP ${viaMcp.ok ? "accepted" : viaMcp.code}`);
+    const there = await filled(role, elsewhere);
+    check(there === 0, "and claims nothing there", `filled ${there}`);
+  });
+
+  let task;
+  await step("SubmitTask with commitSha", async () => {
+    const client = await a2aClient(token);
+    task = (await lead.must("create_task", { workspace_id: room, title: "A2A staging: a commit with no repository", instructions: "From the A2A staging run.", assignee: agent.id })).id;
+    const version = (await client.getTask({ id: a2aId(task) })).metadata?.[VERSION];
+    const accepted = await lifecycle(token, "AcceptTask", { id: a2aId(task), version });
+    const v = accepted.body?.result?.metadata?.[VERSION];
+    check(accepted.body?.result?.metadata?.[STATUS] === "accepted", "the engineer accepts a task in a room with no repository", accepted.body?.result?.metadata?.[STATUS] ?? accepted.reason);
+    const notText = await lifecycle(token, "SubmitTask", { id: a2aId(task), version: v, note: "Done.", commitSha: 7 });
+    check(notText.body?.result === undefined && notText.reason === "INVALID_PARAMS", "a commitSha that isn't text is refused before it's asked", notText.reason ?? "accepted");
+    const sha = randomBytes(20).toString("hex");
+    const submitted = await lifecycle(token, "SubmitTask", { id: a2aId(task), version: v, note: "Done, from the A2A staging run.", commitSha: sha });
+    check(submitted.body?.result?.metadata?.[STATUS] === "submitted", "SubmitTask with a commitSha on a task that isn't repository-linked is accepted", submitted.body?.result?.metadata?.[STATUS] ?? `${submitted.reason} ${submitted.code ?? ""}`);
+    const read = await lead.must("get_task", { workspace_id: room, task_id: task }, false);
+    const subs = read.submissions ?? [];
+    check(subs.length === 1 && subs[0]?.commit_sha === sha && subs[0]?.submitted_by === agent.id, "the lead reads one submission over MCP, with that commit, by the engineer", `${subs.length} submissions`);
+  });
+
+  await step("GetRepoAccess", async () => {
+    if (!task) return skip("GetRepoAccess", "no task");
+    if (!Array.isArray(cardMethods)) return check(false, "the card names the lifecycle extension's methods", "none named");
+    const switchedOn = cardMethods.includes("podster.lifecycle.v1.GetRepoAccess");
+    console.log(`     managed repositories are ${switchedOn ? "on" : "off"}, by the card`);
+    const asked = await lifecycle(token, "GetRepoAccess", { id: a2aId(task) }, { requestId: false });
+    if (!switchedOn) {
+      const unknown = await lifecycle(token, "NoSuchMethod", { id: a2aId(task) }, { requestId: false });
+      check(asked.body?.error?.code === -32601 && isDeepStrictEqual(asked.body?.error, unknown.body?.error) && asked.status === unknown.status, "with managed repositories off, GetRepoAccess answers exactly as an unknown method", `${asked.body?.error?.code} / ${unknown.body?.error?.code}`);
+      return;
+    }
+    check(asked.body?.result === undefined && asked.reason === "UNSUPPORTED_OPERATION" && asked.code === "task_not_linked", "with managed repositories on, GetRepoAccess on a task with no repository is refused task_not_linked", `${asked.reason} ${asked.code ?? ""}`);
+    const viaMcp = await agent.call("get_repo_access", { workspace_id: room, task_id: task });
+    if (typeof viaMcp.data?.token === "string") secrets.add(viaMcp.data.token);
+    check(!viaMcp.ok && viaMcp.code === "task_not_linked", "as MCP's get_repo_access refuses it", viaMcp.ok ? "accepted" : viaMcp.code);
+    const hiddenTask = await lifecycle(token, "GetRepoAccess", { id: a2aId(`tsk_${"0".repeat(32)}`) }, { requestId: false });
+    check(hiddenTask.body?.result === undefined && /TASK_NOT_FOUND/.test(hiddenTask.reason ?? ""), "a task that doesn't exist answers as missing", hiddenTask.reason ?? "accepted");
   });
 }
 

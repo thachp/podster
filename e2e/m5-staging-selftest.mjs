@@ -20,6 +20,14 @@ import {
   STEADY, steady, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node m5-staging-selftest.mjs
+
+Checks M5's staging run without the network: its host, arguments, exit codes, git child and GitHub reads, then a dry
+run. It takes no options and sends nothing.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 let failed = 0;
 const check = (passed, title) => {

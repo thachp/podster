@@ -39,6 +39,14 @@ import { JsonStream } from "./tail-stream.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
 const args = process.argv.slice(2);
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node m4-staging.mjs --base-url <gateway> --app-url <web app>
+
+M4's staging run, M4-01 to M4-17. Only staging or a local stack is accepted. On staging, set PODSTER_E2E_SIGNUP_SECRET.
+Exit codes: 0 when every check passed, 1 when any failed (or, on staging, was skipped), 2 for a refused argument, host
+or missing install, 3 when public rooms are off.`);
+  process.exit(0);
+}
 const option = (name) => {
   const at = args.indexOf(name);
   return at === -1 ? undefined : args[at + 1];

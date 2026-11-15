@@ -11,6 +11,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort, prepareStack, startGateway } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-a2a-staging.mjs [--skip-build]
+
+Builds the API, starts the local stack under wrangler dev, runs a2a-staging.mjs against it, then checks the Workers'
+logs for tokens, endpoint secrets and anything unhandled. --skip-build reuses the last build.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build"), apiVars: { A2A_TOKEN_KEY: randomBytes(32).toString("hex") } });
 

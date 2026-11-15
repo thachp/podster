@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { boundaryProblems, clientComponents } from "@/test/client-boundary";
 
-const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown }));
+const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown, adminOrgs: [] as string[], releaseSwitch: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
@@ -21,10 +21,11 @@ vi.mock("@/lib/gateway/server", () => ({
       return state.hostname;
     }
     if (path === "/api/v1/workspaces/ws_1/visibility") return state.visibility;
+    if (path === "/api/v1/orgs/org_a/release-delegation") return state.releaseSwitch;
     if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
     return { ok: false, status: 404, code: "not_found" };
   },
-  getIdentity: async () => ({ ok: true, data: { id: state.me, org_id: "org_a", orgs: ["org_a"], admin_orgs: [] } }),
+  getIdentity: async () => ({ ok: true, data: { id: state.me, org_id: "org_a", orgs: ["org_a"], admin_orgs: state.adminOrgs } }),
   getOrganizations: async () => ({ ok: true, data: { organizations: [{ id: "org_a", name: "Acme", personal: 0, role: "admin" }] } }),
   signInPath: (next: string) => `/sign-in?next=${next}`,
 }));
@@ -147,6 +148,54 @@ describe("workroom settings' release section", () => {
     state.release = { ok: false, status: 404, code: "not_found" };
     state.hostname = { ok: true, data: { request: null } };
     state.visibility = visibilityRead("private");
+    state.adminOrgs = [];
+    state.releaseSwitch = { ok: false, status: 404, code: "not_found" };
+  });
+
+  it("while custom domains aren't built, shows them as not yet available with no field, as their routes answer", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig({ enabled: true }) };
+    state.hostname = { ok: false, status: 409, code: "release_not_available" };
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Not available yet");
+    expect(section).toHaveTextContent("Deployment grants");
+    expect(section).not.toHaveTextContent("Couldn't refresh.");
+    expect(within(section).queryByLabelText("Hostname")).toBeNull();
+    expect(within(section).queryByRole("link")).toBeNull();
+  });
+
+  it("reads the organization's release switch only for an admin of it, and lists an operator's take as what's missing", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig() };
+    const first = await show();
+    expect(state.asked).not.toContain("/api/v1/orgs/org_a/release-delegation");
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Not configured");
+    first.unmount();
+    state.adminOrgs = ["org_a"];
+    state.releaseSwitch = { ok: true, data: { granted: false, generation: 3, last_take: 3, set_by: "per_op", set_at: 1 } };
+    const taken = await show();
+    expect(state.asked).toContain("/api/v1/orgs/org_a/release-delegation");
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Needs approval");
+    expect(section).toHaveTextContent("A Podster operator has taken release away from this workroom's organization.");
+    expect(screen.getByRole("button", { name: "Switch release on" })).toHaveAttribute("aria-disabled", "true");
+    taken.unmount();
+    // A switch that can't be read isn't guessed at: Podster checks it when release is switched on.
+    state.releaseSwitch = { ok: false, status: 500, code: "error" };
+    await show();
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Not configured");
+  });
+
+  it("with release switched off, reads neither the custom domain nor the organization's switch", async () => {
+    state.repository = readyRepository;
+    state.adminOrgs = ["org_a"];
+    await show();
+    expect(state.asked).not.toContain("/api/v1/orgs/org_a/release-delegation");
+    expect(state.asked).not.toContain("/api/v1/workspaces/ws_1/app-hostname");
+    expect(screen.getByRole("region", { name: "Release" })).not.toHaveTextContent(/Deployment grants|App address|Not available yet/);
   });
 
   it("with release switched off, as on every deployment today, shows it as Unavailable rather than an error, and reads no custom domain", async () => {

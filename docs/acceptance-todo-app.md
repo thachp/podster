@@ -12,7 +12,7 @@ Sources: [the M6 plan](m6-plan.md), with stage 1's [build order](m6-plan.md#stag
 | --- | --- |
 | **Environment** | **Staging only.** Gateway and dashboard on `podster.dev`'s staging hosts. The app is served on the content domain, `podster.site`, from the second Cloudflare account ([decision 217](spec/PRODUCT.md#decisions-needed)). There is no production deployment, and this test doesn't need one |
 | **Podster organization** | One fresh test organization for the run. It holds both people and every agent, so no invitation crosses organizations |
-| **GitHub organization** | `podsterdev`, staging's managed-repository organization, as M5's runs used. `podsterx` is the test organization, but staging creates repositories only in `podsterdev` today (`GITHUB_ORG_LOGIN` in `apps/api/wrangler.jsonc`, and the three Apps are installed there). Running in `podsterx` would need staging re-pointed ([question 9](#6-questions-for-the-owner)) |
+| **GitHub organization** | `podsterdev`, staging's managed-repository organization, as M5's runs used. Settled by the owner on 2026-11-10; `podsterx` is retired and not used ([item 9](#6-questions-for-the-owner)) |
 | **Workroom** | **Public**, because only a public room can release ([decision 213](spec/PRODUCT.md#decisions-needed)). Git-enabled. Its goal is a todo app as [stage 1](adr/0010-revision-apps-are-workers.md#31-what-it-is-made-of) describes it: a client-rendered single page, a small Worker answering a JSON API (list, add, change, remove), one store, and a manifest. The release directory is `site`. Its built files are committed, and Podster builds nothing (decision 220, answer 3). The page must avoid forms, client-side routes, inline scripts and browser storage, so that it works under the strict sandbox ([3.5](adr/0010-revision-apps-are-workers.md#35-under-the-sandbox-as-it-stands)). That constraint goes into the room's brief as an input asset |
 | **Repository** | Created by the room through `requestRepository` at setup, in `podsterdev`, linked to the room. Agents never create it. Its visibility is set separately from the room's. It is public, as managed repositories are on GitHub's Free plan ([decision 181](spec/PRODUCT.md#decisions-needed)), so anyone can read the source of what is served |
 | **People** (test people from staging's test sign-up) | **P1, the room's owner:** creates the room and asks for its repository (`REPOSITORY_REQUESTERS` admits test people), gives repository grants, and switches release on for the room. **P2, a room admin:** approves the release. Decision 215 lets the owner or an admin approve, and an agent never. Splitting the asking from the approving keeps the two apart. **An operator** for the takedown: someone in `OPERATORS`, which today holds only the owner's person ID ([question 3](#6-questions-for-the-owner)) |
@@ -116,7 +116,7 @@ From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's o
 6. **Who asks for the release:** the lead agent holding a `deploy` grant, as proposed, or a person?
 7. **May the agents' sessions run unattended** on the architect's machine for the length of the run, within a budget you set?
 8. **Is a stall that needs a person a fail,** or a recorded gap, as with earlier gates?
-9. **`podsterdev` or `podsterx`?** Staging creates repositories in `podsterdev` today, and M5's and M6's scripts pin it. Using `podsterx` means changing staging's organization variables and installing three staging Apps there, which is a cloud change and yours. Proposed: `podsterdev`, as today.
+9. **Settled, not a question: the run uses `podsterdev`.** The owner moved everything there on 2026-11-10, and `podsterx` is retired and not used. Staging creates repositories in `podsterdev` (`GITHUB_ORG_LOGIN` in `apps/api/wrangler.jsonc`), and M5's scripts pin it.
 10. **Should one agent also use A2A?** Proposed: yes, the engineer, for its accept and submit only ([section 7.2](#72-agents-and-how-they-connect)).
 11. **Private while building, public to release,** with an agent reviewing T1 to T3 and P2 reviewing T4? That is what `main` allows ([section 7.0](#70-three-rules-on-main-that-shape-the-run)); sections 1 to 3 assumed a public room with an agent reviewer throughout.
 
@@ -141,7 +141,7 @@ Read from `packages/contracts/openapi.yaml` on 2026-11-14. Sections 1 to 3 assum
 | **Deployment** | Staging: `gateway-staging.podster.dev`, `app-staging.podster.dev`, and the app on `<label>.podster.site`. No production exists |
 | **People** | P1 and P2, two test people from staging's test sign-up ([staging.md](staging.md#test-people-for-the-journey)), each with the personal organization it makes. P1 adds P2 to the room (`addMember`, or `createInvitation` and `acceptInvitation`) and makes P2 an admin (`changeMemberRole`) |
 | **Workroom** | One new room in P1's organization, made for this run and archived at the end. Private for T1 to T3, then public (`setReviewPolicy` on, then `setRoomVisibility`) |
-| **GitHub** | One managed repository in `podsterdev` ([question 9](#6-questions-for-the-owner)) |
+| **GitHub** | One managed repository in `podsterdev`, as the owner settled on 2026-11-10 ([item 9](#6-questions-for-the-owner)) |
 
 ### 7.2 Agents and how they connect
 

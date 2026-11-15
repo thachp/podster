@@ -2640,6 +2640,138 @@ fn a_repository_link_that_is_not_ready_unpublishes_as_adr_0010_is_written() {
 }
 
 #[test]
+fn a_repository_unpublish_is_owed_only_with_the_link_off_ready_and_something_up() {
+    use podster_core::repositories::LinkStatus;
+    for status in [LinkStatus::Degraded, LinkStatus::Suspended] {
+        assert!(repo_unpublish_owed(status, true), "{status:?}");
+        assert!(!repo_unpublish_owed(status, false), "{status:?}");
+    }
+    assert!(!repo_unpublish_owed(LinkStatus::Ready, true));
+    assert!(!repo_unpublish_owed(LinkStatus::Ready, false));
+}
+
+#[test]
+fn the_repository_unpublish_ceiling_is_the_smaller_of_its_number_and_its_share_and_never_below_one()
+{
+    // Proposed: 5, or 10% of the rooms with apps rounded up, whichever is smaller.
+    assert_eq!(REPO_UNPUBLISH_CEILING, 5);
+    assert_eq!(REPO_UNPUBLISH_CEILING_PERCENT, 10);
+    assert_eq!(repo_unpublish_ceiling(0), 1);
+    assert_eq!(repo_unpublish_ceiling(1), 1);
+    assert_eq!(repo_unpublish_ceiling(10), 1);
+    assert_eq!(repo_unpublish_ceiling(11), 2);
+    assert_eq!(repo_unpublish_ceiling(20), 2);
+    assert_eq!(repo_unpublish_ceiling(21), 3);
+    assert_eq!(repo_unpublish_ceiling(40), 4);
+    assert_eq!(repo_unpublish_ceiling(41), 5);
+    assert_eq!(repo_unpublish_ceiling(50), 5);
+    assert_eq!(repo_unpublish_ceiling(51), 5);
+    assert_eq!(repo_unpublish_ceiling(u64::MAX), 5);
+}
+
+#[test]
+fn a_repository_unpublish_grant_counts_for_its_window_to_the_millisecond() {
+    assert!(repo_unpublish_counts(1_000, 1_000));
+    assert!(repo_unpublish_counts(
+        1_000,
+        1_000 + REPO_UNPUBLISH_WINDOW_MS - 1
+    ));
+    assert!(!repo_unpublish_counts(
+        1_000,
+        1_000 + REPO_UNPUBLISH_WINDOW_MS
+    ));
+    assert!(!repo_unpublish_counts(i64::MIN, i64::MAX));
+}
+
+#[test]
+fn the_repository_unpublish_ceiling_grants_up_to_it_and_holds_the_rest() {
+    let ask = |granted_in_window: u32, rooms: Option<u64>| RepoUnpublishAsk {
+        operator: false,
+        granted_before: false,
+        tripped: false,
+        granted_in_window,
+        rooms_with_apps: rooms,
+    };
+    // 30 rooms with apps: a ceiling of 3.
+    assert_eq!(
+        repo_unpublish_permit(ask(0, Some(30))),
+        RepoUnpublishPermit::Grant
+    );
+    assert_eq!(
+        repo_unpublish_permit(ask(2, Some(30))),
+        RepoUnpublishPermit::Grant
+    );
+    assert_eq!(
+        repo_unpublish_permit(ask(3, Some(30))),
+        RepoUnpublishPermit::Hold
+    );
+    assert_eq!(
+        repo_unpublish_permit(ask(500, Some(10_000))),
+        RepoUnpublishPermit::Hold
+    );
+    // A single repository found gone, anywhere, still takes its own app down.
+    assert_eq!(
+        repo_unpublish_permit(ask(0, Some(0))),
+        RepoUnpublishPermit::Grant
+    );
+    assert_eq!(
+        repo_unpublish_permit(ask(1, Some(0))),
+        RepoUnpublishPermit::Hold
+    );
+    // An unreadable count decides nothing.
+    assert_eq!(
+        repo_unpublish_permit(ask(0, None)),
+        RepoUnpublishPermit::Undecided
+    );
+}
+
+#[test]
+fn a_tripped_ceiling_holds_everyone_but_an_operators_room_and_a_room_already_granted() {
+    let base = RepoUnpublishAsk {
+        operator: false,
+        granted_before: false,
+        tripped: true,
+        granted_in_window: 0,
+        rooms_with_apps: Some(1_000),
+    };
+    // Tripped, a fresh window or not: held, until an operator confirms or the cause clears.
+    assert_eq!(repo_unpublish_permit(base), RepoUnpublishPermit::Hold);
+    assert_eq!(
+        repo_unpublish_permit(RepoUnpublishAsk {
+            rooms_with_apps: None,
+            ..base
+        }),
+        RepoUnpublishPermit::Hold
+    );
+    // An operator's recheck of this room is that operator's confirmation for it.
+    assert_eq!(
+        repo_unpublish_permit(RepoUnpublishAsk {
+            operator: true,
+            ..base
+        }),
+        RepoUnpublishPermit::Grant
+    );
+    // A room granted before the ceiling tripped, whose unpublish failed after its grant, asks again and is granted.
+    assert_eq!(
+        repo_unpublish_permit(RepoUnpublishAsk {
+            granted_before: true,
+            ..base
+        }),
+        RepoUnpublishPermit::Grant
+    );
+    // Not tripped, past the ceiling, with an operator's confirmation: granted all the same.
+    assert_eq!(
+        repo_unpublish_permit(RepoUnpublishAsk {
+            operator: true,
+            tripped: false,
+            granted_in_window: 99,
+            ..base
+        }),
+        RepoUnpublishPermit::Grant
+    );
+}
+
+#[test]
 fn the_deployments_release_setting_has_three_readings_and_only_an_exact_false_unpublishes() {
     use DeploymentRelease::*;
     assert_eq!(deployment_release(Some("true")), On);

@@ -681,7 +681,36 @@ impl Moderation {
         exec(&sql, &release_reads_schema(), vec![])?;
         exec(&sql, content_stop::SCHEMA, vec![])?;
         exec(&sql, reconcile::SCHEMA, vec![])?;
+        exec(&sql, crate::repo_ceiling::SCHEMA, vec![])?;
         match (req.method(), req.path().as_str()) {
+            // A room asks before it unpublishes for its repository's link (M6 step 6, the architect's ruling of
+            // 2026-11-14): the ceiling decides in one transaction here. Rooms with apps are counted first, outside it.
+            (Method::Post, crate::repo_ceiling::PATH) => {
+                let body: Value = req.json().await?;
+                let rooms = if body["wanted"] == true && body["operator"] != true {
+                    crate::repo_ceiling::rooms_with_apps(&self.env).await
+                } else {
+                    None
+                };
+                // Test builds only: a test makes the count of rooms with apps unreadable.
+                #[cfg(feature = "failpoints")]
+                let rooms = if rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_rooms_uncounted'",
+                    vec![],
+                )?
+                .is_empty()
+                {
+                    rooms
+                } else {
+                    None
+                };
+                let store = sql.clone();
+                self.in_transaction(move || {
+                    let now = clock(&store);
+                    crate::repo_ceiling::ask(&store, &body, rooms, now)
+                })
+            }
             // The two reconciles (M6 step 4(a), third PR), each called by the Worker's scheduled handler. Each ends by
             // setting this object's own alarm if the stop's key is owed, which is what corrects a wake that was lost
             // and writes a key that was owed from before any provider was configured.

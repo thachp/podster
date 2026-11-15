@@ -32,8 +32,8 @@ use crate::github::{
     PullAnswer,
 };
 use podster_core::provisioning::{
-    decide_recheck, gone_look, job_backoff_ms, verify_ready, Expected, GoneLook, NotReady, Recheck,
-    RecheckRead,
+    decide_recheck, gone_look, gone_may_count, job_backoff_ms, verify_ready, Expected, GoneLook,
+    InstallationRead, NotReady, Recheck, RecheckRead,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
@@ -1028,6 +1028,11 @@ fn observation<'a>(pull: &'a PullSeen, default_branch_has: Option<bool>) -> Pull
 
 /// Sets a ready link `degraded`, with the reason and an event for the room's owner and admins. Only for a definite
 /// difference from what provisioning set. Coding work in the room stops until an operator has rechecked it.
+///
+/// **It doesn't unpublish the room's app.** A link no longer ready does take the app down (ADR 0010, M6 step 6), but
+/// only once the deployment's ceiling on unpublishes for this cause allows it (decided by the architect on 2026-11-14),
+/// which is a question to another object, asked outside any transaction: `repo_unpublish` asks it and unpublishes, in
+/// the same alarm pass or request, after this has committed.
 pub(super) fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
     let was_ready = !rows(
         sql,
@@ -1045,16 +1050,6 @@ pub(super) fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i
     )?;
     // Every token agents hold on it is marked for revocation in this same transaction (the M5 security review's F2).
     store::mark_stale_repo_tokens(sql, now)?;
-    // A link no longer ready unpublishes the room's app, as core decides for the status (ADR 0010, M6 step 6). Ready
-    // again restores nothing.
-    if podster_core::release::link_status_unpublishes(LinkStatus::Degraded) {
-        super::takedown::unpublish_for(
-            sql,
-            podster_core::release::UnpublishTrigger::RepositoryNotReady,
-            json!({ "cause": code }),
-            now,
-        )?;
-    }
     record_event(
         sql,
         "repository.degraded",
@@ -1111,6 +1106,12 @@ impl Workspace {
             public,
         };
         let read_back = provider.read_back(repo_id).await;
+        // "Gone" counts only while the App's own installation reads healthy (decided by the architect on 2026-11-14): a
+        // GitHub incident, or the installation suspended or removed, would otherwise read as every repository gone.
+        let installation = match &read_back {
+            Ok((observed, _)) if !observed.present => Some(self.installation_read(&provider).await),
+            _ => None,
+        };
         if provider.release().await > 0 {
             console_error!(
                 "{}",
@@ -1119,6 +1120,11 @@ impl Workspace {
         }
         let verdict = match read_back {
             Err(failure) => Readiness::CouldNotRead(failure.status()),
+            Ok(_) if installation.is_some_and(|read| !gone_may_count(read)) => {
+                let read = installation.unwrap_or(InstallationRead::Unreadable);
+                self.installation_unconfirmed(room, read).await;
+                Readiness::CouldNotRead(404)
+            }
             Ok((observed, described)) => match verify_ready(&expected, &observed) {
                 Err(not_ready) => Readiness::Mismatch(not_ready.code()),
                 Ok(()) if described.default_branch != default_branch => {
@@ -1175,6 +1181,9 @@ impl Workspace {
         };
         let hash = format!("{:x}", Sha256::digest(b"POST repository recheck"));
         if let Some(answer) = stored_answer(&sql, &operator, &key, &hash, now_ms())? {
+            // A replay still confirms: the first answer may have been kept while its confirmation's ask failed. Asked
+            // from current rows, so a room with nothing owed only tells the ceiling it no longer waits.
+            self.repo_unpublish(true).await;
             return Ok(answer);
         }
         let found = rows(
@@ -1215,7 +1224,7 @@ impl Workspace {
             None
         };
         let unchanged = json!({ "status": status.name(), "reason": link["status_reason"] });
-        self.in_transaction(move |sql| {
+        let answer = self.in_transaction(move |sql| {
             let now = now_ms();
             // The link as it is now, in case it changed while GitHub was answering.
             let current = rows(sql, "SELECT status FROM repo_link WHERE provider_repo_id = ?", vec![repo_id.into()])?
@@ -1256,7 +1265,11 @@ impl Workspace {
             };
             store_answer(sql, &operator, &key, &hash, &answer, now)?;
             Ok(answer)
-        })
+        })?;
+        // An operator's recheck is that operator's confirmation for this room: a link still not ready unpublishes the
+        // room's app whatever the deployment's ceiling says, and a link ready again releases the room from a hold.
+        self.repo_unpublish(true).await;
+        Ok(answer)
     }
 
     /// The merge job, run by the room's alarm: one pass at each merge that's due, a couple an alarm.

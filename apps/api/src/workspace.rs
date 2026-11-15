@@ -98,6 +98,7 @@ mod release_upload;
 mod releasers;
 mod removal;
 mod repo_tokens;
+mod repo_unpublish;
 mod repositories;
 mod roles;
 mod submission_files;
@@ -3855,6 +3856,13 @@ impl Workspace {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // An unpublish owed for the repository's link, worked out from the room's rows, or a hold to be released: asked
+        // of the deployment's ceiling (M6 step 6).
+        if migrated {
+            if let Some(next) = self.repo_unpublish_due(&sql, now).await? {
+                due = Some(due.map_or(next, |d| d.min(next)));
+            }
+        }
         // A hold on the room's app, when it runs out (M6 step 6).
         if let Some(next) = migrated
             .then(|| releasers::next_due(&sql))
@@ -5367,6 +5375,9 @@ impl DurableObject for Workspace {
         if let Err(error) = self.refresh_changes().await {
             console_error!("change refresh failed: {:?}", error.code());
         }
+        // A link off ready unpublishes the room's app, once the deployment's ceiling allows it: worked out from the
+        // room's rows on every alarm, so a restart between the degrade and the unpublish loses nothing.
+        self.repo_unpublish_from_alarm().await;
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());

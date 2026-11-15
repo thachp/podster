@@ -913,6 +913,98 @@ pub fn link_status_unpublishes(status: crate::repositories::LinkStatus) -> bool 
     }
 }
 
+/// Whether the room's app is owed an unpublish as `UnpublishTrigger::RepositoryNotReady`: its link's status unpublishes
+/// ([`link_status_unpublishes`]) and something is up to take down. With nothing up there is nothing to take down, and
+/// the trigger, read again and again, records nothing, as the deployment's switch does: while the link isn't ready no
+/// release can start, and ready again restores nothing.
+pub fn repo_unpublish_owed(status: crate::repositories::LinkStatus, anything_up: bool) -> bool {
+    link_status_unpublishes(status) && anything_up
+}
+
+/// **The ceiling on unpublishes for a repository's link, Proposed** (decided by the architect on 2026-11-14, for the
+/// owner to review). At most this many rooms' apps are unpublished as `RepositoryNotReady` in one
+/// [`REPO_UNPUBLISH_WINDOW_MS`], or [`REPO_UNPUBLISH_CEILING_PERCENT`] of the rooms with apps, whichever is smaller.
+/// Past it, the rest are held for an operator, so a GitHub incident that reads as many links not ready at once can't
+/// retire every app's address.
+pub const REPO_UNPUBLISH_CEILING: u32 = 5;
+/// The share of rooms with apps that the ceiling allows in one window, in percent, rounded up. Proposed.
+pub const REPO_UNPUBLISH_CEILING_PERCENT: u64 = 10;
+/// The window the ceiling counts over: there is no shared pass over rooms' repositories, since each room reads its own
+/// link, so the deployment's one object counts by time. Proposed.
+pub const REPO_UNPUBLISH_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// How many rooms' apps may be unpublished for a repository's link in one window, given how many rooms have apps:
+/// [`REPO_UNPUBLISH_CEILING`] or [`REPO_UNPUBLISH_CEILING_PERCENT`] of them rounded up, whichever is smaller, and never
+/// below one, so a single repository found gone still takes its own app down.
+pub fn repo_unpublish_ceiling(rooms_with_apps: u64) -> u32 {
+    let share = rooms_with_apps
+        .saturating_mul(REPO_UNPUBLISH_CEILING_PERCENT)
+        .div_ceil(100);
+    let share = u32::try_from(share).unwrap_or(u32::MAX);
+    share.clamp(1, REPO_UNPUBLISH_CEILING)
+}
+
+/// Whether a grant made at `granted_at` still counts against the ceiling at `now`.
+pub fn repo_unpublish_counts(granted_at: i64, now: i64) -> bool {
+    now.saturating_sub(granted_at) < REPO_UNPUBLISH_WINDOW_MS
+}
+
+/// What one room asking to unpublish for its repository's link is answered, from the deployment's one object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoUnpublishPermit {
+    /// Unpublish now.
+    Grant,
+    /// Not now: the ceiling is reached, or was, and an operator hasn't confirmed this room. Nothing comes down.
+    Hold,
+    /// The count of rooms with apps couldn't be read: nothing comes down, and the room asks again later.
+    Undecided,
+}
+
+impl RepoUnpublishPermit {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            RepoUnpublishPermit::Grant => "grant",
+            RepoUnpublishPermit::Hold => "hold",
+            RepoUnpublishPermit::Undecided => "undecided",
+        }
+    }
+}
+
+/// One room's ask, as the deployment's object read it in the transaction that answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoUnpublishAsk {
+    /// An operator's recheck of this room found its link still not ready: that operator confirmed this room.
+    pub operator: bool,
+    /// This room was granted already, within the window: an unpublish that failed after its grant asks again.
+    pub granted_before: bool,
+    /// The ceiling was reached and hasn't been cleared: every room not confirmed by an operator is held.
+    pub tripped: bool,
+    /// Other rooms granted within the window.
+    pub granted_in_window: u32,
+    /// Rooms with apps, or `None` when that couldn't be read.
+    pub rooms_with_apps: Option<u64>,
+}
+
+/// The ceiling's decision for one ask. An operator's confirmation and a grant already made are answered first; then a
+/// tripped ceiling holds everyone else; then a count that couldn't be read is undecided; then the ceiling decides.
+pub fn repo_unpublish_permit(ask: RepoUnpublishAsk) -> RepoUnpublishPermit {
+    if ask.operator || ask.granted_before {
+        return RepoUnpublishPermit::Grant;
+    }
+    if ask.tripped {
+        return RepoUnpublishPermit::Hold;
+    }
+    let Some(rooms) = ask.rooms_with_apps else {
+        return RepoUnpublishPermit::Undecided;
+    };
+    if ask.granted_in_window < repo_unpublish_ceiling(rooms) {
+        RepoUnpublishPermit::Grant
+    } else {
+        RepoUnpublishPermit::Hold
+    }
+}
+
 /// The trigger's own change to the room's serve state: the epoch up by one, every host to nothing with its version up,
 /// and the kept script forgotten, so nothing can be rolled back to afterwards. The scripts to delete are what the hosts
 /// served, what was kept, and, when an unpublish lands between a commit and its marker, what was live before that

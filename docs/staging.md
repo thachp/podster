@@ -423,6 +423,8 @@ Operators work from `/moderation` on the dashboard. For anyone else, that page a
 cd apps/api && npx wrangler secret put OPERATORS --env staging
 ```
 
+**A repository recheck of a room the ceiling holds unpublishes its app at once** (M6 step 6, the architect's rulings of 2026-11-14, confirmed by the owner on 2026-11-14: [the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)). When more rooms' links go off ready in an hour than the ceiling lets come down, the rest are held, each listed in the takedown findings as `repo_unpublish_held` with the room's ID. `POST /v1/moderation/repositories/{room}/recheck` on such a room is the operator's confirmation: if the link still reads not ready, the room's app comes down for good, its label retired, whatever the ceiling says. If the link reads ready again, the room leaves the hold and its app stays up. Read the room's repository first; recheck only a room whose app should come down or whose repository is fixed. A `repo_unpublish_stalled` finding names a room whose ask got no answer, was undecided, or whose unpublish failed; it asks again by itself within the hour.
+
 ## M4's staging run
 
 `e2e/m4-staging.mjs` runs M4's acceptance tests, M4-01 to M4-17. It needs public rooms on, which is **the owner's call at the gate**, and stops at once with exit code 3 while they're off, before making anything public. The owner made that call for staging on 2026-11-10: `PUBLIC_ROOMS` is `true` under `env.staging` in `apps/api/wrangler.jsonc` and nowhere else.

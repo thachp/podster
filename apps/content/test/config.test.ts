@@ -181,7 +181,7 @@ describe("the Worker reaches nothing but its two bindings", () => {
   const sources = readdirSync(new URL("src/", root)).map((name) => [name, read(`src/${name}`)] as const);
 
   it("reads one namespace, asks one dispatch namespace, and names no other binding, host or secret", () => {
-    expect(sources.map(([name]) => name).sort()).toEqual(["handle.ts", "index.ts", "names.ts"]);
+    expect(sources.map(([name]) => name).sort()).toEqual(["handle.ts", "index.ts", "names.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
     expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE"]);
     // Nothing is logged for a request (ADR 0010's "Logs").
@@ -190,6 +190,21 @@ describe("the Worker reaches nothing but its two bindings", () => {
     for (const word of [".put(", ".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "DurableObject", "setTimeout", "setInterval", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
     // The one `fetch` call is the dispatch namespace's own.
     expect(all.match(/\.fetch\(/g)).toHaveLength(1);
+  });
+
+  it("keeps the code-apps switch off, as a constant that nothing configures, and every script static", () => {
+    const handle = read("src/handle.ts");
+    // Exactly one definition, of type `false`: turning it on changes this line, and the pin in `codeHost` then fails
+    // to compile until serving an app with code is built.
+    expect(handle.match(/CODE_APPS_ENABLED/g)?.length).toBe(2);
+    expect(handle).toContain("export const CODE_APPS_ENABLED: false = false;");
+    expect(handle).toContain("const off: false = CODE_APPS_ENABLED;");
+    // The Worker's entry reads no binding or variable for it, and says every script is static: the serve entry has no
+    // mark of code until that contract change lands.
+    const index = read("src/index.ts");
+    expect(index).not.toMatch(/CODE_APPS|hostKind:\s*\(\s*[a-z]/i);
+    expect(index).toContain('hostKind: () => "static",');
+    expect(read("wrangler.jsonc")).not.toMatch(/CODE_APPS|code_apps/i);
   });
 
   it("never holds the word that would give a sandboxed page its real origin back", () => {

@@ -22,6 +22,9 @@ export default {
       stop,
       // Anything but a string is no domain, and then every host is not-found.
       domain: typeof env.CONTENT_DOMAIN === "string" ? env.CONTENT_DOMAIN : "",
+      // The serve entry has no mark that a script has code until that contract change lands, so every script is
+      // static, as every entry has been. Even a host with code would serve nothing: the code-apps switch is off.
+      hostKind: () => "static",
     });
   },
 } satisfies ExportedHandler<Env>;

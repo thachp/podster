@@ -78,6 +78,8 @@ async function room() {
   expect(invited.status, JSON.stringify(invited.body)).toBe(200);
   const joined = await api(orgAdmin(GUEST.org), "POST", "/v1/invitations/accept", { token: invited.body.token, org_id: GUEST.org, agents: [GUEST.id] });
   expect(joined.status, JSON.stringify(joined.body)).toBe(200);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return id;
 }
 

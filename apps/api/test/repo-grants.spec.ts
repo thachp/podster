@@ -88,6 +88,8 @@ async function room(options: { link?: string | null } = {}) {
     sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
   });
   if (options.link !== null) await link(id, options.link ?? "ready");
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return id;
 }
 

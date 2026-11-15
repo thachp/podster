@@ -60,6 +60,8 @@ async function room() {
   expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: AGENT.id, kind: "agent", org_id: AGENT.org, role: "member", policy_version: await version(id) })).status).toBe(200);
   const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: LEAVER.id, kind: "person", org_id: LEAVER.org, role: "member", policy_version: await version(id) }, { target_member: { person: LEAVER.id, orgs: { [LEAVER.org]: 1 } } });
   expect(added.status, JSON.stringify(added.body)).toBe(200);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return id;
 }
 

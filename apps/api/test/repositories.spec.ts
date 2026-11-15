@@ -67,6 +67,8 @@ async function room() {
   }
   const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Add the parser", instructions: "Write it.", assignee: ASSIGNEE.id });
   expect(task.status, JSON.stringify(task.body)).toBe(200);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return { id, task: task.body.id as string };
 }
 

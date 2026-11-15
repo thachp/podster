@@ -132,6 +132,8 @@ async function room(options: { switchedOn?: boolean; link?: boolean } = {}) {
   });
   if (options.link !== false) await addLink(id);
   await pull(7);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return id;
 }
 const addLink = (id: string, status = "ready") => inRoom(id, (sql) => {

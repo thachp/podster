@@ -21,7 +21,13 @@
 // - a shell script that calls a program by its full path (`/usr/bin/curl`), or one that isn't stood in for;
 // - a Node script that reaches the network or a program through a native addon, `process.binding`, or a module
 //   loaded before the guard;
-// - anything that waits to start until after --help's output and exit.
+// - anything that waits to start until after --help's output and exit;
+// - a file written, changed or deleted: nothing stops or records a write;
+// - work started in a `worker_threads` Worker, or a request through `node:http2`, neither of which the guard replaces;
+// - a shell tool with no stand-in, such as jq, make, perl or rustc, or a build run through one of them.
+//
+// A floor keeps the patterns honest: if scripts/ or e2e/ gives fewer scripts to run than FLOOR names, it fails, so a
+// moved folder or a broken pattern can't pass by checking nothing.
 //
 // Exit 1 if any script fails or the lists are wrong.
 import { spawnSync } from "node:child_process";
@@ -54,6 +60,9 @@ export const STOOD_IN = [
   "worker-build", "wrangler", "yarn",
 ];
 
+/** The fewest scripts each folder must give to run: today's counts, 8 and 19, less a small margin. */
+export const FLOOR = { "scripts/": 7, "e2e/": 17 };
+
 const ENTRY = /^(?:.*staging.*|run-.*)\.mjs$/;
 
 function walk(dir, out = []) {
@@ -69,7 +78,7 @@ function walk(dir, out = []) {
  * What to run, from the repository at `base`: `{ run, skipped, problems }`, each path relative to `base`. `notEntry`
  * is NOT_ENTRY's shape; a key ending in `/` covers a whole directory.
  */
-export function discover(base = root, notEntry = NOT_ENTRY) {
+export function discover(base = root, notEntry = NOT_ENTRY, floor = FLOOR) {
   const run = [];
   const skipped = [];
   const problems = [];
@@ -90,6 +99,10 @@ export function discover(base = root, notEntry = NOT_ENTRY) {
     if (ENTRY.test(name) && statSync(join(base, "e2e", name)).isFile()) consider(`e2e/${name}`, true);
   }
   for (const key of Object.keys(notEntry)) if (!used.has(key)) problems.push(`${key} is in NOT_ENTRY but matches no file: remove it`);
+  for (const [folder, least] of Object.entries(floor)) {
+    const found = run.filter((path) => path.startsWith(folder)).length;
+    if (found < least) problems.push(`${folder} gave ${found} scripts to run, fewer than its floor of ${least}: a pattern or a folder is wrong`);
+  }
   return { run, skipped, problems };
 }
 
@@ -165,19 +178,19 @@ function selfTest() {
     write("scripts/test/lib.sh", "true\n");
 
     const notEntry = { "e2e/x-staging-lib.mjs": "a library", "scripts/test/lib.sh": "sourced" };
-    const found = discover(base, notEntry);
+    const found = discover(base, notEntry, {});
     expect("the patterns find every run-*.mjs and executable script, and no other file", found.run.sort(), [
       "e2e/run-connects.mjs", "e2e/run-fails.mjs", "e2e/run-fetches.mjs", "e2e/run-good.mjs", "e2e/run-hangs.mjs", "e2e/run-requests.mjs", "e2e/run-spawns-later.mjs",
       "e2e/run-spawns.mjs", "e2e/run-stderr.mjs", "scripts/builds", "scripts/curls", "scripts/good", "scripts/secret",
     ]);
     expect("a listed library isn't run", found.skipped, ["scripts/test/lib.sh", "e2e/x-staging-lib.mjs"]);
     expect("with everything listed there's no problem", found.problems, []);
-    expect("an unlisted staging library is run, and so fails closed", discover(base, { "scripts/test/lib.sh": "sourced" }).run.includes("e2e/x-staging-lib.mjs"), true);
-    expect("an unlisted file under scripts/ that isn't executable fails", discover(base, { "e2e/x-staging-lib.mjs": "a library" }).problems, [
+    expect("an unlisted staging library is run, and so fails closed", discover(base, { "scripts/test/lib.sh": "sourced" }, {}).run.includes("e2e/x-staging-lib.mjs"), true);
+    expect("an unlisted file under scripts/ that isn't executable fails", discover(base, { "e2e/x-staging-lib.mjs": "a library" }, {}).problems, [
       "scripts/test/lib.sh isn't executable and isn't in NOT_ENTRY: make it executable with --help, or list it with its reason",
     ]);
-    expect("an entry that matches nothing fails", discover(base, { ...notEntry, "e2e/gone-staging.mjs": "gone" }).problems, ["e2e/gone-staging.mjs is in NOT_ENTRY but matches no file: remove it"]);
-    expect("an entry with no reason fails", discover(base, { ...notEntry, "scripts/test/lib.sh": " " }).problems, ["scripts/test/lib.sh is in NOT_ENTRY with no reason"]);
+    expect("an entry that matches nothing fails", discover(base, { ...notEntry, "e2e/gone-staging.mjs": "gone" }, {}).problems, ["e2e/gone-staging.mjs is in NOT_ENTRY but matches no file: remove it"]);
+    expect("an entry with no reason fails", discover(base, { ...notEntry, "scripts/test/lib.sh": " " }, {}).problems, ["scripts/test/lib.sh is in NOT_ENTRY with no reason"]);
 
     const run = (file) => runHelp(file, { base, timeout: 3_000 });
     expect("a Node script that prints usage and exits passes", run("e2e/run-good.mjs"), null);
@@ -200,7 +213,21 @@ function selfTest() {
     } finally {
       for (const name of ["PODSTER_E2E_TOKEN", "CLOUDFLARE_API_TOKEN"]) if (before[name] === undefined) delete process.env[name];
     }
-    expect("the real lists have no problem", discover().problems, []);
+    const empty = mkdtempSync(join(tmpdir(), "help-check-empty-"));
+    mkdirSync(join(empty, "e2e"));
+    try {
+      expect("discovery that finds nothing fails on the floor", discover(empty, {}, { "scripts/": 1, "e2e/": 1 }).problems, [
+        "scripts/ gave 0 scripts to run, fewer than its floor of 1: a pattern or a folder is wrong",
+        "e2e/ gave 0 scripts to run, fewer than its floor of 1: a pattern or a folder is wrong",
+      ]);
+      expect("  and so does the real floor", discover(empty, {}).problems.length, 2);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+    expect("a folder below its floor fails, the other doesn't", discover(base, notEntry, { "scripts/": 5, "e2e/": 9 }).problems, [
+      "scripts/ gave 4 scripts to run, fewer than its floor of 5: a pattern or a folder is wrong",
+    ]);
+    expect("the real lists have no problem, and meet the floor", discover().problems, []);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

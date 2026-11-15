@@ -169,6 +169,7 @@ export default {
       stop,
       domain: DOMAIN,
       hostKind: () => "static",
+      codeApps: false,
     });
   },
 } satisfies ExportedHandler<{ BROWSER_RUN_ID?: unknown }>;

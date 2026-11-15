@@ -22,8 +22,9 @@
 //   8. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
 //      then this Worker's own fixed set, the sandbox among them.
 //
-// For any method but GET and HEAD, every step before 6 that would refuse answers today's `405` instead, and so does a
-// static host: a static host's answers are exactly what they were before the rules for hosts with code.
+// For any method but GET and HEAD, with the code-apps switch off, as it is: today's `405` right after step 3, before
+// anything is read. (With it on, which only a test can do, every step before 6 that would refuse answers that `405`
+// instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
 // Nothing is logged for a request (ADR 0010's "Logs").
 import { defaultHostLabel, scriptLabel, STOP_KEY } from "./names";
@@ -70,6 +71,12 @@ export interface Deps {
    * entry says every script is static, which is what every entry has been.
    */
   hostKind: (script: string) => HostKind;
+  /**
+   * The code-apps switch, as this request sees it. The Worker's entry passes `CODE_APPS_ENABLED`, which is of type
+   * `false`; only a test passes anything else. While it is off, any method but GET and HEAD gets today's `405` before
+   * anything is read, so no host's kind is learned for it, and no rule for hosts with code applies to it.
+   */
+  codeApps: boolean;
 }
 
 /** The visitor's headers that go through to an app with a read. Each calls only for answer headers let through below. */
@@ -244,6 +251,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   const label = defaultHostLabel(host, deps.domain);
   // The sandbox names the host, so a host that is no app's is named as nothing a page could be served from.
   const origin = label === null ? "'none'" : `https://${host}`;
+  // Learned once the entry is confirmed, so an error after it is answered as that kind of host's own.
+  let kind: HostKind | null = null;
   try {
     const read = isRead(request.method);
     // Any other method is refused as it always was, unless the host is confirmed to have code: so a static host, and
@@ -261,6 +270,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // `X-Forwarded-Proto` isn't read: a header is the visitor's to send, and that Cloudflare overwrites it is its
     // documented behaviour toward an origin, which isn't shown here for a Worker.
     if (url.protocol !== "https:") return read ? own(request, origin, 301, "moved_to_https", { location: `${origin}${url.pathname}${url.search}` }) : methodRefused();
+    // With the switch off, no other method is looked at further: today's answer, and nothing read.
+    if (!read && !deps.codeApps) return methodRefused();
     if (await stopped(deps)) return unconfirmed();
 
     let script: string | null;
@@ -272,7 +283,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // Only a script's name, and only one under this host's own label: a host never serves another app's script.
     if (script === null || scriptLabel(script) !== label) return unconfirmed();
 
-    if (deps.hostKind(script) === "code") return await codeHost(request, origin);
+    kind = deps.hostKind(script);
+    if (kind === "code") return await codeHost(request, origin);
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
 
@@ -303,6 +315,6 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   } catch {
     // Nothing above is expected to throw. If it does, the visitor still gets this Worker's own answer and headers.
-    return own(request, origin, 502, "error");
+    return own(request, origin, 502, "error", {}, kind === "code" ? CODE_ALLOW_ORIGIN : "*");
   }
 }

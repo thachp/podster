@@ -196,14 +196,17 @@ describe("the Worker reaches nothing but its two bindings", () => {
     const handle = read("src/handle.ts");
     // Exactly one definition, of type `false`: turning it on changes this line, and the pin in `codeHost` then fails
     // to compile until serving an app with code is built.
-    expect(handle.match(/CODE_APPS_ENABLED/g)?.length).toBe(2);
+    expect(handle.match(/CODE_APPS_ENABLED/g)?.length).toBe(3);
     expect(handle).toContain("export const CODE_APPS_ENABLED: false = false;");
     expect(handle).toContain("const off: false = CODE_APPS_ENABLED;");
     // The Worker's entry reads no binding or variable for it, and says every script is static: the serve entry has no
     // mark of code until that contract change lands.
     const index = read("src/index.ts");
-    expect(index).not.toMatch(/CODE_APPS|hostKind:\s*\(\s*[a-z]/i);
+    expect(index.replaceAll("CODE_APPS_ENABLED", "")).not.toMatch(/CODE_APPS|hostKind:\s*\(\s*[a-z]/i);
     expect(index).toContain('hostKind: () => "static",');
+    // And it passes the switch itself, the constant of type `false`, as the request's: never anything else.
+    expect(index.match(/codeApps:/g)).toHaveLength(1);
+    expect(index).toContain("codeApps: CODE_APPS_ENABLED satisfies false,");
     expect(read("wrangler.jsonc")).not.toMatch(/CODE_APPS|code_apps/i);
   });
 

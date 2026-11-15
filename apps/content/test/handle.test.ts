@@ -55,6 +55,7 @@ function world(): World {
     stop: { read: null },
     domain: DOMAIN,
     hostKind: (script) => (w.codeScripts.has(script) ? "code" : "static"),
+    codeApps: false,
   };
   return w;
 }
@@ -78,14 +79,13 @@ const OWN = { ...FIXED, "cache-control": "no-store", "content-type": "text/plain
 const NOT_FOUND = { ...OWN, "clear-site-data": '"cache"' };
 
 describe("what a request may be", () => {
-  it("serves GET and HEAD and refuses every other method, and asks no app", async () => {
+  it("serves GET and HEAD and refuses every other method, before anything is read", async () => {
     const w = world();
     for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       const refused = await get(w, "/", { method });
       expect([refused.status, headersOf(refused), await refused.text()], method).toEqual([405, { ...OWN, allow: "GET, HEAD" }, "method_not_allowed\n"]);
     }
-    // The host's entry is read now, to learn its kind; a static host's answer is the one it always was.
-    expect([w.reads.every((read) => read.key === STOP_KEY || read.key === HOST), w.sent]).toEqual([true, []]);
+    expect([w.reads, w.sent]).toEqual([[], []]);
     // A HEAD gets this Worker's own answers with no body, as it gets an app's.
     const headMissing = await get(w, "/", { method: "HEAD" }, "other.apps-test.example");
     expect([headMissing.status, await headMissing.text(), headMissing.headers.get("clear-site-data")]).toEqual([404, "", '"cache"']);
@@ -471,9 +471,12 @@ describe("the sandbox", () => {
 });
 
 // Stage 1's request rules (ADR 0010's revision, sections 3.4 and 3.5; `src/requests.ts`, the mirror of
-// `podster_core::app_requests`), through the real handler, for both kinds of host, with the code-apps switch off, as
-// it is and as no configuration can change. A host with code is one the test says has code: the serve entry has no
-// such mark yet, and the Worker's own entry says every script is static.
+// `podster_core::app_requests`), through the real handler, for both kinds of host. A host with code is one the test
+// says has code: the serve entry has no such mark yet, and the Worker's entry says every script is static.
+//
+// The switch is off in the Worker, as a constant of type `false` that no configuration reaches. With it off, no method
+// but GET and HEAD is looked at past the host and the scheme. So the rules for writes and preflights are shown here with
+// `Deps.codeApps` set by the test, which only a test can do; serving an app with code stays refused even then.
 
 const CODE_OWN = { ...OWN, "access-control-allow-origin": "null" };
 /** A refused preflight's headers: this Worker's own, readable by nobody. */
@@ -482,10 +485,11 @@ const STATIC_405 = { ...OWN, allow: "GET, HEAD" };
 const CODE_405 = { ...CODE_OWN, allow: "GET, HEAD, POST, PUT, PATCH, DELETE" };
 const JSON_HEADERS = { "content-type": "application/json" };
 
-/** A world whose one app's release carries code. */
-function codeWorld(): World {
+/** A world whose one app's release carries code, with the switch on through the test's seam unless said otherwise. */
+function codeWorld(codeApps = true): World {
   const w = world();
   w.codeScripts.add(SCRIPT);
+  w.deps.codeApps = codeApps;
   return w;
 }
 const answerOf = async (response: Response) => [response.status, headersOf(response), await response.text()];
@@ -496,13 +500,25 @@ describe("the code-apps switch", () => {
   it("is off, and is a constant no binding or variable reaches", () => {
     expect(CODE_APPS_ENABLED).toBe(false);
   });
+
+  it("while off, refuses every method but GET and HEAD with today's answer before anything is read, even on a host with code", async () => {
+    const w = codeWorld(false);
+    for (const [method, init] of [["POST", { body: "{}", headers: JSON_HEADERS }], ["PUT", { body: bodyOf(MAX_WRITE_BODY_BYTES + 1), headers: JSON_HEADERS }], ["DELETE", {}], ["OPTIONS", { headers: { "access-control-request-method": "POST" } }], ["PATCH", { body: "x" }]] as [string, RequestInit][]) {
+      expect(await answerOf(await get(w, "/", { method, ...init })), method).toEqual([405, STATIC_405, "method_not_allowed\n"]);
+    }
+    expect([w.reads, w.sent]).toEqual([[], []]);
+    // A read on that host still learns its kind, and is refused: nothing of an app with code is served.
+    expect(await answerOf(await get(w))).toEqual([503, CODE_OWN, "code_apps_off\n"]);
+    expect(w.sent).toEqual([]);
+  });
 });
 
-describe("a host whose release carries code, with the switch off", () => {
+describe("a host whose release carries code", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("serves nothing for a read: its own refusal, readable by the origin null, never kept, and no app asked", async () => {
-    const w = codeWorld();
+  it("serves nothing for a read, with the switch off or on: its own refusal, readable by the origin null, and no app asked", async () => {
+    for (const codeApps of [false, true]) {
+    const w = codeWorld(codeApps);
     for (const method of ["GET", "HEAD"]) {
       const answer = await get(w, "/", { method });
       expect(await answerOf(answer), method).toEqual([503, CODE_OWN, method === "HEAD" ? "" : "code_apps_off\n"]);
@@ -511,6 +527,19 @@ describe("a host whose release carries code, with the switch off", () => {
     // The same request to a static host is served, as it always was.
     w.codeScripts.clear();
     expect((await get(w)).status).toBe(200);
+    }
+  });
+
+  it("answers an error after its kind is known as its own, readable by the origin null: a body that fails as it is counted", async () => {
+    const w = codeWorld();
+    const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("the visitor went away")); } });
+    const answer = await handle(new Request(`${ORIGIN}/api/items`, { method: "POST", body, headers: JSON_HEADERS, duplex: "half" } as RequestInit), w.deps);
+    expect(await answerOf(answer)).toEqual([502, CODE_OWN, "error\n"]);
+    // Before the kind is known, the same error is answered as it always was.
+    const s = world();
+    s.deps.stop.read = { at: s.clock.now, stopped: false };
+    s.deps.hostKind = () => { throw new Error("unexpected"); };
+    expect(await answerOf(await get(s))).toEqual([502, OWN, "error\n"]);
   });
 
   it("refuses a write that passes every rule as not available, at the body's cap and one under it, declared or counted", async () => {
@@ -600,7 +629,7 @@ describe("a host whose release carries code, with the switch off", () => {
     expect(w.sent).toEqual([]);
   });
 
-  it("is refused as any host is before its kind is known: over plain HTTP, while stopped, and with no confirmed entry", async () => {
+  it("is refused as any host is before its kind is known, with the switch on: over plain HTTP, while stopped, and with no confirmed entry", async () => {
     const w = codeWorld();
     const write = { method: "POST", body: "{}", headers: JSON_HEADERS };
     expect(await answerOf(await handle(new Request(`http://${HOST}/`, write), w.deps))).toEqual([405, STATIC_405, "method_not_allowed\n"]);
@@ -627,26 +656,32 @@ describe("a host whose release carries code, with the switch off", () => {
 });
 
 describe("a static host, under the same rules", () => {
-  it("answers every write exactly as before, at the cap, one under and one over, and asks no app", async () => {
+  it("answers every write exactly as before, at the cap, one under and one over, with the switch off or on, and asks no app", async () => {
     for (const method of WRITE_METHODS) {
       for (const bytes of [MAX_WRITE_BODY_BYTES - 1, MAX_WRITE_BODY_BYTES, MAX_WRITE_BODY_BYTES + 1]) {
+        for (const codeApps of [false, true]) {
         const w = world();
+        w.deps.codeApps = codeApps;
         const answer = await get(w, "/api/items", { method, body: bodyOf(bytes), headers: { ...JSON_HEADERS, "content-length": String(bytes) } });
-        expect(await answerOf(answer), `${method} ${bytes}`).toEqual([405, STATIC_405, "method_not_allowed\n"]);
+        expect(await answerOf(answer), `${method} ${bytes} ${codeApps}`).toEqual([405, STATIC_405, "method_not_allowed\n"]);
         expect(w.sent).toEqual([]);
+        if (!codeApps) expect(w.reads).toEqual([]);
+        }
       }
     }
   });
 
-  it("answers no preflight: OPTIONS is refused as before, whatever it asks", async () => {
+  it("answers no preflight: OPTIONS is refused as before, whatever it asks, with the switch on", async () => {
     const w = world();
+    w.deps.codeApps = true;
     for (const headers of [{ "access-control-request-method": "POST", "access-control-request-headers": "content-type" }, {}, { "access-control-request-method": "GET" }] as Record<string, string>[]) {
       expect(await answerOf(await get(w, "/", { method: "OPTIONS", headers })), JSON.stringify(headers)).toEqual([405, STATIC_405, "method_not_allowed\n"]);
     }
   });
 
-  it("keeps today's order: a non-read method is refused the same on every path, and a service worker only on a read", async () => {
+  it("keeps today's answer with the switch on: a non-read method is refused the same on every path, and a service worker only on a read", async () => {
     const w = world();
+    w.deps.codeApps = true;
     // Today's answer to a POST on a host that is no app's, over plain HTTP, while stopped, and with no entry.
     expect(await answerOf(await get(w, "/", { method: "POST" }, "app.example.org"))).toEqual([405, { ...STATIC_405, "content-security-policy": sandboxPolicy("'none'") }, "method_not_allowed\n"]);
     expect(await answerOf(await handle(new Request(`http://${HOST}/`, { method: "POST" }), w.deps))).toEqual([405, STATIC_405, "method_not_allowed\n"]);

@@ -1,6 +1,6 @@
 # Acceptance test: agents build and publish a todo app
 
-**Status: Proposed, 2026-11-14. Nothing in this plan is approved, built or scheduled, and no step has been run.** *Later on 2026-11-14: [section 7](#7-runbook-for-the-workroom-run), the runbook for the run itself, was added, also **Proposed**. Later again: the owner answered questions 10 and 11, and section 7 now describes two runs, one in a private room and one in a public room.* It plans Podster's first end-to-end acceptance test. On 2026-11-14 the owner wrote: "the todo app - is meant for later... it will be a first app to be work on in a workroom. it ll be our first test to see that podster work like it supposed to".
+**Status: Proposed, 2026-11-14. Nothing in this plan is approved, built or scheduled, and no step has been run.** *Later on 2026-11-14: [section 7](#7-runbook-for-the-workroom-run), the runbook for the run itself, was added, also **Proposed**. Later again: the owner answered questions 10 and 11, and section 7 now describes two runs, one in a private room and one in a public room. Later again: the owner deferred to the architect's recommendation that a private room's app isn't served for now ([7.9](#79-gaps), item 1).* It plans Podster's first end-to-end acceptance test. On 2026-11-14 the owner wrote: "the todo app - is meant for later... it will be a first app to be work on in a workroom. it ll be our first test to see that podster work like it supposed to".
 
 **The test:** real agents work in a Podster workroom. They build a todo app and publish it through Podster's own release path. Then takedown and unpublish are run on that app. **The team doesn't write the app.** People act only where Podster requires a person: setting up the room, giving grants, approving the release, and the operator's takedown. If the whole run passes on staging, it shows Podster working end to end, from core job 1 to core job 8 ([PRODUCT.md](spec/PRODUCT.md#core-jobs)).
 
@@ -137,6 +137,7 @@ Read from `packages/contracts/openapi.yaml` on 2026-11-14. Sections 1 to 3 assum
 - **Question 10, settled by the owner:** the engineer agent, A2, connects over A2A ([7.2](#72-agents-and-how-they-connect)).
 - **Question 11, settled by the owner:** both private and public rooms must be supported.
 - **The architect's interpretation, 2026-11-14, not the owner's words:** the acceptance run passes in a private room and, separately, in a public room. Each run has its own room and repository, and passes or fails on its own. This replaces the earlier proposal of one room that goes from private to public.
+- **Decided on 2026-11-14, on the architect's recommendation:** a private room's app is not served for now, and the private run passes at merge. Decision 213 stands ([7.9](#79-gaps), item 1).
 
 **The two runs, Proposed.** Stages that are the same in both are run the same way in each room ([7.4](#74-stages-who-acts-what-passes-where-it-is-seen)). They differ only here:
 
@@ -280,9 +281,11 @@ Whether the runs passed or not:
 
 ### 7.9 Gaps
 
-Found on 2026-11-14 against `main`. Gaps 2 to 4 were built in #394. Gap 1 isn't assigned to a plan item.
+Found on 2026-11-14 against `main`. Gaps 2 to 4 were built in #394. Item 1 is settled and is no longer a gap.
 
-1. **A private room can't release.** Decision 213 refuses it (`release_needs_public_room`), and M6 leaves serving a private room's app out, with a signed link for the room's own people as a possible later design. So the private run passes on stages 0 to 10, and the release, serving, takedown and unpublish stages are shown only in a public room. Whether "both rooms supported" needs a private room's app served is a question for the owner.
+1. **Settled, not a gap: a private room's app isn't served for now.** Decision 213 refuses a private room's release (`release_needs_public_room`), and M6 leaves serving a private room's app out, with a signed link for the room's own people as a possible later design. So the private run passes on stages 0 to 10, and the release, serving, takedown and unpublish stages are shown only in a public room. The question was whether "both rooms supported" needs a private room's app served.
+   - **Decided on 2026-11-14:** the owner deferred to the architect's recommendation, answering "per ur recommendation". A private room's app is not served for now. Decision 213 stands: only a public room releases. The private run passes at merge.
+   - **Reason:** serving a private room's app needs visitor authentication on the content Worker, which is a new sign-in surface on a public host. The acceptance run doesn't need it. It is revisited as its own decision after the acceptance run.
 2. **Built: a role claim over A2A,** `podster.lifecycle.v1.ClaimRole`, in [#394](https://github.com/thachp/podster/pull/394).
 3. **Built: a repository token over A2A,** `podster.lifecycle.v1.GetRepoAccess`, in [#394](https://github.com/thachp/podster/pull/394), under the same grants and refusals as MCP's `get_repo_access`. It's shown against a stand-in API in the gateway's tests and isn't yet shown on staging.
 4. **Built: a commit and pull request on an A2A submission,** `SubmitTask`'s `commitSha` and `prNumber`, in [#394](https://github.com/thachp/podster/pull/394).

@@ -1540,6 +1540,8 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **Proposed, on 2026-11-13, after the owner's answer ([decision 220](spec/PRODUCT.md#decisions-needed)).** What stage 1 is, and why, is [the revision](adr/0010-revision-apps-are-workers.md#3-stage-1-in-full-one-todo-app). This is only the order. **No code is started.** *Corrected on 2026-11-14, by the owner ([their words](adr/0010-revision-apps-are-workers.md#stage-1-one-todo-app)): this orders stage 1's capabilities. The todo app itself will be built later, by agents working in a Podster workroom, as Podster's first end-to-end acceptance test, and the owner-only inputs, the spike's tokens, the write cap's figure, the second account's setup and the read-only GitHub App, are wanted when that test approaches.*
 
+*2026-11-14: that acceptance test, its setup, flow, pass criteria and prerequisites, is planned in [`acceptance-todo-app.md`](acceptance-todo-app.md), **Proposed**.*
+
 **Questions for the architect, each with its ruling. The rulings are the architect's, of 2026-11-13, for the owner to review:**
 
 1. **How does the content Worker count one app's write requests?** It keeps no state today, and the cap is decided. The candidates are a rate-limiting binding of Cloudflare's, a Durable Object in the second account, or a counter in KV, which is slow to agree and costs a write for each write. None was read or tried. It needs a ruling, or a place in the spike.

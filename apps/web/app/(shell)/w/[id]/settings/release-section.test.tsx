@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { ReleaseSection } from "./release-section";
-import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
+import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
 
 const config = (over: Partial<ReleaseConfig> = {}): ReleaseConfig => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 4, set_by: null, updated_at: null, ...over });
 const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
@@ -308,6 +308,16 @@ describe("release at setup", () => {
     expect(setupRelease({ ok: true, data: { granted: false, generation: 2, last_take: 2, set_by: "per_op", set_at: 1 } })).toBe("needs-approval");
     for (const failure of [{ status: 403, code: "not_allowed" }, { status: 404, code: "organization_not_found" }, { status: 429, code: "rate_limited" }, { status: 0, code: "read_failed" }]) expect(setupRelease({ ok: false, ...failure })).toBe("unknown");
     expect(setupRelease(null)).toBe("unknown");
+  });
+
+  it("takes a 200 of any other shape as unknown, never as an operator's take, and never throws", () => {
+    for (const data of [{}, null, { granted: "false" }, { granted: 0 }, { granted: null }, "granted", []]) {
+      const result = { ok: true as const, data: data as never };
+      expect(setupRelease(result)).toBe("unknown");
+      expect(switchGranted(result)).toBeNull();
+    }
+    expect(switchGranted({ ok: true, data: { granted: false, generation: 1, last_take: 1, set_by: null, set_at: null } })).toBe(false);
+    expect(switchGranted({ ok: false, status: 500, code: "error" })).toBeNull();
   });
 });
 

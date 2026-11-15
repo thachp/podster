@@ -71,9 +71,24 @@ export type ReleaseSwitch = { granted: boolean; generation: number; last_take: n
  */
 export type SetupRelease = "unavailable" | "needs-approval" | "not-configured" | "unknown";
 
+/**
+ * Whether the organization holds release, from a read of its switch: a boolean only when the answer had a boolean
+ * `granted`. Anything else, a failed read or a body of another shape, is unknown, never a take (review standard 3).
+ */
+export function switchGranted(result: GatewayResult<ReleaseSwitch> | null): boolean | null {
+  if (result === null || !result.ok) return null;
+  const body: unknown = result.data;
+  if (typeof body !== "object" || body === null) return null;
+  const granted = (body as { granted?: unknown }).granted;
+  return typeof granted === "boolean" ? granted : null;
+}
+
 export function setupRelease(result: GatewayResult<ReleaseSwitch> | null): SetupRelease {
   if (result === null) return "unknown";
-  if (result.ok) return result.data.granted === true ? "not-configured" : "needs-approval";
+  if (result.ok) {
+    const granted = switchGranted(result);
+    return granted === null ? "unknown" : granted ? "not-configured" : "needs-approval";
+  }
   if (result.status === 404 && result.code === "not_found") return "unavailable";
   return "unknown";
 }

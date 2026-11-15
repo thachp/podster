@@ -189,6 +189,21 @@ describe("workroom settings' release section", () => {
     expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Not configured");
   });
 
+  it("never lists an operator's take from a 200 whose body isn't the switch's shape", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig() };
+    state.adminOrgs = ["org_a"];
+    for (const data of [{}, null, { granted: "false" }, { granted: 0 }]) {
+      state.releaseSwitch = { ok: true, data };
+      const shown = await show();
+      const section = screen.getByRole("region", { name: "Release" });
+      expect(section).toHaveTextContent("Not configured");
+      expect(section).not.toHaveTextContent("taken release away");
+      shown.unmount();
+    }
+  });
+
   it("with release switched off, reads neither the custom domain nor the organization's switch", async () => {
     state.repository = readyRepository;
     state.adminOrgs = ["org_a"];

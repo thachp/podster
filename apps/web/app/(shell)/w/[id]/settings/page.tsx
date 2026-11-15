@@ -17,7 +17,7 @@ import { VisibilityControls } from "./visibility-controls";
 import { RepositorySection } from "./repository-section";
 import { availability, type RoomRepository } from "./repository-model";
 import { ReleaseSection } from "./release-section";
-import { hostnameAvailability, releaseAvailability, releaseView, type AppHostname, type ReleaseConfig, type ReleaseSwitch } from "./release-model";
+import { hostnameAvailability, releaseAvailability, releaseView, switchGranted, type AppHostname, type ReleaseConfig, type ReleaseSwitch } from "./release-model";
 import { plainName } from "@/components/agent-content/text";
 import type { GatewayResult } from "@/lib/gateway/result";
 import type { RoomVisibility } from "./visibility-model";
@@ -63,7 +63,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const release = releaseView(releaseAnswer, {
     isPublic: visibility.ok ? visibility.data.visibility === "public" : null,
     repositoryReady: repository.kind === "on" ? repository.data.repository?.status === "ready" : null,
-    delegated: switchRead?.ok ? switchRead.data.granted === true : null,
+    delegated: switchGranted(switchRead),
   });
   const hostname = hostnameRead === null ? null : hostnameAvailability(hostnameRead);
   const admins = membersOf(room).filter((member) => member.role === "admin");

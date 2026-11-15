@@ -128,7 +128,7 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
 
       <h3 className="pt-2 font-medium">Custom domain</h3>
       {hostname === "failed" ? <ReadFailure /> : null}
-      {hostname === "unavailable" || hostname === null ? (
+      {hostname === "unavailable" ? (
         <div className="flex flex-wrap items-center gap-2">
           <StateBadge label="Not available yet" tone="neutral" />
           <span className="text-sm text-muted-foreground">{CUSTOM_DOMAIN_UNAVAILABLE}</span>

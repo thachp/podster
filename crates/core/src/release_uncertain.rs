@@ -6,9 +6,10 @@
 //! - **Which calls** ([`on_lost_answer`]): only the script's write leaves a release `uncertain`. Every other call the
 //!   release path makes is retried as it is, because a repeat does no harm and something already reads back its effect.
 //! - **The script's write** ([`script_write_outcome`]): written only on the answer that says so; not written only when
-//!   nothing was sent or the provider refused in so many words, a `4xx`; anything else, no answer among it, is unknown.
-//! - **Settling** ([`settle_read`]): the provider's own read of the release's script, and only that: a script object is
-//!   written, `"script": null` is absent, anything else settles nothing.
+//!   nothing was sent or the provider refused in so many words, a `4xx` other than a timeout's (`408`, `499`); anything
+//!   else, no answer among it, is unknown.
+//! - **Settling** ([`settle_read`]): the provider's own read of the release's script, and only that: a script object
+//!   whose `id` is the name read is written, `"script": null` is absent, anything else settles nothing.
 //! - **Bounds** ([`settle_next`]): at most [`MAX_SETTLE_ATTEMPTS`] reads in a release's life, none later than
 //!   [`SETTLE_DEADLINE_MS`] after the release became uncertain, with a wait that doubles from
 //!   [`SETTLE_FIRST_WAIT_MS`] to [`SETTLE_MAX_WAIT_MS`]. Past them the release ends, [`UNSETTLED`].
@@ -136,9 +137,14 @@ pub enum WriteOutcome {
     Unknown,
 }
 
-/// The script's write, judged. **Only a `4xx` is read as a refusal** (**Proposed**: no spike saw the provider answer an
-/// error): the provider said it didn't take the request. A `5xx`, a `200` that doesn't say success or names another
-/// script, a page in place of an answer, and no answer at all may each follow a write that went through.
+/// The `4xx` statuses that say a wait ran out, not that the request was refused: `408`, and `499`, which an
+/// intermediary answers when it stopped waiting. Either can follow a write that landed behind it.
+pub const TIMEOUT_STATUSES: [u16; 2] = [408, 499];
+
+/// The script's write, judged. **Only a `4xx` other than a timeout's is read as a refusal** (**Proposed**: no spike saw
+/// the provider answer an error): the provider said it didn't take the request. A [`TIMEOUT_STATUSES`] answer, a `5xx`,
+/// a `200` that doesn't say success or names another script, a page in place of an answer, and no answer at all may
+/// each follow a write that went through.
 pub fn script_write_outcome(answer: ScriptWriteAnswer) -> WriteOutcome {
     match answer {
         ScriptWriteAnswer::NotSent => WriteOutcome::NotWritten,
@@ -148,7 +154,9 @@ pub fn script_write_outcome(answer: ScriptWriteAnswer) -> WriteOutcome {
             success: true,
             names_script: true,
         } => WriteOutcome::Written,
-        ScriptWriteAnswer::Answered { status, .. } if (400..=499).contains(&status) => {
+        ScriptWriteAnswer::Answered { status, .. }
+            if (400..=499).contains(&status) && !TIMEOUT_STATUSES.contains(&status) =>
+        {
             WriteOutcome::NotWritten
         }
         ScriptWriteAnswer::Answered { .. } => WriteOutcome::Unknown,
@@ -158,7 +166,7 @@ pub fn script_write_outcome(answer: ScriptWriteAnswer) -> WriteOutcome {
 /// What a read of the release's script settles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettleRead {
-    /// A `200` with a script object: the script is there, and its upload went through.
+    /// A `200` with a script object whose `id` is the name read: the script is there, and its upload went through.
     Written,
     /// A `200` with `"script": null`: the script isn't there.
     Absent,
@@ -166,13 +174,15 @@ pub enum SettleRead {
     Unknown,
 }
 
-/// A read of the release's script, judged. A delete's answer is never a settling read.
-pub fn settle_read(answer: Option<ScriptAnswer>) -> SettleRead {
+/// A read of the release's script `sent`, judged, with the `id` its script object answered, if any. A script object
+/// is written only when its `id` is `sent`, so another script is never taken for this one: one with no `id`, or
+/// another, settles nothing. A delete's answer is never a settling read.
+pub fn settle_read(answer: Option<ScriptAnswer>, read_id: Option<&str>, sent: &str) -> SettleRead {
     match answer {
         Some(ScriptAnswer::Read {
             status: 200,
             script_null: false,
-        }) => SettleRead::Written,
+        }) if read_id == Some(sent) => SettleRead::Written,
         Some(ScriptAnswer::Read {
             status: 200,
             script_null: true,

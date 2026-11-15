@@ -29,7 +29,8 @@ fn only_the_scripts_write_leaves_a_release_uncertain_and_every_other_call_is_ret
 // --- the script's write ----------------------------------------------------------------------------------------------
 
 #[test]
-fn the_write_is_written_only_on_its_own_answer_refused_only_on_a_4xx_and_unknown_otherwise() {
+fn the_write_is_written_only_on_its_own_answer_refused_only_on_a_4xx_but_a_timeout_and_unknown_otherwise(
+) {
     assert_eq!(
         script_write_outcome(ScriptWriteAnswer::NotSent),
         WriteOutcome::NotWritten
@@ -43,7 +44,7 @@ fn the_write_is_written_only_on_its_own_answer_refused_only_on_a_4xx_and_unknown
             for names_script in [false, true] {
                 let expected = if status == 200 && success && names_script {
                     WriteOutcome::Written
-                } else if (400..=499).contains(&status) {
+                } else if (400..=499).contains(&status) && status != 408 && status != 499 {
                     WriteOutcome::NotWritten
                 } else {
                     WriteOutcome::Unknown
@@ -62,11 +63,33 @@ fn the_write_is_written_only_on_its_own_answer_refused_only_on_a_4xx_and_unknown
     }
 }
 
+#[test]
+fn a_timeouts_4xx_may_follow_a_write_that_landed_and_every_other_4xx_is_a_refusal() {
+    let answered = |status| {
+        script_write_outcome(ScriptWriteAnswer::Answered {
+            status,
+            success: false,
+            names_script: false,
+        })
+    };
+    // Both ways: an intermediary's timeout is unknown, and the refusals around it stay refusals.
+    for status in [408, 499] {
+        assert_eq!(answered(status), WriteOutcome::Unknown, "{status}");
+    }
+    for status in [400, 401, 403, 404, 407, 409, 413, 422, 429, 498] {
+        assert_eq!(answered(status), WriteOutcome::NotWritten, "{status}");
+    }
+    assert_eq!(TIMEOUT_STATUSES, [408, 499]);
+}
+
 // --- what a read settles ---------------------------------------------------------------------------------------------
 
+const SENT: &str = "lbl1.rel_5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+
 #[test]
-fn only_a_reads_200_settles_a_script_object_as_written_and_null_as_absent() {
-    assert_eq!(settle_read(None), SettleRead::Unknown);
+fn only_a_reads_200_settles_a_script_object_naming_this_script_as_written_and_null_as_absent() {
+    assert_eq!(settle_read(None, None, SENT), SettleRead::Unknown);
+    assert_eq!(settle_read(None, Some(SENT), SENT), SettleRead::Unknown);
     for status in 100..=599_u16 {
         for script_null in [false, true] {
             let expected = match (status, script_null) {
@@ -75,10 +98,14 @@ fn only_a_reads_200_settles_a_script_object_as_written_and_null_as_absent() {
                 _ => SettleRead::Unknown,
             };
             assert_eq!(
-                settle_read(Some(ScriptAnswer::Read {
-                    status,
-                    script_null
-                })),
+                settle_read(
+                    Some(ScriptAnswer::Read {
+                        status,
+                        script_null
+                    }),
+                    (!script_null).then_some(SENT),
+                    SENT
+                ),
                 expected,
                 "{status} {script_null}"
             );
@@ -87,9 +114,34 @@ fn only_a_reads_200_settles_a_script_object_as_written_and_null_as_absent() {
     // A delete's answer never settles anything, even the one that says gone.
     for (status, code) in [(200, None), (404, Some(10007)), (404, None), (500, None)] {
         assert_eq!(
-            settle_read(Some(ScriptAnswer::Delete { status, code })),
+            settle_read(
+                Some(ScriptAnswer::Delete { status, code }),
+                Some(SENT),
+                SENT
+            ),
             SettleRead::Unknown
         );
+    }
+}
+
+#[test]
+fn a_script_object_naming_another_script_or_none_is_never_taken_for_this_one() {
+    let there = Some(ScriptAnswer::Read {
+        status: 200,
+        script_null: false,
+    });
+    assert_eq!(settle_read(there, Some(SENT), SENT), SettleRead::Written);
+    let longer = format!("{SENT}x");
+    let other = "lbl1.rel_4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b";
+    for id in [
+        None,
+        Some(""),
+        Some(other),
+        Some(longer.as_str()),
+        Some(&SENT[..SENT.len() - 1]),
+        Some("LBL1.rel_5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"),
+    ] {
+        assert_eq!(settle_read(there, id, SENT), SettleRead::Unknown, "{id:?}");
     }
 }
 

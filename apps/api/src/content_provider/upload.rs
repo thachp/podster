@@ -20,8 +20,8 @@
 //! **Strict on every answer.** A session counts only on `200`, `"success": true`, a token of a token's form, and
 //! buckets that name only hashes the manifest holds, each once. A bucket counts only on the two answers above. The
 //! script counts as written only on `200`, `"success": true` and the script's own name in the answer. Anything else
-//! at the session or a bucket is no answer, and the room tries again. At the script, a `4xx` is a refusal and the room
-//! tries again; anything else, no answer among it, leaves the release `uncertain` until the provider's own read of
+//! at the session or a bucket is no answer, and the room tries again. At the script, a `4xx` other than a timeout's
+//! (`408`, `499`) is a refusal and the room tries again; anything else, no answer among it, leaves the release `uncertain` until the provider's own read of
 //! the script settles it (`podster_core::release_uncertain`). An upload is never recorded on a guess.
 //!
 //! **What no spike has shown,** and a wrong assumption here leaves the room retrying, which shows: what any of the

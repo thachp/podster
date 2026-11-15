@@ -10,10 +10,11 @@
 //! recorded on the provider's word alone.
 //!
 //! **How it settles** ([`Workspace::settle_of`], the release's upload step while it is `uncertain`): one read of the
-//! release's script, by name, with the scripts token, and nothing else asked of anyone. In one room transaction, with the
+//! release's script, by name, with the scripts token, and nothing else asked of anyone. A script object counts only
+//! when its `id` is the name read, so no other script is taken for this one. In one room transaction, with the
 //! step's lease checked again ([`settle`]):
 //!
-//! - **There,** a script object: its upload is recorded as written whole, and the release is uploading again, ready to
+//! - **There,** a script object named as read: its upload is recorded as written whole, and the release is uploading again, ready to
 //!   commit: `release.settled` with `release_settled_written`, then `release.uploaded`.
 //! - **Not there,** `"script": null`: the release is uploading again, and its upload is tried as a whole:
 //!   `release.settled` with `release_settled_absent`.
@@ -356,7 +357,12 @@ impl Workspace {
         if !may_go_on(&sql, lease) {
             return lease_lost(&sql, &release_id);
         }
-        let read = settle_read(provider.read_script(&script).await);
+        let answer = provider.read_script_named(&script).await;
+        let read = settle_read(
+            answer.as_ref().map(|(read, _)| *read),
+            answer.as_ref().and_then(|(_, id)| id.as_deref()),
+            &script,
+        );
         let lease = lease.cloned();
         self.release_transaction(move |sql| {
             if !may_go_on(sql, lease.as_ref()) {

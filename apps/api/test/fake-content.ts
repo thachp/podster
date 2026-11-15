@@ -112,7 +112,7 @@ type UploadFault = {
   /** The work is done and the answer is lost: a `502`. */
   lost?: boolean;
   /** One way the answer isn't what it must be, the status staying a success. */
-  shape?: "not_success" | "no_token" | "unknown_hash" | "hash_twice" | "empty_bucket" | "html" | "done_early" | "never_done" | "other_id" | "refused_but_success";
+  shape?: "not_success" | "no_token" | "unknown_hash" | "hash_twice" | "empty_bucket" | "html" | "done_early" | "never_done" | "other_id" | "no_id" | "refused_but_success";
 };
 type Manifest = Record<string, { hash: string; size: number }>;
 type Upload = {
@@ -215,6 +215,9 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     await passGate("read", held.gates);
     if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
     if (fault?.shape === "html") return done(200, html());
+    // A script object that names another script, or none: never this one.
+    if (fault?.shape === "other_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: { id: `${name}x`, tag: "tag-test" } })));
+    if (fault?.shape === "no_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: { tag: "tag-test" } })));
     return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: held.written ? { id: name, tag: "tag-test" } : null })));
   }
   if (script && request.method === "PUT") {

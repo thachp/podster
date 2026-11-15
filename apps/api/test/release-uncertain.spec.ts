@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { evictRoom } from "./evict";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, a release whose upload's answer was lost (`docs/m6-plan.md`, "`uncertain` settling"): the script's write
@@ -356,11 +357,9 @@ describe("an upload whose answer was lost", () => {
     const r = await room();
     await providerFault(r.script, { op: "script", lost: true });
     expect((await pass(r.room)).state).toBe("uncertain");
-    // Evicted: the object is thrown away with everything it held in memory. A mark on the old instance shows the next
-    // call meets a new one, which has only the room's durable state.
-    await runInDurableObject(stub(r.room), (instance: any) => { instance.testEvictionMark = true; });
-    await runInDurableObject(stub(r.room), (_: any, state: any) => { try { state.abort("evicted"); } catch {} }).catch(() => {});
-    expect(await runInDurableObject(stub(r.room), (instance: any) => instance.testEvictionMark ?? null)).toBeNull();
+    // Evicted: the object is thrown away with everything it held in memory, and the next call meets a new one, which
+    // has only the room's durable state.
+    await evictRoom(() => stub(r.room));
     expect(await kept(r.room)).toEqual({ files: 3, bytes: 15 + 24 + MARKER_BYTES(REL), since: T, settles: 0, settled_at: null, last_code: "release_upload_outcome_unknown" });
     // The read is still due at five seconds, not sooner, and settles from `release_uncertain` alone.
     await at(r.room, T + 4_999);

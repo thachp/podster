@@ -1,7 +1,7 @@
 // The content Worker's entry (M6 step 4(b), ADR 0010). Its only two bindings are the serve entries, to read, and the
 // dispatch namespace, and its one variable is the content domain's name. It holds no binding to the gateway, the API,
 // D1 or R2, and no secret. It logs nothing for a request.
-import { handle, type StopMemory } from "./handle";
+import { CODE_APPS_ENABLED, handle, type StopMemory } from "./handle";
 
 interface Env {
   SERVE: KVNamespace;
@@ -22,6 +22,11 @@ export default {
       stop,
       // Anything but a string is no domain, and then every host is not-found.
       domain: typeof env.CONTENT_DOMAIN === "string" ? env.CONTENT_DOMAIN : "",
+      // The serve entry has no mark that a script has code until that contract change lands, so every script is
+      // static, as every entry has been. Even a host with code would serve nothing: the code-apps switch is off.
+      hostKind: () => "static",
+      // The switch, off: a constant of type `false`, and no binding or variable.
+      codeApps: CODE_APPS_ENABLED satisfies false,
     });
   },
 } satisfies ExportedHandler<Env>;

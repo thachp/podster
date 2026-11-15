@@ -4,7 +4,7 @@ import { ContentTypeNotSupportedError, toJsonRpcError, UnsupportedOperationError
 import { agentCard } from "./card";
 import { Task } from "@a2a-js/sdk";
 import { guarded, PodsterA2AHandler } from "./handler";
-import { activated, isLifecycleMethod, LIFECYCLE_URI, runLifecycle } from "./lifecycle";
+import { activated, isLifecycleMethod, LIFECYCLE_URI, REPOSITORY_METHOD, runLifecycle, type LifecycleOptions } from "./lifecycle";
 import { INCOMPLETE_HEADER, type ApiReads, type ReadNotes } from "./reads";
 import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
 
@@ -64,11 +64,14 @@ function envelope(text: string): { id: unknown; method: unknown } {
   }
 }
 
-/** Podster's one public card, on the gateway's host. `null` for every other path. */
-export function handleA2aCard(request: Request, url: URL, baseUrl: string): Response | null {
+/**
+ * Podster's one public card, on the gateway's host. `null` for every other path. It names `GetRepoAccess` only while
+ * managed repositories are on, as MCP lists `get_repo_access` only then.
+ */
+export function handleA2aCard(request: Request, url: URL, baseUrl: string, options: LifecycleOptions = { managedRepositories: false }): Response | null {
   if (url.pathname !== CARD_PATH) return null;
   if (request.method !== "GET" && request.method !== "HEAD") return httpError("method_not_allowed", 405, { allow: "GET, HEAD" });
-  const { body, etag } = cardFor(baseUrl);
+  const { body, etag } = cardFor(baseUrl, options);
   const headers = { "content-type": "application/json", "cache-control": "public, max-age=300", etag, ...VERSION_HEADERS };
   // Compared weakly: Cloudflare may weaken an ETag when it compresses, and a client then sends it back as `W/"…"`.
   const match = request.headers.get("if-none-match");
@@ -78,12 +81,13 @@ export function handleA2aCard(request: Request, url: URL, baseUrl: string): Resp
 
 /** The card's body and a strong validator from its own bytes (A2A's CARD-CACHE-002 SHOULD), made once per base URL. */
 const cards = new Map<string, { body: string; etag: string }>();
-function cardFor(baseUrl: string) {
-  let card = cards.get(baseUrl);
+function cardFor(baseUrl: string, options: LifecycleOptions) {
+  const key = `${options.managedRepositories ? "1" : "0"} ${baseUrl}`;
+  let card = cards.get(key);
   if (!card) {
-    const body = JSON.stringify(agentCard(baseUrl));
+    const body = JSON.stringify(agentCard(baseUrl, options));
     card = { body, etag: `"${fnv1a64(body)}"` };
-    cards.set(baseUrl, card);
+    cards.set(key, card);
   }
   return card;
 }
@@ -155,9 +159,13 @@ export async function checkA2aRequest(request: Request, baseUrl: string): Promis
 /**
  * After authentication: one JSON-RPC request from one agent. `agentId` is what the gateway resolved from the token, never
  * anything the client sent. A request's `tenant` reaches the SDK's context, and Podster never reads it for authority.
+ * `options` is the gateway's own configuration.
  */
-export async function answerA2a(text: string, agentId: string, baseUrl: string, api: ApiReads, extensionsHeader: string | null = null): Promise<Response> {
+export async function answerA2a(text: string, agentId: string, baseUrl: string, api: ApiReads, extensionsHeader: string | null = null, options: LifecycleOptions = { managedRepositories: false }): Promise<Response> {
   const { id, method } = envelope(text);
+  // While managed repositories are off, GetRepoAccess doesn't exist: it answers exactly as any method that doesn't, as
+  // MCP's get_repo_access answers as a tool that doesn't, and nothing reaches the API.
+  if (method === REPOSITORY_METHOD && !options.managedRepositories) return json({ jsonrpc: "2.0", id: safeId(id), error: { code: -32601, message: "Method not found" } });
   // Step 10: the lifecycle extension's own methods, which the SDK's transport doesn't know.
   if (isLifecycleMethod(method)) {
     const extensions = activated(extensionsHeader);
@@ -169,8 +177,11 @@ export async function answerA2a(text: string, agentId: string, baseUrl: string, 
     }
     try {
       const params = request.params;
-      const task = await guarded(method, agentId, () => runLifecycle(api, agentId, method, params, extensions));
-      return json({ jsonrpc: "2.0", id: safeId(id), result: Task.toJSON(task) }, 200, { [A2A_EXTENSIONS_HEADER]: LIFECYCLE_URI });
+      const answer = await guarded(method, agentId, () => runLifecycle(api, agentId, method, params, extensions, options));
+      const result = "task" in answer ? Task.toJSON(answer.task) : answer.value;
+      // A repository token is in this answer only: it's never cached, and nothing logs it.
+      const noStore: Record<string, string> = method === REPOSITORY_METHOD ? { "cache-control": "no-store" } : {};
+      return json({ jsonrpc: "2.0", id: safeId(id), result }, 200, { [A2A_EXTENSIONS_HEADER]: LIFECYCLE_URI, ...noStore });
     } catch (error) {
       return rpcError(id, error);
     }

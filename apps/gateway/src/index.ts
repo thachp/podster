@@ -17,6 +17,7 @@ import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
 import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
+import { A2A_CAPABILITIES } from "./a2a/lifecycle";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 import { filterPublicRead, publicPassthrough, PUBLIC_READ_CAPABILITIES } from "./public/reads";
 
@@ -1094,7 +1095,7 @@ const appHandler = {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
-    const card = onApplicationHost ? null : handleA2aCard(request, url, publicEnv.BASE_URL);
+    const card = onApplicationHost ? null : handleA2aCard(request, url, publicEnv.BASE_URL, a2aOptions(publicEnv));
     if (card) return card;
     // GitHub's deliveries come to the gateway's own host, never the application's.
     const webhook = onApplicationHost ? null : await handleGithubWebhook(request, url, publicEnv);
@@ -1263,21 +1264,35 @@ const mcpHandler = {
   },
 };
 
+/** The gateway's own A2A options: `GetRepoAccess` and a submission's `prNumber` exist exactly when MCP's tool and field do. */
+const a2aOptions = (env: { MANAGED_REPOSITORIES?: string }) => ({ managedRepositories: capabilitiesFor(env).some((c) => c.name === "get_repo_access") });
+
+/**
+ * One capability an `/a2a` token may reach, as MCP offers it under this Worker's switch. Only the capabilities in
+ * `A2A_CAPABILITIES` are ever found, so nothing reaches a capability MCP alone has.
+ */
+export function a2aCapability(env: { MANAGED_REPOSITORIES?: string }, name: string): Capability {
+  const capability = (A2A_CAPABILITIES as readonly string[]).includes(name) ? capabilitiesFor(env).find((c) => c.name === name) : undefined;
+  if (!capability) throw new Error("capability not on /a2a");
+  return capability;
+}
+
 /** The API reads A2A needs, through the same capabilities MCP calls, as the agent the token resolved to. */
 function a2aReads(env: Env, identity: Identity): ApiReads {
-  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, CAPABILITIES.find((c) => c.name === name)!, args);
+  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, a2aCapability(env, name), args);
   return {
     getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
     listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
     listWorkspaces: () => run("list_workspaces", {}),
+    // The same call MCP's tool makes: `toApiCall` takes only the capability's own fields, and the key only when one is given.
     command: async (name, args, idempotencyKey) => {
-      const response = await callApi(env, identity, toApiCall(CAPABILITIES.find((c) => c.name === name)!, { ...args, idempotency_key: idempotencyKey }));
+      const response = await callApi(env, identity, toApiCall(a2aCapability(env, name), idempotencyKey === undefined ? args : { ...args, idempotency_key: idempotencyKey }));
       return { status: response.status, body: await response.json().catch(() => null) };
     },
     // `send_message`'s own call, with `via` added, which no capability field can set: it tells the room the message
     // came over A2A, so a finished task refuses it (ADR 0007). It can only refuse more.
     sendMessage: async (workspaceId, taskId, body, idempotencyKey) => {
-      const call = toApiCall(CAPABILITIES.find((c) => c.name === "send_message")!, { workspace_id: workspaceId, task_id: taskId, body, idempotency_key: idempotencyKey });
+      const call = toApiCall(a2aCapability(env, "send_message"), { workspace_id: workspaceId, task_id: taskId, body, idempotency_key: idempotencyKey });
       const response = await callApi(env, identity, { ...call, body: JSON.stringify({ body, via: "a2a" }) });
       return { status: response.status, body: await response.json().catch(() => null) };
     },
@@ -1295,7 +1310,7 @@ const a2aHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     try {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
-      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity), request.headers.get("A2A-Extensions"));
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity), request.headers.get("A2A-Extensions"), a2aOptions(env));
     } catch (error) {
       // error-codes: from new AgentRefused
       if (error instanceof AgentRefused) return denied(error.message, 403);

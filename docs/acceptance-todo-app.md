@@ -166,24 +166,24 @@ The same agents act in both runs, except A4.
 | Agent | Linked by | Role | Joins by | Connects by | Grants from P1 |
 | --- | --- | --- | --- | --- | --- |
 | A1 | P1 | `lead` | Invitation | Hosted MCP, `/mcp` | *`deploy`, not built yet (M6 step 6)*; public run only |
-| A2 | P1 | `engineer` | Invitation | **A2A, `/a2a`** (the owner's answer), and hosted MCP for the steps A2A can't do, in the table below | `push` |
+| A2 | P1 | `engineer` | Invitation | **A2A, `/a2a`** (the owner's answer). Every step in the table below is on A2A since [#394](https://github.com/thachp/podster/pull/394) | `push` |
 | A3 | P2 | `reviewer` (in the public run it only merges) | Invitation | Hosted MCP | `merge` |
 | A4 | P1 | `observer`, publicly claimable | `claim_public_opening`; public run only | Hosted MCP | None, and a grant to it is refused `grantee_public` |
 
-**The engineer's steps over A2A,** checked on 2026-11-14 against the [A2A profile](spec/A2A-PROFILE.md), `apps/gateway/src/a2a/` and `packages/contracts`:
+**The engineer's steps over A2A,** checked on 2026-11-14 against the [A2A profile](spec/A2A-PROFILE.md), `apps/gateway/src/a2a/` and `packages/contracts`, and updated by [#394](https://github.com/thachp/podster/pull/394), which built the three that were missing, under exactly MCP's rules:
 
 | Step | Over A2A today | So A2 uses |
 | --- | --- | --- |
 | Find offers | `ListTasks` and `GetTask`: an offered task reads `TASK_STATE_SUBMITTED`, and its real status is in `podster.dev/status`. `read_inbox` and `ack_inbox` aren't on A2A. Offers sent to A2's own endpoint (`set_a2a_endpoint`) need a public HTTPS address, and Runner's tunnel for one is *not built yet* (M7, [RUNNER.md](spec/RUNNER.md#proposed-runner-as-an-a2a-server)) | A2A, polling `ListTasks` |
 | Threads | `SendMessage` to an existing task | A2A |
-| **Claim** its role | No claim over A2A. **A gap with no owner:** no plan item adds one | MCP, `claim_role` |
+| **Claim** its role | `podster.lifecycle.v1.ClaimRole`, `claim_role` as the agent (#394) | A2A |
 | **Accept** | `podster.lifecycle.v1.AcceptTask` | A2A |
 | See a change request | `GetTask`: `podster.dev/status` and the thread | A2A |
-| **Deliver: a repository token** | `get_repo_access` isn't reachable with an `/a2a` token. **A gap with no owner** | MCP, `get_repo_access` |
+| **Deliver: a repository token** | `podster.lifecycle.v1.GetRepoAccess`, `get_repo_access` as the agent, with the same grants and refusals, only while managed repositories are on (#394) | A2A |
 | **Push** and open the PR | Not Podster's protocol: Git and GitHub, with that token only | The token |
-| **Deliver: submit** | `podster.lifecycle.v1.SubmitTask` takes only `note`, `artifacts` and `files`, not `commit_sha` or `pr_number`. A repository task submitted that way is refused at submission: `invalid_argument` on `commit_sha`, and with managed repositories on, `invalid_argument` for the missing `pr_number`. **A gap with no owner** | MCP, `submit_task` with `commit_sha` and `pr_number` |
+| **Deliver: submit** | `podster.lifecycle.v1.SubmitTask` with `commitSha` and `prNumber`, sent as `submit_task`'s `commit_sha` and `pr_number`, with the same validation and refusals (#394) | A2A |
 
-- **One agent is one OAuth grant per resource.** Its person consents on the consent page, picks the organization and names it ([Connecting an agent](spec/PRODUCT.md#connecting-an-agent)). A2 needs two consents, `/a2a` and `/mcp`. An `/mcp` token is refused at `/a2a`, and the reverse. The two share one rate limit.
+- **One agent is one OAuth grant per resource.** Its person consents on the consent page, picks the organization and names it ([Connecting an agent](spec/PRODUCT.md#connecting-an-agent)). Since #394, A2 needs only `/a2a` for its steps. It still needs `/mcp` for `create_upload` if it submits files, and an `/mcp` consent is a second one. An `/mcp` token is refused at `/a2a`, and the reverse. The two share one rate limit.
 - **A3 is linked by P2, in P2's organization,** so that rule 3 lets it merge A2's work. Bringing it into P1's rooms is an invitation across organizations, which a person approves. *Whether staging's test people can do that end to end hasn't been checked,* and is checked before the run.
 - **A4 needs its owner's consent to claim publicly.** Its participation policy defaults to invitations only, so P1 sets it (`setAgentParticipationPolicy`).
 - **Each agent runs where its person runs it.** Proposed: Claude Code sessions on the architect's machine, each in its own empty directory, started without a person typing in them ([section 4(b)](#b-what-agents-can-still-build), [question 7](#6-questions-for-the-owner)). Runner (M7) isn't built. Every agent polls; none is reached inbound.
@@ -280,9 +280,9 @@ Whether the runs passed or not:
 
 ### 7.9 Gaps
 
-Found on 2026-11-14 against `main`. None is assigned to a plan item.
+Found on 2026-11-14 against `main`. Gaps 2 to 4 were built in #394. Gap 1 isn't assigned to a plan item.
 
 1. **A private room can't release.** Decision 213 refuses it (`release_needs_public_room`), and M6 leaves serving a private room's app out, with a signed link for the room's own people as a possible later design. So the private run passes on stages 0 to 10, and the release, serving, takedown and unpublish stages are shown only in a public room. Whether "both rooms supported" needs a private room's app served is a question for the owner.
-2. **No role claim over A2A.** A2 claims over MCP.
-3. **No repository token over A2A.** `get_repo_access` needs an `/mcp` token or Agent Auth.
-4. **No commit or pull request on an A2A submission.** `SubmitTask` takes no `commit_sha` or `pr_number`, so A2 submits repository work over MCP.
+2. **Built: a role claim over A2A,** `podster.lifecycle.v1.ClaimRole`, in [#394](https://github.com/thachp/podster/pull/394).
+3. **Built: a repository token over A2A,** `podster.lifecycle.v1.GetRepoAccess`, in [#394](https://github.com/thachp/podster/pull/394), under the same grants and refusals as MCP's `get_repo_access`. It's shown against a stand-in API in the gateway's tests and isn't yet shown on staging.
+4. **Built: a commit and pull request on an A2A submission,** `SubmitTask`'s `commitSha` and `prNumber`, in [#394](https://github.com/thachp/podster/pull/394).

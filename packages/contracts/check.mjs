@@ -7,7 +7,7 @@ import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
-const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [] } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
+const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
 
 const operations = new Map();
 for (const [path, item] of Object.entries(api.paths)) {
@@ -30,6 +30,11 @@ for (const [name, cap] of Object.entries(capabilities)) {
   if (cap.kind === "command" && !cap.idempotent_by_design && !hasKey) problems.push(`${name}: command without an idempotency key`);
   if (cap.kind === "query" && hasKey) problems.push(`${name}: query with an idempotency key`);
 }
+// What an `/a2a` token reaches: each method names capabilities that exist, and the lifecycle's commands keep their keys.
+for (const [method, reached] of Object.entries(a2a)) {
+  for (const name of [reached].flat()) if (!capabilities[name]) problems.push(`a2a ${method}: no capability ${name}`);
+}
+for (const name of ["claim_role", "get_repo_access", "submit_task"]) if (!Object.values(a2a).flat().includes(name)) problems.push(`a2a: the engineer's ${name} isn't reachable`);
 for (const id of personOnly) {
   if (!operations.has(id)) problems.push(`${id}: person_only operation doesn't exist`);
   if (covered.has(id)) problems.push(`${id}: person_only but also a capability`);

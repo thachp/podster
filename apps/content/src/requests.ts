@@ -86,7 +86,13 @@ function asciiLower(value: string): string {
 }
 /** Spaces and tabs off both ends, and nothing else, as Rust's `trim_matches([' ', '\t'])`. */
 function trimSpaceTab(value: string): string {
-  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+  // Scanned, not matched: a visitor's header never meets a pattern that could take quadratic time.
+  const blank = (char: string) => char === " " || char === "\t";
+  let start = 0;
+  let end = value.length;
+  while (start < end && blank(value[start])) start += 1;
+  while (end > start && blank(value[end - 1])) end -= 1;
+  return value.slice(start, end);
 }
 
 /** The methods a host takes, for its `Allow` header. */

@@ -10,28 +10,114 @@ import { allowedMethods, bodyWithinCap, checkPreflight, checkRequest, CODE_METHO
 
 const RUST = readFileSync(new URL("../../../crates/core/src/app_requests.rs", import.meta.url), "utf8");
 
+// The Rust source is read by plain string scanning, line by line, and the only regular expressions used are anchored
+// character classes with a single quantifier: nothing here can backtrack.
+
+/** The source's lines, each with its ends trimmed. */
+const linesOf = (source: string) => source.split("\n").map((line) => line.trim());
+const isDigits = (text: string) => /^[0-9_]+$/.test(text);
+const isName = (text: string) => /^[A-Za-z0-9_]+$/.test(text);
+
+/** Every string literal in `text`, in order, or null if a quote is left open or a literal holds a backslash. */
+function stringLiterals(text: string): string[] | null {
+  const found: string[] = [];
+  let at = text.indexOf('"');
+  while (at !== -1) {
+    const close = text.indexOf('"', at + 1);
+    if (close === -1) return null;
+    const literal = text.slice(at + 1, close);
+    if (literal.includes("\\")) return null;
+    found.push(literal);
+    at = text.indexOf('"', close + 1);
+  }
+  return found;
+}
+
 /** A Rust constant's value: a string, a list of strings, or a product of integers. Anything else fails the test. */
 function rustValue(source: string): unknown {
   const text = source.trim();
-  if (text.startsWith("[")) return [...text.matchAll(/"([^"\\]*)"/g)].map((match) => match[1]);
-  if (text.startsWith('"')) return /^"([^"\\]*)"$/.exec(text)?.[1] ?? `unreadable: ${text}`;
-  if (/^[0-9_]+(\s*\*\s*[0-9_]+)*$/.test(text)) return text.split("*").reduce((product, part) => product * Number(part.trim().replaceAll("_", "")), 1);
-  return `unreadable: ${text}`;
+  const unreadable = `unreadable: ${text}`;
+  if (text.startsWith("[")) {
+    if (!text.endsWith("]")) return unreadable;
+    return stringLiterals(text) ?? unreadable;
+  }
+  if (text.startsWith('"')) {
+    const literals = stringLiterals(text);
+    return literals !== null && literals.length === 1 && text === `"${literals[0]}"` ? literals[0] : unreadable;
+  }
+  const factors = text.split("*").map((part) => part.trim());
+  if (factors.every(isDigits)) return factors.reduce((product, part) => product * Number(part.replaceAll("_", "")), 1);
+  return unreadable;
 }
 
-const rustConstants = Object.fromEntries([...RUST.matchAll(/^pub const ([A-Z0-9_]+):[^=]*=\s*([\s\S]*?);\s*$/gm)].map((match) => [match[1], rustValue(match[2])]));
+/** Every `pub const` at the start of a line, with its value, which may run over several lines to its `;`. */
+function rustConstantsOf(source: string): Record<string, unknown> {
+  const constants: Record<string, unknown> = {};
+  const lines = source.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].startsWith("pub const ")) continue;
+    let text = lines[index];
+    while (!text.trimEnd().endsWith(";") && index + 1 < lines.length) text += `\n${lines[(index += 1)]}`;
+    const colon = text.indexOf(":");
+    const equals = text.indexOf("=");
+    const name = text.slice("pub const ".length, colon);
+    if (colon === -1 || equals < colon || !isName(name)) constants[`unreadable ${index}`] = `unreadable: ${text}`;
+    else constants[name] = rustValue(text.trimEnd().slice(equals + 1, -1));
+  }
+  return constants;
+}
+
+/** How many lines start a `pub const`, counted apart from the reader above. */
+const constantLines = (source: string) => source.split("\n").filter((line) => line.startsWith("pub const ")).length;
+
+const rustConstants = rustConstantsOf(RUST);
 const tsConstants = Object.fromEntries(Object.entries(rules).filter(([name]) => /^[A-Z0-9_]+$/.test(name) && name !== "REFUSAL_STATUS").map(([name, value]) => [name, Array.isArray(value) ? [...value] : value]));
 
-/** Each variant's code, from a `code()` match, by enum. */
+/** Each variant's code, from a `code()` arm such as `Enum::Variant => "code",`, by enum. */
 function rustCodes(enumName: string): Record<string, string> {
-  return Object.fromEntries([...RUST.matchAll(new RegExp(`${enumName}::(\\w+) => "([a-z_]+)"`, "g"))].map((match) => [match[1], match[2]]));
+  const codes: Record<string, string> = {};
+  const prefix = `${enumName}::`;
+  for (const line of linesOf(RUST)) {
+    if (!line.startsWith(prefix) || !line.endsWith('",')) continue;
+    const arrow = line.indexOf(' => "');
+    if (arrow === -1) continue;
+    const variant = line.slice(prefix.length, arrow);
+    const code = line.slice(arrow + ' => "'.length, -'",'.length);
+    expect(isName(variant) && /^[a-z_]+$/.test(code), line).toBe(true);
+    codes[variant] = code;
+  }
+  return codes;
+}
+
+/** Each refusal's status, from `status()`'s arms, such as `A | B => 403,`, an arm's variants on one or more lines. */
+function rustStatuses(source: string): Record<string, number> {
+  const body = source.slice(source.indexOf("pub fn status(self)"), source.indexOf("/// The methods a host takes"));
+  expect(body.length).toBeGreaterThan(0);
+  const statuses: Record<string, number> = {};
+  let pending: string[] = [];
+  for (const line of linesOf(body)) {
+    if (!line.startsWith("RequestRefusal::") && !line.startsWith("| RequestRefusal::")) continue;
+    const arrow = line.indexOf("=>");
+    const left = arrow === -1 ? line : line.slice(0, arrow);
+    for (const part of left.split("|").map((piece) => piece.trim()).filter((piece) => piece !== "")) {
+      expect(part.startsWith("RequestRefusal::") && isName(part.slice("RequestRefusal::".length)), line).toBe(true);
+      pending.push(part.slice("RequestRefusal::".length));
+    }
+    if (arrow === -1) continue;
+    const status = line.slice(arrow + 2).trim().replace(/,$/, "");
+    expect(/^[0-9]{3}$/.test(status), line).toBe(true);
+    for (const variant of pending) statuses[variant] = Number(status);
+    pending = [];
+  }
+  expect(pending).toEqual([]);
+  return statuses;
 }
 
 describe("the mirror keeps step with crates/core", () => {
   it("has every constant of app_requests.rs, with the same value, and no other", () => {
     // The reader found them all: a change of form in the Rust file fails here rather than passing with fewer.
     expect(Object.keys(rustConstants).length).toBe(11);
-    expect(Object.keys(rustConstants).length).toBe(RUST.match(/\bpub const /g)?.length);
+    expect(Object.keys(rustConstants).length).toBe(constantLines(RUST));
     for (const [name, value] of Object.entries(rustConstants)) expect(String(value).startsWith("unreadable"), name).toBe(false);
     expect(tsConstants).toEqual(rustConstants);
     expect(MAX_WRITE_BODY_BYTES).toBe(65_536);
@@ -40,12 +126,10 @@ describe("the mirror keeps step with crates/core", () => {
   it("has every refusal code and status, and no other", () => {
     const requestCodes = rustCodes("RequestRefusal");
     expect(Object.keys(requestCodes).length).toBe(6);
-    // Statuses, from `status()`: each arm names one or more variants.
-    const statusBody = RUST.slice(RUST.indexOf("pub fn status(self)"), RUST.indexOf("/// The methods a host takes"));
-    const statuses: Record<string, number> = {};
-    for (const arm of statusBody.matchAll(/((?:RequestRefusal::\w+\s*\|?\s*)+)=>\s*(\d+)/g)) {
-      for (const variant of arm[1].matchAll(/RequestRefusal::(\w+)/g)) statuses[requestCodes[variant[1]]] = Number(arm[2]);
-    }
+    // Statuses, from `status()`: each arm names one or more variants, and every variant has one.
+    const byVariant = rustStatuses(RUST);
+    expect(Object.keys(byVariant).sort()).toEqual(Object.keys(requestCodes).sort());
+    const statuses = Object.fromEntries(Object.entries(byVariant).map(([variant, status]) => [requestCodes[variant], status]));
     expect(REFUSAL_STATUS).toEqual(statuses);
     expect(Object.keys(statuses).sort()).toEqual(Object.values(requestCodes).sort());
     // The preflight's codes, against every code the mirror can give.
@@ -63,8 +147,22 @@ describe("the mirror keeps step with crates/core", () => {
     // A control for the check above: the same comparison, against the Rust source with one figure changed.
     const changed = RUST.replace("pub const MAX_WRITE_BODY_BYTES: u64 = 64 * 1024;", "pub const MAX_WRITE_BODY_BYTES: u64 = 64 * 1025;");
     expect(changed).not.toBe(RUST);
-    const reread = Object.fromEntries([...changed.matchAll(/^pub const ([A-Z0-9_]+):[^=]*=\s*([\s\S]*?);\s*$/gm)].map((match) => [match[1], rustValue(match[2])]));
-    expect(reread).not.toEqual(tsConstants);
+    expect(rustConstantsOf(changed)).not.toEqual(tsConstants);
+    // And a changed list, a changed string, and a constant added on the Rust side, each caught the same way.
+    for (const [from, to] of [['"GET", "HEAD"]', '"GET", "HEAD", "PUT"]'], ['pub const JSON_TYPE: &str = "application/json";', 'pub const JSON_TYPE: &str = "application/jsonx";'], ["pub const JSON_TYPE", "pub const EXTRA: &str = \"x\";\npub const JSON_TYPE"]]) {
+      const drifted = RUST.replace(from, to);
+      expect(drifted, from).not.toBe(RUST);
+      expect(rustConstantsOf(drifted), from).not.toEqual(tsConstants);
+    }
+    // The status reader sees a changed status, and an arm split over two lines reads the same.
+    const read = { MethodNotAllowed: 405, ServiceWorker: 403, Upgrade: 403, NotJson: 415, BadLength: 400, TooLarge: 413 };
+    expect(rustStatuses(RUST)).toEqual(read);
+    const changedStatus = RUST.replace("RequestRefusal::TooLarge => 413,", "RequestRefusal::TooLarge => 414,");
+    expect(changedStatus).not.toBe(RUST);
+    expect(rustStatuses(changedStatus)).toEqual({ ...read, TooLarge: 414 });
+    const split = RUST.replace("RequestRefusal::ServiceWorker | RequestRefusal::Upgrade => 403,", "RequestRefusal::ServiceWorker\n            | RequestRefusal::Upgrade => 403,");
+    expect(split).not.toBe(RUST);
+    expect(rustStatuses(split)).toEqual(read);
   });
 });
 

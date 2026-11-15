@@ -453,6 +453,17 @@ impl Provider {
 
     /// Reads a script. `None` when there was no answer, or a `200` that doesn't say whether the script is there.
     pub(crate) async fn read_script(&self, name: &str) -> Option<ScriptAnswer> {
+        self.read_script_named(name).await.map(|(answer, _)| answer)
+    }
+
+    /// Reads a script, with the `id` its script object answered, if it answered one: the name the provider gives the
+    /// script it found, for settling to compare with the name it asked for (`settle_read`). `None` as [`read_script`].
+    ///
+    /// [`read_script`]: Self::read_script
+    pub(crate) async fn read_script_named(
+        &self,
+        name: &str,
+    ) -> Option<(ScriptAnswer, Option<String>)> {
         let answer = call(
             Method::Get,
             self.script_url(name)?,
@@ -461,24 +472,33 @@ impl Provider {
         )
         .await?;
         if answer.status != 200 {
-            return Some(ScriptAnswer::Read {
-                status: answer.status,
-                script_null: false,
-            });
+            return Some((
+                ScriptAnswer::Read {
+                    status: answer.status,
+                    script_null: false,
+                },
+                None,
+            ));
         }
         // The read answers the namespace's own fields and the script: `null` for one that isn't there, an object
         // for one that is. A `200` with neither says nothing.
         let body = answer.json();
         let script = body["result"].as_object()?.get("script")?;
         match script {
-            Value::Null => Some(ScriptAnswer::Read {
-                status: 200,
-                script_null: true,
-            }),
-            Value::Object(_) => Some(ScriptAnswer::Read {
-                status: 200,
-                script_null: false,
-            }),
+            Value::Null => Some((
+                ScriptAnswer::Read {
+                    status: 200,
+                    script_null: true,
+                },
+                None,
+            )),
+            Value::Object(found) => Some((
+                ScriptAnswer::Read {
+                    status: 200,
+                    script_null: false,
+                },
+                found.get("id").and_then(Value::as_str).map(str::to_owned),
+            )),
             _ => None,
         }
     }

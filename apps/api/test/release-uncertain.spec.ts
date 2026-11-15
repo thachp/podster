@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, a release whose upload's answer was lost (`docs/m6-plan.md`, "`uncertain` settling"): the script's write
@@ -31,7 +31,7 @@ async function assertion(who: Who) {
 let counter = 0;
 async function api(who: Who, method: string, path: string, body?: unknown) {
   const headers: Record<string, string> = { "content-type": "application/json", "x-podster-assertion": await assertion(who), "idempotency-key": `un-key-${++counter}` };
-  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: JSON.stringify(body ?? {}) });
+  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -99,7 +99,7 @@ const T = 1_900_000_000_000;
 const DEADLINE = 10 * 60 * 1000;
 let rooms = 0;
 const made: string[] = [];
-type Room = { room: string; label: string; host: string; script: string };
+type Room = { room: string; label: string; host: string; script: string; admin: string };
 /**
  * A room where everything the recheck asks for holds, whose default host serves an earlier release, and whose release
  * `REL` is uploading since `T`. The driver is on for it, from the test's own passes only.
@@ -137,7 +137,7 @@ async function room(extra: string[] = []): Promise<Room> {
     for (const statement of extra) sql.exec(statement);
   });
   await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, id).run();
-  return { room: id, label, host, script: `${label}.${REL}` };
+  return { room: id, label, host, script: `${label}.${REL}`, admin };
 }
 type Pass = { release_id?: string | null; outcome: string; code?: string | null; next_attempt_at?: number | null; state?: string; due: number | null };
 const pass = (id: string): Promise<Pass> => switchedOn(() => stub(id).fetch("https://do/internal/test-release-drive", { method: "POST", body: "{}" }).then(async (r: Response) => {
@@ -157,6 +157,21 @@ const recorded = (id: string) => inRoom(id, (sql) => sql.exec("SELECT release_id
 const slots = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM release_upload_attempt").one().n as number);
 const queued = (id: string) => inRoom(id, (sql) => sql.exec("SELECT script_name FROM script_delete").toArray().map((row: any) => row.script_name));
 const hostScript = (id: string) => inRoom(id, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name as string);
+const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+const unpublishCauses = (id: string) => inRoom(id, (sql) => sql.exec("SELECT cause FROM unpublish ORDER BY seq").toArray().map((row: any) => row.cause));
+const holds = (id: string) => inRoom(id, (sql) => sql.exec("SELECT cause FROM release_hold WHERE until IS NOT NULL").toArray().map((row: any) => row.cause));
+/** A departure from the room's organization, as the organization's sweep sends it to every room. */
+const depart = (id: string, person: string) => stub(id).fetch("https://do/internal/org-departure", {
+  method: "POST", body: JSON.stringify({ person, org: ORG, actor: "per_un_orgadmin", left_at: T }),
+}).then((x: Response) => x.status);
+/** A room that is `uncertain` since `T`, its script's write lost, and whose first read is due at `T + 5_000`, now. */
+async function uncertainAndDue(extra: string[] = []) {
+  const r = await room(extra);
+  await providerFault(r.script, { op: "script", lost: true });
+  expect((await pass(r.room)).state).toBe("uncertain");
+  await at(r.room, T + 5_000);
+  return r;
+}
 const trail = (id: string) => inRoom(id, (sql) => ({
   events: sql.exec("SELECT type, subject_id, reason FROM event WHERE type LIKE 'release.%' ORDER BY seq").toArray().map((e: any) => [e.type, e.subject_id, e.reason]),
   audit: sql.exec("SELECT action, new_json FROM audit_event WHERE action IN ('release.uncertain', 'release.settled') ORDER BY seq").toArray().map((a: any) => [a.action, JSON.parse(a.new_json)]),
@@ -318,6 +333,46 @@ describe("an upload whose answer was lost", () => {
     expect(reads(await provider(r.script))).toBe(0);
     expect([(await release(r.room)).state, (await kept(r.room)).settles]).toEqual(["uncertain", 0]);
   });
+
+  it("never takes a script object that names another script, or none, for its own: such a read settles nothing", async () => {
+    const r = await uncertainAndDue();
+    // The script is written at the provider. The first read answers an object naming another script, the second one
+    // naming none: neither is this script, so neither records anything.
+    await providerFault(r.script, { op: "read", shape: "other_id" });
+    const other = await pass(r.room);
+    expect([other.outcome, other.code, other.state, other.next_attempt_at]).toEqual(["retry", "release_settle_unknown", "uncertain", T + 15_000]);
+    await providerFault(r.script, { op: "read", shape: "no_id" });
+    await at(r.room, T + 15_000);
+    const none = await pass(r.room);
+    expect([none.outcome, none.code, none.state, none.next_attempt_at]).toEqual(["retry", "release_settle_unknown", "uncertain", T + 35_000]);
+    expect([await recorded(r.room), await kept(r.room)]).toEqual([[], expect.objectContaining({ settles: 2, settled_at: null, last_code: "release_settle_unknown" })]);
+    // The control: the read that names this very script settles it written.
+    await at(r.room, T + 35_000);
+    expect([(await pass(r.room)).state, (await recorded(r.room)).length]).toEqual(["uploading", 1]);
+    expect(ops(await provider(r.script)).filter((op) => op.startsWith("read"))).toEqual(["read 200", "read 200", "read 200"]);
+  });
+
+  it("resumes settling from what the room keeps after the object is evicted between the write and the read", async () => {
+    const r = await room();
+    await providerFault(r.script, { op: "script", lost: true });
+    expect((await pass(r.room)).state).toBe("uncertain");
+    // Evicted: the object is thrown away with everything it held in memory. A mark on the old instance shows the next
+    // call meets a new one, which has only the room's durable state.
+    await runInDurableObject(stub(r.room), (instance: any) => { instance.testEvictionMark = true; });
+    await runInDurableObject(stub(r.room), (_: any, state: any) => { try { state.abort("evicted"); } catch {} }).catch(() => {});
+    expect(await runInDurableObject(stub(r.room), (instance: any) => instance.testEvictionMark ?? null)).toBeNull();
+    expect(await kept(r.room)).toEqual({ files: 3, bytes: 15 + 24 + MARKER_BYTES(REL), since: T, settles: 0, settled_at: null, last_code: "release_upload_outcome_unknown" });
+    // The read is still due at five seconds, not sooner, and settles from `release_uncertain` alone.
+    await at(r.room, T + 4_999);
+    expect((await pass(r.room)).outcome).toBe("not_due");
+    await at(r.room, T + 5_000);
+    const settled = await pass(r.room);
+    expect([settled.outcome, settled.state]).toEqual(["next", "uploading"]);
+    expect(await recorded(r.room)).toEqual([{ release_id: REL, files: 3, bytes: 15 + 24 + MARKER_BYTES(REL) }]);
+    expect(await kept(r.room)).toMatchObject({ settles: 1, settled_at: T + 5_000, last_code: "release_settled_written" });
+    expect((await provider(r.script)).written!.times).toBe(1);
+    expect([(await pass(r.room)).state, await hostScript(r.room)]).toEqual(["live", r.script]);
+  });
 });
 
 describe("while a release is uncertain", () => {
@@ -345,5 +400,99 @@ describe("while a release is uncertain", () => {
     expect((await upload(r.room)).body.state).toBe("uncertain");
     await check(r.room, { kind: "script", script: r.script });
     expect([await queued(r.room), (await release(r.room)).state]).toEqual([[], "uncertain"]);
+  });
+
+  const unpublishes: [string, string, (r: Room) => Promise<unknown>][] = [
+    ["the room is archived", "workspace_archived", async (r) => expect((await api(OWNER, "POST", `/v1/workspaces/${r.room}/archive`, { policy_version: await version(r.room) })).status).toBe(200)],
+    ["the room is made private", "release_needs_public_room", async (r) => expect((await api(OWNER, "PUT", `/v1/workspaces/${r.room}/visibility`, { visibility: "private" })).status).toBe(200)],
+  ];
+  for (const [what, cause, fire] of unpublishes) {
+    it(`ends under the unpublish's own cause when ${what} during its read, and nothing is recorded or served`, async () => {
+      const r = await uncertainAndDue();
+      // The read is held at the provider while the unpublish lands; the provider then says the script is there.
+      const gate = await providerGate(r.script, "read");
+      const running = pass(r.room);
+      try {
+        await gate.arrived();
+        await fire(r);
+      } finally {
+        await gate.release();
+      }
+      await running;
+      expect(await unpublishCauses(r.room)).toEqual([cause]);
+      expect(await release(r.room)).toEqual({ state: "failed", failure_code: "release_epoch_moved" });
+      // The read counted for nothing: nothing recorded, nothing settled, the script queued, the host serving nothing.
+      expect([await recorded(r.room), await kept(r.room)]).toEqual([[], expect.objectContaining({ settles: 0, settled_at: null })]);
+      expect(await queued(r.room)).toContain(r.script);
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name, release_id FROM serve_state").one())).toEqual({ script_name: null, release_id: null });
+      expect((await trail(r.room)).events.map((e: any[]) => e[0])).not.toContain("release.settled");
+      // Nothing more is read.
+      await at(r.room, T + 15_000);
+      await pass(r.room);
+      expect(reads(await provider(r.script))).toBe(1);
+    });
+  }
+
+  const holdsLanding: [string, string, (r: Room) => Promise<unknown>][] = [
+    // The hold alone, as no command would write it with the requester's standing unchanged: its own cause ends it.
+    ["a hold because nobody may release", "no_releaser", (r) => inRoom(r.room, (sql) => void sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = ?, until = ?, generation = generation + 1", T + 5_000, T + 5_000 + 7 * 24 * 60 * 60 * 1000))],
+    // The real departures that hold the app: they also take the owner's delegation of the requester's `deploy` grant,
+    // which the recheck asks first, so that is the cause it ends under.
+    ["the departures that leave nobody who may release", "requester_lost_authority", async (r) => {
+      for (const who of [r.admin, OWNER.id]) expect(await depart(r.room, who)).toBe(200);
+    }],
+  ];
+  for (const [what, code, fire] of holdsLanding) {
+    it(`ends with ${code} when ${what} lands during its read, and nothing is served`, async () => {
+      const r = await uncertainAndDue();
+      const gate = await providerGate(r.script, "read");
+      const running = pass(r.room);
+      try {
+        await gate.arrived();
+        await fire(r);
+        expect(await holds(r.room)).toEqual(["no_releaser"]);
+      } finally {
+        await gate.release();
+      }
+      await running;
+      // Whatever the read settled, the release can't go live while the app is held: its commit's recheck ends it.
+      for (let step = 0; step < 4 && ["uncertain", "uploading"].includes((await release(r.room)).state); step += 1) await pass(r.room);
+      expect(await release(r.room)).toEqual({ state: "failed", failure_code: code });
+      expect((await trail(r.room)).events.at(-1)).toEqual(["release.failed", REL, code]);
+      expect((await trail(r.room)).events.map((e: any[]) => e[0])).not.toContain("release.live");
+      expect(await hostScript(r.room)).toBe(`${r.label}.${PREV}`);
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT in_flight_release FROM release_config").one())).toEqual({ in_flight_release: null });
+      expect([await holds(r.room), await unpublishCauses(r.room)]).toEqual([["no_releaser"], []]);
+    });
+  }
+});
+
+describe("the room's stored alarm while a release is uncertain", () => {
+  it("is armed for each of settling's waits, the same distance off by the Worker's clock", async () => {
+    const r = await room();
+    await providerFault(r.script, { op: "script", lost: true });
+    await providerFault(r.script, { op: "read", status: 500 });
+    expect((await pass(r.room)).state).toBe("uncertain");
+    // Armed from the room's alarm alone, with the release commands' clock held where it is: the alarm's own pass finds
+    // nothing due, and sets the room's next alarm for the first read, five seconds off.
+    const armedFor = async (wait: number) => {
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE test_release_driver SET from_alarm = 1"));
+      try {
+        const before = Date.now();
+        await switchedOn(() => alarmPass(stub(r.room)));
+        const armed = (await nextAlarm(stub(r.room)))!;
+        expect(armed).toBeGreaterThanOrEqual(before + wait);
+        expect(armed).toBeLessThanOrEqual(Date.now() + wait);
+      } finally {
+        await inRoom(r.room, (sql) => void sql.exec("UPDATE test_release_driver SET from_alarm = 0"));
+      }
+    };
+    await armedFor(5_000);
+    expect(reads(await provider(r.script))).toBe(0);
+    // The first read settles nothing; the next wait is ten seconds, and the alarm is armed for it.
+    await at(r.room, T + 5_000);
+    expect((await pass(r.room)).next_attempt_at).toBe(T + 15_000);
+    await armedFor(10_000);
+    expect([reads(await provider(r.script)), (await release(r.room)).state]).toEqual([1, "uncertain"]);
   });
 });

@@ -44,10 +44,78 @@ export type HostnameRequest = {
 
 export type AppHostname = { request: HostnameRequest | null };
 
+/**
+ * What the custom-domain read gave. Custom domains are built after release's configuration (M6 step 8): until then their
+ * routes answer as routes that don't exist, or 409 `release_not_available` where release is switched on, and both read
+ * as not yet available, with no field. Anything else that isn't an answer is a read failure.
+ */
+export type HostnameRead = AppHostname | "unavailable" | "failed";
+
+export function hostnameAvailability(result: GatewayResult<AppHostname>): HostnameRead {
+  if (result.ok) return result.data;
+  if (result.status === 404 && result.code === "not_found") return "unavailable";
+  if (result.status === 409 && result.code === "release_not_available") return "unavailable";
+  return "failed";
+}
+
+/** An organization's release switch (decision 218), as `getReleaseDelegation` answers an operator or the organization's admin. Display only. */
+export type ReleaseSwitch = { granted: boolean; generation: number; last_take: number; set_by: string | null; set_at: number | null };
+
+/**
+ * Release at workroom setup, before the room exists. The only deployment-wide read a creator can make is their
+ * organization's release switch, which answers as a route that doesn't exist while release is off for the deployment:
+ * - Unavailable: off for the deployment. Nothing is offered or implied.
+ * - Needs approval: an operator has taken release away from the organization.
+ * - Not configured: release is on for the deployment and the organization, and a new workroom starts with it off.
+ * - Unknown: the read failed or wasn't the creator's to make, so the page says it can't tell rather than guessing.
+ */
+export type SetupRelease = "unavailable" | "needs-approval" | "not-configured" | "unknown";
+
+/**
+ * Whether the organization holds release, from a read of its switch: a boolean only when the answer had a boolean
+ * `granted`. Anything else, a failed read or a body of another shape, is unknown, never a take (review standard 3).
+ */
+export function switchGranted(result: GatewayResult<ReleaseSwitch> | null): boolean | null {
+  if (result === null || !result.ok) return null;
+  const body: unknown = result.data;
+  if (typeof body !== "object" || body === null) return null;
+  const granted = (body as { granted?: unknown }).granted;
+  return typeof granted === "boolean" ? granted : null;
+}
+
+export function setupRelease(result: GatewayResult<ReleaseSwitch> | null): SetupRelease {
+  if (result === null) return "unknown";
+  if (result.ok) {
+    const granted = switchGranted(result);
+    return granted === null ? "unknown" : granted ? "not-configured" : "needs-approval";
+  }
+  if (result.status === 404 && result.code === "not_found") return "unavailable";
+  return "unknown";
+}
+
+export const CUSTOM_DOMAIN_UNAVAILABLE = "Custom domains aren't available on this Podster deployment yet. A released app would have only the address Podster gives it.";
+
+/**
+ * Deployment grants (ADR 0010): no route gives one yet, and no agent has a deploy tool until the release path exists
+ * (AC-17). So nobody in a workroom holds one, and the page says so rather than offering one.
+ */
+export const DEPLOY_GRANTS_UNAVAILABLE = "Nobody can be given a deployment grant on this Podster deployment yet, so nobody in this workroom can ask for a release.";
+
+/**
+ * What a released app is, said before release is switched on (decision 220, stage 1 of apps as Workers). The person who
+ * approves each release is to be told it again there (step 10(b)).
+ */
+export const WHAT_AN_APP_IS = "A released app can run its own code on Podster's servers, and can keep data in a store that anyone who opens the app can write to.";
+
 export type Tone = "neutral" | "amber" | "blue" | "green" | "danger";
 
-/** What else the page read, which switching release on needs. Null where the read failed or the feature is off. */
-export type Prerequisites = { isPublic: boolean | null; repositoryReady: boolean | null };
+/**
+ * What else the page read, which switching release on needs. Null where the read failed or the feature is off.
+ * `delegated` is the organization's release switch (decision 218), which only an organization admin or an operator can
+ * read: null, or absent, where it couldn't be read, and then it isn't listed, since Podster checks it when release is
+ * switched on.
+ */
+export type Prerequisites = { isPublic: boolean | null; repositoryReady: boolean | null; delegated?: boolean | null };
 
 export type ReleaseView =
   | { state: "unavailable"; label: "Unavailable"; tone: Tone; text: string }
@@ -60,8 +128,9 @@ export const UNAVAILABLE = "Release isn't available on this Podster deployment, 
  * What still has to be in place before release can be switched on, each with who resolves it. Only what the page could
  * read: the deployment delegation isn't readable here, so Podster checks it when release is switched on.
  */
-export function missingFor({ isPublic, repositoryReady }: Prerequisites): string[] {
+export function missingFor({ isPublic, repositoryReady, delegated = null }: Prerequisites): string[] {
   const missing: string[] = [];
+  if (delegated === false) missing.push("A Podster operator has taken release away from this workroom's organization. Only an operator can give it back.");
   if (isPublic === false) missing.push("The workroom has to be public. Its owner makes it public under Visibility.");
   if (isPublic === null) missing.push("We couldn't read whether the workroom is public, and only a public workroom can release.");
   if (repositoryReady === false) missing.push("Its repository has to be Ready. The owner or an admin sets it up under Repository.");
@@ -155,21 +224,37 @@ export function hostnameProblem(raw: string): string | null {
   return null;
 }
 
+/**
+ * Refusals of release's commands, in words. The configuration's are `podster_policy::release::ReleaseDenial`'s and
+ * `podster_core::release::ReleaseConfigRefusal`'s, as `setReleaseConfig` lists them; the hostname ones are core's hostname
+ * rules'. Each refusal writes nothing, so each says nothing changed.
+ */
 export function explainReleaseRefusal(code: string, status = 400) {
   switch (code) {
     case "release_not_available":
       return "Release isn't available on this Podster deployment yet. Nothing changed.";
+    case "release_off_for_deployment":
+      return "Release is switched off for this whole Podster deployment, so no workroom can switch it on. Nothing changed.";
     case "release_needs_public_room":
       return "Only a public workroom can release. Make it public under Visibility first. Nothing changed.";
     case "repo_not_ready":
       return "This workroom's repository isn't Ready, and a release is made only from a ready repository. Nothing changed.";
-    case "not_delegated":
-      return "A Podster operator hasn't given this workroom's organization the ability to release, or has taken it away. Only an operator can change that. Nothing changed.";
-    case "delegation_unavailable":
-      return "Podster couldn't check this workroom's organization's ability to release just now. Nothing changed. Try again.";
+    case "release_not_delegated":
+      return "A Podster operator has taken release away from this workroom's organization, or hasn't let it make repositories. Only an operator can change that. Nothing changed.";
+    case "standing_unknown":
+      return "Podster couldn't check this workroom's organization or repository just now. Nothing changed. Try again.";
+    case "public_surface_suspended":
+      return "A Podster operator has suspended this workroom's public page, so release can't be switched on. Nothing changed.";
+    case "app_suspended":
+      return "A Podster operator has suspended this workroom's app, so release can't be switched on. Nothing changed.";
+    case "organization_deleted":
+      return "This workroom's organization has been deleted, so release can't be switched on. Nothing changed.";
+    case "workspace_deleted":
+      return "This workroom has been deleted. Nothing changed.";
     case "workspace_archived":
       return "This workroom is archived, so release can't be changed. Nothing changed.";
     case "not_allowed":
+    case "not_a_participant":
       return "Only this workroom's owner and admins can change release, as people. Nothing changed.";
     case "not_found":
       return "Release isn't available on this Podster deployment. Nothing changed.";

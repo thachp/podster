@@ -17,7 +17,7 @@ import { VisibilityControls } from "./visibility-controls";
 import { RepositorySection } from "./repository-section";
 import { availability, type RoomRepository } from "./repository-model";
 import { ReleaseSection } from "./release-section";
-import { releaseAvailability, releaseView, type AppHostname, type ReleaseConfig } from "./release-model";
+import { hostnameAvailability, releaseAvailability, releaseView, switchGranted, type AppHostname, type ReleaseConfig, type ReleaseSwitch } from "./release-model";
 import { plainName } from "@/components/agent-content/text";
 import type { GatewayResult } from "@/lib/gateway/result";
 import type { RoomVisibility } from "./visibility-model";
@@ -51,20 +51,28 @@ export default async function Settings({ params, searchParams }: { params: Promi
     settled(gatewayQuery<ReleaseConfig>(`/api/v1/workspaces/${id}/release-config`)),
   ]);
   const repository = availability(repositoryRead);
-  const release = releaseView(releaseAvailability(releaseRead), {
+  const releaseAnswer = releaseAvailability(releaseRead);
+  // The custom domain, and the organization's release switch, are read only where release answers at all. The switch only
+  // an admin of the room's organization can read, so nobody else spends a call on it.
+  const releaseAnswers = releaseAnswer.kind === "on";
+  const readsSwitch = releaseAnswers && identity.ok && typeof room.owner_org === "string" && identity.data.admin_orgs.includes(room.owner_org);
+  const [hostnameRead, switchRead] = await Promise.all([
+    releaseAnswers ? settled(gatewayQuery<AppHostname>(`/api/v1/workspaces/${id}/app-hostname`)) : null,
+    readsSwitch ? settled(gatewayQuery<ReleaseSwitch>(`/api/v1/orgs/${encodeURIComponent(room.owner_org as string)}/release-delegation`)) : null,
+  ]);
+  const release = releaseView(releaseAnswer, {
     isPublic: visibility.ok ? visibility.data.visibility === "public" : null,
     repositoryReady: repository.kind === "on" ? repository.data.repository?.status === "ready" : null,
+    delegated: switchGranted(switchRead),
   });
-  // The custom domain is read only where release answers at all.
-  const hostnameRead = release.state === "unavailable" || release.state === "failed" ? null : await settled(gatewayQuery<AppHostname>(`/api/v1/workspaces/${id}/app-hostname`));
-  const hostname = hostnameRead === null ? null : hostnameRead.ok ? hostnameRead.data : "failed";
+  const hostname = hostnameRead === null ? null : hostnameAvailability(hostnameRead);
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
   const heirs = membersOf(room).filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org);
   // Names are only worth a read for someone choosing one. A failure leaves IDs.
   // Release names who last changed it and who asked for a hostname; only then is a read of names worth it.
-  const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && hostname !== "failed" && hostname.request !== null));
+  const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && typeof hostname === "object" && hostname.request !== null));
   const organizations = (isOwner && heirs.length > 0) || releaseNamed ? await getOrganizations() : null;
   const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
   // Resolved here, on the server: a client component takes only serializable props, so the names cross as strings.
@@ -159,7 +167,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
               mayConfigure={mayConfigure}
               archived={isArchived(room)}
               setByName={release.state === "unavailable" || release.state === "failed" ? null : nameOf(release.config.set_by)}
-              requestedByName={hostname !== null && hostname !== "failed" && hostname.request ? nameOf(hostname.request.requested_by) : null}
+              requestedByName={hostname !== null && typeof hostname === "object" && hostname.request ? nameOf(hostname.request.requested_by) : null}
             />
           </Section>
         </>

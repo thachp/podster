@@ -11,6 +11,8 @@ This page adds to [CLAUDE.md](../CLAUDE.md), which holds the rules that must alw
 - No count asserted (`attempts: 1`) while an alarm the test doesn't control may still run. Read what the last controlled pass left and count from there.
 - An exact boundary is tested with the clock passed in, or in the pure rule in `crates/core`, to the millisecond.
 - A fault or refusal is scripted before the command that sets the alarm, so whichever run comes first meets it. Every room a test makes is quieted with `alarmQuiet` in `afterEach` or `finally`, so no alarm of it reaches a later test.
+- A helper that makes a room hands it back quiet: it ends with `alarmQuiet` on that room, after its last command and its last row. A test that then writes the room's rows directly, through SQL or `inRoom`, is the only thing changing them until it runs a pass itself. A helper whose last step is a command leaves that command's alarm set; a test that writes rows straight after it quiets the room first, or holds the work it is about to check.
+- A test that says it shows recovery from durable state, "a restart loses nothing", evicts the object with `evictRoom` from `apps/api/test/evict.ts`, which proves the object's memory went. Reading the rows without a restart shows nothing about a restart.
 
 **Why:** a runner under load is slower than any margin, and a failure that needs a slow runner to show can't be reproduced or trusted.
 
@@ -24,6 +26,7 @@ This page adds to [CLAUDE.md](../CLAUDE.md), which holds the rules that must alw
 - Learned in #336 (2026-11-13): every room a test makes is quieted in an `afterEach`; two `attempts: 2` assertions stopped resting on a wait; the reads' 5-second bound and the upload's one-hour expiry are each shown to the millisecond with the clock passed in.
 - Learned in #341 (2026-11-13): an accessibility run read a 50-message thread in one in-page script under a single 90-second bound, and stalled on CI without saying how far it got. It is now a bounded step per message, named, with no timer. A page starved of CPU still fails its 800 ms responsiveness budget, but as a measurement.
 - Learned in #342 (2026-11-13): a gateway test got its 429 only when other tests had put 20 requests into a shared counter's current wall-clock minute, and its `"0"` limit was an invalid setting that silently fell back to the default. It failed `main`. The test now makes its own refusal, with a caller of its own.
+- Learned in #347 (2026-11-13), #377, #378 and #387 (2026-11-14): three races of one shape in a week, in the takedown, provisioning and repository-readiness specs. A set-up helper left its room's alarm set, the test wrote the room's rows directly, and the alarm's run acted on them before the test's next step. On `main` at 38280eb3 a link written as degraded was unpublished by that run before the test asked whether an unpublish was owed. The room helpers now end with `alarmQuiet`. A static check for it was weighed and not added: whether a write races depends on whether the alarm acts on that table and on what the helper's last step was, which a reading of the text can't tell, so it would either miss races or flag harmless switches.
 
 ## 2. A check that can't fail is not a check
 

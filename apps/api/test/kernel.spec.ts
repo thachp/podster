@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { evictRoom } from "./evict.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -84,6 +85,8 @@ async function room() {
     expect((await add(who, role)).status).toBe(200);
   }
   for (const who of [BOB, CAROL]) expect((await admit(id, who)).status).toBe(200);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return { id, add, tasks: `/v1/workspaces/${id}/tasks` };
 }
 const offer = async (tasks: string, extra: object = {}) => {
@@ -2086,7 +2089,7 @@ describe("inbox", () => {
     const task = await offerTo(tasks, bob);
     // Still held here, because an alarm already running from an earlier command would deliver as soon as the hold lifts.
     expect(await count(id, "outbox")).toBeGreaterThan(0);
-    await runInDurableObject(stub(id), (_: any, state: any) => { try { state.abort("restart"); } catch {} }).catch(() => {});
+    await evictRoom(() => stub(id));
     expect(await count(id, "outbox")).toBeGreaterThan(0);
     await releaseOutbox(id);
     await drain(id);

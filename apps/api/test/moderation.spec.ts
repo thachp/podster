@@ -83,6 +83,8 @@ async function publicRoom(opts: { capacity?: number; preset?: string } = {}) {
   const done = await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash: hash });
   expect(done.status, done.text).toBe(200);
   await drain(id);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return { id, handle: done.body.public_handle as string, role: opening.body.id as string };
 }
 const claim = (who: Who, handle: string, role: string, opts: { claims?: object; on?: boolean } = {}) => api(who, "POST", `/v1/public/workrooms/${handle}/claim`, { role_id: role }, opts);

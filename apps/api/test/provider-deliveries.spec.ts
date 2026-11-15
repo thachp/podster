@@ -93,6 +93,8 @@ async function room(repo?: number, options: { routed?: boolean; change?: boolean
     });
     if (options.routed !== false) await route(repo, id);
   }
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return { id, task };
 }
 

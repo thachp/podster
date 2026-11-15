@@ -44,6 +44,8 @@ afterEach(async () => {
 async function room() {
   const id = (await api("POST", "/v1/workspaces", { name: "Scans" })).body.id as string;
   madeRooms.push(id);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return id;
 }
 /** A stored file, waiting for its scan. */

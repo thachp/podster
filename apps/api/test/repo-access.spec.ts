@@ -170,6 +170,8 @@ async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: b
   // The grant route is there only while the switch is on, so a room that's off is switched off after its grant.
   if (options.switchedOn === false) await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const task = await newTask(id, options.assignee ?? AGENT, options);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return { id, task, grant: grant! };
 }
 

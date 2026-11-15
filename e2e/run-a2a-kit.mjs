@@ -23,6 +23,16 @@ import { childEnv } from "./child-env.mjs";
 import { linkedA2aToken, McpAgent, Person, Target } from "./lib.mjs";
 import { freePort, prepareStack, startGateway } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-a2a-kit.mjs --kit <a2a-tck checkout with its .venv> [--skip-build] [--level must]
+       PODSTER_E2E_SIGNUP_SECRET=… node run-a2a-kit.mjs --kit <checkout> --staging
+
+Runs the A2A compatibility kit against Podster's inbound A2A through a local proxy that adds an agent's token: on the
+local stack, which it builds and starts, or with --staging on staging, with a test person from its test sign-up.
+--skip-build reuses the last API build.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const option = (name) => {
   const at = process.argv.indexOf(name);

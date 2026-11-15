@@ -3,6 +3,14 @@
 #
 #   scripts/test/staging-probes-selftest
 set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/staging-probes-selftest
+
+Checks that each staging probe can fail, with a stand-in curl and no network.
+EOF
+  exit 0
+fi
 . "$(dirname "$0")/lib.sh"
 probes="$scripts/staging-probes"
 stub_curl

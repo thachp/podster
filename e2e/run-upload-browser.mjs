@@ -17,6 +17,14 @@ import { parseJsonc } from "./jsonc.mjs";
 import { key, Person, Target } from "./lib.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-upload-browser.mjs [--skip-build] [--skip-web-build] [--browser=chromium|firefox|webkit]
+
+Builds the API, the web Worker and the upload helper, starts them locally, and sends a file's bytes through the helper in
+a real browser to local storage. --skip-build reuses the last builds, and --skip-web-build the last web build.`);
+  process.exit(0);
+}
+
 const browserName = process.argv.find((arg) => arg.startsWith("--browser="))?.slice("--browser=".length) ?? "chromium";
 if (!["chromium", "firefox", "webkit"].includes(browserName)) throw new Error(`Unknown browser: ${browserName}`);
 const skipBuild = process.argv.includes("--skip-build");

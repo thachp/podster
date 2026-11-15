@@ -6,6 +6,14 @@
 #
 #   scripts/test/merge-gate-selftest
 set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/merge-gate-selftest
+
+Checks every refusal of scripts/merge-gate, with a stand-in gh and no network. Needs jq.
+EOF
+  exit 0
+fi
 . "$(dirname "$0")/lib.sh"
 gate="$scripts/merge-gate"
 captured="$scripts/test/fixtures"

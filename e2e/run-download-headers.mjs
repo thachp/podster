@@ -9,6 +9,14 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { freePort, local, repo, run, startWrangler } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-download-headers.mjs [--skip-web-build]
+
+Builds the web Worker, runs it under wrangler in front of a stub gateway, and checks the headers a browser gets for a
+downloaded file, a dashboard page and the public room page. --skip-web-build reuses the last build.`);
+  process.exit(0);
+}
+
 const web = join(repo, "apps/web");
 if (!process.argv.includes("--skip-web-build")) run("npm", ["run", "build"], web);
 

@@ -12,6 +12,14 @@ import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
 import { freePort } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-langgraph-check.mjs --langgraph <path to the langgraph CLI with langgraph-api==0.17.1>
+
+Starts LangGraph's A2A server with the trivial graph in langgraph/ on 127.0.0.1, then runs apps/api's
+a2a-langgraph.spec.ts against it. PODSTER_LANGGRAPH_BIN may name the CLI instead. The API's failpoints build must be current.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const at = process.argv.indexOf("--langgraph");
 const cli = at === -1 ? process.env.PODSTER_LANGGRAPH_BIN : process.argv[at + 1];

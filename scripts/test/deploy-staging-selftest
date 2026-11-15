@@ -5,6 +5,15 @@
 #
 #   scripts/test/deploy-staging-selftest
 set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/deploy-staging-selftest
+
+Checks every refusal of scripts/deploy-staging, in a scratch repository with stand-ins for npm, npx,
+worker-build, rustc, gh and curl. Nothing reaches the network or Cloudflare. Needs jq.
+EOF
+  exit 0
+fi
 . "$(dirname "$0")/lib.sh"
 stub_curl
 # A stand-in HOME, so the owner's ~/.podster/cloudflare-account-id.staging is never read.

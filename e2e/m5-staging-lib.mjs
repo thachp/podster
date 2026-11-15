@@ -104,7 +104,7 @@ export const PLAN = [
 
 const WAITS = { "--setup-wait-s": ["setupWait", 240], "--merge-wait-s": ["mergeWait", 180], "--observe-wait-s": ["observeWait", 420], "--revoke-wait-s": ["revokeWait", 180] };
 
-export const USAGE = `node m5-staging.mjs --base-url ${STAGING} [--dry-run] [--skip-logs]
+export const USAGE = `Usage: node m5-staging.mjs --base-url ${STAGING} [--dry-run] [--skip-logs]
     [--setup-wait-s N] [--merge-wait-s N] [--observe-wait-s N] [--revoke-wait-s N] [--api-config FILE]
 
   --dry-run   check the configuration and print the plan. Sends staging and GitHub nothing. Unless --skip-logs is given

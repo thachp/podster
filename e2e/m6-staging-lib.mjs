@@ -116,7 +116,7 @@ export function keptProblem(record, { now, commit }) {
   return null;
 }
 
-export const USAGE = `node m6-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--capabilities FILE]
+export const USAGE = `Usage: node m6-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--capabilities FILE]
 node m6-staging.mjs --base-url ${STAGING} --before-deploy --deployed-commit SHA [--dry-run]
 node m6-staging.mjs --base-url ${STAGING} --after-deploy --deployed-commit SHA [--dry-run]
 

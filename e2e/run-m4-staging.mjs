@@ -17,6 +17,14 @@ import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-m4-staging.mjs [--skip-build] [--skip-web-build] [--public-rooms-off]
+
+Builds the web app and the API, starts the local stack with PUBLIC_ROOMS on, runs m4-staging.mjs against it, then checks
+the Workers' logs. With --public-rooms-off it passes only if m4-staging.mjs stops at once with exit code 3.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
 const flagOff = process.argv.includes("--public-rooms-off");

@@ -18,6 +18,14 @@ import {
 } from "./m6-staging-lib.mjs";
 import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node m6-staging-selftest.mjs
+
+Checks M6's staging run without the network: its arguments, its kept file, a dry run and runs against
+m6-staging-standin.mjs. Run npm ci in this directory once first. It takes no options and sends nothing to staging.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 // The runs below start m6-staging.mjs, which imports lib.mjs and with it this directory's packages. Without `npm ci` here

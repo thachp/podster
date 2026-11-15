@@ -13,6 +13,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { freePort, local, prepareStack, startGateway } from "./stack.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node run-m2-staging.mjs [--skip-build] [--big]
+
+Builds the API, starts the local stack with a stand-in scanner, runs m2-staging.mjs against it, then checks the Workers'
+logs. --skip-build reuses the last build; --big adds a 100 MB file.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const big = process.argv.includes("--big");
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build") });

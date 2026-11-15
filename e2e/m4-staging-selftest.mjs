@@ -8,6 +8,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { edgeRefused, missingWranglers } from "./m4-staging-lib.mjs";
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node m4-staging-selftest.mjs
+
+Checks the parts of M4's staging run that need no network. It takes no options and sends nothing.`);
+  process.exit(0);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 let failed = 0;
 const check = (passed, title) => {

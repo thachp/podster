@@ -19,7 +19,7 @@
 11. "okay". *This answered the architect's summary of what a todo app needs. It approves no decision.*
 12. "stage1: all as recommend". *This answered [the stage-1 table](#stage-1-one-todo-app) below. The architect had put its rows 1 to 10, with 4a and 4b, to the owner, each with this document's recommendation, and had said that this reply would mean all as recommended.*
 
-**What those words settle:** an app is a Worker, code included, in any language Workers for Platforms runs, and not only HTML (1, 2). **The target is a full framework app** (8), and **the first app published is one todo app** (9, 10). **What they don't settle, and stays the owner's to decide:** whether an app gets storage, of any kind; whether Podster builds; what an app may reach; the sandbox. Each is a row in [the summary](#1-summary-the-decisions-by-stage).
+**What those words settle:** an app is a Worker, code included, in any language Workers for Platforms runs, and not only HTML (1, 2). **The target is a full framework app** (8), and **the first app published is one todo app** (9, 10). *Corrected by the owner on 2026-11-14: that todo app is for later, built by agents working in a Podster workroom, as Podster's first end-to-end acceptance test ([stage 1](#stage-1-one-todo-app)).* **What they don't settle, and stays the owner's to decide:** whether an app gets storage, of any kind; whether Podster builds; what an app may reach; the sandbox. Each is a row in [the summary](#1-summary-the-decisions-by-stage).
 
 **What this overrides:** [decision 214](../spec/PRODUCT.md#decisions-needed)'s "an app is static files: nothing an agent wrote runs on a server". **What it leaves, proposed:** one environment, `production`; no preview of unmerged code; only a public room releases ([decision 213](../spec/PRODUCT.md#decisions-needed)). **What it puts in question:** the strict sandbox ([decision 216](../spec/PRODUCT.md#decisions-needed)), which the owner confirmed again on 2026-11-13, before message 8: the architect asked "Keep the sandbox as strict as it is? Forms, downloads and popups don't work under it. I'd keep it until real apps show what they need.", and the owner answered "2. per your recommendation". That conflict is [section 2](#2-the-sandbox-conflict).
 
@@ -41,6 +41,8 @@
 **Stage 1 is decided, by the owner on 2026-11-13: [message 12](#the-owners-words), quoted there.** Each of its rows is marked below. Two are a yes in principle with a spike still owed, and two leave a figure or a setting with the owner. **Stages 2 to 4 are not decided,** and everything about them is **proposed.**
 
 ### Stage 1: one todo app
+
+**Who builds the todo app, and when, as the owner said on 2026-11-14:** "the todo app - is meant for later... it will be a first app to be work on in a workroom. it ll be our first test to see that podster work like it supposed to". **So the todo app will be built later, by agents working in a Podster workroom, and it serves as Podster's first end-to-end acceptance test.** Stage 1's capabilities are built so that test can run; below, "the todo app" is the app that test publishes. The owner-only inputs stage 1 needs, the spike's tokens, the write cap's figure, the second account's setup and the read-only GitHub App, are wanted when that test approaches.
 
 **What it is:** a todo app built with a front-end framework as a single page, published from a reviewed, approved, merged commit. A small Worker that answers a JSON API, static files for the page, and one store of its own. No login, no outbound access, the sandbox exactly as it stands.
 
@@ -141,6 +143,8 @@ Decision 216, as the owner confirmed it, gives every app `sandbox allow-scripts`
 **Proposed:** stage 1 changes nothing. Stage 2 is the owner choosing among (2), (2b) and (5), with (4) started if they want sessions on `podster.site` itself.
 
 ## 3. Stage 1 in full: one todo app
+
+*As the owner said on 2026-11-14 ([stage 1](#stage-1-one-todo-app)): the todo app is built later, by agents working in a Podster workroom, as Podster's first end-to-end acceptance test. What follows is what stage 1 must support for it.*
 
 ### 3.1 What it is made of
 

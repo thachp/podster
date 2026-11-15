@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod a2a;
+pub mod app_code;
+pub mod app_requests;
 pub mod asset_links;
 pub mod baseline;
 pub mod expected_outputs;
@@ -30,6 +32,7 @@ pub mod repo_merge;
 pub mod repositories;
 pub mod submission_files;
 pub mod task_change;
+pub mod write_budget;
 
 pub const MAX_ARTIFACTS: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;

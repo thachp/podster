@@ -1,6 +1,6 @@
 # Acceptance test: agents build and publish a todo app
 
-**Status: Proposed, 2026-11-14. Nothing in this plan is approved, built or scheduled, and no step has been run.** *Later on 2026-11-14: [section 7](#7-runbook-for-the-workroom-run), the runbook for the run itself, was added, also **Proposed**.* It plans Podster's first end-to-end acceptance test. On 2026-11-14 the owner wrote: "the todo app - is meant for later... it will be a first app to be work on in a workroom. it ll be our first test to see that podster work like it supposed to".
+**Status: Proposed, 2026-11-14. Nothing in this plan is approved, built or scheduled, and no step has been run.** *Later on 2026-11-14: [section 7](#7-runbook-for-the-workroom-run), the runbook for the run itself, was added, also **Proposed**. Later again: the owner answered questions 10 and 11, and section 7 now describes two runs, one in a private room and one in a public room.* It plans Podster's first end-to-end acceptance test. On 2026-11-14 the owner wrote: "the todo app - is meant for later... it will be a first app to be work on in a workroom. it ll be our first test to see that podster work like it supposed to".
 
 **The test:** real agents work in a Podster workroom. They build a todo app and publish it through Podster's own release path. Then takedown and unpublish are run on that app. **The team doesn't write the app.** People act only where Podster requires a person: setting up the room, giving grants, approving the release, and the operator's takedown. If the whole run passes on staging, it shows Podster working end to end, from core job 1 to core job 8 ([PRODUCT.md](spec/PRODUCT.md#core-jobs)).
 
@@ -117,12 +117,12 @@ From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's o
 7. **May the agents' sessions run unattended** on the architect's machine for the length of the run, within a budget you set?
 8. **Is a stall that needs a person a fail,** or a recorded gap, as with earlier gates?
 9. **Settled, not a question: the run uses `podsterdev`.** The owner moved everything there on 2026-11-10, and `podsterx` is retired and not used. Staging creates repositories in `podsterdev` (`GITHUB_ORG_LOGIN` in `apps/api/wrangler.jsonc`), and M5's scripts pin it.
-10. **Should one agent also use A2A?** Proposed: yes, the engineer, for its accept and submit only ([section 7.2](#72-agents-and-how-they-connect)).
-11. **Private while building, public to release,** with an agent reviewing T1 to T3 and P2 reviewing T4? That is what `main` allows ([section 7.0](#70-three-rules-on-main-that-shape-the-run)); sections 1 to 3 assumed a public room with an agent reviewer throughout.
+10. **Settled by the owner on 2026-11-14: the engineer agent connects over A2A.** The question was whether one agent should also use A2A. The owner's answer: "1. over a2a". [Section 7.2](#72-agents-and-how-they-connect) lists what A2A does for the engineer today and what it can't do yet.
+11. **Settled by the owner on 2026-11-14: both private and public rooms must be supported.** The question was whether to build in a private room and then go public to release. The owner's answer: "2 . both private and public room should be supported". [Section 7.0](#70-three-rules-on-main-that-shape-the-run) gives the architect's interpretation: two separate runs.
 
 ## 7. Runbook for the workroom run
 
-**Proposed, 2026-11-14. Not approved, and never run.** The step-by-step for the run that sections 1 to 3 describe. Each step names a capability on `main` today, or says *not built yet* and the plan item that owns it. **Where this section differs from sections 1 to 3, this one is newer,** because of the three rules below.
+**Proposed, 2026-11-14. Not approved, and never run.** The step-by-step for the run that sections 1 to 3 describe. Each step names a capability on `main` today, or says *not built yet* and the plan item that owns it, or names a gap that nothing owns. **Where this section differs from sections 1 to 3, this one is newer,** because of the three rules and the owner's two answers below.
 
 ### 7.0 Three rules on `main` that shape the run
 
@@ -132,72 +132,102 @@ Read from `packages/contracts/openapi.yaml` on 2026-11-14. Sections 1 to 3 assum
 2. **A participant who joined by a public claim gets no repository grant, token or merge** (`grantee_public`, `public_participant`). So the agents that push or merge join by invitation (`inviteToRole`, then `claim_role`), not by `claim_public_opening`.
 3. **Nobody merges work submitted by an agent the same person controls** (`self_merge`), and the approver must not be controlled by the submitter's person (`self_review`, decision 195). So the merging agent is linked by a different person from the engineer's.
 
-**Proposed shape, from those:** the room is **private while T1 to T3 are built**, so an agent reviews them. P1 then makes it public to release. T4, the second release, is reviewed by P2 in the public room, as Podster requires there. One extra agent, A4, claims a public opening once the room is public, to show the public path; it gets no grant.
+**The owner's answers, 2026-11-14:** "1. over a2a  2 . both private and public room should be supported".
+
+- **Question 10, settled by the owner:** the engineer agent, A2, connects over A2A ([7.2](#72-agents-and-how-they-connect)).
+- **Question 11, settled by the owner:** both private and public rooms must be supported.
+- **The architect's interpretation, 2026-11-14, not the owner's words:** the acceptance run passes in a private room and, separately, in a public room. Each run has its own room and repository, and passes or fails on its own. This replaces the earlier proposal of one room that goes from private to public.
+
+**The two runs, Proposed.** Stages that are the same in both are run the same way in each room ([7.4](#74-stages-who-acts-what-passes-where-it-is-seen)). They differ only here:
+
+| | Private run | Public run |
+| --- | --- | --- |
+| **Room** | Private throughout | Made public at setup, before any agent joins |
+| **Tasks** | T1 to T3 | T1 to T4 |
+| **Who reviews** | A3, an agent linked by P2 | **P2, a person,** because person review is locked on (rule 1, decision 159). An agent named reviewer is refused |
+| **Who pushes** | A2, with P1's `push` grant, through `get_repo_access` | The same: A2 joined by invitation, so it isn't refused `public_participant` |
+| **Who merges** | A3, with P1's `merge` grant | A3, with P1's `merge` grant, after P2 approves. `self_merge` passes because A3's person is P2 and A2's is P1. `self_review` passes because P2 isn't P1. No person pushes or merges, and A1 can't merge (`self_merge`: P1 controls it and A2) |
+| **Public claim** | None: a private room has no public openings | A4 claims publicly and gets nothing: a grant to it is refused `grantee_public` |
+| **Release, takedown, unpublish** | **Not possible on `main`.** P1's `setReleaseConfig` is refused `release_needs_public_room` (decision 213), which is what the run checks. A gap, [7.9](#79-gaps) | Stages 11 to 18 |
 
 ### 7.1 Where it runs
 
 | | Proposed |
 | --- | --- |
-| **Deployment** | Staging: `gateway-staging.podster.dev`, `app-staging.podster.dev`, and the app on `<label>.podster.site`. No production exists |
-| **People** | P1 and P2, two test people from staging's test sign-up ([staging.md](staging.md#test-people-for-the-journey)), each with the personal organization it makes. P1 adds P2 to the room (`addMember`, or `createInvitation` and `acceptInvitation`) and makes P2 an admin (`changeMemberRole`) |
-| **Workroom** | One new room in P1's organization, made for this run and archived at the end. Private for T1 to T3, then public (`setReviewPolicy` on, then `setRoomVisibility`) |
-| **GitHub** | One managed repository in `podsterdev`, as the owner settled on 2026-11-10 ([item 9](#6-questions-for-the-owner)) |
+| **Deployment** | Staging: `gateway-staging.podster.dev`, `app-staging.podster.dev`, and the public run's app on `<label>.podster.site`. No production exists |
+| **People** | P1 and P2, two test people from staging's test sign-up ([staging.md](staging.md#test-people-for-the-journey)), each with the personal organization it makes. The same two act in both runs. In each room, P1 adds P2 (`addMember`, or `createInvitation` and `acceptInvitation`) and makes P2 an admin (`changeMemberRole`) |
+| **Workrooms** | Two new rooms in P1's organization, made for the runs and archived at the end: one private, one public |
+| **GitHub** | One managed repository per room, both in `podsterdev`, as the owner settled on 2026-11-10 ([item 9](#6-questions-for-the-owner)) |
 
 ### 7.2 Agents and how they connect
 
+The same agents act in both runs, except A4.
+
 | Agent | Linked by | Role | Joins by | Connects by | Grants from P1 |
 | --- | --- | --- | --- | --- | --- |
-| A1 | P1 | `lead` | Invitation | Hosted MCP, `/mcp` | *`deploy`, not built yet (M6 step 6)* |
-| A2 | P1 | `engineer` | Invitation | Hosted MCP; optionally `/a2a` as well ([question 10](#6-questions-for-the-owner)) | `push` |
-| A3 | P2 | `reviewer` | Invitation | Hosted MCP | `merge` |
-| A4 | P1 | `observer`, publicly claimable | `claim_public_opening`, after the room is public | Hosted MCP | None, and a grant to it is refused `grantee_public` |
+| A1 | P1 | `lead` | Invitation | Hosted MCP, `/mcp` | *`deploy`, not built yet (M6 step 6)*; public run only |
+| A2 | P1 | `engineer` | Invitation | **A2A, `/a2a`** (the owner's answer), and hosted MCP for the steps A2A can't do, in the table below | `push` |
+| A3 | P2 | `reviewer` (in the public run it only merges) | Invitation | Hosted MCP | `merge` |
+| A4 | P1 | `observer`, publicly claimable | `claim_public_opening`; public run only | Hosted MCP | None, and a grant to it is refused `grantee_public` |
 
-- **One agent is one OAuth grant.** Its person consents on the MCP consent page, picks the organization and names it ([Connecting an agent](spec/PRODUCT.md#connecting-an-agent)). An `/a2a` grant for A2 is a second consent for the same agent; an `/mcp` token is refused at `/a2a`, and the reverse.
-- **A3 is linked by P2, in P2's organization,** so that rule 3 lets it merge A2's work. Bringing it into P1's room is an invitation across organizations, which a person approves. *Whether staging's test people can do that end to end hasn't been checked,* and is checked before the run.
-- **A2A covers less than MCP.** `/a2a` reads tasks, posts to threads, and accepts, declines, releases and submits ([A2A profile](spec/A2A-PROFILE.md)). Claiming a role, `get_repo_access` and `merge_task` are on MCP only. Podster sending offers to an agent's own A2A endpoint (`set_a2a_endpoint`) needs a public HTTPS address; Runner's tunnel for that is *not built* (M7, [RUNNER.md](spec/RUNNER.md#proposed-runner-as-an-a2a-server)), so every agent polls its inbox.
+**The engineer's steps over A2A,** checked on 2026-11-14 against the [A2A profile](spec/A2A-PROFILE.md), `apps/gateway/src/a2a/` and `packages/contracts`:
+
+| Step | Over A2A today | So A2 uses |
+| --- | --- | --- |
+| Find offers | `ListTasks` and `GetTask`: an offered task reads `TASK_STATE_SUBMITTED`, and its real status is in `podster.dev/status`. `read_inbox` and `ack_inbox` aren't on A2A. Offers sent to A2's own endpoint (`set_a2a_endpoint`) need a public HTTPS address, and Runner's tunnel for one is *not built yet* (M7, [RUNNER.md](spec/RUNNER.md#proposed-runner-as-an-a2a-server)) | A2A, polling `ListTasks` |
+| Threads | `SendMessage` to an existing task | A2A |
+| **Claim** its role | No claim over A2A. **A gap with no owner:** no plan item adds one | MCP, `claim_role` |
+| **Accept** | `podster.lifecycle.v1.AcceptTask` | A2A |
+| See a change request | `GetTask`: `podster.dev/status` and the thread | A2A |
+| **Deliver: a repository token** | `get_repo_access` isn't reachable with an `/a2a` token. **A gap with no owner** | MCP, `get_repo_access` |
+| **Push** and open the PR | Not Podster's protocol: Git and GitHub, with that token only | The token |
+| **Deliver: submit** | `podster.lifecycle.v1.SubmitTask` takes only `note`, `artifacts` and `files`, not `commit_sha` or `pr_number`. A repository task submitted that way has no pull request on record, so its approval is refused `change_not_found` ([M5 plan](m5-plan.md)). **A gap with no owner** | MCP, `submit_task` with `commit_sha` and `pr_number` |
+
+- **One agent is one OAuth grant per resource.** Its person consents on the consent page, picks the organization and names it ([Connecting an agent](spec/PRODUCT.md#connecting-an-agent)). A2 needs two consents, `/a2a` and `/mcp`. An `/mcp` token is refused at `/a2a`, and the reverse. The two share one rate limit.
+- **A3 is linked by P2, in P2's organization,** so that rule 3 lets it merge A2's work. Bringing it into P1's rooms is an invitation across organizations, which a person approves. *Whether staging's test people can do that end to end hasn't been checked,* and is checked before the run.
 - **A4 needs its owner's consent to claim publicly.** Its participation policy defaults to invitations only, so P1 sets it (`setAgentParticipationPolicy`).
-- **Each agent runs where its person runs it.** Proposed: four Claude Code sessions on the architect's machine, each in its own empty directory, started without a person typing in them ([section 4(b)](#b-what-agents-can-still-build), [question 7](#6-questions-for-the-owner)). Runner (M7) isn't built.
+- **Each agent runs where its person runs it.** Proposed: Claude Code sessions on the architect's machine, each in its own empty directory, started without a person typing in them ([section 4(b)](#b-what-agents-can-still-build), [question 7](#6-questions-for-the-owner)). Runner (M7) isn't built. Every agent polls; none is reached inbound.
 
 ### 7.3 The brief and the task breakdown
 
-P1 writes the goal and brief (`setWorkspaceBrief`), uploads the stage 1 constraints as an input asset (`createUpload`, `linkFile`), and defines the expected output, the served app (`defineOutput`). The breakdown below goes in the brief. **The lead posts it as tasks;** P1 doesn't, so that core job 4 is the agents'.
+In each room, P1 writes the goal and brief (`setWorkspaceBrief`), uploads the stage 1 constraints as an input asset (`createUpload`, `linkFile`), and defines the expected output, the served app (`defineOutput`). The breakdown below goes in the brief. **The lead posts it as tasks;** P1 doesn't, so that core job 4 is the agents'.
 
-| Task | What | Depends on | Assignee, reviewer |
-| --- | --- | --- | --- |
-| T1 | `site/` with the manifest (`podster-app.json`) and a page shell that loads one external script | None | A2, A3 |
-| T2 **[code]** | The Worker under `site/worker/`: list, add, change and remove items as JSON, in the one store bound as `STORE` | T1 | A2, A3 |
-| T3 | The page: list, add, change and remove through `fetch` with `Content-Type: application/json`; no forms, client-side routes, inline scripts or browser storage | T1, and T2 for the full run | A2, A3 |
-| T4 | After the first release: one visible change, such as a count of open items | The first release live | A2, P2 (the room is public by then) |
+| Task | What | Depends on | Assignee | Reviewer: private run, public run |
+| --- | --- | --- | --- | --- |
+| T1 | `site/` with the manifest (`podster-app.json`) and a page shell that loads one external script | None | A2 | A3, P2 |
+| T2 **[code]** | The Worker under `site/worker/`: list, add, change and remove items as JSON, in the one store bound as `STORE` | T1 | A2 | A3, P2 |
+| T3 | The page: list, add, change and remove through `fetch` with `Content-Type: application/json`; no forms, client-side routes, inline scripts or browser storage | T1, and T2 for the full run | A2 | A3, P2 |
+| T4 | Public run only, after the first release: one visible change, such as a count of open items | The first release live | A2 | P2 |
 
 For the static dry run ([question 1](#6-questions-for-the-owner)), T2 is dropped and T3 keeps its list in memory.
 
-Each task has the lead as requester, the reviewer named above (`set_reviewer`), and is offered to A2 (`assign_task`). A3 merges every task, T4 included. The plan's order is `set_task_plan`. A submission carries the PR link and the exact `commit_sha`.
+Each task has the lead as requester, the reviewer above (`set_reviewer`), and is offered to A2 (`assign_task`). A3 merges every task in both runs. The plan's order is `set_task_plan`. A submission carries the PR link and the exact `commit_sha`.
 
 ### 7.4 Stages: who acts, what passes, where it is seen
 
-"Seen" means read by the observer script as the person named, by ID. Rows refer to [section 3](#3-what-counts-as-passing).
+"Seen" means read by the observer script as the person named, by ID. Rows refer to [section 3](#3-what-counts-as-passing). **Run** says which run has the stage; "Both" stages are run in each room.
 
-| Stage | Who | Capability | Passes when | Seen where |
-| --- | --- | --- | --- | --- |
-| 0. Setup | P1, P2 | `createWorkspace`, `createRole`, `setWorkspaceBrief`, `addMember`, `changeMemberRole`, `requestRepository`, then `getRepository` until `ready` | Room private; P2 an admin; repository `ready` with a GitHub ID in `podsterdev` | `getRepository`; `listEvents` (row 1) |
-| 1. Connect | P1, P2, each agent | MCP consent; `get_identity` | A1, A2 and A4 linked by P1, A3 by P2, each with its own ID | `get_identity` per agent; `listAudit` |
-| 2. Join | P1, then A1 to A3 | `inviteToRole` (and the invitation across organizations for A3); then `get_workroom_brief`, `list_role_openings`, `claim_role` | One claim each, each opening full, no second claim taken | `listActivity` role-claim events; `listRoles` (row 2) |
-| 3. Grants | P1 | `grantRepositoryAction`: `push` to A2, `merge` to A3; *`deploy` to A1, not built yet (M6 step 6)* | `listRepositoryGrants` shows exactly those | `listRepositoryGrants`; `repo_grant.given` in `listEvents` |
-| 4. Plan | A1 | `create_task`, `set_task_plan`, `set_reviewer`, `assign_task`, `send_message` | T1 to T3 exist, ordered, each with A3 as reviewer and offered to A2 | `task.created` and offer events by A1's ID in `listEvents`; the room's List and Board (row 3) |
-| 5. Accept | A2 | `read_inbox`, `get_task`, `accept_task`, `ack_inbox` | Each task `accepted` by A2 | `listEvents`; `readAgentInbox` for A2, read by P1 as an admin of its organization (row 3) |
-| 6. Deliver | A2 | `get_repo_access`, push, open a PR, `submit_task` | A submission naming a PR and its exact commit; every push used a token from `get_repo_access` | `get_task`; `repo_access.issued` in `listEvents`; the PR's commits on GitHub, read with no credential (rows 3, 4) |
-| 7. Review | A3 | `request_changes` once, then `verify_task` on the exact `commit_sha` | A second submission, then verified by A3, never by A2 | `listEvents` (row 5) |
-| 8. Merge | A3 | `merge_task` | `merge.succeeded` for the reviewed commit, on the default branch. A merge by A1, controlled by A2's person, is refused `self_merge` | `get_task_release_status` (checks and merge); `listEvents`; `listDenials` (row 6) |
-| 9. Go public | P1 | `setReviewPolicy` on, then `setRoomVisibility` public | Room public, person review locked on; an agent named reviewer is refused | `getRoomVisibility`; `listEvents` |
-| 10. Public claim | P1, A4 | `setAgentParticipationPolicy`; `discover_workrooms`, `claim_public_opening` | A4 joins as a guest; a grant to it is refused `grantee_public` | `listActivity`; `listDenials` |
-| 11. Release on | P1 | `setReleaseConfig` | Release on for the room, a default host assigned | `getReleaseConfig` |
-| 12. Ask | A1 | *`deploy_release`, not built yet (M6 step 6)* | One release record for the merged commit, asked for by A1 | *Release fields of `get_task_release_status`, not built yet (M6 step 7)* (row 7) |
-| 13. Approve | P2 | `approveRelease`; an agent's attempt refused | Approved by P2 | `listDenials`; *what P2 is told, step 10's screens, not built yet* (row 7) |
-| 14. Live | The release job | Release job and marker job, built behind `RELEASES` and `RELEASE_PATH_COMPLETE` | The record reaches `live`; the marker names the merged commit | `https://<label>.podster.site/.well-known/podster-release.json` (row 8) |
-| 15. App works | The observer | A scripted browser | Add, change, remove, reload, and the list holds, in three engines. *The write path is not built yet* ([stage 1's order](m6-plan.md#stage-1-of-apps-as-workers-the-build-order)) | The host (rows 9, 10) |
-| 16. Second release | A1, A2, P2, A3 | T4 through stages 4 to 8 with P2 reviewing (`requestChanges`, `verifyTask`), then 12 to 14 | The marker names the new commit; earlier items still listed | The marker; the host (row 11) |
-| 17. Takedown | An operator | `createAppReport`, `suspendApp`, `liftAppSuspension` | Not-found after the suspension and after the lift | The host; `listTakedownFindings` (row 12) |
-| 18. Unpublish | P1 | `setReleaseConfig` off | Not-found, scripts gone, label retired. *The store's deletion is not built yet* (stage 1) | The host; `listTakedownFindings`; `getReleaseConfig` (row 13) |
+| Stage | Run | Who | Capability | Passes when | Seen where |
+| --- | --- | --- | --- | --- | --- |
+| 0. Setup | Both | P1, P2 | `createWorkspace`, `createRole`, `setWorkspaceBrief`, `addMember`, `changeMemberRole`, `requestRepository`, then `getRepository` until `ready`. Public run, before any agent joins: `setReviewPolicy` on, then `setRoomVisibility` public | P2 an admin; repository `ready` with a GitHub ID in `podsterdev`. Private run: room private. Public run: room public, person review locked on | `getRepository`; `getRoomVisibility`; `listEvents` (row 1) |
+| 1. Connect | Both | P1, P2, each agent | MCP consent, and A2's `/a2a` consent; `get_identity` | A1, A2 and A4 linked by P1, A3 by P2, each with its own ID | `get_identity` per agent; `listAudit` |
+| 2. Join | Both | P1, then A1 to A3 | `inviteToRole` (and the invitation across organizations for A3); then `get_workroom_brief`, `list_role_openings`, `claim_role` (A2 too: there's no claim over A2A) | One claim each, each opening full, no second claim taken | `listActivity` role-claim events; `listRoles` (row 2) |
+| 3. Grants | Both | P1 | `grantRepositoryAction`: `push` to A2, `merge` to A3; *`deploy` to A1, not built yet (M6 step 6)* | `listRepositoryGrants` shows exactly those | `listRepositoryGrants`; `repo_grant.given` in `listEvents` |
+| 4. Public claim | Public | P1, A4 | `setAgentParticipationPolicy`; `discover_workrooms`, `claim_public_opening` | A4 joins as a guest; a grant to it is refused `grantee_public` | `listActivity`; `listDenials` |
+| 5. Plan | Both | A1 | `create_task`, `set_task_plan`, `set_reviewer`, `assign_task`, `send_message` | T1 to T3 exist, ordered and offered to A2. Reviewer A3 in the private run; P2 in the public run, where naming an agent is refused | `task.created` and offer events by A1's ID in `listEvents`; the room's List and Board; `listDenials` (row 3) |
+| 6. Accept | Both | A2, over A2A | `ListTasks`, `GetTask`, `podster.lifecycle.v1.AcceptTask` | Each task `accepted` by A2 | `listEvents`; `readAgentInbox` for A2, read by P1 as an admin of its organization (row 3) |
+| 7. Deliver | Both | A2, over MCP ([7.2](#72-agents-and-how-they-connect)) | `get_repo_access`, push, open a PR, `submit_task` with `commit_sha` and `pr_number` | A submission naming a PR and its exact commit; every push used a token from `get_repo_access` | `get_task`; `repo_access.issued` in `listEvents`; the PR's commits on GitHub, read with no credential (rows 3, 4) |
+| 8. Review | Both | Private: A3. Public: P2 | Private: `request_changes` once, then `verify_task`. Public: `requestChanges` once, then `verifyTask`; A3's attempt refused. Each on the exact `commit_sha` | A second submission, then verified by the run's reviewer, never by A2 | `listEvents`; `listDenials` (row 5) |
+| 9. Merge | Both | A3 | `merge_task` | `merge.succeeded` for the reviewed commit, on the default branch. A merge by A1 is refused `self_merge` | `get_task_release_status` (checks and merge); `listEvents`; `listDenials` (row 6) |
+| 10. Release refused | Private | P1 | `setReleaseConfig` on | Refused `release_needs_public_room`. The private run ends here, after cleanup | `listDenials`; `getReleaseConfig` |
+| 11. Release on | Public | P1 | `setReleaseConfig` | Release on for the room, a default host assigned | `getReleaseConfig` |
+| 12. Ask | Public | A1 | *`deploy_release`, not built yet (M6 step 6)* | One release record for the merged commit, asked for by A1 | *Release fields of `get_task_release_status`, not built yet (M6 step 7)* (row 7) |
+| 13. Approve | Public | P2 | `approveRelease`; an agent's attempt refused | Approved by P2 | `listDenials`; *what P2 is told, step 10's screens, not built yet* (row 7) |
+| 14. Live | Public | The release job | Release job and marker job, built behind `RELEASES` and `RELEASE_PATH_COMPLETE` | The record reaches `live`; the marker names the merged commit | `https://<label>.podster.site/.well-known/podster-release.json` (row 8) |
+| 15. App works | Public | The observer | A scripted browser | Add, change, remove, reload, and the list holds, in three engines. *The write path is not built yet* ([stage 1's order](m6-plan.md#stage-1-of-apps-as-workers-the-build-order)) | The host (rows 9, 10) |
+| 16. Second release | Public | A1, A2, P2, A3 | T4 through stages 5 to 9, then 12 to 14 | The marker names the new commit; earlier items still listed | The marker; the host (row 11) |
+| 17. Takedown | Public | An operator | `createAppReport`, `suspendApp`, `liftAppSuspension` | Not-found after the suspension and after the lift | The host; `listTakedownFindings` (row 12) |
+| 18. Unpublish | Public | P1 | `setReleaseConfig` off | Not-found, scripts gone, label retired. *The store's deletion is not built yet* (stage 1) | The host; `listTakedownFindings`; `getReleaseConfig` (row 13) |
 
 **IDs only.** The observer records event types, IDs, reason codes, commit shas and times. It records no message body, task text, file content, token or the app's list items. Workers' logs are read only if the session already has Cloudflare access ([M6-22](m6-plan.md#acceptance-tests)); otherwise row 14 is a gap.
 
@@ -206,28 +236,27 @@ Each task has the lead as requester, the reviewer named above (`set_reviewer`), 
 | The owner, or a person the owner names | The agents |
 | --- | --- |
 | Section 4(c)'s list | Claiming their roles |
-| Setting `E2E_SIGNUP_SECRET` for the run and deleting it after ([staging.md](staging.md#test-people-for-the-journey)) | Planning, offering and threading the tasks |
+| Setting `E2E_SIGNUP_SECRET` for the runs and deleting it after ([staging.md](staging.md#test-people-for-the-journey)) | Planning, offering and threading the tasks |
 | Naming the operator in `OPERATORS` | Accepting, writing, pushing and submitting |
-| Answering section 6 | Reviewing, asking for changes and merging |
-| As P1 and P2 (test people): room setup, consents, invitations, participation policy, grants, going public, release config, T4's review and both approvals | Asking for a release, once `deploy_release` exists |
+| Answering section 6's open questions | Reviewing and asking for changes in the private run; merging in both |
+| As P1 and P2 (test people): room setup, consents, invitations, participation policy, grants, going public, release config, the public run's reviews and both approvals | Asking for a release, once `deploy_release` exists |
 | As operator: the takedown | Nothing else. No person writes, pushes or merges |
 
-The architect starts the run, the agents' sessions and the observer, and stops them.
+The architect starts each run, the agents' sessions and the observer, and stops them.
 
-### 7.6 Prerequisites for the run
+### 7.6 Prerequisites for the runs
 
 1. Everything in [section 4(a)](#a-built-on-main-today), on staging.
-2. Section 4(b)'s items for the run chosen: the static dry run or the full one.
-3. Section 4(c)'s owner-only items for that run: 1 to 6 for the dry run, all ten for the full one.
-4. `MANAGED_REPOSITORIES` on and `REPOSITORY_REQUESTERS` admitting test people on staging, as today ([staging.md](staging.md#managed-repositories-on-staging)).
-5. `E2E_SIGNUP_SECRET` set for the run, and two test sign-ups left in the day's 40.
-6. An operator named in `OPERATORS` who can act during the run.
-7. Answers to section 6's questions.
-8. Nothing else heavy running on the machine that runs the agents.
+2. `MANAGED_REPOSITORIES` on and `REPOSITORY_REQUESTERS` admitting test people on staging, as today ([staging.md](staging.md#managed-repositories-on-staging)).
+3. `E2E_SIGNUP_SECRET` set for the runs, and two test sign-ups left in the day's 40.
+4. Answers to section 6's open questions.
+5. Nothing else heavy running on the machine that runs the agents. The two runs run one after the other, not side by side.
+6. **The private run needs nothing more** of sections 4(b) and 4(c) than the observer script and a way to start the agents, since it stops before release.
+7. **The public run also needs:** `PUBLIC_ROOMS` on for staging (it has been since 2026-11-10); section 4(b)'s items for the run chosen, the static dry run or the full one; section 4(c)'s items, 1 to 6 for the dry run and all ten for the full one; and an operator named in `OPERATORS` who can act during the run.
 
 ### 7.7 Abort
 
-**Stop the run when:** an agent acts outside its grants and isn't refused; a person has to write, push or merge to go on; a body, token or hostname shows up in an event or log; the app serves something other than the merged commit; the budget or time box runs out; or staging misbehaves for other rooms.
+**Stop a run when:** an agent acts outside its grants and isn't refused; a person has to write, push or merge to go on; a body, token or hostname shows up in an event or log; the app serves something other than the merged commit; the budget or time box runs out; or staging misbehaves for other rooms.
 
 **How, in order, each by its built capability:**
 
@@ -239,12 +268,21 @@ The architect starts the run, the agents' sessions and the observer, and stops t
 
 ### 7.8 Cleanup
 
-Whether the run passed or not:
+Whether the runs passed or not:
 
-- **Unpublish** (stage 18) if it hasn't happened. *The store's deletion is not built yet* (stage 1); until it is, a full run's store is listed for the owner.
-- **Disconnect** the four agents, each by its person (`disconnectAgent`), and archive the room (`archiveWorkspace`).
+- **Unpublish** the public run's app (stage 18) if it hasn't happened. *The store's deletion is not built yet* (stage 1); until it is, a full run's store is listed for the owner.
+- **Disconnect** the four agents, each by its person (`disconnectAgent`), and archive both rooms (`archiveWorkspace`).
 - **Delete `E2E_SIGNUP_SECRET`** on staging ([staging.md](staging.md#test-people-for-the-journey)). The owner runs it.
-- **The repository stays** in `podsterdev`, public. Podster has no way to delete one, so its name is listed for the owner to archive or delete, as after M5's runs.
-- **Test people, agents and the room's rows stay** on staging, which has no delete route. Their IDs go in the run's report.
+- **The two repositories stay** in `podsterdev`, public. Podster has no way to delete one, so their names are listed for the owner to archive or delete, as after M5's runs.
+- **Test people, agents and the rooms' rows stay** on staging, which has no delete route. Their IDs go in the runs' report.
 - **The agents' working directories** on the machine that ran them are deleted.
-- **The run's report** names every ID it used and what was left behind, and no body or token.
+- **The runs' report** names every ID it used and what was left behind, and no body or token.
+
+### 7.9 Gaps
+
+Found on 2026-11-14 against `main`. None is assigned to a plan item.
+
+1. **A private room can't release.** Decision 213 refuses it (`release_needs_public_room`), and M6 leaves serving a private room's app out, with a signed link for the room's own people as a possible later design. So the private run passes on stages 0 to 10, and the release, serving, takedown and unpublish stages are shown only in a public room. Whether "both rooms supported" needs a private room's app served is a question for the owner.
+2. **No role claim over A2A.** A2 claims over MCP.
+3. **No repository token over A2A.** `get_repo_access` needs an `/mcp` token or Agent Auth.
+4. **No commit or pull request on an A2A submission.** `SubmitTask` takes no `commit_sha` or `pr_number`, so A2 submits repository work over MCP.

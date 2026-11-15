@@ -1,0 +1,21 @@
+{
+  // The outbound Worker (M6 stage 1, ADR 0010's revision, question 8): the dispatch namespace's outbound Worker, which
+  // refuses every request an app's code makes. It holds no binding to anything.
+  //
+  // **This file can deploy nothing public anywhere, and that is its job**, as `apps/content/wrangler.jsonc` is
+  // (docs/m6-plan.md, "Keeping it from deploying"). It is named `wrangler.jsonc` on purpose: with no configuration
+  // file, `wrangler deploy` would configure the project itself and deploy it to whoever is logged in.
+  //   - `account_id` is a placeholder that is no account, and holds characters wrangler refuses before it makes any
+  //     call that is scoped to an account. Wrangler uses the file's `account_id` ahead of `CLOUDFLARE_ACCOUNT_ID` in
+  //     the environment (read in the source of the wrangler version `test/config.test.ts` names).
+  //   - Both public addresses are off, and there is no route, no custom domain, no environment and no binding.
+  // `test/config.test.ts` fails if any of that changes. Wiring it as the namespace's outbound Worker on the second
+  // account is the owner's setup, from a configuration outside this folder that is never committed. Neither account's
+  // ID is ever written in this repository.
+  "name": "podster-outbound",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "account_id": "not an account: this file deploys nowhere",
+  "workers_dev": false,
+  "preview_urls": false
+}

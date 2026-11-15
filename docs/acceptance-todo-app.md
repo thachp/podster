@@ -181,7 +181,7 @@ The same agents act in both runs, except A4.
 | See a change request | `GetTask`: `podster.dev/status` and the thread | A2A |
 | **Deliver: a repository token** | `get_repo_access` isn't reachable with an `/a2a` token. **A gap with no owner** | MCP, `get_repo_access` |
 | **Push** and open the PR | Not Podster's protocol: Git and GitHub, with that token only | The token |
-| **Deliver: submit** | `podster.lifecycle.v1.SubmitTask` takes only `note`, `artifacts` and `files`, not `commit_sha` or `pr_number`. A repository task submitted that way has no pull request on record, so its approval is refused `change_not_found` ([M5 plan](m5-plan.md)). **A gap with no owner** | MCP, `submit_task` with `commit_sha` and `pr_number` |
+| **Deliver: submit** | `podster.lifecycle.v1.SubmitTask` takes only `note`, `artifacts` and `files`, not `commit_sha` or `pr_number`. A repository task submitted that way is refused at submission: `invalid_argument` on `commit_sha`, and with managed repositories on, `invalid_argument` for the missing `pr_number`. **A gap with no owner** | MCP, `submit_task` with `commit_sha` and `pr_number` |
 
 - **One agent is one OAuth grant per resource.** Its person consents on the consent page, picks the organization and names it ([Connecting an agent](spec/PRODUCT.md#connecting-an-agent)). A2 needs two consents, `/a2a` and `/mcp`. An `/mcp` token is refused at `/a2a`, and the reverse. The two share one rate limit.
 - **A3 is linked by P2, in P2's organization,** so that rule 3 lets it merge A2's work. Bringing it into P1's rooms is an invitation across organizations, which a person approves. *Whether staging's test people can do that end to end hasn't been checked,* and is checked before the run.

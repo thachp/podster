@@ -70,6 +70,8 @@ async function room() {
   await addPerson(id, ADMIN, "admin");
   await add(MEMBER, "member");
   await add(GUEST, "guest");
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return { id, uploads: `/v1/workspaces/${id}/uploads` };
 }
 async function addPerson(id: string, who: Who, role: string) {

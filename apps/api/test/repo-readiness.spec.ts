@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet, expectNoAlarmSooner, nextAlarm } from "./alarm.ts";
+import { evictRoom } from "./evict.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // The M5 security review's F2 and F8: a ready link is read back once a day from the room's alarm, and a link that's
@@ -230,6 +231,8 @@ async function room() {
   const got = await api(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task.id}/repo-access`, undefined, { key: null });
   expect(got.status, got.text).toBe(200);
   expect(await tokens(id)).toEqual(["held"]);
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(stub(id));
   return { id, token: got.body.token as string };
 }
 
@@ -626,13 +629,18 @@ describe("an operator's recheck of a ready link (item 12)", () => {
 });
 
 describe("the guard against a GitHub outage reading as every repository gone (the architect's ruling of 2026-11-14)", () => {
-  /** A room of its own repository, with an app up, as `room()` and `withApp` make them. */
+  /**
+   * A room of its own repository, with an app up, as `room()` and `withApp` make them, handed back quiet: no alarm run
+   * under way and none to come, so a test that writes the room's rows next is the only thing that changes them.
+   */
   async function roomWithApp() {
     REPO_ID = IDS.next();
     await fake("/agent-repo", { id: REPO_ID });
     await ready({ rulesets: "ready" });
     const r = await room();
-    return { ...r, repo: REPO_ID, app: await withApp(r.id) };
+    const app = await withApp(r.id);
+    await alarmQuiet(stub(r.id));
+    return { ...r, repo: REPO_ID, app };
   }
   /** Both looks of the daily read-back, a minute apart, at room `r`'s repository answering that it's gone. */
   async function bothLooks(r: { id: string; repo: number }) {
@@ -716,6 +724,8 @@ describe("the guard against a GitHub outage reading as every repository gone (th
     expect(await retryAt(c.id)).not.toBeNull();
     await expectNoAlarmSooner(stub(c.id), QUIET_MS);
     expect(await nextAlarm(stub(c.id))).not.toBeNull();
+    // The room is evicted, as a restart would: what it asks next comes from its rows and its kept retry alone.
+    await evictRoom(() => stub(c.id));
     await alarmPass(stub(c.id));
     expect(await appState(c.id)).toEqual(appUp(c.app));
     await anHourOn();
@@ -771,6 +781,8 @@ describe("the guard against a GitHub outage reading as every repository gone (th
     // is kept anywhere. The room is armed for it, and its alarm asks.
     const r = await roomWithApp();
     await inRoom(r.id, (sql) => void sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
+    // And it really stops: evicted, its memory is gone, and only its rows are left.
+    await evictRoom(() => stub(r.id));
     expect(await retryAt(r.id)).toBeNull();
     expect(await woken(r.id)).toBe(true);
     await alarmPass(stub(r.id));
@@ -791,6 +803,7 @@ describe("the guard against a GitHub outage reading as every repository gone (th
     // The retry is kept durably and the alarm armed for it, so a restart loses nothing.
     expect(await retryAt(r.id)).not.toBeNull();
     expect(await nextAlarm(stub(r.id))).not.toBeNull();
+    await evictRoom(() => stub(r.id));
     await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_ceiling_unanswered"));
     await retryNow(r.id);
     await alarmPass(stub(r.id));

@@ -65,6 +65,8 @@ async function room(personReview = true) {
     const r = await api(OWNER, "PUT", `/v1/workspaces/${id}/review-policy`, { require_person: true, policy_version: await version(id) });
     expect(r.status, r.text).toBe(200);
   }
+  // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return id;
 }
 

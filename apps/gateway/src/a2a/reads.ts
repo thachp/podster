@@ -13,8 +13,11 @@ import { statusesFor, toA2aTask } from "./tasks";
  */
 export type ApiReads = {
   sendMessage(workspaceId: string, taskId: string, body: string, idempotencyKey: string): Promise<{ status: number; body: any }>;
-  /** One of the lifecycle capabilities, as MCP calls it (step 10). */
-  command(capability: "accept_task" | "decline_task" | "release_task" | "submit_task", args: Record<string, unknown>, idempotencyKey: string): Promise<{ status: number; body: any }>;
+  /**
+   * One of the lifecycle capabilities, as MCP calls it (step 10). `get_repo_access` takes no key, as MCP sends none. The
+   * gateway refuses any capability that isn't one of these, so an `/a2a` token reaches nothing more.
+   */
+  command(capability: "accept_task" | "decline_task" | "release_task" | "submit_task" | "claim_role" | "get_repo_access", args: Record<string, unknown>, idempotencyKey?: string): Promise<{ status: number; body: any }>;
   getTask(workspaceId: string, taskId: string): Promise<{ status: number; body: any }>;
   listTasks(workspaceId: string, query: { cursor?: string; order: "newest"; status?: string }): Promise<{ status: number; body: any }>;
   listWorkspaces(): Promise<{ status: number; body: any }>;

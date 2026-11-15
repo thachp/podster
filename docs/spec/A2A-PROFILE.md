@@ -2,7 +2,7 @@
 
 What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md), which the owner accepted on 2026-11-08. The choices behind it are [decisions 107 to 143](PRODUCT.md#decisions-needed), and the order of work is in the [M3 plan](../m3-plan.md).
 
-**Status: preview, not available.** As of M3 step 10, the card is published, every request must authenticate, and an agent can read its tasks, post to their threads, and accept, decline, release and submit through Podster's lifecycle extension. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). **2026-11-11:** the owner called the gate met, accepting local runs for four items that didn't run on staging ([decision 193](PRODUCT.md#decisions-needed)). This page's status and the card's wording weren't changed, and whether they change is a separate question for the owner. Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
+**Status: preview, not available.** As of M3 step 10, the card is published, every request must authenticate, and an agent can read its tasks, post to their threads, and accept, decline, release and submit through Podster's lifecycle extension. Since the architect's ruling of 2026-11-14, for the engineer in the [todo app's workroom run](../acceptance-todo-app.md#72-agents-and-how-they-connect), it can also claim a role, get a task's repository token, and name a commit and pull request when it submits, under exactly MCP's rules. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). **2026-11-11:** the owner called the gate met, accepting local runs for four items that didn't run on staging ([decision 193](PRODUCT.md#decisions-needed)). This page's status and the card's wording weren't changed, and whether they change is a separate question for the owner. Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
 
 ## Protocol
 
@@ -97,7 +97,11 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
 | `podster.lifecycle.v1.AcceptTask` | `accept_task` | `id`, `version`, `requestId`, and an optional `reason` |
 | `podster.lifecycle.v1.DeclineTask` | `decline_task` | `id`, `version`, `requestId`, `reason` |
 | `podster.lifecycle.v1.ReleaseTask` | `release_task` | `id`, `version`, `requestId`, `reason` |
-| `podster.lifecycle.v1.SubmitTask` | `submit_task` | `id`, `version`, `requestId`, and an optional `note`, `artifacts` and `files` |
+| `podster.lifecycle.v1.SubmitTask` | `submit_task` | `id`, `version`, `requestId`, and an optional `note`, `artifacts`, `files`, `commitSha` and `prNumber` |
+| `podster.lifecycle.v1.ClaimRole` | `claim_role` | `workspaceId`, `roleId`, `requestId` |
+| `podster.lifecycle.v1.GetRepoAccess` | `get_repo_access` | `id` only. **Only while managed repositories are on**, as MCP's tool is listed only then |
+
+- **What an `/a2a` token reaches** is exactly these methods, `GetTask`, `ListTasks` and `SendMessage`, and the capabilities they call. `packages/contracts/capabilities.yaml` lists them under `a2a`, the gateway's `A2A_CAPABILITIES` is the same set, and a test holds the two together. No other capability, merging and granting among them, can be reached with an `/a2a` token, and an `/a2a` token is still refused at `/mcp`.
 
 - **Parameters:**
   - `id` is the task's A2A ID.
@@ -107,14 +111,23 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
   - `note` is up to 16 KB.
   - `artifacts` is up to 10 links of `{ uri, label }`.
   - `files` is up to 10 of `{ id, label? }`. Each names an upload the agent made with `create_upload` and `task_id`, over MCP as the same agent, and which has scanned as ready. M2's rules decide them: the uploader, the task, the state, at most 10 links and files together, and each file pinned to its hash. A file the API refuses answers `RequestMalformedError` naming its code, such as `file_not_ready` or `file_not_found`, never `TaskNotFoundError`, because the task was already found.
+  - `commitSha` is the commit, as text, and `prNumber` the pull request's number, a whole number. They're MCP's `commit_sha` and `pr_number`, sent to the API under those names, and only their types are checked here, as MCP's tool schema checks them. The API decides the rest, exactly as for MCP: a linked task needs a full commit ID, 40 or 64 lowercase hexadecimal digits (`invalid_argument`), and while managed repositories are on, its pull request (`invalid_argument` without one, then `pull_request_not_found`, `pull_request_from_fork`, `pull_request_wrong_base`, `pull_request_not_open`, `pull_request_draft`, `commit_changed`, `pull_request_in_use` and `pull_request_changed`). **While managed repositories are off,** `prNumber` is dropped unread, not checked or sent, as MCP's tool drops `pr_number`. The body the API gets is the one MCP's `submit_task` sends for the same arguments: `note`, `artifacts` and `files` go only when given.
+  - `workspaceId` and `roleId` name the room and the opening, each 1 to 200 printable characters. The room decides whether the agent may claim it: who claims comes only from the token, and a principal, preset or scopes in the request are refused by name.
+  - `GetRepoAccess` takes the task's `id` and nothing else, not even a `requestId`: MCP's `get_repo_access` takes no key, and the API keeps none, because a stored answer would be a second copy of the token. Asking again is safe, and the API answers it: the same token until 5 minutes before it expires, then a new one.
   - Any other parameter is refused, so nothing a client adds is read for meaning.
-- **Answers:** the task, as `GetTask` reads it afterwards. If the command leaves the caller unable to see the task, as a decline does, the answer is the task as the command left it, with no history.
-- **Refusals:**
-  - A task the caller can't see, a missing one and a malformed ID all answer `TaskNotFoundError`.
-  - A stale `version` answers `RequestMalformedError` saying to read the task again.
+- **Answers:** the task, as `GetTask` reads it afterwards. If the command leaves the caller unable to see the task, as a decline does, the answer is the task as the command left it, with no history. `ClaimRole` answers the claim as MCP's `claim_role` does: `{ role_id, principal_id, status, claimed_at, access }`. `GetRepoAccess` answers MCP's `get_repo_access` answer, exactly the contract's `RepoAccess` fields, `{ token, expires_at, repository, clone_url, permissions, authority_ends_at }`, with `Cache-Control: no-store`. An answer of any other shape is "Internal error", and never passed on.
+- **The token** is in that answer only. The gateway never logs it, keeps it or caches it: a failure is logged as the operation, the agent's ID and a status. Keep it out of files, commits, logs and messages, and use it only with `clone_url`.
+- **Refusals** carry the API's fixed code, the one MCP's tool answers, in the error's `ErrorInfo`, as `data[0].metadata.code`, except where a task reads as missing:
+  - A task the caller can't see, a missing one and a malformed ID all answer `TaskNotFoundError`, with no code. So do `not_allowed`, `access_revoked` and `agent_disconnected` on a task, which MCP names: this extension has read those as a missing task since step 10, and `GetRepoAccess` does the same.
+  - A stale `version` answers `RequestMalformedError` saying to read the task again, `version_conflict`.
   - A move the task's state doesn't allow, or an archived room, answers `UnsupportedOperationError`.
-  - A request the API refuses as malformed answers `RequestMalformedError` naming the fixed code, such as `limit_exceeded`.
-  - Anything else answers "Internal error".
+  - A request the API refuses as malformed answers `RequestMalformedError` naming the fixed code, such as `limit_exceeded`, `invalid_argument` or `idempotency_mismatch`. So does a refused pull request, such as `pull_request_not_found`, which is never read as a missing task.
+  - A room's repository that can't take a submission now answers `UnsupportedOperationError`: `repo_not_ready`, `pull_request_unread`, `change_not_found` or `task_not_linked`.
+  - `ClaimRole` names every refusal MCP names: `not_allowed` (not invited), `already_claimed`, `role_full`, `role_not_found`, `workspace_not_found`, `access_revoked`, `agent_disconnected` and `workspace_archived`, as `UnsupportedOperationError`.
+  - `GetRepoAccess` names the repository's refusals as MCP does, as `UnsupportedOperationError`: `grant_required`, `grant_expired`, `grant_stale`, `public_participant`, `controller_departed`, `task_not_linked`, `repo_not_ready`, `task_not_active`, `repo_access_busy`, and `not_found` while the API's own switch is off. A grant given to someone in the room through a public claim is refused `grantee_public` when the person gives it, so such an agent holds none, and asking answers `public_participant`.
+  - A call to try again later, `rate_limited`, `standing_unknown`, `repo_access_unavailable`, `provider_unavailable`, `provider_mismatch` or `upstream_unavailable`, answers "Internal error" (`-32603`) with its code.
+  - Anything else answers "Internal error", with no code.
+- **While managed repositories are off,** `GetRepoAccess` doesn't exist: it answers `-32601` "Method not found" exactly as a method that doesn't exist, with the extension named or not, and nothing reaches the API. The card lists it only while they're on.
 - **Not here:** cancelling, which belongs to the requester or an admin, and verifying, which belongs to the reviewer, never to a remote state or to this extension.
 
 ## Outbound

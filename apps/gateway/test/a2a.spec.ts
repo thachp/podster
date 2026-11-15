@@ -40,9 +40,10 @@ describe("the Agent Card", () => {
     const card = await res.json<any>();
     expect(card.supportedInterfaces).toEqual([{ url: `${BASE}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }]);
     expect(card.capabilities).toMatchObject({ streaming: false, pushNotifications: false, extendedAgentCard: false });
-    // Step 10: the lifecycle extension, declared and not required.
+    // Step 10: the lifecycle extension, declared and not required. ClaimRole since the engineer's steps (2026-11-14), and
+    // GetRepoAccess only while managed repositories are on, which they aren't here (a2a-engineer.spec.ts).
     expect(card.capabilities.extensions).toEqual([
-      { uri: "https://podster.dev/a2a/lifecycle/v1", description: expect.any(String), required: false, params: { methods: ["podster.lifecycle.v1.AcceptTask", "podster.lifecycle.v1.DeclineTask", "podster.lifecycle.v1.ReleaseTask", "podster.lifecycle.v1.SubmitTask"] } },
+      { uri: "https://podster.dev/a2a/lifecycle/v1", description: expect.any(String), required: false, params: { methods: ["podster.lifecycle.v1.AcceptTask", "podster.lifecycle.v1.DeclineTask", "podster.lifecycle.v1.ReleaseTask", "podster.lifecycle.v1.SubmitTask", "podster.lifecycle.v1.ClaimRole"] } },
     ]);
     expect(card.skills).toEqual([]);
     // Step 7: the same consent as MCP, for scope `a2a`, with PKCE.

@@ -186,3 +186,18 @@ transfer_only:
 # delivery, with an assertion that names no one. It is never a capability or a tool.
 provider_only:
   - receiveGithubDelivery
+# What an `/a2a` token reaches (docs/spec/A2A-PROFILE.md), and nothing else: each A2A method or lifecycle-extension method,
+# and the one capability it calls, as the agent the token names. The gateway's A2A_CAPABILITIES is exactly these
+# capabilities, and a gateway test holds the two together, so the token's reach changes only with this list. Policy and the
+# state machine decide every call, as for MCP. ClaimRole, GetRepoAccess and SubmitTask's commit and pull request were added
+# for the engineer's steps on 2026-11-14. GetRepoAccess, like get_repo_access, exists only while managed repositories are on.
+a2a:
+  GetTask: get_task
+  ListTasks: [list_workspaces, list_tasks, get_task]
+  SendMessage: send_message
+  podster.lifecycle.v1.AcceptTask: accept_task
+  podster.lifecycle.v1.DeclineTask: decline_task
+  podster.lifecycle.v1.ReleaseTask: release_task
+  podster.lifecycle.v1.SubmitTask: submit_task
+  podster.lifecycle.v1.ClaimRole: claim_role
+  podster.lifecycle.v1.GetRepoAccess: get_repo_access

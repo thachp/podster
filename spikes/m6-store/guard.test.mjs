@@ -1,7 +1,7 @@
 // Offline: `node --test spikes/m6-store/guard.test.mjs`. It makes no request and reads no token.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NAMESPACE, allow, spikeNamed } from "./guard.mjs";
+import { NAMESPACE, SCRIPT_IN_SOURCE, allow, spikeNamed } from "./guard.mjs";
 
 const ACCOUNT = "0123456789abcdef0123456789abcdef"; // made up
 const API = "https://api.cloudflare.com/client/v4";
@@ -18,6 +18,39 @@ const ok = (method, url, body = null, metadata = null) => assert.equal(allow(met
 const no = (method, url, body = null, metadata = null) => assert.throws(() => allow(method, url, ACCOUNT, { body, made, metadata }));
 const meta = (extra = {}) => JSON.stringify({ main_module: "index.js", compatibility_date: "2026-11-01", ...extra });
 const PLAIN = meta();
+
+test("the account must be exactly 32 lowercase hex, or nothing is sent", () => {
+  const path = (acct) => `${API}/accounts/${acct}/workers/scripts/spike-store-ab12-x`;
+  for (const bad of [
+    "0123456789abcdef0123456789abcde\\",
+    "0123456789abcdef0123456789abcde.",
+    "0123456789abcdef0123456789abcd.*",
+    "0123456789abcdef0123456789abc|()",
+    "[0-9a-f]{32}",
+    ".*",
+    "0123456789ABCDEF0123456789ABCDEF",
+    "0123456789abcdef0123456789abcdef0",
+    "",
+    null,
+  ]) {
+    for (const method of ["GET", "PUT", "DELETE"]) {
+      assert.throws(() => allow(method, path("0123456789abcdef0123456789abcdef"), bad, { made, metadata: PLAIN }), /no account ID/, `${method} ${bad}`);
+    }
+  }
+});
+
+test("a write is refused unless its path is under this account", () => {
+  const other = `${API}/accounts/fedcba9876543210fedcba9876543210`;
+  no("PUT", `${other}/workers/scripts/spike-store-ab12-x`, null, PLAIN);
+  no("POST", `${other}/storage/kv/namespaces`, JSON.stringify({ title: "spike-store-ab12-kv-a" }));
+  no("DELETE", `${other}/storage/kv/namespaces/${KV_MADE}`);
+  no("POST", `${other}/d1/database/${D1_MADE}/query`);
+  no("PUT", `${account}workers/scripts/spike-store-ab12-x`, null, PLAIN);
+});
+
+test("the namespace written into the script pattern is NAMESPACE", () => {
+  assert.ok(SCRIPT_IN_SOURCE.includes(`\\/namespaces\\/${NAMESPACE}\\/scripts\\/`));
+});
 
 test("names", () => {
   assert.ok(spikeNamed("spike-store-ab12-kv-a"));

@@ -20,7 +20,17 @@ export const spikeNamed = (name) => typeof name === "string" && SPIKE_NAME.test(
 
 const ORIGIN = "https://api.cloudflare.com";
 const ROOT = "/client/v4/";
-const NAME = "spike-store-[a-z0-9-]{1,40}";
+// The paths a write may take, after `/client/v4/accounts/<account>`. Literal patterns only. The namespace in
+// SCRIPT_IN is NAMESPACE written out, and guard.test.mjs checks that the two agree.
+const SCRIPT_AT = /^\/workers\/scripts\/(spike-store-[a-z0-9-]{1,40})$/;
+const SCRIPT_IN = /^\/workers\/dispatch\/namespaces\/podster-staging-apps\/scripts\/(spike-store-[a-z0-9-]{1,40})$/;
+const SCRIPT_SUBDOMAIN = /^\/workers\/scripts\/(spike-store-[a-z0-9-]{1,40})\/subdomain$/;
+const KV_NAMESPACES = /^\/storage\/kv\/namespaces$/;
+const KV_NAMESPACE = /^\/storage\/kv\/namespaces\/([0-9a-f]{32})$/;
+const KV_VALUE = /^\/storage\/kv\/namespaces\/([0-9a-f]{32})\/values\/(spike-store-[a-z0-9-]{1,40})$/;
+const D1_DATABASES = /^\/d1\/database$/;
+const D1_DATABASE = /^\/d1\/database\/([0-9a-f-]{36})(\/query)?$/;
+export const SCRIPT_IN_SOURCE = SCRIPT_IN.source;
 const HEX32 = /^[0-9a-f]{32}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -115,43 +125,46 @@ export function allow(method, url, account, { body = null, made = { kv: new Set(
   if (parsed.origin !== ORIGIN || !parsed.pathname.startsWith(ROOT)) throw new Error("refusing: not Cloudflare's API");
   if (method === "GET") return url;
 
-  const path = parsed.pathname;
   const search = parsed.search;
-  const base = `/client/v4/accounts/${account}`;
-  const match = (re) => path.match(new RegExp(`^${base.replace(/\//g, "\\/")}${re}$`));
+  // The account's own prefix is compared as text; what follows it is matched against fixed literal patterns.
+  // No pattern is ever built from a string.
+  const base = `/client/v4/accounts/${account}/`;
+  if (!parsed.pathname.startsWith(base)) throw new Error(`refusing ${method}: not this account`);
+  const rest = parsed.pathname.slice(base.length - 1);
+  const match = (re) => rest.match(re);
 
   // Scripts.
-  const scriptAt = match(`\\/workers\\/scripts\\/(${NAME})`);
-  const scriptIn = match(`\\/workers\\/dispatch\\/namespaces\\/${NAMESPACE}\\/scripts\\/(${NAME})`);
+  const scriptAt = match(SCRIPT_AT);
+  const scriptIn = match(SCRIPT_IN);
   if ((scriptAt || scriptIn) && method === "PUT" && search === "") {
     checkMetadata(metadata, made, Boolean(scriptAt));
     return url;
   }
   if ((scriptAt || scriptIn) && method === "DELETE" && (search === "" || search === "?force=true")) return url;
-  if (match(`\\/workers\\/scripts\\/(${NAME})\\/subdomain`) && method === "POST" && search === "") return url;
+  if (match(SCRIPT_SUBDOMAIN) && method === "POST" && search === "") return url;
 
   // KV.
-  if (match("\\/storage\\/kv\\/namespaces") && method === "POST" && search === "") {
+  if (match(KV_NAMESPACES) && method === "POST" && search === "") {
     if (spikeNamed(onlyField(body, "title"))) return url;
     throw new Error("refusing: a KV namespace's title must be a spike name");
   }
-  const kvNamespace = match("\\/storage\\/kv\\/namespaces\\/([0-9a-f]{32})");
+  const kvNamespace = match(KV_NAMESPACE);
   if (kvNamespace && method === "DELETE" && search === "") {
     if (made.kv.has(kvNamespace[1])) return url;
     throw new Error("refusing: not a KV namespace this spike made");
   }
-  const kvValue = match(`\\/storage\\/kv\\/namespaces\\/([0-9a-f]{32})\\/values\\/(${NAME})`);
+  const kvValue = match(KV_VALUE);
   if (kvValue && method === "PUT" && search === "") {
     if (made.kv.has(kvValue[1])) return url;
     throw new Error("refusing: not a KV namespace this spike made");
   }
 
   // D1.
-  if (match("\\/d1\\/database") && method === "POST" && search === "") {
+  if (match(D1_DATABASES) && method === "POST" && search === "") {
     if (spikeNamed(onlyField(body, "name"))) return url;
     throw new Error("refusing: a D1 database's name must be a spike name");
   }
-  const d1 = match("\\/d1\\/database\\/([0-9a-f-]{36})(\\/query)?");
+  const d1 = match(D1_DATABASE);
   if (d1 && UUID.test(d1[1]) && search === "") {
     if (!made.d1.has(d1[1])) throw new Error("refusing: not a D1 database this spike made");
     if (method === "DELETE" && !d1[2]) return url;

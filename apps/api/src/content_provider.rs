@@ -513,27 +513,33 @@ impl Provider {
         })
     }
 
-    /// Writes a host's serve entry, naming one script. `true` only when the provider said it was written.
-    pub(crate) async fn write_entry(&self, host: &str, script: &str) -> bool {
+    /// What a host's serve entry holds for one script: on the content domain, an app's default host, the script's name
+    /// alone; anywhere else, a custom hostname, the script's name and the host it is written under
+    /// (`podster_core::hostnames::custom_entry_value`, M6 step 8c), so a value under any other key serves nothing.
+    /// `None` for a script that isn't a name Podster makes, or a host on the content domain that isn't that script's
+    /// app's default host: a host there takes only its own app's scripts, and a host two labels deep is nobody's.
+    fn entry_value(&self, host: &str, script: &str) -> Option<String> {
         let ScriptOwner::Podster { label, .. } = script_owner(script) else {
+            return None;
+        };
+        if self.on_content_domain(host) {
+            return (self.default_host_label(host) == Some(label)).then(|| script.to_owned());
+        }
+        podster_core::hostnames::custom_entry_value(host, script)
+    }
+
+    /// Writes a host's serve entry, naming one script, in the form [`Provider::entry_value`] gives. `true` only when
+    /// the provider said it was written.
+    pub(crate) async fn write_entry(&self, host: &str, script: &str) -> bool {
+        let Some(value) = self.entry_value(host, script) else {
             return false;
         };
-        // A host on the content domain is one app's default host, and takes only that app's scripts: the label in
-        // the host and the label in the script's name must be the same one. A host two labels deep is nobody's.
-        if self.on_content_domain(host) && self.default_host_label(host) != Some(label) {
-            return false;
-        }
         let Some(url) = self.entry_url(host) else {
             return false;
         };
-        call(
-            Method::Put,
-            url,
-            &self.routing_token,
-            Some(script.to_owned()),
-        )
-        .await
-        .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
+        call(Method::Put, url, &self.routing_token, Some(value))
+            .await
+            .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
     }
 
     /// Deletes a host's serve entry. `true` only when the provider said it was done. The applier still reads the
@@ -556,11 +562,16 @@ impl Provider {
             return Entry::Unknown;
         };
         match answer.status {
+            // Read in the form written for this host: a default host's script alone, a custom hostname's naming that
+            // very host. Anything else there is foreign, a value in the other form among it.
             200 => match String::from_utf8(answer.body) {
-                Ok(script) if matches!(script_owner(&script), ScriptOwner::Podster { .. }) => {
-                    Entry::Present(script)
-                }
-                _ => Entry::Foreign,
+                Ok(value) if self.on_content_domain(host) => match script_owner(&value) {
+                    ScriptOwner::Podster { .. } => Entry::Present(value),
+                    ScriptOwner::Foreign => Entry::Foreign,
+                },
+                Ok(value) => podster_core::hostnames::custom_entry_script(host, &value)
+                    .map_or(Entry::Foreign, |script| Entry::Present(script.to_owned())),
+                Err(_) => Entry::Foreign,
             },
             404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => Entry::Absent,
             _ => Entry::Unknown,

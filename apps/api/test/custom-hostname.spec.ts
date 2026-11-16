@@ -165,13 +165,16 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     expect(await providerRow(r)).toMatchObject({ provider_status: "active" });
     expect((await cloudflare(name)).calls).toEqual(["create", "read"]);
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
-    // A custom host serving, as 8c will write one, to show the end clears it.
-    await inRoom(r.room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'custom', ?, 1, ?, ?, 2, 1)", name, r.label, PREV, `${r.label}.${PREV}`));
+    // Read active with the claim live at its object, but this room has no content provider: no applier could write or
+    // remove an entry, so no custom host is made (the security re-check of PR #404), and nothing waits on one.
+    expect(await all(r.room, "SELECT host FROM serve_state WHERE host = ?", name)).toEqual([]);
     // Cloudflare reports it moved: the claim ends, and the room stops serving on the name in the same transaction.
     await setAtCloudflare(name, "moved");
-    await step(r);
+    // Its last read is put six hours back, the longest any read waits (8c, D5).
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() - 6 * 3600_000 - 1000));
+    await switchedOn(() => quietPass(r));
     expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1, end_reason: "hostname_moved" });
-    expect(await all(r.room, "SELECT script_name, closed FROM serve_state WHERE host = ?", name)).toEqual([{ script_name: null, closed: 1 }]);
+    expect(await all(r.room, "SELECT host FROM serve_state WHERE host = ?", name)).toEqual([]);
     // The object is told first, and the claim, still holding the name, is never granted again.
     await step(r);
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id, state: "ending" });
@@ -188,6 +191,7 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     await confirmGone(r);
     expect((await providerRow(r)).gone_at).not.toBeNull();
     expect((await claimState(name)).claim).not.toBeNull();
+    // With no row for the host, nothing was ever written for it: freed at once (the review of PR #404, S1).
     await step(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_moved" });
     expect(await claimState(name)).toEqual({ claim: null, suspended: false, generation: 1 });

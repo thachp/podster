@@ -4,6 +4,7 @@ import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { customRoutingCases } from "./custom-routing.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
 // room unpublishes in one transaction, its applier removes the serve entries, and its delete job removes the scripts
@@ -1112,15 +1113,15 @@ describe("the room's applier and its delete job", () => {
     await pass(a.room);
     expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 6, attempts: 0, last_code: null });
     await alarmQuiet(stub(a.room));
-    // A custom hostname that wants a script: its claim can't be asked yet, so nothing is written for it, and an entry
-    // that is somehow there is removed, since nothing can confirm it.
+    // A custom hostname that wants a script, in a room the gate on claims is closed for, which is every room but a
+    // test's opt-in: nothing is written for it, and an entry that is somehow there is removed (8c).
     await fake("/seed", { entries: { "app.example.org": a.served } });
     await inRoom(a.room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES ('app.example.org', 'custom', ?, 1, ?, ?, 1, 1)", a.label, rel(2), a.served));
     await pass(a.room);
     state = await held();
     expect(state.entries["app.example.org"]).toBeUndefined();
     expect(state.calls.filter((call) => call.name === "app.example.org").map((call) => `${call.op} ${call.status}`)).toEqual(["entry.delete 200", "entry.get 404"]);
-    expect((await applyRows(a.room)).find((row: any) => row.host === "app.example.org")).toMatchObject({ applied_version: null, last_code: "claim_check_not_built" });
+    expect((await applyRows(a.room)).find((row: any) => row.host === "app.example.org")).toMatchObject({ applied_version: null, last_code: "hostname_claims_incomplete" });
     // A state that names a script while the app is suspended is a fault no command makes. Even so, nothing is written,
     // and the entry that is there comes out.
     // Nothing is set or running from here: the rows changed next are met first by the pass below, not by a stray alarm.
@@ -1957,19 +1958,20 @@ describe("an operator's suspension of a custom hostname", () => {
   it("is found for the reconcile by the hostname's own object, which is woken, and a host the room refuses is told to operators", async () => {
     await fresh();
     const c = await claimed();
-    // The entry for the custom hostname names another of the room's scripts than the room wants.
-    await fake("/seed", { entries: { [c.hostname]: c.kept } });
+    // The entry for the custom hostname names another of the room's scripts than the room wants, in a custom
+    // hostname's own form (8c).
+    await fake("/seed", { entries: { [c.hostname]: `${c.kept}@${c.hostname}` } });
     const summary = await reconcile("entries");
     expect(summary).toMatchObject({ code: "ok", listed: 2, changed: 1, unanswered: 0 });
-    // The room's own applier did the rest. Nothing confirms a custom hostname's claim until custom domains are built,
-    // so it takes the entry out and refuses the host; the default host's entry, which matched, is untouched.
+    // The room's own applier did the rest. The gate on claims is closed in this room, so its checks before a write
+    // refuse: it takes the entry out and refuses the host; the default host's entry, which matched, is untouched.
     await pass(c.room);
     const state = await held();
     expect([state.entries[c.hostname], state.entries[c.host]]).toEqual([undefined, c.served]);
     expect(state.calls.filter((call) => call.name === c.host).map((call) => call.op)).toEqual(["entry.get"]);
     // The next pass carries the refusal to the operators' record, by the host it is about.
     await reconcile("entries");
-    expect(await found()).toEqual([`host_refused ${c.hostname} claim_check_not_built`]);
+    expect(await found()).toEqual([`host_refused ${c.hostname} hostname_claims_incomplete`]);
     await alarmQuiet(stub(c.room));
   });
 
@@ -2137,7 +2139,7 @@ describe("the two reconciles", () => {
     expect(summary).toMatchObject({ code: "ok", listed: 8, changed: 0, unanswered: 0 });
     expect(await found()).toEqual([
       `entry_foreign_name ${FAKE.domain}`, "entry_foreign_name Not_A-Host", `entry_foreign_name deep.${a.host}`,
-      `entry_without_room ${hostname}`, `entry_without_room ${nowhere}.${FAKE.domain}`, `entry_without_room ${stray}.${FAKE.domain}`, `entry_without_room ${unlisted.host}`,
+      `custom_entry_without_claim ${hostname}`, `entry_without_room ${nowhere}.${FAKE.domain}`, `entry_without_room ${stray}.${FAKE.domain}`, `entry_without_room ${unlisted.host}`,
     ].sort());
     // Every one is left exactly as it was: no entry was written or removed, by the pass or by any room.
     await pass(a.room);
@@ -2464,3 +2466,6 @@ describe("the two reconciles", () => {
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 });
+
+// M6 step 8c's cases: here, so they never run beside this file's resets of the content provider's stand-in.
+customRoutingCases();

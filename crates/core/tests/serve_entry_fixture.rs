@@ -53,3 +53,76 @@ fn every_invalid_name_is_foreign() {
         );
     }
 }
+
+/// A scalar string of the fixture, by the same reading as [`strings`].
+fn scalar(name: &str) -> &'static str {
+    let Some(start) = FIXTURE.find(&format!("\"{name}\": \"")) else {
+        return "";
+    };
+    FIXTURE
+        .get(start + name.len() + 5..)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_custom_hosts_entry_is_read_only_in_the_fixtures_form_and_for_its_own_host() {
+    use podster_core::hostnames::{
+        custom_entry_script, custom_entry_value, CUSTOM_ENTRY_SEPARATOR,
+    };
+    let host = scalar("custom_entry_host");
+    assert_eq!(host, "app.example.com");
+    assert_eq!(
+        scalar("custom_entry_separator"),
+        CUSTOM_ENTRY_SEPARATOR.to_string()
+    );
+    let valid = strings("valid_custom_entries");
+    assert!(valid.len() >= 2);
+    for value in valid {
+        let script = custom_entry_script(host, value);
+        assert!(script.is_some(), "{value:?} should be {host}'s entry");
+        // What Rust writes for that script is exactly that value.
+        assert_eq!(
+            custom_entry_value(host, script.unwrap_or_default()).as_deref(),
+            Some(value)
+        );
+    }
+    let invalid = strings("invalid_custom_entries");
+    assert!(invalid.len() >= 15);
+    for value in invalid {
+        assert_eq!(
+            custom_entry_script(host, value),
+            None,
+            "{value:?} should not be {host}'s entry"
+        );
+    }
+}
+
+#[test]
+fn no_custom_entry_is_written_or_read_for_a_host_rust_never_writes() {
+    use podster_core::hostnames::{
+        custom_entry_script, custom_entry_value, CUSTOM_ENTRY_SEPARATOR,
+    };
+    let script = strings("valid_script_names")
+        .get(1)
+        .copied()
+        .unwrap_or_default();
+    let refused = strings("custom_entry_refused_hosts");
+    assert!(refused.len() >= 10);
+    for host in refused {
+        let value = format!("{script}{CUSTOM_ENTRY_SEPARATOR}{host}");
+        assert_eq!(custom_entry_value(host, script), None, "{host:?}");
+        assert_eq!(custom_entry_script(host, &value), None, "{host:?}");
+    }
+    // A public suffix alone is a formed host: the entry's form doesn't judge it, the claim does.
+    let formed = strings("custom_entry_formed_hosts");
+    assert!(formed.contains(&"co.uk"));
+    for host in formed {
+        let value = format!("{script}{CUSTOM_ENTRY_SEPARATOR}{host}");
+        assert_eq!(
+            custom_entry_value(host, script).as_deref(),
+            Some(value.as_str())
+        );
+        assert_eq!(custom_entry_script(host, &value), Some(script));
+    }
+}

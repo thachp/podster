@@ -39,15 +39,15 @@
 //! proof was recorded and whose granted answer was lost stays held at the object while the gate is closed, which fails
 //! closed, until a removal withdraws it.
 //!
-//! **What this doesn't do:** write a serve entry for a custom hostname, or recheck a claim. Nothing here serves: the
-//! applier still writes nothing for a custom hostname. A committed claim's custom hostname at Cloudflare and its long
-//! end are `custom_hostname`'s (8b).
+//! **What this doesn't do:** write a serve entry for a custom hostname, or recheck a claim. Nothing here serves. A
+//! committed claim's custom hostname at Cloudflare and its long end are `custom_hostname`'s (8b), and so is routing
+//! (8c), whose entry only the applier writes (`takedown`).
 //!
 //! Logs carry IDs and codes only, never a hostname or a challenge's value.
 use super::*;
 use crate::hostname_proof::Resolver;
 use podster_core::hostname_requests::{
-    after_ask, request_rate_allows, retry_wait_ms, unmap, HostnameRequestState, Unmap,
+    after_ask, claimed_read_wait_ms, request_rate_allows, unmap, HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
     challenge_record_name, challenge_value, mappable, next_proof_check, normalize, proof_matches,
@@ -136,6 +136,26 @@ pub(super) fn asked(body: &Value) -> R<Asked> {
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
+}
+
+/// The proof job's clock. Test builds only: a room a test gave `test_hostname_clock (now)` reads that, so a wait's edge
+/// is shown to the millisecond with no real time spent (review standard 1).
+fn job_now(sql: &SqlStorage) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if let Some(now) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_clock'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| rows(sql, "SELECT now FROM test_hostname_clock", vec![]).ok())
+    .and_then(|found| found.first().map(|row| int(&row["now"])))
+    {
+        return now;
+    }
+    let _ = sql;
+    now_ms()
 }
 
 /// One request as the contract's `AppHostnameRequest` gives it. A pending request past its 72 hours whose proof was
@@ -450,8 +470,28 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
     let checked = (!row["checked_at"].is_null()).then(|| int(&row["checked_at"]));
     // An ask or a withdrawal that got no answer waits as long as has gone by since the request last changed, which
     // `checked` never moves, so the wait doubles from a minute up to an hour.
+    // A committed claim whose custom hostname reads `active` and is routed is read less often (8c, the deep review's
+    // D5): routing gives the read its purpose, and once routed it only has to notice a change. A host the applier
+    // refused isn't routed in that sense: it is read again at the shortest wait, so it opens again once the cause clears
+    // (the review of PR #404, S3).
+    let routed_active = state == Some(HostnameRequestState::Claimed)
+        && !rows(
+            sql,
+            "SELECT 1 AS r FROM hostname_provider p JOIN serve_state s ON s.host = ? AND s.kind = 'custom' AND s.closed = 0
+               WHERE p.request_id = ? AND p.provider_status = 'active'
+                 AND NOT EXISTS (SELECT 1 FROM serve_apply a WHERE a.host = s.host AND a.refused_version = s.version)",
+            vec![
+                row["hostname"].as_str().unwrap_or_default().into(),
+                row["id"].as_str().unwrap_or_default().into(),
+            ],
+        )?
+        .is_empty();
     let retry = checked.map_or(0, |at| {
-        at.saturating_add(retry_wait_ms(int(&row["updated_at"]), at))
+        at.saturating_add(claimed_read_wait_ms(
+            int(&row["updated_at"]),
+            at,
+            routed_active,
+        ))
     });
     Ok(match state {
         Some(HostnameRequestState::Pending) if row["proved_at"].is_null() => {
@@ -535,22 +575,7 @@ impl Workspace {
     /// room a test gave the table `test_hostname_claims_open` has it open, so the rest of the path can be shown. A
     /// build without the `failpoints` feature never reads that table.
     pub(super) fn hostname_claims_open(&self) -> bool {
-        if HOSTNAME_CLAIMS_COMPLETE {
-            return true;
-        }
-        #[cfg(feature = "failpoints")]
-        {
-            rows(
-                &self.state.storage().sql(),
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_claims_open'",
-                vec![],
-            )
-            .is_ok_and(|found| !found.is_empty())
-        }
-        #[cfg(not(feature = "failpoints"))]
-        {
-            false
-        }
+        claims_open(&self.state.storage().sql())
     }
 
     /// One call to a hostname's own object, by its normalized name. Its answer, or an error for anything but `200`.
@@ -561,24 +586,7 @@ impl Workspace {
         path: &str,
         body: Option<Value>,
     ) -> R<Value> {
-        let stub = self
-            .env
-            .durable_object("HOSTNAME_CLAIM")?
-            .id_from_name(hostname)?
-            .get_stub()?;
-        let mut response = crate::forward(
-            stub,
-            path,
-            "",
-            Headers::new(),
-            method,
-            body.map(|body| body.to_string()),
-        )
-        .await?;
-        if response.status_code() != 200 {
-            return Err(ApiError::internal("the hostname's object refused"));
-        }
-        Ok(response.json::<Value>().await?)
+        super::custom_hostname::claim_call(&self.env, hostname, method, path, body).await
     }
 
     /// The room's proof job, one pass from its alarm. Expired requests are ended; then the open request, if its turn
@@ -589,7 +597,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
         }
-        let now = now_ms();
+        let now = job_now(&sql);
         let store = sql.clone();
         transaction_sync(&self.state, move || sweep_expired(&store, now))?;
         let Some(row) = open_request(&sql)? else {
@@ -736,6 +744,28 @@ impl Workspace {
         };
         let store = sql.clone();
         transaction_sync(&self.state, move || answered(&store, &id, decision, now))
+    }
+}
+
+/// **The gate on claims** ([`HOSTNAME_CLAIMS_COMPLETE`]), from the room's own storage, as
+/// [`Workspace::hostname_claims_open`] reads it: for the applier too, which is no method of the room's.
+pub(super) fn claims_open(sql: &SqlStorage) -> bool {
+    if HOSTNAME_CLAIMS_COMPLETE {
+        return true;
+    }
+    #[cfg(feature = "failpoints")]
+    {
+        rows(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_claims_open'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
+    }
+    #[cfg(not(feature = "failpoints"))]
+    {
+        let _ = sql;
+        false
     }
 }
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS } from "../src/handle";
-import { defaultHostLabel, isHost, isScriptName, scriptLabel, STOP_KEY } from "../src/names";
+import { customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
 
 // The content Worker's handler, against stand-ins for its two bindings (M6 step 4(b), ADR 0010). Nothing here reaches
@@ -109,11 +109,11 @@ describe("what a request may be", () => {
     expect((await get(w, "/sw.js")).status).toBe(200);
   });
 
-  it("serves only an app's default host, and reads nothing for any other", async () => {
+  it("serves on the content domain only an app's default host, and reads nothing for any other name there or no host", async () => {
     const w = world();
-    // The content domain itself, a deeper name, a label of a form no app has, a name elsewhere, and names that
-    // aren't hosts: none is an app's host. Custom hostnames arrive with custom domains, with their own entry form.
-    const others = [DOMAIN, `deep.${HOST}`, `has-dash.${DOMAIN}`, `${"a".repeat(27)}.${DOMAIN}`, `k3v9q2.other-${DOMAIN}`, `k3v9q2.${DOMAIN}.evil.example`, "app.example.org", "localhost", "under_score.example", "xn--caf-dma.example."];
+    // The content domain itself, a deeper name, a label of a form no app has, and names that aren't hosts: none is an
+    // app's host. A host off the content domain may be a custom hostname, which has its own entry form (step 8c).
+    const others = [DOMAIN, `deep.${HOST}`, `has-dash.${DOMAIN}`, `${"a".repeat(27)}.${DOMAIN}`, "localhost", "under_score.example", "xn--caf-dma.example."];
     for (const host of others) {
       // Even with an entry written for it, as only a fault or another writer could.
       w.kv.set(host, SCRIPT);
@@ -122,6 +122,14 @@ describe("what a request may be", () => {
       // The sandbox names the host. For a host that is no app's, it names nothing a page could load from.
       expect(answer.headers.get("content-security-policy"), host).toContain("default-src 'none'");
     }
+    // A name off the content domain holding a default host's form, the script's name alone, serves nothing: only a
+    // custom hostname's own form is read there.
+    for (const host of [`k3v9q2.other-${DOMAIN}`, `k3v9q2.${DOMAIN}.evil.example`, "app.example.org"]) {
+      w.kv.set(host, SCRIPT);
+      const answer = await handle(new Request(`https://${host}/`), w.deps);
+      expect([answer.status, w.sent.length], host).toEqual([404, 0]);
+    }
+    w.reads.length = 0;
     expect([defaultHostLabel(HOST, DOMAIN), defaultHostLabel(DOMAIN, DOMAIN), defaultHostLabel(`a.b.${DOMAIN}`, DOMAIN), defaultHostLabel(`k3v9q2${DOMAIN}`, DOMAIN), defaultHostLabel(HOST, ""), defaultHostLabel(HOST, "example")]).toEqual(["k3v9q2", null, null, null, null, null]);
     expect([isHost("a.b"), isHost(HOST), isHost("has space.example"), isHost("UPPER.example"), isHost("a..b"), isHost(".a.b"), isHost(`${"a".repeat(250)}.com`)]).toEqual([false, true, false, false, false, false, false]);
     // A content domain that isn't a host, a single label, is no domain, even for a host that would sit under it.
@@ -150,8 +158,10 @@ describe("what a request may be", () => {
     }
     // And one that says a secure request wasn't is ignored the same way.
     expect((await get(w, "/", { headers: { "x-forwarded-proto": "http" } })).status).toBe(200);
-    // The other refusals come first, and a host that is no app's is not-found, never redirected.
-    expect([(await plain("/", { method: "POST" })).status, (await plain("/", { headers: { "service-worker": "script" } })).status, (await plain("/", {}, "app.example.org")).status]).toEqual([405, 403, 404]);
+    // The other refusals come first, and a name on the content domain that is no app's is not-found, never
+    // redirected. A name off it may be a custom hostname, which goes to HTTPS the same way, with nothing read.
+    expect([(await plain("/", { method: "POST" })).status, (await plain("/", { headers: { "service-worker": "script" } })).status, (await plain("/", {}, `deep.${HOST}`)).status]).toEqual([405, 403, 404]);
+    expect((await plain("/a?b=1", {}, "app.example.org")).headers.get("location")).toBe("https://app.example.org/a?b=1");
     // Nothing was read and nothing was asked of any app for a plain request.
     expect([w.reads.filter((read) => read.key !== STOP_KEY && read.key !== HOST), w.sent.length]).toEqual([[], 1]);
     const fresh = world();
@@ -272,6 +282,102 @@ describe("the serve entry", () => {
     w.kv.set(`other.${DOMAIN}`, others[0]);
     w.apps.set(others[0], () => new Response("its own files"));
     expect([(await get(w, "/", {}, `other.${DOMAIN}`)).status, w.sent.map((sent) => sent.script)]).toEqual([200, [others[0]]]);
+  });
+});
+
+describe("a custom hostname (M6 step 8c)", () => {
+  const CUSTOM = "app.example.com";
+  const ENTRY = `${SCRIPT}@${CUSTOM}`;
+  /** A world whose custom hostname holds its entry, in the form the API writes for it. */
+  const custom = () => {
+    const w = world();
+    w.kv.set(CUSTOM, ENTRY);
+    return w;
+  };
+
+  it("serves the script its entry names, only when that entry names this very host, with the sandbox naming the host", async () => {
+    const w = custom();
+    const answer = await get(w, "/index.html?x=1", {}, CUSTOM);
+    expect([answer.status, await answer.text()]).toEqual([200, "<h1>app</h1>"]);
+    expect(w.reads).toEqual([{ key: STOP_KEY, cacheTtl: 30 }, { key: CUSTOM, cacheTtl: 30 }]);
+    expect(w.sent.map((sent) => [sent.script, sent.request.url])).toEqual([[SCRIPT, `https://${CUSTOM}/index.html?x=1`]]);
+    expect(headersOf(answer)).toEqual({
+      ...FIXED,
+      "content-type": "text/html",
+      "content-security-policy": sandboxPolicy(`https://${CUSTOM}`),
+      // A custom hostname is a customer's name: its HSTS never pins the customer's other names, and is never preloaded.
+      "strict-transport-security": "max-age=31536000",
+    });
+    // The same value under another name is nothing: a value copied, or written under the wrong key, serves nothing.
+    w.kv.set("www.example.com", ENTRY);
+    expect((await get(w, "/", {}, "www.example.com")).status).toBe(404);
+  });
+
+  it("reads its entry only in the custom form, by the vectors the API and core are tested against", async () => {
+    expect(fixture.custom_entry_separator).toBe("@");
+    expect(fixture.invalid_custom_entries.length).toBeGreaterThanOrEqual(15);
+    for (const value of fixture.invalid_custom_entries) {
+      const w = world();
+      w.kv.set(fixture.custom_entry_host, value);
+      const answer = await get(w, "/", {}, fixture.custom_entry_host);
+      expect([customEntryScript(fixture.custom_entry_host, value), answer.status, w.sent.length], JSON.stringify(value)).toEqual([null, 404, 0]);
+      expect(headersOf(answer)["strict-transport-security"]).toBe("max-age=31536000");
+    }
+    for (const value of fixture.valid_custom_entries) {
+      const w = world();
+      const script = value.slice(0, value.indexOf("@"));
+      w.kv.set(fixture.custom_entry_host, value);
+      w.apps.set(script, () => new Response("ok"));
+      expect([customEntryScript(fixture.custom_entry_host, value), (await get(w, "/", {}, fixture.custom_entry_host)).status, w.sent.map((sent) => sent.script)], value).toEqual([script, 200, [script]]);
+    }
+  });
+
+  it("reads no entry for a host Rust never writes, and reads a formed host as core does, by the fixture's vectors", async () => {
+    expect(fixture.custom_entry_refused_hosts.length).toBeGreaterThanOrEqual(10);
+    for (const host of fixture.custom_entry_refused_hosts) {
+      expect([isWrittenHost(host), customEntryScript(host, `${SCRIPT}@${host}`)], host).toEqual([false, null]);
+    }
+    // An IP address reaches the Worker as what it is, and nothing is read for it. (A request can't even name a host
+    // whose last label is a number but isn't an address: the URL parser refuses it.)
+    const ip = world();
+    ip.kv.set("192.0.2.1", `${SCRIPT}@192.0.2.1`);
+    expect([(await get(ip, "/", {}, "192.0.2.1")).status, ip.reads.length, ip.sent.length]).toEqual([404, 0, 0]);
+    // A public suffix alone is a formed host, read the same on both sides: the claim refuses it, not the entry's form.
+    for (const host of fixture.custom_entry_formed_hosts) {
+      expect([isWrittenHost(host), customEntryScript(host, `${SCRIPT}@${host}`)], host).toEqual([true, SCRIPT]);
+    }
+  });
+
+  it("answers not-found with no entry, an entry it can't read, and while the domain is stopped, and keeps a default host's HSTS", async () => {
+    const empty = world();
+    const none = await get(empty, "/", {}, CUSTOM);
+    expect([none.status, headersOf(none)]).toEqual([404, { ...NOT_FOUND, "content-security-policy": sandboxPolicy(`https://${CUSTOM}`), "strict-transport-security": "max-age=31536000" }]);
+    const unreadable = custom();
+    unreadable.failReads.keys.add(CUSTOM);
+    expect((await get(unreadable, "/", {}, CUSTOM)).status).toBe(404);
+    const stopped = custom();
+    stopped.kv.set(STOP_KEY, fixture.stop_value);
+    expect([(await get(stopped, "/", {}, CUSTOM)).status, stopped.reads.map((read) => read.key)]).toEqual([404, [STOP_KEY]]);
+    expect([empty.sent, unreadable.sent, stopped.sent]).toEqual([[], [], []]);
+    // A default host keeps `includeSubDomains`: the content domain is Podster's own.
+    expect((await get(world())).headers.get("strict-transport-security")).toBe("max-age=31536000; includeSubDomains");
+  });
+
+  it("is never read with no content domain configured, which is no deployment's way to tell names apart", async () => {
+    for (const domain of ["", "not a domain", "example"]) {
+      const w = custom();
+      w.deps.domain = domain;
+      expect([(await get(w, "/", {}, CUSTOM)).status, w.reads.length, w.sent.length], JSON.stringify(domain)).toEqual([404, 0, 0]);
+    }
+  });
+
+  it("meets the same rules as a default host for its kind: a host with code serves nothing while the switch is off", async () => {
+    const w = custom();
+    w.codeScripts.add(SCRIPT);
+    const answer = await get(w, "/", {}, CUSTOM);
+    expect([answer.status, await answer.text(), w.sent.length]).toEqual([503, "code_apps_off\n", 0]);
+    expect((await get(w, "/", { method: "POST" }, CUSTOM)).status).toBe(405);
+    expect((await get(w, "/sw.js", { headers: { "service-worker": "script" } }, CUSTOM)).status).toBe(403);
   });
 });
 
@@ -683,7 +789,9 @@ describe("a static host, under the same rules", () => {
     const w = world();
     w.deps.codeApps = true;
     // Today's answer to a POST on a host that is no app's, over plain HTTP, while stopped, and with no entry.
-    expect(await answerOf(await get(w, "/", { method: "POST" }, "app.example.org"))).toEqual([405, { ...STATIC_405, "content-security-policy": sandboxPolicy("'none'") }, "method_not_allowed\n"]);
+    expect(await answerOf(await get(w, "/", { method: "POST" }, `deep.${HOST}`))).toEqual([405, { ...STATIC_405, "content-security-policy": sandboxPolicy("'none'") }, "method_not_allowed\n"]);
+    // A custom hostname's the same, with its own origin and HSTS.
+    expect(await answerOf(await get(w, "/", { method: "POST" }, "app.example.org"))).toEqual([405, { ...STATIC_405, "content-security-policy": sandboxPolicy("https://app.example.org"), "strict-transport-security": "max-age=31536000" }, "method_not_allowed\n"]);
     expect(await answerOf(await handle(new Request(`http://${HOST}/`, { method: "POST" }), w.deps))).toEqual([405, STATIC_405, "method_not_allowed\n"]);
     expect(await answerOf(await get(w, "/", { method: "POST" }, `other.${DOMAIN}`))).toEqual([405, { ...STATIC_405, "content-security-policy": sandboxPolicy(`https://other.${DOMAIN}`) }, "method_not_allowed\n"]);
     expect(await answerOf(await get(w, "/", { method: "POST", headers: { "service-worker": "script" } }))).toEqual([405, STATIC_405, "method_not_allowed\n"]);

@@ -850,6 +850,34 @@ pub fn routing_may_start(record: &HostnameRecord, room: &str, cloudflare_status:
     custom_host_may_serve(true, record, room) && cloudflare_status == "active"
 }
 
+/// Between a custom hostname's script and its host in its serve entry (M6 step 8c). Neither a script's name nor a host
+/// can hold it.
+pub const CUSTOM_ENTRY_SEPARATOR: char = '@';
+
+/// A custom hostname's serve entry (M6 step 8c): the script's name, [`CUSTOM_ENTRY_SEPARATOR`], then the host it is
+/// written under. A default host's entry is the script's name alone, so the two forms can't be taken for each other,
+/// and a custom host's value names the one host it may serve. `None` unless the script is a name Podster makes and the
+/// host is written exactly as Podster writes names.
+pub fn custom_entry_value(host: &str, script: &str) -> Option<String> {
+    let made = matches!(
+        crate::release::script_owner(script),
+        crate::release::ScriptOwner::Podster { .. }
+    );
+    // More than one label, as a room's request stores a name (a single label is never mappable).
+    (made && host.contains('.') && normalize(host).ok().as_deref() == Some(host))
+        .then(|| format!("{script}{CUSTOM_ENTRY_SEPARATOR}{host}"))
+}
+
+/// The script a custom hostname's entry names, read for exactly `host`: `None` for any value [`custom_entry_value`]
+/// wouldn't write for that host and script. The content Worker holds a copy of this rule, tested against the same
+/// vectors (`packages/contracts/serve-entry.fixture.json`).
+pub fn custom_entry_script<'a>(host: &str, value: &'a str) -> Option<&'a str> {
+    // Exactly what would be written for this host and the script before the separator: so the host after it is this
+    // one, and nothing else is in the value.
+    let (script, _) = value.split_once(CUSTOM_ENTRY_SEPARATOR)?;
+    (custom_entry_value(host, script).as_deref() == Some(value)).then_some(script)
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Suspension
 // ---------------------------------------------------------------------------------------------------------------------

@@ -28,6 +28,47 @@ export function defaultHostLabel(host: string, domain: string): string | null {
   return LABEL.test(label) ? label : null;
 }
 
+/** Whether a host is `domain` itself or any name under it, at any depth. The same rule as `on_domain` in the API. */
+export function onDomain(host: string, domain: string): boolean {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+/** Between a custom hostname's script and its host in its serve entry (M6 step 8c). */
+export const CUSTOM_ENTRY_SEPARATOR = "@";
+
+/**
+ * The script a custom hostname's serve entry names, read for exactly `host`, or null: the script's name, `@`, then the
+ * host it was written under, as `podster_core::hostnames::custom_entry_script` reads it. A value under any other key,
+ * or a default host's form (the script's name alone), is nothing.
+ */
+export function customEntryScript(host: string, value: string): string | null {
+  const at = value.indexOf(CUSTOM_ENTRY_SEPARATOR);
+  if (at < 0) return null;
+  const script = value.slice(0, at);
+  return isWrittenHost(host) && value.slice(at + 1) === host && isScriptName(script) ? script : null;
+}
+
+/** A label that reads as a number, as `is_number` in `podster_core::hostnames`: decimal, or `0x` hexadecimal. */
+const NUMBER_LABEL = /^(?:[0-9]+|0[xX][0-9a-fA-F]*)$/;
+
+/**
+ * A host as `podster_core::hostnames::normalize` writes one, so this never reads an entry for a name Rust never writes:
+ * lower case, no trailing dot, labels of 1 to 63 letters, digits and hyphens that neither begin nor end with a hyphen,
+ * not an IP address (no last label that reads as a number), and unchanged by the URL parser, which also refuses
+ * punycode that doesn't decode. A second check of what was read, never the authority.
+ */
+export function isWrittenHost(host: string): boolean {
+  if (!isHost(host)) return false;
+  const labels = host.split(".");
+  if (!labels.every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return false;
+  if (NUMBER_LABEL.test(labels[labels.length - 1])) return false;
+  try {
+    return new URL(`https://${host}/`).hostname === host;
+  } catch {
+    return false;
+  }
+}
+
 /** The label a script's name begins with, or null if it isn't a script's name. */
 export function scriptLabel(script: string): string | null {
   return isScriptName(script) ? script.slice(0, script.indexOf(".")) : null;

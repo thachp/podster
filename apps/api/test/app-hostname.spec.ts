@@ -301,6 +301,9 @@ describe("the proof job and the claim (M6 step 8)", () => {
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_resolver_off (x INTEGER)"));
     const request = await switchedOn(async () => (await ask(r, name)).body.request);
     await answerWith(name, request.challenge_value);
+    // A public room's first check of its discovery row comes at a random time within six hours, which can be sooner
+    // than the hour below. Set past it, so the only wake left to read is the proof job's.
+    await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.put("public_index_verify_next", Date.now() + 7 * 24 * 3600_000));
     await pass(r);
     expect(await asked()).not.toContain(`GET _podster-challenge.${name} TXT application/dns-json`);
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null, checked_at: null });

@@ -11,8 +11,8 @@
 /** Test values only. No environment binds `HOSTNAME_RESOLVER_URL`. */
 export const FAKE_RESOLVER = { url: "https://doh-test.example.com/dns-query" };
 
-/** What a name answers: a JSON body as it is, or an HTTP status with no body, or an answer that comes too late. */
-type Answer = { body: unknown } | { httpStatus: number } | { hang: true };
+/** What a name answers: a JSON body as it is, or an HTTP status with no body. */
+type Answer = { body: unknown } | { httpStatus: number };
 
 const answers = new Map<string, Answer>();
 const asked: string[] = [];
@@ -40,10 +40,6 @@ export async function fakeResolver(request: Request): Promise<Response | undefin
   const name = url.searchParams.get("name") ?? "";
   asked.push(`${request.method} ${name} ${url.searchParams.get("type")} ${request.headers.get("accept")}`);
   const answer = answers.get(name);
-  if (answer && "hang" in answer) {
-    await new Promise((resolve) => setTimeout(resolve, 7000));
-    return new Response(JSON.stringify({ Status: 0, Answer: [] }), { headers: { "content-type": "application/dns-json" } });
-  }
   if (answer && "httpStatus" in answer) return new Response("no", { status: answer.httpStatus });
   const body = answer ? answer.body : { Status: 3 };
   return new Response(typeof body === "string" ? body : JSON.stringify(body), { headers: { "content-type": "application/dns-json" } });

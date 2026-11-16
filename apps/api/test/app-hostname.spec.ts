@@ -275,6 +275,10 @@ describe("the proof job and the claim (M6 step 8)", () => {
     const [a, b] = [await room("org_ah_one_a"), await room("org_ah_one_b")];
     const name = newName();
     const [ra, rb] = await switchedOn(async () => [(await ask(a, name)).body.request, (await ask(b, name)).body.request]);
+    // Each ask set its room's alarm, due at once. Quieted, so only the passes below look, a's first: otherwise b's own
+    // run could look while a's pass has release switched on, and claim the name first.
+    await alarmQuiet(stub(a.room));
+    await alarmQuiet(stub(b.room));
     await answerWith(name, ra.challenge_value, rb.challenge_value);
     await rewindLook(a);
     await pass(a);

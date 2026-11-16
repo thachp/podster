@@ -12,7 +12,10 @@
 //!
 //! **After it, the job reads what Cloudflare holds of the name,** at a wait that doubles from a minute to an hour
 //! (`retry_wait_ms`), which also settles a create whose answer was lost: never assumed made, never assumed not.
-//! `moved` ends the claim, and so does a hostname read gone after its ID was recorded.
+//! `moved` ends the claim, and so does a hostname read gone after its ID was recorded. **One read of gone proves
+//! nothing** (`count_gone`): a lost create may still land, and the list may lag. Gone counts only as two reads at least
+//! ten minutes apart, the first ten minutes after the create and the last delete, here and in the long end alike. A
+//! name's search is read to its last page, up to a bound past which operators are told.
 //!
 //! **Every way a committed claim ends goes one way** (`podster_core::hostname_requests::end_step`). The room sets the
 //! request `ending` and clears and closes the host in one transaction: the owner's removal (8a), the name's suspension
@@ -20,7 +23,8 @@
 //! unpublish moves, so every unpublish trigger is one), the room's own facts read and failing before a provider call
 //! (archived, deleted, no longer public, its public surface or app suspended, its organization gone or its release
 //! switch taken), Cloudflare's `moved`, and the hostname gone at Cloudflare. Then the hostname's object is told, and
-//! marks the claim ending; the job deletes the custom hostname and **reads until Cloudflare reports it gone,** never
+//! marks the claim ending (if it answers that it holds no claim for this request, nothing at Cloudflare is this room's
+//! to delete, and the request ends with no call to Cloudflare); the job deletes the custom hostname and **reads until Cloudflare reports it gone,** never
 //! taking a delete's answer for that; and only then frees the claim at the object and ends the request. A request for
 //! which no create was ever sent has nothing at Cloudflare, so it goes straight to the free. **The long end never waits
 //! on a switch, a gate or the room's facts:** it only takes down. It waits only on what it can't read, and on a missing
@@ -34,8 +38,8 @@ use super::hostname::{checked, proof_room};
 use super::*;
 use crate::custom_hostnames::HostnameProvider;
 use podster_core::hostname_requests::{
-    after_claimed_read, after_end_read, claimed_step, end_step, unpublished_since,
-    AfterClaimedRead, AfterEndRead, ClaimedStep, EndStep,
+    after_claimed_read, after_end_read, claimed_step, count_gone, end_step, unpublished_since,
+    AfterClaimedRead, AfterEndRead, ClaimedStep, EndStep, GoneCount, ProviderRead,
 };
 use podster_core::hostnames::{may_free_claim, ClaimEnd};
 use podster_policy::release::{hostname_proof_room, HostnameProofStep};
@@ -48,16 +52,23 @@ struct Phase {
     provider_status: Option<String>,
     object_ending: bool,
     gone: bool,
+    create_sent_at: Option<i64>,
+    deleted_at: Option<i64>,
+    first_gone_at: Option<i64>,
 }
 
 fn phase(sql: &SqlStorage, id: &str) -> R<Phase> {
     let found = rows(
         sql,
-        "SELECT release_epoch, create_sent_at, provider_id, provider_status, object_ending_at, gone_at FROM hostname_provider WHERE request_id = ?",
+        "SELECT release_epoch, create_sent_at, provider_id, provider_status, object_ending_at, gone_at, deleted_at, first_gone_at FROM hostname_provider WHERE request_id = ?",
         vec![id.into()],
     )?;
     let row = found.first();
     let at = |name: &str| row.is_some_and(|row| !row[name].is_null());
+    let time = |name: &str| {
+        row.filter(|row| !row[name].is_null())
+            .map(|row| int(&row[name]))
+    };
     Ok(Phase {
         epoch: row
             .filter(|row| !row["release_epoch"].is_null())
@@ -67,6 +78,9 @@ fn phase(sql: &SqlStorage, id: &str) -> R<Phase> {
         provider_status: row.and_then(|row| text(&row["provider_status"])),
         object_ending: at("object_ending_at"),
         gone: at("gone_at"),
+        create_sent_at: time("create_sent_at"),
+        deleted_at: time("deleted_at"),
+        first_gone_at: time("first_gone_at"),
     })
 }
 
@@ -216,6 +230,12 @@ impl Workspace {
                     return self.tried(sql, &id, now);
                 };
                 let read = provider.read(&hostname).await;
+                if read.too_long {
+                    self.list_too_long(&room, &id, &hostname).await;
+                }
+                if read.read == ProviderRead::Gone && !self.gone_counted(sql, &id, &phase, now)? {
+                    return Ok(());
+                }
                 match after_claimed_read(read.read, phase.provider_id.is_some()) {
                     AfterClaimedRead::Wait => {
                         console_error!("hostname: the custom hostname couldn't be read: room={} request={} code=custom_hostname_unread", room, id);
@@ -228,6 +248,8 @@ impl Workspace {
                             || phase.provider_status.as_deref() != Some(status.as_str());
                         let (store, id) = (sql.clone(), id.clone());
                         return transaction_sync(&self.state, move || {
+                            // Read there: any read of gone noted before it is forgotten.
+                            set_phase(&store, &id, "first_gone_at = NULL", vec![])?;
                             if differs {
                                 set_phase(
                                     &store,
@@ -250,6 +272,44 @@ impl Workspace {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Counts a read of gone (`podster_core::hostname_requests::count_gone`): whether it is confirmed. Otherwise the first
+    /// that counts is noted, and either way the try is recorded.
+    fn gone_counted(&self, sql: &SqlStorage, id: &str, phase: &Phase, now: i64) -> R<bool> {
+        let Some(sent) = phase.create_sent_at else {
+            return Ok(true);
+        };
+        let count = count_gone(sent, phase.deleted_at, phase.first_gone_at, now);
+        if count == GoneCount::Confirmed {
+            return Ok(true);
+        }
+        let (store, id) = (sql.clone(), id.to_owned());
+        transaction_sync(&self.state, move || {
+            if count == GoneCount::First {
+                set_phase(&store, &id, "first_gone_at = ?", vec![now.into()])?;
+            }
+            checked(&store, &id, now)
+        })?;
+        Ok(false)
+    }
+
+    /// The search for a name matched more than a read takes: operators are told, by code, in their own record, with
+    /// the name as its subject, which never reaches a log. If the telling fails, the next read tells again.
+    async fn list_too_long(&self, room: &str, id: &str, hostname: &str) {
+        console_error!("hostname: the custom hostname's list was too long to read: room={} request={} code=custom_hostname_list_too_long", room, id);
+        let finding = json!({ "code": "custom_hostname_list_too_long", "subject": hostname });
+        let told = crate::moderation::call(
+            &self.env,
+            crate::reconcile::FINDING_PATH,
+            Method::Post,
+            Some(finding),
+        )
+        .await
+        .is_ok_and(|response| response.status_code() == 200);
+        if !told {
+            console_error!("hostname: operators weren't told of a list too long: room={} request={} code=finding_not_kept", room, id);
+        }
     }
 
     /// Records a try that settled nothing, so the next waits longer.
@@ -316,7 +376,7 @@ impl Workspace {
                 set_phase(
                     &store,
                     &request,
-                    "create_sent_at = coalesce(create_sent_at, ?)",
+                    "create_sent_at = ?, first_gone_at = NULL",
                     vec![now.into()],
                 )?;
                 checked(&store, &request, now)?;
@@ -365,10 +425,22 @@ impl Workspace {
                         Some(body),
                     )
                     .await
-                    .is_ok_and(|answer| answer["ending"].is_boolean());
-                if !told {
-                    console_error!("hostname: the claim's end wasn't recorded: room={} request={} code=claim_no_answer", room, id);
-                    return self.tried(sql, &id, now);
+                    .ok()
+                    .and_then(|answer| answer["ending"].as_bool());
+                match told {
+                    None => {
+                        console_error!("hostname: the claim's end wasn't recorded: room={} request={} code=claim_no_answer", room, id);
+                        return self.tried(sql, &id, now);
+                    }
+                    // The object holds no claim for this request: whatever Cloudflare holds of the name isn't this
+                    // room's to delete. The request ends, and nothing is asked of Cloudflare (the deep review of
+                    // PR #403).
+                    Some(false) => {
+                        console_error!("hostname: the claim wasn't this request's at its object: room={} request={} code=claim_not_held", room, id);
+                        let store = sql.clone();
+                        return transaction_sync(&self.state, move || ended(&store, &id, now));
+                    }
+                    Some(true) => {}
                 }
                 let store = sql.clone();
                 transaction_sync(&self.state, move || {
@@ -387,18 +459,36 @@ impl Workspace {
                     return self.tried(sql, &id, now);
                 };
                 let read = provider.read(&hostname).await;
+                if read.too_long {
+                    self.list_too_long(&room, &id, &hostname).await;
+                }
                 match after_end_read(read.read) {
                     AfterEndRead::Wait => {
                         console_error!("hostname: the custom hostname couldn't be read: room={} request={} code=custom_hostname_unread", room, id);
                         self.tried(sql, &id, now)
                     }
                     AfterEndRead::Delete => {
+                        // Recorded before it is sent: a read of gone counts only well after the last delete.
+                        let store = sql.clone();
+                        let request = id.clone();
+                        transaction_sync(&self.state, move || {
+                            set_phase(
+                                &store,
+                                &request,
+                                "deleted_at = ?, first_gone_at = NULL",
+                                vec![now.into()],
+                            )?;
+                            checked(&store, &request, now)
+                        })?;
                         for (found, _) in &read.found {
                             provider.delete(found).await;
                         }
-                        self.tried(sql, &id, now)
+                        Ok(())
                     }
                     AfterEndRead::Gone => {
+                        if !self.gone_counted(sql, &id, &phase, now)? {
+                            return Ok(());
+                        }
                         let store = sql.clone();
                         transaction_sync(&self.state, move || {
                             set_phase(

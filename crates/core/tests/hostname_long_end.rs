@@ -204,3 +204,55 @@ fn only_an_id_and_a_status_of_the_expected_form_are_kept() {
         assert!(!provider_status_form(status), "{status}");
     }
 }
+
+const MIN: i64 = 60 * 1000;
+
+#[test]
+fn gone_counts_only_after_two_reads_ten_minutes_apart_after_the_create_and_the_last_delete() {
+    assert_eq!(GONE_SPAN_MS, 10 * MIN);
+    let sent = NOW;
+    // Too soon after the create: a create that may still land, or a list that lags, proves nothing.
+    assert_eq!(
+        count_gone(sent, None, None, sent + 10 * MIN - 1),
+        GoneCount::NotYet
+    );
+    // The first read that counts is only noted.
+    assert_eq!(
+        count_gone(sent, None, None, sent + 10 * MIN),
+        GoneCount::First
+    );
+    let first = sent + 10 * MIN;
+    // A second too soon after it is nothing, and the first stays noted; one ten minutes after it confirms.
+    assert_eq!(
+        count_gone(sent, None, Some(first), first + 10 * MIN - 1),
+        GoneCount::NotYet
+    );
+    assert_eq!(
+        count_gone(sent, None, Some(first), first + 10 * MIN),
+        GoneCount::Confirmed
+    );
+    // A delete since restarts the wait, and a first read noted before it doesn't count.
+    let deleted = first + 5 * MIN;
+    assert_eq!(
+        count_gone(sent, Some(deleted), Some(first), deleted + 10 * MIN - 1),
+        GoneCount::NotYet
+    );
+    assert_eq!(
+        count_gone(sent, Some(deleted), Some(first), deleted + 10 * MIN),
+        GoneCount::First
+    );
+    assert_eq!(
+        count_gone(
+            sent,
+            Some(deleted),
+            Some(deleted + 10 * MIN),
+            deleted + 20 * MIN
+        ),
+        GoneCount::Confirmed
+    );
+    // A first read noted before the create, which would be a fault, never counts.
+    assert_eq!(
+        count_gone(sent, None, Some(sent - 1), sent + 30 * MIN),
+        GoneCount::First
+    );
+}

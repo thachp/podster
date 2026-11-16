@@ -96,7 +96,7 @@ async function room(org: string): Promise<Room> {
 
 const path = (r: Room) => `/v1/workspaces/${r.room}/app-hostname`;
 const requestRow = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT id, hostname, state, open, claimed_at, end_reason FROM hostname_request ORDER BY requested_at DESC, id DESC LIMIT 1").toArray()[0] ?? null);
-const providerRow = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT p.release_epoch, p.create_sent_at, p.provider_id, p.provider_status, p.object_ending_at, p.gone_at FROM hostname_provider p JOIN hostname_request q ON q.id = p.request_id ORDER BY q.requested_at DESC LIMIT 1").toArray()[0] ?? null);
+const providerRow = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT p.release_epoch, p.create_sent_at, p.provider_id, p.provider_status, p.object_ending_at, p.gone_at, p.first_gone_at, p.deleted_at FROM hostname_provider p JOIN hostname_request q ON q.id = p.request_id ORDER BY q.requested_at DESC LIMIT 1").toArray()[0] ?? null);
 const events = (r: Room) => all(r.room, "SELECT type FROM event WHERE type LIKE 'app_hostname.%' ORDER BY seq").then((found) => found.map((e: any) => e.type));
 /**
  * Makes the request's next turn due now, whatever time has passed: its last try set a minute and a second before its
@@ -111,6 +111,19 @@ const quietPass = (r: Room) => runInDurableObject(stub(r.room), async (instance:
 });
 /** One pass of the room's job, its turn made due first, with release switched on for the deployment. */
 const step = async (r: Room) => { await due(r); await switchedOn(() => quietPass(r)); };
+/**
+ * Moves the request's create, last delete and first read of gone eleven minutes back, so a read of gone now counts:
+ * two reads ten minutes apart, each ten minutes after the create and the last delete (the deep review of PR #403).
+ */
+const aged = (r: Room) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_provider SET create_sent_at = create_sent_at - 660000, deleted_at = deleted_at - 660000, first_gone_at = first_gone_at - 660000"));
+/** Two reads of gone that count: the first noted, the second confirming it. */
+const confirmGone = async (r: Room) => { await aged(r); await step(r); await aged(r); await step(r); };
+/** The long end of a claim whose custom hostname is there: marked, read and deleted, read gone twice, freed. */
+const endLongWay = async (r: Room) => { await step(r); await step(r); await confirmGone(r); await step(r); };
+/** The owner removes the room's custom hostname, and the room is handed back quiet before a test writes its rows. */
+const remove = async (r: Room) => { const answer = await switchedOn(() => api(r.owner, "DELETE", path(r))); await alarmQuiet(stub(r.room)); return answer; };
+/** The operators' record, as an operator reads it. */
+const findings = async () => ((await switchedOn(() => api(OPERATOR, "GET", "/v1/moderation/takedown-findings"))).body.findings as { code: string; subject: string }[]);
 /** Opens creating at Cloudflare for this room, as only a test build can. */
 const createOpen = (r: Room) => inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_custom_hostname_create_open (x INTEGER)"));
 
@@ -168,15 +181,18 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     expect((await cloudflare(name)).held).toBeNull();
     expect(await providerRow(r)).toMatchObject({ gone_at: null });
     expect((await claimState(name)).claim).not.toBeNull();
-    // Read again: gone. Only then freed.
+    // Read again at once: gone, but so soon after the delete it counts for nothing.
     await step(r);
+    expect(await providerRow(r)).toMatchObject({ gone_at: null, first_gone_at: null });
+    // Two reads of gone ten minutes apart, well after the delete: gone. Only then freed.
+    await confirmGone(r);
     expect((await providerRow(r)).gone_at).not.toBeNull();
     expect((await claimState(name)).claim).not.toBeNull();
     await step(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_moved" });
     expect(await claimState(name)).toEqual({ claim: null, suspended: false, generation: 1 });
     expect(await inClaim(name, (sql) => sql.exec("SELECT state, held, end_reason FROM claim").toArray())).toEqual([{ state: "ended", held: null, end_reason: "hostname_moved" }]);
-    expect((await cloudflare(name)).calls).toEqual(["create", "read", "read", "read", "delete", "read"]);
+    expect((await cloudflare(name)).calls).toEqual(["create", "read", "read", "read", "delete", "read", "read", "read"]);
     expect(await events(r)).toEqual(["app_hostname.requested", "app_hostname.claimed", "app_hostname.ending", "app_hostname.ended"]);
     // The default host is untouched, and the room may ask for another name.
     expect(await all(r.room, "SELECT script_name FROM serve_state WHERE host = ?", r.host)).toEqual([{ script_name: `${r.label}.${PREV}` }]);
@@ -228,8 +244,10 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     await fault("create", b.name, "failed");
     await step(b.r);
     expect((await cloudflare(b.name)).held).toBeNull();
+    // Read gone at once proves nothing; read gone twice, ten minutes apart, it is created again.
     await step(b.r);
-    expect((await cloudflare(b.name)).calls).toEqual(["create", "read", "create"]);
+    await confirmGone(b.r);
+    expect((await cloudflare(b.name)).calls).toEqual(["create", "read", "read", "read", "create"]);
     expect(await providerRow(b.r)).toMatchObject({ provider_id: (await cloudflare(b.name)).held!.id });
   });
 
@@ -238,10 +256,17 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     await createOpen(r);
     await step(r);
     await setAtCloudflare(name, null);
+    // One read of gone ends nothing: the list may lag.
+    await aged(r);
+    await step(r);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    await aged(r);
     await step(r);
     expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_gone_at_provider" });
-    // Marked, read gone, freed: nothing to delete.
-    for (let n = 0; n < 3; n += 1) await step(r);
+    // Marked, read gone twice, freed: nothing to delete.
+    await step(r);
+    await confirmGone(r);
+    await step(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_gone_at_provider" });
     expect((await claimState(name)).claim).toBeNull();
     expect((await cloudflare(name)).calls).not.toContain("delete");
@@ -251,7 +276,7 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
 describe("every way a committed claim ends (M6 step 8b)", () => {
   it("frees a removed claim nothing was ever asked of Cloudflare for, without calling Cloudflare", async () => {
     const { r, name } = await claimed("org_ch_remove_none");
-    expect((await switchedOn(() => api(r.owner, "DELETE", path(r)))).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
+    expect((await remove(r)).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
     await step(r);
     expect((await claimState(name)).claim).toMatchObject({ state: "ending" });
     await step(r);
@@ -266,7 +291,7 @@ describe("every way a committed claim ends (M6 step 8b)", () => {
     const { r, name } = await claimed("org_ch_unsettled");
     await createOpen(r);
     await step(r);
-    await switchedOn(() => api(r.owner, "DELETE", path(r)));
+    await remove(r);
     await step(r);
     // No provider: nothing at Cloudflare can be read gone, so nothing is freed.
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_custom_hostname_provider_off (x INTEGER)"));
@@ -286,10 +311,10 @@ describe("every way a committed claim ends (M6 step 8b)", () => {
     expect(await providerRow(r)).toMatchObject({ gone_at: null });
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, state: "ending" });
     expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1 });
-    await step(r);
+    await confirmGone(r);
     await step(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended" });
-    expect((await cloudflare(name)).calls).toEqual(["create", "read", "read", "read", "read", "delete", "read", "delete", "read"]);
+    expect((await cloudflare(name)).calls).toEqual(["create", "read", "read", "read", "read", "delete", "read", "delete", "read", "read"]);
   });
 
   it("ends the claim once the room unpublishes, by any trigger, and when the room's own facts fail", async () => {
@@ -303,7 +328,7 @@ describe("every way a committed claim ends (M6 step 8b)", () => {
     expect(await all(a.r.room, "SELECT release_epoch FROM release_config")).toEqual([{ release_epoch: 3 }]);
     await step(a.r);
     expect(await requestRow(a.r)).toMatchObject({ state: "ending", end_reason: "hostname_unpublished" });
-    for (let n = 0; n < 4; n += 1) await step(a.r);
+    await endLongWay(a.r);
     expect(await requestRow(a.r)).toMatchObject({ state: "ended", end_reason: "hostname_unpublished" });
     expect((await cloudflare(a.name)).held).toBeNull();
     // Archived: read before the next call, and ended.
@@ -320,13 +345,90 @@ describe("every way a committed claim ends (M6 step 8b)", () => {
     await step(r);
     await switchedOn(async () => expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/suspend`, { reason: "abuse" })).status).toBe(200));
     await alarmPass(claimOf(name));
+    // The notice changed the room's rows: quiet before the test writes its own.
+    await alarmQuiet(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_suspended" });
-    for (let n = 0; n < 4; n += 1) await step(r);
+    await endLongWay(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_suspended" });
     expect((await cloudflare(name)).held).toBeNull();
     // Suspended, then freed.
     expect(await claimState(name)).toEqual({ claim: null, suspended: true, generation: 2 });
     await switchedOn(async () => expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/lift`, { reason: "other" })).status).toBe(200));
+  });
+});
+
+describe("the deep review's rulings (M6 step 8b)", () => {
+  it("never takes a create that lands after a first read of gone, or a list that lags right after a create, for gone", async () => {
+    // A create whose answer was lost and that hadn't landed yet.
+    const a = await claimed("org_ch_late_create");
+    await createOpen(a.r);
+    await fault("create", a.name, "failed");
+    await step(a.r);
+    await aged(a.r);
+    await step(a.r);
+    expect((await providerRow(a.r)).first_gone_at).not.toBeNull();
+    // It lands: the next read finds it, the first read of gone is forgotten, and it is never created twice.
+    await setAtCloudflare(a.name, "pending");
+    await aged(a.r);
+    await step(a.r);
+    expect(await providerRow(a.r)).toMatchObject({ provider_id: (await cloudflare(a.name)).held!.id, first_gone_at: null });
+    expect((await cloudflare(a.name)).calls).toEqual(["create", "read", "read"]);
+    expect(await requestRow(a.r)).toMatchObject({ state: "claimed" });
+    // Made, and the list doesn't show it yet: read gone at once, and again after ten minutes, ends nothing.
+    const b = await claimed("org_ch_lagging");
+    await createOpen(b.r);
+    await step(b.r);
+    await setAtCloudflare(b.name, null);
+    await step(b.r);
+    expect(await providerRow(b.r)).toMatchObject({ first_gone_at: null });
+    await aged(b.r);
+    await step(b.r);
+    expect(await requestRow(b.r)).toMatchObject({ state: "claimed" });
+    await setAtCloudflare(b.name, "pending");
+    await step(b.r);
+    expect(await providerRow(b.r)).toMatchObject({ first_gone_at: null });
+    expect(await requestRow(b.r)).toMatchObject({ state: "claimed" });
+    expect((await cloudflare(b.name)).calls).toEqual(["create", "read", "read", "read"]);
+  });
+
+  it("reads every page of a name's search, so a name matched by more than a page is still found and deleted, and only it", async () => {
+    const { r, name } = await claimed("org_ch_pages");
+    // Sixty other names that contain this one, made first, so this one is on the second page.
+    const others = Array.from({ length: 60 }, (_, n) => `p${n}${name}`);
+    for (const other of others) await setAtCloudflare(other, "active");
+    await createOpen(r);
+    await step(r);
+    expect((await cloudflare(name)).held).not.toBeNull();
+    await remove(r);
+    await endLongWay(r);
+    expect(await requestRow(r)).toMatchObject({ state: "ended" });
+    expect((await cloudflare(name)).held).toBeNull();
+    for (const other of [others[0], others[49], others[59]]) expect((await cloudflare(other)).held, other).not.toBeNull();
+    expect((await cloudflare(name)).calls.filter((call) => call === "delete")).toHaveLength(1);
+  });
+
+  it("reads a name's search no further than its bound, takes that for no answer, and tells operators", async () => {
+    const { r, name } = await claimed("org_ch_too_long");
+    await createOpen(r);
+    await step(r);
+    await fault("read", name, "huge", 25);
+    await step(r);
+    expect((await cloudflare(name)).calls.filter((call) => call === "read")).toHaveLength(20);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    expect((await findings()).filter((found) => found.subject === name).map((found) => found.code)).toEqual(["custom_hostname_list_too_long"]);
+  });
+
+  it("never deletes at Cloudflare for a claim its object says isn't this request's, and ends the request", async () => {
+    const { r, name } = await claimed("org_ch_not_held");
+    await createOpen(r);
+    await step(r);
+    // The object holds the name for another request.
+    await inClaim(name, (sql) => sql.exec("UPDATE claim SET request_id = ?", `hnr_${"9".repeat(32)}`));
+    await remove(r);
+    await step(r);
+    expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_unmapped" });
+    expect(await cloudflare(name)).toMatchObject({ held: { status: "pending" }, calls: ["create"] });
+    expect((await claimState(name)).claim).toMatchObject({ request_id: `hnr_${"9".repeat(32)}`, state: "live" });
   });
 });
 

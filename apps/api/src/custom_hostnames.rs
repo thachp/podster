@@ -16,11 +16,13 @@
 //! - **A create** counts only on `200` or `201` with `"success": true` and a `result` naming exactly this hostname, with
 //!   an ID of the documented form and a status. Anything else, no answer among them, may or may not have made it, and
 //!   only a later read settles that.
-//! - **A read** is a page of the list, filtered by name. The documentation says the filter searches, so only entries
-//!   naming exactly this hostname count. It counts as an answer only on `200` with `"success": true`, `result` an array
-//!   whose every entry has an ID of the documented form, a hostname and a status, and `result_info.total_count` equal to
-//!   the entries on the page: anything that hints at another page is no answer. **Gone is only such an answer with no
-//!   entry of this name.** A read by ID, and its `404` with code `1436`, isn't used.
+//! - **A read** is the list, filtered by name, every page of it up to [`MAX_PAGES`]. The documentation says the filter
+//!   searches, so a name also matches every longer name containing it, and only entries naming exactly this hostname
+//!   count. Each page counts only on `200` with `"success": true`, `result` an array whose every entry has an ID of the
+//!   documented form, a hostname and a status, and `result_info.total_count` the same on every page; the pages must add
+//!   up to it exactly. Anything else is no answer, and so is a list longer than the bound, which the room tells
+//!   operators of. **Gone is only such a whole list with no entry of this name,** and the room counts even that only as
+//!   `podster_core::hostname_requests::count_gone` allows. A read by ID, and its `404` with code `1436`, isn't used.
 //! - **A delete's answer is never trusted:** the room reads again, and only a read says gone.
 //!
 //! A client never names a zone, an ID or a hostname here: the zone comes from configuration, the hostname from the
@@ -36,10 +38,14 @@ use worker::*;
 const API: &str = "https://api.cloudflare.com/client/v4";
 /// How long one call may take. The room's alarm waits on it.
 const CALL_TIMEOUT_MS: u64 = 5_000;
-/// No answer read here is longer. A name's page holds one entry, or a few that the search also matched.
+/// No answer read here is longer. A page holds at most [`PAGE`] entries.
 const MAX_ANSWER_BYTES: usize = 256 * 1024;
-/// Entries asked for in the one page read. More than that matching one name is no answer.
+/// Entries asked for in one page.
 const PAGE: usize = 50;
+/// **Proposed** (the deep review of PR #403). Pages read for one name, at most. Every entry the search matches is read,
+/// since a name's search also matches every longer name containing it, which anyone may hold. More than this is no
+/// answer, and the room tells operators.
+pub(crate) const MAX_PAGES: usize = 20;
 
 /// The settings a provider for custom hostnames needs. Neither is set in any environment.
 const ZONE: &str = "CUSTOM_HOSTNAME_ZONE_ID";
@@ -50,6 +56,8 @@ pub(crate) struct Read {
     pub(crate) read: ProviderRead,
     /// Each custom hostname of exactly this name, by ID, with its status. Empty unless `read` is `Present`.
     pub(crate) found: Vec<(String, String)>,
+    /// The search matched more than [`MAX_PAGES`] pages: `read` is `Unknown`, and operators are owed a finding.
+    pub(crate) too_long: bool,
 }
 
 impl Read {
@@ -57,6 +65,7 @@ impl Read {
         Read {
             read: ProviderRead::Unknown,
             found: Vec::new(),
+            too_long: false,
         }
     }
 }
@@ -186,41 +195,66 @@ impl HostnameProvider {
         if !plain_host(hostname) {
             return Read::unknown();
         }
-        // The name is lower-case letters, digits, `-` and `.`, so it goes into the query as it is.
-        let url = format!("{}?hostname={hostname}&per_page={PAGE}", self.base());
-        let Some((status, answer)) = call(Method::Get, url, &self.token, None).await else {
-            return Read::unknown();
-        };
-        if status != 200 || answer["success"] != true {
-            return Read::unknown();
-        }
-        let Some(entries) = answer["result"]
-            .as_array()
-            .and_then(|entries| entries.iter().map(entry).collect::<Option<Vec<_>>>())
-        else {
-            return Read::unknown();
-        };
-        // The whole list is on this page, said in so many words. Anything else may hide this name on another.
-        let whole = answer["result_info"]["total_count"]
-            .as_u64()
-            .is_some_and(|total| total == entries.len() as u64)
-            && entries.len() <= PAGE;
-        if !whole {
-            return Read::unknown();
-        }
-        let found: Vec<(String, String)> = entries
-            .into_iter()
-            .filter(|(_, named, _)| named == hostname)
-            .map(|(id, _, status)| (id, status))
-            .collect();
-        let read = if found.is_empty() {
-            ProviderRead::Gone
-        } else {
-            ProviderRead::Present {
-                moved: found.iter().any(|(_, status)| status == "moved"),
+        let mut entries: Vec<(String, String, String)> = Vec::new();
+        let mut total: Option<u64> = None;
+        for page in 1..=MAX_PAGES {
+            // The name is lower-case letters, digits, `-` and `.`, so it goes into the query as it is.
+            let url = format!(
+                "{}?hostname={hostname}&per_page={PAGE}&page={page}",
+                self.base()
+            );
+            let Some((status, answer)) = call(Method::Get, url, &self.token, None).await else {
+                return Read::unknown();
+            };
+            if status != 200 || answer["success"] != true {
+                return Read::unknown();
             }
-        };
-        Read { read, found }
+            let Some(more) = answer["result"]
+                .as_array()
+                .and_then(|found| found.iter().map(entry).collect::<Option<Vec<_>>>())
+            else {
+                return Read::unknown();
+            };
+            // Every page says how many there are in all, and says the same each time. Anything else is no answer.
+            let Some(said) = answer["result_info"]["total_count"].as_u64() else {
+                return Read::unknown();
+            };
+            if total.is_some_and(|total| total != said) || more.len() > PAGE {
+                return Read::unknown();
+            }
+            total = Some(said);
+            // A page longer than what is left, or short of a full page before the end: the list changed, or isn't
+            // whole.
+            let left = said.saturating_sub(entries.len() as u64);
+            if more.len() as u64 > left || (more.len() < PAGE && (more.len() as u64) < left) {
+                return Read::unknown();
+            }
+            entries.extend(more);
+            if entries.len() as u64 == said {
+                let found: Vec<(String, String)> = entries
+                    .into_iter()
+                    .filter(|(_, named, _)| named == hostname)
+                    .map(|(id, _, status)| (id, status))
+                    .collect();
+                let read = if found.is_empty() {
+                    ProviderRead::Gone
+                } else {
+                    ProviderRead::Present {
+                        moved: found.iter().any(|(_, status)| status == "moved"),
+                    }
+                };
+                return Read {
+                    read,
+                    found,
+                    too_long: false,
+                };
+            }
+        }
+        // More names match the search than [`MAX_PAGES`] pages hold: no answer, and the room tells operators.
+        Read {
+            too_long: true,
+            ..Read::unknown()
+        }
     }
 
     /// Deletes one custom hostname, by an ID Cloudflare's own read gave. Its answer isn't trusted: only a read says gone.

@@ -5,7 +5,7 @@
 // `src/custom_hostnames.rs` expects, from Cloudflare's documented API: a create is a `POST` to
 // `/zones/<zone>/custom_hostnames` answered with the new hostname's `id`, `hostname` and `status` in the usual envelope;
 // a read is that path's list with `?hostname=`, which the documentation calls a search, so this one matches any name
-// containing it, with `result_info.total_count`; a delete is a `DELETE` of `/<id>`. A second create of one name is
+// containing it, a page at a time by `page` and `per_page`, with `result_info.total_count`; a delete is a `DELETE` of `/<id>`. A second create of one name is
 // refused, with the code the documentation lists for a duplicate. Spike D or a later one must confirm these before a
 // provider is configured.
 //
@@ -23,9 +23,10 @@ type Op = "create" | "read" | "delete";
 /**
  * How one kind of call for one name misbehaves, for its next `times` calls. `lost` does the work and answers 502;
  * `failed` does nothing and answers 500; `kept` answers a delete with success and keeps the hostname; `partial` answers
- * a read with a total that says there is another page; `shape` answers a read with no `result_info`.
+ * a read with a total that says there is another page; `shape` answers a read with no `result_info`; `huge` answers each
+ * page with a full page of other names, out of a total of a hundred pages.
  */
-type Fault = { op: Op; hostname: string; times: number; kind: "lost" | "failed" | "kept" | "partial" | "shape" };
+type Fault = { op: Op; hostname: string; times: number; kind: "lost" | "failed" | "kept" | "partial" | "shape" | "huge" };
 
 const held = new Map<string, { id: string; status: string }>();
 const calls: { op: Op; hostname: string }[] = [];
@@ -78,10 +79,18 @@ export async function fakeHostnames(request: Request): Promise<Response | undefi
     calls.push({ op: "read", hostname });
     const fault = takeFault("read", hostname);
     if (fault === "failed" || fault === "lost") return failure(500, 1000, "failed");
-    const found = [...held.entries()].filter(([name]) => name.includes(hostname)).map(([name, h]) => ({ id: h.id, hostname: name, status: h.status }));
+    const perPage = Number(url.searchParams.get("per_page") ?? 20);
+    const page = Number(url.searchParams.get("page") ?? 1);
+    // `huge`: the search matches far more than any read takes, every page full of other names.
+    if (fault === "huge") {
+      const result = Array.from({ length: perPage }, (_, n) => ({ id: crypto.randomUUID(), hostname: `x${page}y${n}.${hostname}`, status: "active" }));
+      return json(envelope(result, { result_info: { page, per_page: perPage, count: perPage, total_count: perPage * 100 } }));
+    }
+    const all = [...held.entries()].filter(([name]) => name.includes(hostname)).map(([name, h]) => ({ id: h.id, hostname: name, status: h.status }));
+    const found = all.slice((page - 1) * perPage, page * perPage);
     if (fault === "shape") return json({ success: true, errors: [], messages: [], result: found });
-    const total = found.length + (fault === "partial" ? 1 : 0);
-    return json(envelope(found, { result_info: { page: 1, per_page: Number(url.searchParams.get("per_page") ?? 20), count: found.length, total_count: total } }));
+    const total = all.length + (fault === "partial" ? 1 : 0);
+    return json(envelope(found, { result_info: { page, per_page: perPage, count: found.length, total_count: total } }));
   }
   if (request.method === "DELETE" && rest.startsWith("/")) {
     const id = rest.slice(1);

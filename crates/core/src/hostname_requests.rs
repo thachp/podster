@@ -239,7 +239,8 @@ pub enum AfterClaimedRead {
     Wait,
 }
 
-/// A read of a committed claim's custom hostname, given whether the room recorded its ID from an earlier answer.
+/// A read of a committed claim's custom hostname, given whether the room recorded its ID from an earlier answer. The
+/// room passes `Gone` only once [`count_gone`] has confirmed it: one read of gone proves nothing.
 pub fn after_claimed_read(read: ProviderRead, id_recorded: bool) -> AfterClaimedRead {
     use crate::hostnames::ClaimEnd;
     match read {
@@ -292,6 +293,50 @@ pub fn after_end_read(read: ProviderRead) -> AfterEndRead {
         ProviderRead::Unknown => AfterEndRead::Wait,
         ProviderRead::Present { .. } => AfterEndRead::Delete,
         ProviderRead::Gone => AfterEndRead::Gone,
+    }
+}
+
+/// **Proposed.** How long apart two reads of gone must be, and how long after a create or a delete the first may come
+/// (ruled on the deep review of PR #403). A create whose answer was lost may still land, and Cloudflare's list may not
+/// show a hostname made a moment ago, so one read of gone soon after either proves nothing.
+pub const GONE_SPAN_MS: i64 = 10 * 60 * 1000;
+
+/// What one read of gone counts for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoneCount {
+    /// Too soon after the create, the last delete or the first read of gone: it counts for nothing.
+    NotYet,
+    /// The first that counts: the room notes when, and reads again.
+    First,
+    /// A second, at least [`GONE_SPAN_MS`] after a first that counted: the custom hostname is gone.
+    Confirmed,
+}
+
+/// A read of gone at `now`, for a request whose create was sent at `create_sent_at`, whose last delete was sent at
+/// `last_delete_at`, and whose first read of gone that counted was at `first_gone_at`. A first read only counts at least
+/// [`GONE_SPAN_MS`] after both the create and the last delete; one noted before that is ignored, so a delete since
+/// starts the count again. The room forgets the first whenever a read finds the hostname there.
+pub fn count_gone(
+    create_sent_at: i64,
+    last_delete_at: Option<i64>,
+    first_gone_at: Option<i64>,
+    now: i64,
+) -> GoneCount {
+    let earliest = create_sent_at
+        .max(last_delete_at.unwrap_or(i64::MIN))
+        .saturating_add(GONE_SPAN_MS);
+    if now < earliest {
+        return GoneCount::NotYet;
+    }
+    match first_gone_at {
+        Some(first) if first >= earliest => {
+            if now.saturating_sub(first) >= GONE_SPAN_MS {
+                GoneCount::Confirmed
+            } else {
+                GoneCount::NotYet
+            }
+        }
+        _ => GoneCount::First,
     }
 }
 

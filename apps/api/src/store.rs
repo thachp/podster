@@ -401,7 +401,10 @@ CREATE TABLE hostname_provider (request_id TEXT PRIMARY KEY REFERENCES hostname_
   provider_status TEXT CHECK (provider_status IS NULL OR (length(provider_status) BETWEEN 1 AND 32 AND provider_status NOT GLOB '*[^a-z_]*')),
   object_ending_at INTEGER CHECK (object_ending_at IS NULL OR typeof(object_ending_at) = 'integer'),
   gone_at INTEGER CHECK (gone_at IS NULL OR typeof(gone_at) = 'integer'),
-  CHECK (provider_id IS NULL OR create_sent_at IS NOT NULL), CHECK (gone_at IS NULL OR create_sent_at IS NOT NULL)) WITHOUT ROWID;
+  first_gone_at INTEGER CHECK (first_gone_at IS NULL OR typeof(first_gone_at) = 'integer'),
+  deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer'),
+  CHECK (provider_id IS NULL OR create_sent_at IS NOT NULL), CHECK (gone_at IS NULL OR create_sent_at IS NOT NULL),
+  CHECK (first_gone_at IS NULL OR create_sent_at IS NOT NULL), CHECK (deleted_at IS NULL OR create_sent_at IS NOT NULL)) WITHOUT ROWID;
 INSERT INTO hostname_provider (request_id, release_epoch) SELECT id, (SELECT release_epoch FROM release_config) FROM hostname_request WHERE open = 1;
 "];
 

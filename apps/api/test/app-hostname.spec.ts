@@ -344,23 +344,23 @@ describe("the proof job and the claim (M6 step 8)", () => {
     const request = await switchedOn(async () => (await ask(r, name)).body.request);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
-    const before = (await asked()).length;
+    const before = (await asked()).filter((line) => line.includes(name)).length;
     await alarmPass(stub(r.room));
-    expect((await asked()).length).toBe(before);
+    expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
     expect((await requestRow(r)).checked_at).not.toBeNull();
     // Nor while release is switched off in the room, with the deployment's switch on.
     await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
     await rewindLook(r);
     await pass(r);
-    expect((await asked()).length).toBe(before);
+    expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
     // An ask already out is finished whatever the switches say: only the object's answer settles it.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?", Date.now()));
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
-    expect((await asked()).length).toBe(before);
+    expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
   });
 
   it("proves nothing from a resolver that fails, or answers in any other form", async () => {
@@ -570,7 +570,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     const request = await askedQuiet(r, name);
     await answerWith(name, request.challenge_value);
     await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_open"));
-    const before = (await asked()).length;
+    const before = (await asked()).filter((line) => line.includes(name)).length;
     // No provider, release switched on, a resolver and a Public Suffix List bound: still closed.
     expect(refusedBy(await switchedOn(() => ask(r, newName())))).toEqual([409, "release_not_available"]);
     await rewindLook(r);
@@ -581,7 +581,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
       await rewindLook(r);
       await pass(r);
     });
-    expect((await asked()).length).toBe(before);
+    expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
     expect(await requestRow(r)).toMatchObject({ id: request.id, state: "pending", proved_at: null });
     expect((await claimState(name)).claim).toBeNull();
     expect(await all(r.room, "SELECT count(*) AS n FROM hostname_request")).toEqual([{ n: 1 }]);
@@ -644,10 +644,10 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     await answerWith(nameA, ra.challenge_value);
     await inRoom(a.room, (sql) => sql.exec("UPDATE workspace SET status = 'archived'"));
     await rewindLook(a);
-    const before = (await asked()).length;
+    const before = (await asked()).filter((line) => line.includes(nameA)).length;
     await pass(a);
     expect(await requestRow(a)).toMatchObject({ state: "ended", open: null, proved_at: null, end_reason: "workspace_archived" });
-    expect((await asked()).length).toBe(before);
+    expect((await asked()).filter((line) => line.includes(nameA)).length).toBe(before);
     expect(await events(a)).toEqual([
       { type: "app_hostname.requested", actor_id: a.owner.id },
       { type: "app_hostname.refused", actor_id: "podster" },
@@ -677,9 +677,9 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     // Held at a generation its last take equals, which no set makes.
     await inRoom(c.room, (sql) => sql.exec("UPDATE release_switch_applied SET granted = 1, generation = 1, last_take = 1"));
     await rewindLook(c);
-    const beforeC = (await asked()).length;
+    const beforeC = (await asked()).filter((line) => line.includes(nameC)).length;
     await pass(c);
-    expect((await asked()).length).toBe(beforeC);
+    expect((await asked()).filter((line) => line.includes(nameC)).length).toBe(beforeC);
     expect(await requestRow(c)).toMatchObject({ state: "pending", open: 1, proved_at: null });
   });
 

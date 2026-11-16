@@ -95,6 +95,71 @@ impl HostnameClaimState {
     }
 }
 
+/// What a room's removal of its custom hostname does to its open request (M6 step 8, `removeAppHostname`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unmap {
+    /// Nothing to do: the request is ending already, or over.
+    Nothing,
+    /// A pending request whose proof was never taken to the hostname's object: nobody was asked, so it is over at
+    /// once, `ended`.
+    Drop,
+    /// A pending request whose proof was taken to the object, which may have given the claim: it goes `ending`, and is
+    /// over only once the object has recorded it withdrawn ([`crate::hostnames::withdraw`]).
+    Withdraw,
+    /// A claim the room committed: it goes `ending`, the room stops serving on the name in the same transaction, and
+    /// the claim ends as every claim does, deleted at Cloudflare and read until gone before it is freed.
+    EndClaim,
+}
+
+/// The plan for a removal, from the request's state, whether its proof was taken to the object (`proof_asked`), and
+/// whether the room committed a claim for it (`claimed`).
+pub fn unmap(state: HostnameRequestState, proof_asked: bool, claimed: bool) -> Unmap {
+    match state {
+        HostnameRequestState::Pending if proof_asked => Unmap::Withdraw,
+        HostnameRequestState::Pending => Unmap::Drop,
+        HostnameRequestState::Claimed if claimed => Unmap::EndClaim,
+        // A claimed request always has its claim committed. If one ever didn't, removing it must still end it, and
+        // only the object can say whether a claim was given: withdraw.
+        HostnameRequestState::Claimed => Unmap::Withdraw,
+        _ => Unmap::Nothing,
+    }
+}
+
+/// What the room records from the hostname object's answer to its ask.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AskOutcome {
+    pub state: HostnameRequestState,
+    /// The reason code for a request that is over.
+    pub end_reason: Option<&'static str>,
+}
+
+/// The room's record of the object's answer, for a request that is still `pending`. **`None` for any other state:**
+/// the room removed it, or a notice set it ending, while the ask was out, so a claim given for it is withdrawn and
+/// never committed.
+pub fn after_ask(
+    state: HostnameRequestState,
+    decision: crate::hostnames::ClaimDecision,
+) -> Option<AskOutcome> {
+    use crate::hostnames::ClaimDecision as D;
+    if state != HostnameRequestState::Pending {
+        return None;
+    }
+    Some(match decision {
+        D::Granted => AskOutcome {
+            state: HostnameRequestState::Claimed,
+            end_reason: None,
+        },
+        D::Expired => AskOutcome {
+            state: HostnameRequestState::Expired,
+            end_reason: Some(decision.code()),
+        },
+        _ => AskOutcome {
+            state: HostnameRequestState::Refused,
+            end_reason: Some(decision.code()),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::HostnameRequestState;

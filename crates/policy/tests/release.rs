@@ -156,6 +156,48 @@ fn only_the_rooms_owner_and_admins_as_people_configure_and_approve() {
 }
 
 #[test]
+fn only_those_who_configure_release_map_a_custom_hostname_and_only_where_release_may_happen() {
+    // M6 step 8: asking to map a name is a change to the release configuration, so it needs everything a change
+    // needs, release switched on in the room among them. Removing one only takes down, so it is always theirs.
+    for kind in [Person, Agent] {
+        for role in Role::ALL {
+            for holds in [true, false] {
+                let c = caller("x", kind, role);
+                let expected = if role == Role::None {
+                    Err(ReleaseDenial::NotParticipant)
+                } else if kind == Person && matches!(role, Role::Owner | Role::Admin) && holds {
+                    Ok(())
+                } else {
+                    Err(ReleaseDenial::NotAllowed)
+                };
+                for change in [HostnameChange::Request, HostnameChange::Remove] {
+                    assert_eq!(
+                        authorize_custom_hostname(&c, holds, &ReleaseRoom::OPEN, change),
+                        expected,
+                        "{kind:?} {role:?} {holds} {change:?}"
+                    );
+                }
+            }
+        }
+    }
+    let owner = caller("per_owner", Person, Role::Owner);
+    for (change, denial) in ROOM_CHANGES {
+        let mut room = ReleaseRoom::OPEN;
+        change(&mut room);
+        assert_eq!(
+            authorize_custom_hostname(&owner, true, &room, HostnameChange::Request),
+            Err(denial),
+            "{denial:?}"
+        );
+        assert_eq!(
+            authorize_custom_hostname(&owner, true, &room, HostnameChange::Remove),
+            Ok(()),
+            "{denial:?}"
+        );
+    }
+}
+
+#[test]
 fn configuring_and_approving_refuse_where_release_cant_happen_but_switching_off_never_does() {
     let owner = caller("per_owner", Person, Role::Owner);
     for (change, denial) in ROOM_CHANGES {

@@ -6,6 +6,7 @@ import { defineConfig } from "vitest/config";
 import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fake-github-release.ts";
+import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
@@ -85,6 +86,10 @@ async function fakeHook(request: Request) {
   // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
   const content = await fakeContent(request);
   if (content) return content;
+  // The resolver a room's proof job reads a custom hostname's challenge from (M6 step 8): a stand-in, so nothing ever
+  // asks a real one.
+  const resolved = await fakeResolver(request);
+  if (resolved) return resolved;
   const url = new URL(request.url);
   if (url.hostname === "upload-gate.example.com") return uploadGate(url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
@@ -205,6 +210,10 @@ export default defineConfig({
           CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
           CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
           TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
+          // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in, and a few of the Public
+          // Suffix List's rules, in the list's own format. Test values: no environment binds either name.
+          HOSTNAME_RESOLVER_URL: FAKE_RESOLVER.url,
+          PUBLIC_SUFFIX_RULES: "// A test list, in the Public Suffix List's format.\ncom\nnet\norg\nexample\nuk\nco.uk\nck\n*.ck\n!www.ck\n",
           TEST_GATE_LIMIT_MS: GATE_LIMIT_MS,
           // The provider module's source, for the test that reads its settings' names and shows no environment binds one.
           // Every Rust source file of the API, by its path under src, and its Cargo.toml, for the test that shows no

@@ -4,6 +4,7 @@
 //! | Action | Who |
 //! | --- | --- |
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
+//! | Map a custom hostname, or remove one (M6 step 8) | The same people; asking only where release may happen at all, release switched on in the room among them; removing always ([`authorize_custom_hostname`]) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
 //! | Approve a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed (decided by the architect, for the owner to review) |
 //! | Decline a release | The same people, wherever they may still act on the room: only a deleted room or organization refuses ([`authorize_decline`]) |
@@ -274,6 +275,32 @@ pub fn authorize_release_config(
         }),
         ConfigChange::Change => release_room_allows(room),
     }
+}
+
+/// A change to the room's custom hostname (M6 step 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameChange {
+    /// Ask to map a hostname: the room gets a challenge.
+    Request,
+    /// Remove the mapping, or drop a pending request. It only takes down.
+    Remove,
+}
+
+/// Who may map a custom hostname to the room's app, or remove one, and where (M6 step 8; decisions 201, 207 and 215):
+/// the same people as configure release. Asking is a change to the release configuration, so it needs everything
+/// release needs at all, release switched on in the room among them ([`release_room_allows`]). Removing is always
+/// allowed to them, as switching release off is, since it only takes down. An agent never.
+pub fn authorize_custom_hostname(
+    caller: &Caller,
+    authority_holds: bool,
+    room: &ReleaseRoom,
+    change: HostnameChange,
+) -> Result<(), ReleaseDenial> {
+    let config = match change {
+        HostnameChange::Request => ConfigChange::Change,
+        HostnameChange::Remove => ConfigChange::TurnOff,
+    };
+    authorize_release_config(caller, authority_holds, room, config)
 }
 
 /// Who may approve a release, and where: the same people as configure it (decision 215), where release may happen now. Holding the deployment grant gives nothing here, and isn't needed: an agent never approves. A person who

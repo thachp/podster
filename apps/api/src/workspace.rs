@@ -77,6 +77,7 @@ mod collaboration;
 mod cursor;
 mod downloads;
 mod held;
+mod hostname;
 mod merges;
 mod moderation;
 mod objects;
@@ -105,6 +106,7 @@ mod submission_files;
 mod takedown;
 mod visibility;
 
+pub(crate) use hostname::HOSTNAME_REQUEST_PREFIX;
 pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
@@ -3863,6 +3865,15 @@ impl Workspace {
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
         }
+        // The custom hostname's proof job, when its turn comes (M6 step 8).
+        if let Some(next) = migrated
+            .then(|| hostname::next_due(&sql, &self.env))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // A hold on the room's app, when it runs out (M6 step 6).
         if let Some(next) = migrated
             .then(|| releasers::next_due(&sql))
@@ -4438,8 +4449,9 @@ impl Workspace {
         let tail = parts.get(3..).unwrap_or(&[]);
         // The room's release configuration (M6 step 6) is there only while the deployment's setting is on, as every M6
         // route. Otherwise it answers as a route that doesn't exist.
-        let release_route_on =
-            matches!(tail, ["release-config"]) && crate::releases::switched_on(&self.env).await;
+        // So is the room's custom hostname (M6 step 8).
+        let release_route_on = matches!(tail, ["release-config"] | ["app-hostname"])
+            && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
         // recovery, which doesn't come through here, can change its owner. `command`
@@ -4457,6 +4469,9 @@ impl Workspace {
                 // Switching release off only takes down. Switching it on in an archived room is refused by
                 // `podster_policy::release::authorize_release_config`, by its own code.
                 | (Method::Put, ["release-config"])
+                // Removing a custom hostname only takes down. Asking for one in an archived room is refused by
+                // `podster_policy::release::authorize_custom_hostname`.
+                | (Method::Delete, ["app-hostname"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -4534,6 +4549,7 @@ impl Workspace {
                     &who,
                     crate::content_provider::content_domain(&self.env).as_deref(),
                 ),
+                ["app-hostname"] if release_route_on => hostname::read(&sql, &who, now_ms()),
                 _ => Err(ApiError::not_found()),
             };
         }
@@ -5232,6 +5248,35 @@ impl Workspace {
                     },
                 )
             }
+            // The room's custom hostname (M6 step 8), as the release configuration: who first, by the room's rows,
+            // then the name, then what it needs from outside, and the transaction checks again.
+            (Method::Put, ["app-hostname"]) if release_route_on => {
+                hostname::may_change(&who)?;
+                let asked = hostname::asked(&body)?;
+                let reads = self.hostname_request_reads(&identity.id, &asked).await?;
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| hostname::may_change(who),
+                    move |sql, who, now| hostname::handle_request(sql, who, &body, &reads, now),
+                )
+            }
+            (Method::Delete, ["app-hostname"]) if release_route_on => {
+                hostname::may_change(&who)?;
+                let reads = self.config_reads(&identity.id, false).await?;
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| hostname::may_change(who),
+                    move |sql, who, now| hostname::handle_remove(sql, who, &reads, now),
+                )
+            }
             _ => Err(ApiError::not_found()),
         }
     }
@@ -5327,6 +5372,10 @@ impl DurableObject for Workspace {
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());
+        }
+        // The custom hostname's proof job (M6 step 8): one bounded step, after the applier.
+        if let Err(error) = self.hostname_upkeep().await {
+            console_error!("hostname upkeep failed: {:?}", error.code());
         }
         let index = self.drain_index().await;
         if let Err(error) = &index {

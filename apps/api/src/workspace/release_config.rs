@@ -98,6 +98,12 @@ pub(super) fn may_configure(who: &Participant) -> R<()> {
         .map_err(denial)
 }
 
+/// Whether the caller's authority still holds, by their own `Principal`'s answer, about whoever the room's rows name
+/// now. An unknown answer refuses with `standing_unknown`.
+pub(super) fn caller_holds(sql: &SqlStorage, reads: &ConfigReads, caller_id: &str) -> R<bool> {
+    settled(sql, &reads.caller, Some(caller_id), true)?.ok_or_else(standing_unknown)
+}
+
 /// The request's body: `{ enabled, expected_version }`, and nothing else.
 fn parse(body: &Value) -> R<(bool, u64)> {
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
@@ -123,7 +129,7 @@ pub(super) fn asks_on(body: &str) -> bool {
         .is_some_and(|body| body["enabled"].as_bool() == Some(true))
 }
 
-fn denial(denial: podster_policy::release::ReleaseDenial) -> ApiError {
+pub(super) fn denial(denial: podster_policy::release::ReleaseDenial) -> ApiError {
     use podster_policy::release::ReleaseDenial as D;
     let status = match denial {
         D::NotParticipant | D::NotAllowed => 403,
@@ -218,7 +224,7 @@ pub(super) fn handle_set(
 
 /// The room as switching on sees it: its own rows now, and what was read outside, each answer counting only if it is
 /// about the organization and repository the rows name now. An unread fact refuses with `standing_unknown`.
-fn on_room(sql: &SqlStorage, reads: &ConfigReads) -> R<ReleaseRoom> {
+pub(super) fn on_room(sql: &SqlStorage, reads: &ConfigReads) -> R<ReleaseRoom> {
     let on = reads.on.as_ref().ok_or_else(standing_unknown)?;
     let org = room_owner_org(sql)?;
     let provider = super::release_recheck::linked_provider(sql)?;
@@ -253,8 +259,14 @@ impl Workspace {
     /// Everything `PUT release-config` reads outside the room, before its transaction. Switching on also passes the
     /// release path's gate, as every release command does; switching off never waits on it, since it only takes down.
     pub(super) async fn release_config_reads(&self, caller_id: &str, body: &str) -> R<ConfigReads> {
+        self.config_reads(caller_id, asks_on(body)).await
+    }
+
+    /// The same reads, for a change that needs everything switching on needs (`on`), such as asking to map a custom
+    /// hostname (M6 step 8), or for one that only takes down.
+    pub(super) async fn config_reads(&self, caller_id: &str, on: bool) -> R<ConfigReads> {
         let sql = self.state.storage().sql();
-        let on = if asks_on(body) {
+        let on = if on {
             self.release_path_open().await?;
             let deployment = crate::releases::setting(&self.env).await;
             self.apply_deployment_switch(deployment).await;

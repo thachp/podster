@@ -10,10 +10,15 @@
 //! when it is suspended, the claim starts ending at once and the room is told, by a notice this object keeps and sends
 //! again, from its alarm, until the room has answered. Lifting restores nothing.
 //!
-//! **What isn't:** giving a claim to the first room whose proof passed, and ending and freeing one, which are custom
-//! domains' (M6 step 8). So on a deployment no name has a claim, and a suspension only ever stops a name being
-//! claimed later. Its read answers what it holds, and for a hostname nobody has asked about it answers empty and
-//! leaves no state behind.
+//! **Built with step 8's first PR:** giving the claim to the first room whose proof passed, by
+//! `podster_core::hostnames::decide_ask`, recorded with the request's ID and the generation it was made under; and a
+//! room's withdrawal of a request it never committed as claimed, which frees a claim given for it at once and is kept,
+//! so an ask that arrives after it is refused. Its read also answers the name's generation, which a room keeps with a
+//! request it makes.
+//!
+//! **What isn't:** ending a claim a room committed, deleting its custom hostname at Cloudflare, reading until it is
+//! gone and only then freeing it, which are step 8's later PRs. Its read answers what it holds, and for a hostname
+//! nobody has asked about it answers empty and leaves no state behind.
 //!
 //! - `hostname`: the name this object is for, with the name's `generation`, which core's `suspend`, `lift` and `free`
 //!   each advance (`podster_core::hostnames::HostnameRecord`), and when it was last freed, suspended and lifted. A
@@ -24,6 +29,8 @@
 //!   is unique, so two claims can't hold the name at once. A claim that is `ending` still holds the name: it is freed
 //!   only after the custom hostname is read as gone at Cloudflare.
 //! - `suspension`: an operator's suspension of the name. While it holds, nobody gets a claim or starts a challenge.
+//! - `withdrawn`: each request a room withdrew here (step 8), by the room's and the request's IDs. Such a request is
+//!   never granted, whichever of the ask and the withdrawal arrived first.
 //! - `notice`: what the object owes a room, kept and sent again until the room has answered: that the name was
 //!   suspended while that room held it.
 //!
@@ -31,7 +38,9 @@
 use crate::error::ApiError;
 use crate::forward;
 use crate::store::{exec, int, rows, text, transaction_sync};
-use podster_core::hostnames::{lift, suspend, Claim, HostnameRecord};
+use podster_core::hostnames::{
+    decide_ask, lift, suspend, withdraw, Claim, ClaimDecision, HostnameRecord, Withdrawal,
+};
 use serde_json::{json, Value};
 use std::{cell::RefCell, rc::Rc};
 use worker::*;
@@ -50,6 +59,8 @@ CREATE TABLE notice (seq INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NO
   attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, answered_at INTEGER);
 ", "
 ALTER TABLE claim ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0);
+", "
+CREATE TABLE withdrawn (workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (workspace_id, request_id)) WITHOUT ROWID;
 "];
 
 /// Whether this object holds anything. This only reads, so asking about an unknown hostname leaves no state.
@@ -88,12 +99,15 @@ fn migrate(sql: &SqlStorage) -> R<()> {
     )
 }
 
-/// What the object holds: the claim that holds the name, if any, by its IDs, and whether the name is suspended. Never
-/// the hostname itself.
+/// What the object holds: the claim that holds the name, if any, by its IDs, whether the name is suspended, and the
+/// name's generation, which a room keeps with a request it makes (M6 step 8). Never the hostname itself.
 fn read(sql: &SqlStorage) -> R<Value> {
     if !initialized(sql)? {
-        return Ok(json!({ "claim": null, "suspended": false }));
+        return Ok(json!({ "claim": null, "suspended": false, "generation": 0 }));
     }
+    let generation = rows(sql, "SELECT generation FROM hostname", vec![])?
+        .first()
+        .map_or(0, |row| int(&row["generation"]));
     let claim = rows(
         sql,
         "SELECT id, workspace_id, request_id, state, claimed_at FROM claim WHERE held = 1",
@@ -108,7 +122,147 @@ fn read(sql: &SqlStorage) -> R<Value> {
         vec![],
     )?
     .is_empty();
-    Ok(json!({ "claim": claim, "suspended": suspended }))
+    Ok(json!({ "claim": claim, "suspended": suspended, "generation": generation }))
+}
+
+/// Records the normalized name this object is for, on the first call that writes, and refuses a call that names
+/// another, so a mistake in routing can't act on the wrong name. Callers run this inside a transaction.
+fn own_name(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
+    let hostname = body["hostname"]
+        .as_str()
+        .filter(|name| podster_core::hostnames::normalize(name).ok().as_deref() == Some(*name))
+        .ok_or_else(ApiError::invalid_argument)?;
+    migrate(sql)?;
+    exec(
+        sql,
+        "INSERT INTO hostname (singleton, name, created_at) VALUES (1, ?, ?) ON CONFLICT (singleton) DO NOTHING",
+        vec![hostname.into(), now.into()],
+    )?;
+    let named = rows(sql, "SELECT name FROM hostname", vec![])?;
+    if named.first().and_then(|row| row["name"].as_str()) != Some(hostname) {
+        return Err(ApiError::internal("this object is for another hostname"));
+    }
+    Ok(())
+}
+
+/// A room and one of its requests, as a call names them. Both are IDs Podster made, checked against their form.
+fn room_and_request(body: &Value) -> R<(String, String)> {
+    let id = |value: &Value, prefix: &str| {
+        value
+            .as_str()
+            .filter(|id| {
+                id.strip_prefix(prefix).is_some_and(|rest| {
+                    rest.len() == 32
+                        && rest
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                })
+            })
+            .map(str::to_owned)
+            .ok_or_else(ApiError::invalid_argument)
+    };
+    Ok((
+        id(&body["workspace_id"], "ws_")?,
+        id(
+            &body["request_id"],
+            crate::workspace::HOSTNAME_REQUEST_PREFIX,
+        )?,
+    ))
+}
+
+/// Whether the room withdrew this request here, or a claim it was given has ended: either way it is never granted.
+fn withdrawn(sql: &SqlStorage, room: &str, request: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS w FROM withdrawn WHERE workspace_id = ? AND request_id = ?
+         UNION ALL SELECT 1 AS w FROM claim WHERE workspace_id = ? AND request_id = ? AND state = 'ended'",
+        vec![room.into(), request.into(), room.into(), request.into()],
+    )?
+    .is_empty())
+}
+
+/// The path a room asks for the claim on, once its proof matched (M6 step 8). Nothing outside the Worker reaches it.
+pub(crate) const INTERNAL_CLAIM: &str = "/internal/claim";
+/// The path a room withdraws a request on that it never committed as claimed (M6 step 8).
+pub(crate) const INTERNAL_WITHDRAW: &str = "/internal/withdraw";
+
+/// `{ hostname, workspace_id, request_id, requested_at, generation }`: a room asks for the claim, after its proof
+/// matched for this request's own value, inside the caller's transaction. Decided by `podster_core::hostnames::
+/// decide_ask`: one hostname, one room; suspension first; a request the room withdrew is never granted. A grant
+/// records the claim with **both the request's ID and the generation it was made under**, which a suspension's notice
+/// carries back to the room. Asking again for the same room and request gets the same answer. Answers
+/// `{ decision }`, core's code.
+fn ask_claim(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (room, request) = room_and_request(body)?;
+    let requested_at = body["requested_at"]
+        .as_i64()
+        .ok_or_else(ApiError::invalid_argument)?;
+    let generation = body["generation"]
+        .as_u64()
+        .ok_or_else(ApiError::invalid_argument)?;
+    own_name(sql, body, now)?;
+    let before = held(sql)?;
+    let was_withdrawn = withdrawn(sql, &room, &request)?;
+    let ask = podster_core::hostnames::ClaimAsk {
+        room: &room,
+        request: &request,
+        requested_at,
+        // The room asks only after its proof matched, for this request's own value.
+        proof_matched: true,
+        generation,
+    };
+    let decision = decide_ask(&before.record(), &ask, was_withdrawn, now);
+    if decision == ClaimDecision::Granted && before.claim.is_none() {
+        let stored = i64::try_from(generation).unwrap_or(i64::MAX);
+        exec(
+            sql,
+            "INSERT INTO claim (id, workspace_id, request_id, state, held, claimed_at, proved_at, updated_at, generation)
+               VALUES (?, ?, ?, 'live', 1, ?, ?, ?, ?)",
+            vec![
+                format!("hcl_{}", uuid::Uuid::new_v4().simple()).into(),
+                room.as_str().into(),
+                request.as_str().into(),
+                now.into(),
+                now.into(),
+                now.into(),
+                stored.into(),
+            ],
+        )?;
+    }
+    Ok(json!({ "decision": decision.code() }))
+}
+
+/// `{ hostname, workspace_id, request_id }`: a room withdraws a request it never committed as claimed, inside the
+/// caller's transaction (`podster_core::hostnames::withdraw`). A claim given for exactly that room and request, live or
+/// ending, is freed at once, and the name's generation advances; a claim anyone else holds is untouched. Either way
+/// the request is recorded as withdrawn, so an ask for it that arrives later is refused. Asking again changes nothing
+/// more. Answers `{ withdrawn: true, freed }`.
+fn withdraw_request(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (room, request) = room_and_request(body)?;
+    own_name(sql, body, now)?;
+    let before = held(sql)?;
+    let (after, outcome) = withdraw(&before.record(), &room, &request, now);
+    let freed = outcome == Withdrawal::Freed;
+    if freed {
+        let stored = i64::try_from(after.generation).unwrap_or(i64::MAX);
+        exec(
+            sql,
+            "UPDATE claim SET state = 'ended', held = NULL, ended_at = ?, end_reason = coalesce(end_reason, 'hostname_request_withdrawn'), updated_at = ?
+               WHERE workspace_id = ? AND request_id = ? AND held = 1",
+            vec![now.into(), now.into(), room.as_str().into(), request.as_str().into()],
+        )?;
+        exec(
+            sql,
+            "UPDATE hostname SET generation = ?, last_freed_at = ?",
+            vec![stored.into(), after.last_freed_at.into()],
+        )?;
+    }
+    exec(
+        sql,
+        "INSERT INTO withdrawn (workspace_id, request_id, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+        vec![room.as_str().into(), request.as_str().into(), now.into()],
+    )?;
+    Ok(json!({ "withdrawn": true, "freed": freed }))
 }
 
 /// The object's path for an operator's suspension and its lifting. Nothing outside the Worker reaches it.
@@ -226,20 +380,7 @@ fn set_suspension(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         .as_str()
         .and_then(podster_policy::moderation::Reason::from_name)
         .ok_or_else(ApiError::invalid_argument)?;
-    let hostname = body["hostname"]
-        .as_str()
-        .filter(|name| podster_core::hostnames::normalize(name).ok().as_deref() == Some(*name))
-        .ok_or_else(ApiError::invalid_argument)?;
-    migrate(sql)?;
-    exec(
-        sql,
-        "INSERT INTO hostname (singleton, name, created_at) VALUES (1, ?, ?) ON CONFLICT (singleton) DO NOTHING",
-        vec![hostname.into(), now.into()],
-    )?;
-    let named = rows(sql, "SELECT name FROM hostname", vec![])?;
-    if named.first().and_then(|row| row["name"].as_str()) != Some(hostname) {
-        return Err(ApiError::internal("this object is for another hostname"));
-    }
+    own_name(sql, body, now)?;
     let before = held(sql)?;
     if before.suspended == suspended {
         return suspension(sql);
@@ -437,6 +578,27 @@ impl HostnameClaim {
             (Method::Post, INTERNAL_WAKE) => {
                 self.arm().await?;
                 read(&sql)
+            }
+            // A room's ask for the claim, and its withdrawal of a request it never committed (M6 step 8). Each is one
+            // transaction here, and answers what it decided.
+            (Method::Post, path @ (INTERNAL_CLAIM | INTERNAL_WITHDRAW)) => {
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
+                let claiming = path == INTERNAL_CLAIM;
+                let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+                let slot = out.clone();
+                let store = sql.clone();
+                transaction_sync(&self.state, move || {
+                    let now = now_ms();
+                    *slot.borrow_mut() = Some(if claiming {
+                        ask_claim(&store, &body, now)?
+                    } else {
+                        withdraw_request(&store, &body, now)?
+                    });
+                    Ok(())
+                })?;
+                let answer = out.borrow_mut().take();
+                answer.ok_or_else(|| ApiError::internal("the claim object answered nothing"))
             }
             (Method::Post, INTERNAL_SUSPENSION) => {
                 let body: Value = serde_json::from_str(&req.text().await?)

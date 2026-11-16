@@ -66,9 +66,13 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
 }
 
 /// Whether an M6 route is built in the room that it names, and so goes to that room like any other room route: the room's
-/// release configuration, read and set (step 6). The room answers it only while release is switched on.
+/// release configuration, read and set (step 6), and its custom hostname, read, asked for and removed (step 8). The room
+/// answers each only while release is switched on.
 pub(crate) fn room_route(parts: &[&str]) -> bool {
-    matches!(parts, ["v1", "workspaces", _, "release-config"])
+    matches!(
+        parts,
+        ["v1", "workspaces", _, "release-config" | "app-hostname"]
+    )
 }
 
 /// The deployment's release setting, `RELEASES`, read by core's one rule (`podster_core::release::deployment_release`):

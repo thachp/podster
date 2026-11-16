@@ -485,6 +485,44 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     }))
 }
 
+/// Clears and closes a custom hostname's host, in the caller's transaction, through core's `clear_host`: the room stops
+/// serving on the name, and its applier then removes the entry. Its default host, its epoch and its scripts are
+/// untouched. Answers whether there was an open host to close. A suspension's notice and the room's own removal of its
+/// custom hostname (M6 step 8) both end serving this way.
+pub(super) fn close_custom_host(sql: &SqlStorage, hostname: &str, now: i64) -> R<bool> {
+    let open_custom = !rows(
+        sql,
+        "SELECT 1 AS open FROM serve_state WHERE host = ? AND kind = 'custom' AND closed = 0",
+        vec![hostname.into()],
+    )?
+    .is_empty();
+    if !open_custom {
+        return Ok(false);
+    }
+    let loaded = load(sql)?.ok_or_else(|| ApiError::internal("a host with no release state"))?;
+    let index = loaded
+        .hosts
+        .iter()
+        .position(|host| host == hostname)
+        .ok_or_else(|| ApiError::internal("a host that isn't in the serve state"))?;
+    // Core never clears the first host, which is the default one. A room whose only host is a custom hostname has no
+    // default host to keep, which no command makes: refused, and the caller's transaction rolls back.
+    let after = clear_host(&loaded.state, index)
+        .ok_or_else(|| ApiError::internal("the host can't be cleared"))?;
+    let cleared = after
+        .hosts
+        .get(index)
+        .filter(|host| host.script.is_none() && host.closed)
+        .ok_or_else(|| ApiError::internal("the host wasn't cleared"))?;
+    exec(
+        sql,
+        "UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = ?,
+           closed = 1, updated_at = ? WHERE host = ?",
+        vec![to_stored(cleared.version).into(), now.into(), hostname.into()],
+    )?;
+    Ok(true)
+}
+
 /// `{ hostname, request_id, generation }`: the hostname's own object says the name was suspended while this room's
 /// request held it. In the caller's transaction the room clears and closes that host, so its applier removes the entry
 /// and no commit, rollback or set-back writes to it again, and marks its request as ending.
@@ -552,35 +590,7 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
         )?;
         acted = true;
     }
-    let open_custom = !rows(
-        sql,
-        "SELECT 1 AS open FROM serve_state WHERE host = ? AND kind = 'custom' AND closed = 0",
-        vec![hostname.into()],
-    )?
-    .is_empty();
-    if open_custom {
-        let loaded =
-            load(sql)?.ok_or_else(|| ApiError::internal("a host with no release state"))?;
-        let index = loaded
-            .hosts
-            .iter()
-            .position(|host| host == hostname)
-            .ok_or_else(|| ApiError::internal("a host that isn't in the serve state"))?;
-        // Core never clears the first host, which is the default one. A room whose only host is a custom hostname
-        // has no default host to keep, which no command makes: refused, and the object asks again.
-        let after = clear_host(&loaded.state, index)
-            .ok_or_else(|| ApiError::internal("the host can't be cleared"))?;
-        let cleared = after
-            .hosts
-            .get(index)
-            .filter(|host| host.script.is_none() && host.closed)
-            .ok_or_else(|| ApiError::internal("the host wasn't cleared"))?;
-        exec(
-            sql,
-            "UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = ?,
-               closed = 1, updated_at = ? WHERE host = ?",
-            vec![to_stored(cleared.version).into(), now.into(), hostname.into()],
-        )?;
+    if close_custom_host(sql, hostname, now)? {
         acted = true;
     }
     if acted {

@@ -10,6 +10,7 @@ mod downloads;
 mod error;
 mod github;
 mod hostname_claim;
+mod hostname_proof;
 mod moderation;
 mod objects;
 mod principal;

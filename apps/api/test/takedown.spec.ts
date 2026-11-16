@@ -1720,7 +1720,7 @@ describe("an operator's suspension of a custom hostname", () => {
       for (const host of [`deep.${a.host}`, FAKE.domain, "podster.dev", "app.podster.dev"]) expect([(await suspendHost(host)).status, (await suspendHost(host)).code], host).toEqual([404, "not_found"]);
     });
     // None of that left anything behind for the name.
-    expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: false });
+    expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: false, generation: 0 });
     await alarmQuiet(stub(a.room));
   });
 
@@ -1730,7 +1730,7 @@ describe("an operator's suspension of a custom hostname", () => {
       const done = await suspendHost(hostname);
       expect([done.status, done.body]).toEqual([200, { host: hostname, suspended: true, reason: "abuse", at: expect.any(Number) }]);
       expect(await claimRows(hostname)).toEqual({ name: [{ name: hostname, generation: 1, was_suspended: 1, was_lifted: 0 }], suspension: [{ reason: "abuse", holds: 1 }], claim: [], notice: [] });
-      expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: true });
+      expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: true, generation: 1 });
       // Two spellings are one name, and asking again changes nothing: no new generation.
       expect((await suspendHost(hostname.toUpperCase(), OPERATOR, "spam")).body).toEqual(done.body);
       expect((await suspendHost(`${hostname}.`)).body).toEqual(done.body);

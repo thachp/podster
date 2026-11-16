@@ -23,6 +23,10 @@ pub const MAX_HOSTNAME_LEN: usize = 253;
 pub const MAX_HOSTNAME_LABEL_LEN: usize = 63;
 /// Podster's own domain. Neither it nor anything under it may be mapped.
 pub const PODSTER_DOMAIN: &str = "podster.dev";
+/// Every domain of Podster's that no room may map, nor any name under one: its own, the content domain first named
+/// (`opster.dev`, replaced the same day and still Podster's), and the content domain named since (`podster.site`). A
+/// deployment's configured content domain is refused as well, whatever it is.
+pub const RESERVED_DOMAINS: [&str; 3] = [PODSTER_DOMAIN, "opster.dev", "podster.site"];
 /// The name the challenge's TXT record goes at, before the hostname.
 pub const CHALLENGE_PREFIX: &str = "_podster-challenge";
 /// How long a pending request lives. Pending holds nothing.
@@ -47,7 +51,7 @@ pub enum HostnameRefusal {
     IpAddress,
     /// `hostname_single_label`
     SingleLabel,
-    /// `hostname_reserved`: `podster.dev`, the content domain, or a name under either.
+    /// `hostname_reserved`: one of [`RESERVED_DOMAINS`], the content domain, or a name under one.
     Reserved,
     /// `hostname_public_suffix`: a public suffix itself.
     PublicSuffix,
@@ -300,7 +304,11 @@ pub fn mappable(
     if !content.contains('.') {
         return Err(HostnameRefusal::Unclassified);
     }
-    if is_or_under(&name, PODSTER_DOMAIN) || is_or_under(&name, &content) {
+    if RESERVED_DOMAINS
+        .iter()
+        .any(|domain| is_or_under(&name, domain))
+        || is_or_under(&name, &content)
+    {
         return Err(HostnameRefusal::Reserved);
     }
     let rules: Option<Vec<SuffixRule>> =
@@ -347,6 +355,115 @@ pub fn proof_matches(values: &[&str], expected: &str) -> bool {
 /// Whether a pending request has expired: 72 hours after it was made. An expired request is gone.
 pub fn pending_expired(requested_at: i64, now: i64) -> bool {
     now.saturating_sub(requested_at) >= PENDING_TTL_MS
+}
+
+/// Whether the room may end a request as expired by its own clock (M6 step 8): it is pending, past its 72 hours, and
+/// its proof was never taken to the hostname's object. Once it was (`proof_asked`), the object may already have given
+/// the claim, so only the object's answer ends it ([`decide_claim`] answers `Expired` for a claim it never gave).
+pub fn request_expired(
+    state: crate::hostname_requests::HostnameRequestState,
+    proof_asked: bool,
+    requested_at: i64,
+    now: i64,
+) -> bool {
+    state == crate::hostname_requests::HostnameRequestState::Pending
+        && !proof_asked
+        && pending_expired(requested_at, now)
+}
+
+/// **Proposed.** How often a pending request's challenge is looked for in its first hour.
+pub const PROOF_EARLY_INTERVAL_MS: i64 = 60 * 1000;
+/// **Proposed.** How often after that, until it expires.
+pub const PROOF_LATE_INTERVAL_MS: i64 = 15 * 60 * 1000;
+/// **Proposed.** How long the first, frequent looks go on.
+pub const PROOF_EARLY_SPAN_MS: i64 = 60 * 60 * 1000;
+
+/// When a pending request's challenge is next looked for: at once if it never was, then a minute after each look for
+/// its first hour, and fifteen minutes after each look from then on. Taken from the last look, so a clock that ran
+/// backwards never makes a look due before the one it follows.
+pub fn next_proof_check(requested_at: i64, checked_at: Option<i64>) -> i64 {
+    let Some(checked_at) = checked_at else {
+        return requested_at;
+    };
+    let interval = if checked_at.saturating_sub(requested_at) < PROOF_EARLY_SPAN_MS {
+        PROOF_EARLY_INTERVAL_MS
+    } else {
+        PROOF_LATE_INTERVAL_MS
+    };
+    checked_at.saturating_add(interval)
+}
+
+/// One TXT record's text, from the presentation form a DNS-over-HTTPS JSON answer gives in `data`: one or more quoted
+/// strings, separated by spaces, joined into one value, with `\"`, `\\` and `\DDD` undone. A resolver that gives the
+/// text bare is read as one token, taken as it is. `None` for anything else, a value that unescapes to a byte that
+/// isn't text among them: a record that can't be read proves nothing.
+pub fn txt_rdata_text(data: &str) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    if !data.starts_with('"') {
+        let bare = data
+            .chars()
+            .all(|c| c.is_ascii_graphic() && c != '"' && c != '\\');
+        return bare.then(|| data.to_owned());
+    }
+    let bytes = data.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut at = 0;
+    loop {
+        // At a string's opening quote.
+        if bytes.get(at) != Some(&b'"') {
+            return None;
+        }
+        at += 1;
+        loop {
+            let byte = *bytes.get(at)?;
+            match byte {
+                b'"' => {
+                    at += 1;
+                    break;
+                }
+                b'\\' => {
+                    let next = *bytes.get(at + 1)?;
+                    if next.is_ascii_digit() {
+                        let digits = bytes.get(at + 1..at + 4)?;
+                        if !digits.iter().all(u8::is_ascii_digit) {
+                            return None;
+                        }
+                        let value = digits
+                            .iter()
+                            .fold(0u32, |n, d| n * 10 + u32::from(d - b'0'));
+                        out.push(u8::try_from(value).ok()?);
+                        at += 4;
+                    } else {
+                        out.push(next);
+                        at += 2;
+                    }
+                }
+                byte if byte.is_ascii_control() => return None,
+                byte => {
+                    out.push(byte);
+                    at += 1;
+                }
+            }
+        }
+        if at == bytes.len() {
+            break;
+        }
+        // Strings are separated by spaces, and nothing else.
+        let spaces = bytes
+            .get(at..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|b| **b == b' ')
+            .count();
+        if spaces == 0 || at + spaces == bytes.len() {
+            return None;
+        }
+        at += spaces;
+    }
+    let text = String::from_utf8(out).ok()?;
+    (!text.chars().any(char::is_control)).then_some(text)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -415,6 +532,9 @@ pub enum ClaimDecision {
     /// `hostname_claim_ending`: the claim is ending, and is never granted again, not even to its own room and request.
     /// Once it is freed, any claim needs a new challenge.
     Ending,
+    /// `hostname_request_withdrawn`: the room withdrew this request before it ever committed a claim for it, so it is
+    /// never granted, whichever of the two reached the object first ([`decide_ask`], [`withdraw`]).
+    Withdrawn,
 }
 
 impl ClaimDecision {
@@ -428,7 +548,72 @@ impl ClaimDecision {
             ClaimDecision::StaleChallenge => "hostname_challenge_stale",
             ClaimDecision::Expired => "hostname_request_expired",
             ClaimDecision::Ending => "hostname_claim_ending",
+            ClaimDecision::Withdrawn => "hostname_request_withdrawn",
         }
+    }
+
+    pub const ALL: [ClaimDecision; 8] = [
+        ClaimDecision::Granted,
+        ClaimDecision::HeldElsewhere,
+        ClaimDecision::Suspended,
+        ClaimDecision::Unproven,
+        ClaimDecision::StaleChallenge,
+        ClaimDecision::Expired,
+        ClaimDecision::Ending,
+        ClaimDecision::Withdrawn,
+    ];
+
+    /// The decision a code names, as the hostname's object answers it to a room. `None` for anything else.
+    pub fn from_code(code: &str) -> Option<ClaimDecision> {
+        Self::ALL
+            .into_iter()
+            .find(|decision| decision.code() == code)
+    }
+}
+
+/// The hostname object's decision on a room's ask, given whether the room has withdrawn that request (M6 step 8). A
+/// withdrawn request is refused whatever the record says, so a withdrawal that reached the object before the ask it
+/// overtook still wins. Otherwise it is [`decide_claim`].
+pub fn decide_ask(
+    record: &HostnameRecord,
+    ask: &ClaimAsk,
+    withdrawn: bool,
+    now: i64,
+) -> ClaimDecision {
+    if withdrawn {
+        return ClaimDecision::Withdrawn;
+    }
+    decide_claim(record, ask, now)
+}
+
+/// What a room's withdrawal did in the hostname's object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Withdrawal {
+    /// The object held a claim, live or ending, for exactly that room and request, and freed it.
+    Freed,
+    /// The object held no claim: the withdrawal is recorded, and that request is never granted.
+    NothingHeld,
+    /// Another room, or another request of this room, holds the name: nothing of it changes.
+    HeldByOther,
+}
+
+/// A room withdraws a request it never committed as claimed (M6 step 8): it removed a request whose proof it had taken
+/// to the object, or a suspension's notice ended it, before the room recorded a claim. **The room's word that it never
+/// committed the claim is what makes freeing safe:** nothing served on the name, and no custom hostname was made at
+/// Cloudflare, which is only ever made for a claim the room committed. So [`may_free_claim`] holds, and the claim is
+/// freed at once, live or ending; the generation advances, as every free does. A claim anyone else holds is untouched.
+pub fn withdraw<'a>(
+    record: &HostnameRecord<'a>,
+    room: &str,
+    request: &str,
+    now: i64,
+) -> (HostnameRecord<'a>, Withdrawal) {
+    match record.claim {
+        Some(claim) if claim.room == room && claim.request == request => {
+            (free(record, now), Withdrawal::Freed)
+        }
+        Some(_) => (*record, Withdrawal::HeldByOther),
+        None => (*record, Withdrawal::NothingHeld),
     }
 }
 

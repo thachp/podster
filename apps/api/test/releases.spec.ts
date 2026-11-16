@@ -144,8 +144,14 @@ describe("M6's routes, none of them built", () => {
           // Step 6 built the room's release configuration, which the room itself answers: an operator isn't in the
           // room, and the owner reads it, and sends a body that isn't `{ enabled, expected_version }`.
           getReleaseConfig: [404, "workspace_not_found"], setReleaseConfig: [404, "workspace_not_found"],
+          // Step 8's first PR built the room's custom hostname, which the room answers the same way: the owner reads
+          // none, sends a body that isn't `{ hostname }`, and removes nothing.
+          getAppHostname: [404, "workspace_not_found"], requestAppHostname: [404, "workspace_not_found"], removeAppHostname: [404, "workspace_not_found"],
         };
-        const ownerWant: Record<string, [number, string | undefined]> = { ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"] };
+        const ownerWant: Record<string, [number, string | undefined]> = {
+          ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"],
+          getAppHostname: [200, undefined], requestAppHostname: [400, "invalid_argument"], removeAppHostname: [200, undefined],
+        };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);
         expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : ownerWant[route.operation] ?? [409, "release_not_available"]);
@@ -455,7 +461,7 @@ describe("the hostname-claim object (M6 step 2)", () => {
   const state = async (hostname: string) => (await claimStub(hostname).fetch("https://claim.internal/internal/state")).json() as Promise<any>;
 
   it("answers empty for a hostname nobody asked about, and leaves no state behind", async () => {
-    expect(await state("unknown.example.com")).toEqual({ claim: null, suspended: false });
+    expect(await state("unknown.example.com")).toEqual({ claim: null, suspended: false, generation: 0 });
     expect(await inClaim("unknown.example.com", (sql) => sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'").one().n)).toBe(0);
   });
 
@@ -471,10 +477,10 @@ describe("the hostname-claim object (M6 step 2)", () => {
     expect((await claimStub(hostname).fetch("https://claim.internal/internal/test-migrate", { method: "POST" })).status).toBe(200);
     // Applying it again changes nothing.
     expect((await claimStub(hostname).fetch("https://claim.internal/internal/test-migrate", { method: "POST" })).status).toBe(200);
-    expect(await state(hostname)).toEqual({ claim: null, suspended: false });
+    expect(await state(hostname)).toEqual({ claim: null, suspended: false, generation: 0 });
     const add = (id: string, room: string, status: string, held: number | null) => inClaim(hostname, (sql) => refuses(() => sql.exec("INSERT INTO claim (id, workspace_id, request_id, state, held, claimed_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)", id, room, `hnr_${id}`, status, held)));
     expect(await add("clm_1", "ws_a", "live", 1)).toBe(false);
-    expect(await state(hostname)).toEqual({ claim: { id: "clm_1", workspace_id: "ws_a", request_id: "hnr_clm_1", state: "live", claimed_at: 1 }, suspended: false });
+    expect(await state(hostname)).toEqual({ claim: { id: "clm_1", workspace_id: "ws_a", request_id: "hnr_clm_1", state: "live", claimed_at: 1 }, suspended: false, generation: 0 });
     // Another room can't hold the name while the first does, live or ending.
     expect(await add("clm_2", "ws_b", "live", 1)).toBe(true);
     await inClaim(hostname, (sql) => sql.exec("UPDATE claim SET state = 'ending'"));
@@ -486,7 +492,7 @@ describe("the hostname-claim object (M6 step 2)", () => {
     expect(await add("clm_3", "ws_b", "claimed", 1)).toBe(true);
     // Ended, the name is free, and the old claim is kept.
     await inClaim(hostname, (sql) => sql.exec("UPDATE claim SET state = 'ended', held = NULL, ended_at = 2"));
-    expect(await state(hostname)).toEqual({ claim: null, suspended: false });
+    expect(await state(hostname)).toEqual({ claim: null, suspended: false, generation: 0 });
     expect(await add("clm_2", "ws_b", "live", 1)).toBe(false);
     expect(await inClaim(hostname, (sql) => sql.exec("SELECT COUNT(*) AS n FROM claim").one().n)).toBe(2);
     // A suspension belongs to the name, not to a claim, and holds until it is lifted.
@@ -503,7 +509,7 @@ describe("the hostname-claim object (M6 step 2)", () => {
     const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { hostnameClaimStates: string[]; holdingHostnameClaimStates: string[] };
     expect([core.hostnameClaimStates, core.holdingHostnameClaimStates]).toEqual([["live", "ending", "ended"], ["live", "ending"]]);
     // Another hostname is another object.
-    expect(await state("other.example.com")).toEqual({ claim: null, suspended: false });
+    expect(await state("other.example.com")).toEqual({ claim: null, suspended: false, generation: 0 });
   });
 });
 

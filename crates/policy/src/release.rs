@@ -4,6 +4,7 @@
 //! | Action | Who |
 //! | --- | --- |
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
+//! | Map a custom hostname, or remove one (M6 step 8) | The same people; asking only where release may happen at all, release switched on in the room among them; removing always ([`authorize_custom_hostname`]) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
 //! | Approve a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed (decided by the architect, for the owner to review) |
 //! | Decline a release | The same people, wherever they may still act on the room: only a deleted room or organization refuses ([`authorize_decline`]) |
@@ -273,6 +274,95 @@ pub fn authorize_release_config(
             ..*room
         }),
         ConfigChange::Change => release_room_allows(room),
+    }
+}
+
+/// A change to the room's custom hostname (M6 step 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameChange {
+    /// Ask to map a hostname: the room gets a challenge.
+    Request,
+    /// Remove the mapping, or drop a pending request. It only takes down.
+    Remove,
+}
+
+/// Who may map a custom hostname to the room's app, or remove one, and where (M6 step 8; decisions 201, 207 and 215):
+/// the same people as configure release. Asking is a change to the release configuration, so it needs everything
+/// release needs at all, release switched on in the room among them ([`release_room_allows`]). Removing is always
+/// allowed to them, as switching release off is, since it only takes down. An agent never.
+pub fn authorize_custom_hostname(
+    caller: &Caller,
+    authority_holds: bool,
+    room: &ReleaseRoom,
+    change: HostnameChange,
+) -> Result<(), ReleaseDenial> {
+    let config = match change {
+        HostnameChange::Request => ConfigChange::Change,
+        HostnameChange::Remove => ConfigChange::TurnOff,
+    };
+    authorize_release_config(caller, authority_holds, room, config)
+}
+
+/// The room's own facts the custom hostname's proof job reads before each look in DNS and each ask of the hostname's
+/// object (M6 step 8): those asking checked that only the room's rows can say, read again now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostnameProofRoom {
+    pub organization_exists: bool,
+    /// The organization's release switch as the room last applied it; `None` when that can't be read.
+    pub organization_may_release: Option<bool>,
+    pub deleted: bool,
+    pub public: bool,
+    pub archived: bool,
+    pub public_surface_suspended: bool,
+    pub app_suspended: bool,
+}
+
+impl HostnameProofRoom {
+    /// A room where nothing stands in the way.
+    pub const OPEN: HostnameProofRoom = HostnameProofRoom {
+        organization_exists: true,
+        organization_may_release: Some(true),
+        deleted: false,
+        public: true,
+        archived: false,
+        public_surface_suspended: false,
+        app_suspended: false,
+    };
+}
+
+/// What the proof job may do next for a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameProofStep {
+    /// Look, or ask.
+    Go,
+    /// A fact couldn't be read: nothing is looked up or asked, nothing ends, and the job looks again in its turn.
+    Wait,
+    /// A fact was read and fails, with its code: the request ends, withdrawn at the object if its proof was taken there.
+    End(ReleaseDenial),
+}
+
+/// Whether the proof job may go on, in [`release_room_allows`]'s order. A fact read and failing ends the request even
+/// while another can't be read; only when nothing read fails does an unread one make it wait.
+pub fn hostname_proof_room(room: &HostnameProofRoom) -> HostnameProofStep {
+    let checks = [
+        (room.organization_exists, ReleaseDenial::OrganizationDeleted),
+        (
+            room.organization_may_release != Some(false),
+            ReleaseDenial::NotDelegated,
+        ),
+        (!room.deleted, ReleaseDenial::Deleted),
+        (room.public, ReleaseDenial::NeedsPublicRoom),
+        (!room.archived, ReleaseDenial::Archived),
+        (
+            !room.public_surface_suspended,
+            ReleaseDenial::PublicSurfaceSuspended,
+        ),
+        (!room.app_suspended, ReleaseDenial::AppSuspended),
+    ];
+    match checks.into_iter().find(|(holds, _)| !holds) {
+        Some((_, denial)) => HostnameProofStep::End(denial),
+        None if room.organization_may_release.is_none() => HostnameProofStep::Wait,
+        None => HostnameProofStep::Go,
     }
 }
 

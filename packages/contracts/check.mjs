@@ -141,7 +141,7 @@ for (const [name, cap] of Object.entries(capabilities)) {
 const root = new URL("../../", import.meta.url);
 const core = coreSets(root);
 const releaseEnums = {
-  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(),
+  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStates.join(),
   "AppHostnameRequest.state": core.hostnameRequestStates.join(),
 };
 const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
@@ -172,6 +172,17 @@ for (const [what, source, pattern, expected] of ties) {
 // A release is declined exactly when someone declined it. The state's name is core's.
 if (!core.releaseStates.includes("declined") || !store.includes("CHECK ((state = 'declined') = (declined_by IS NOT NULL))")) problems.push("release.declined_by: must be set exactly in core's declined state");
 if (!store.includes(`environments_json = '[\\"${core.environment}\\"]'`)) problems.push(`release_config.environments_json: must be exactly the one environment, ${core.environment}`);
+// M6 step 7: a task's release status carries the release beside checks and merge. It is null for whoever is given the
+// merge alone, `{ exists: false }` while release is off, or the latest attempt, whose `served` and `result_url` are what
+// says live: the state alone never does.
+{
+  const release = api.components.schemas.TaskReleaseStatus?.properties?.release;
+  const shown = api.components.schemas.TaskRelease;
+  const variants = (release?.oneOf ?? []).map((v) => v.$ref ?? JSON.stringify(v));
+  if (variants.join("|") !== [JSON.stringify({ type: "null" }), JSON.stringify({ type: "object", additionalProperties: false, required: ["exists"], properties: { exists: { type: "boolean", enum: [false] } } }), "#/components/schemas/TaskRelease"].join("|")) problems.push("TaskReleaseStatus.release: must be null, { exists: false } or a TaskRelease");
+  if (shown?.properties?.served?.type !== "boolean" || JSON.stringify(shown?.properties?.result_url?.type) !== JSON.stringify(["string", "null"]) || shown?.properties?.exists?.enum?.join() !== "true" || shown?.additionalProperties !== false) problems.push("TaskRelease: must say served as a boolean and result_url as a string or null, apart from its state");
+  if (shown?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("TaskRelease.commit_sha: must be 40 lower-case hexadecimal characters");
+}
 if (api.components.schemas.Release?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("Release.commit_sha: must be 40 lower-case hexadecimal characters");
 for (const [what, text] of [["approval policy", `approval_policy = '${core.approvalPolicies.join()}'`], ["environment", `environment = '${core.environment}'`], ["release ID's prefix", `id GLOB '${core.releaseIdPrefix}*'`], ["release ID's length", `length(id) = ${core.idLen}`], ["label's length", `length(label) BETWEEN 1 AND ${core.maxLabelLen}`]]) {
   if (!store.includes(text)) problems.push(`the room's tables don't hold the ${what} as core has it: ${text}`);

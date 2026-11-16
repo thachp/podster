@@ -1487,6 +1487,10 @@ describe("rate limits", () => {
     const status = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "get_task_release_status")!;
     expect([status.kind, status.method, Object.keys(status.fields ?? {})]).toEqual(["query", "GET", ["workspace_id", "task_id"]]);
     expect(toApiCall(status, { workspace_id: "w", task_id: "t", pr_number: 7, refresh: true })).toEqual({ method: "GET", path: "/v1/workspaces/w/tasks/t/release-status" });
+    // M6 step 7: the release is in the answer, which the gateway passes on as the API gave it. The tool tells an agent
+    // that only `served` means live, and its fields are still only the task: nothing an agent sends reaches a release.
+    expect(status.description).toContain("live only when release.served is true");
+    expect(status.description).not.toContain("No release exists");
     // The merge tool (M5 step 7b) is listed the same way: only with the switch exactly on. Off, no agent is offered one (AC-17).
     for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("merge_task");
     expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("merge_task");

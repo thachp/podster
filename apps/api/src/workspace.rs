@@ -4540,7 +4540,8 @@ impl Workspace {
                 // A task's checks and merge, as last observed (M5 step 8). Switched off, this arm isn't taken, and
                 // the read answers below as any route that doesn't exist.
                 ["tasks", id, "release-status"] if provisioning::enabled(&self.env, &sql)? => {
-                    changes::release_status(&sql, &who, id)
+                    let facts = self.release_status_facts(&sql, id).await;
+                    changes::release_status(&sql, &who, id, &facts)
                 }
                 ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(

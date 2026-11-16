@@ -28,6 +28,26 @@ export function defaultHostLabel(host: string, domain: string): string | null {
   return LABEL.test(label) ? label : null;
 }
 
+/** Whether a host is `domain` itself or any name under it, at any depth. The same rule as `on_domain` in the API. */
+export function onDomain(host: string, domain: string): boolean {
+  return host === domain || host.endsWith(`.${domain}`);
+}
+
+/** Between a custom hostname's script and its host in its serve entry (M6 step 8c). */
+export const CUSTOM_ENTRY_SEPARATOR = "@";
+
+/**
+ * The script a custom hostname's serve entry names, read for exactly `host`, or null: the script's name, `@`, then the
+ * host it was written under, as `podster_core::hostnames::custom_entry_script` reads it. A value under any other key,
+ * or a default host's form (the script's name alone), is nothing.
+ */
+export function customEntryScript(host: string, value: string): string | null {
+  const at = value.indexOf(CUSTOM_ENTRY_SEPARATOR);
+  if (at < 0) return null;
+  const script = value.slice(0, at);
+  return isHost(host) && value.slice(at + 1) === host && isScriptName(script) ? script : null;
+}
+
 /** The label a script's name begins with, or null if it isn't a script's name. */
 export function scriptLabel(script: string): string | null {
   return isScriptName(script) ? script.slice(0, script.indexOf(".")) : null;

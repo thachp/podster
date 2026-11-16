@@ -25,8 +25,9 @@
 //! What this step leaves out, on purpose:
 //! - Only `app_suspended` unpublishes here. Decision 218's release switch unpublishes through [`unpublish_app`] from
 //!   `release_switch`. The other nine triggers are step 6's.
-//! - A custom hostname's entry is never written here, only removed: writing one needs the hostname's claim to agree,
-//!   and nothing makes a claim until custom domains are built (step 8), which adds that read.
+//! - **A custom hostname's entry** (step 8c) is written only while routing holds, the hostname's own object asked
+//!   last, just before the write ([`custom_write`]); what was read and fails takes the entry down. It is written in
+//!   the custom form, naming its host (`podster_core::hostnames::custom_entry_value`).
 //! - **A custom hostname suspended while this room holds it** ([`hostname_suspended`]): the hostname's own object
 //!   tells the room, and the room clears and closes that host through `podster_core::release::clear_host`, in its own
 //!   transaction. The epoch doesn't move and the default host is untouched. The applier then removes the entry.
@@ -40,7 +41,7 @@
 use super::*;
 use crate::content_provider::{Entry, Provider};
 use crate::content_stop::{self, Stop};
-use podster_core::hostname_requests::HostnameRequestState;
+use podster_core::hostname_requests::{CustomRoute, HostnameRequestState};
 use podster_core::release::{
     clear_host, next_state, reconcile_script, script_gone, script_owner, unpublish, upload_expired,
     CommitMark, DesiredServe, InFlight, ReleaseEvent, ReleaseState, RoomClaim, ScriptAnswer,
@@ -693,15 +694,41 @@ fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
     Ok(found)
 }
 
+/// Whether the hostname's object, as the reconcile read it (`{ request_id, live }`), holds this room's open request for
+/// `host`, claimed, live. Anything else, an answer of another shape among it, is no.
+fn claim_live_for(sql: &SqlStorage, host: &str, claim: &Value) -> R<bool> {
+    let (Some(request), Some(true)) = (claim["request_id"].as_str(), claim["live"].as_bool())
+    else {
+        return Ok(false);
+    };
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS held FROM hostname_request WHERE id = ? AND hostname = ? AND open = 1 AND state = 'claimed'",
+        vec![request.into(), host.into()],
+    )?
+    .is_empty())
+}
+
 /// The 5-minute reconcile found an entry for `host` naming `found`, or one it couldn't read (`None`). `(known,
 /// changed)`: whether the host is this room's to answer for, and whether the room now owes it a new pass.
 ///
 /// **The reconcile never writes or removes an entry.** Where what is there differs from what the room wants, the room
 /// forgets that it applied the host, so its own applier, still the only writer, does it again.
-fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R<(bool, bool)> {
+///
+/// **A custom hostname's entry stands only while both agree** (step 8c; ADR 0010's "Two scheduled reconciles"): the
+/// room's desired state, and `claim`, what the hostname's own object answered the pass, `{ request_id, live }`. Unless
+/// the object holds the room's own claimed request for that name, live, the room forgets it applied the host, and its
+/// applier, which asks the object again before any write, takes the entry down.
+fn check_entry(
+    sql: &SqlStorage,
+    host: &str,
+    found: Option<&str>,
+    claim: &Value,
+    now: i64,
+) -> R<(bool, bool)> {
     let row = rows(
         sql,
-        "SELECT s.script_name, s.version, a.applied_version, a.refused_version, a.last_code FROM serve_state s
+        "SELECT s.kind, s.script_name, s.version, a.applied_version, a.refused_version, a.last_code FROM serve_state s
            LEFT JOIN serve_apply a ON a.host = s.host WHERE s.host = ?",
         vec![host.into()],
     )?;
@@ -730,6 +757,8 @@ fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R
         (Some(found), Some(wanted)) => found == wanted,
         _ => false,
     };
+    let matches =
+        matches && (row["kind"].as_str() == Some("default") || claim_live_for(sql, host, claim)?);
     if is_applied && matches {
         return Ok((true, false));
     }
@@ -857,6 +886,7 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
                 .as_str()
                 .ok_or_else(ApiError::invalid_argument)?,
             body["found"].as_str(),
+            &body["claim"],
             now,
         )?,
         Some("script") => check_script(
@@ -1074,6 +1104,8 @@ async fn apply_host(
 ) -> R<()> {
     let mut last = None;
     for _ in 0..APPLY_PASSES {
+        // A custom host's check that was read and failed, with its entry known absent: refused, not retried.
+        let mut refused_code: Option<&'static str> = None;
         let Some(want) = wanted(sql, host)? else {
             return Ok(());
         };
@@ -1087,22 +1119,35 @@ async fn apply_host(
             Err(code) => return refused(sql, host, want.version, code, now_ms()),
         };
         let outcome = match &want.script {
-            // A custom hostname's entry needs its claim to agree, which this step can't ask yet. And the room's state
-            // never names a script while its app is suspended. While the app is held because nobody who may release
-            // remains (step 6), the room keeps the script it serves, and the host serves nothing. In each case nothing
-            // is written, and an entry that is there is removed: what can't be confirmed isn't left serving.
-            Some(_) if want.custom || app_suspended(sql)? || want.held => {
+            // The room's state never names a script while its app is suspended. While the app is held because nobody
+            // who may release remains (step 6), the room keeps the script it serves, and the host serves nothing. In
+            // each case nothing is written, and an entry that is there is removed: what can't be confirmed isn't left
+            // serving.
+            Some(_) if app_suspended(sql)? || want.held => {
                 let (_, absent) = remove_entry(provider, host).await;
-                Err(
-                    match (want.custom, app_suspended(sql)? || !want.held, absent) {
-                        (true, _, true) => "claim_check_not_built",
-                        (true, _, false) => "claim_check_not_built_entry_remains",
-                        (false, true, true) => "app_suspended",
-                        (false, true, false) => "app_suspended_entry_remains",
-                        (false, false, true) => "app_held",
-                        (false, false, false) => "app_held_entry_remains",
-                    },
-                )
+                Err(match (app_suspended(sql)? || !want.held, absent) {
+                    (true, true) => "app_suspended",
+                    (true, false) => "app_suspended_entry_remains",
+                    (false, true) => "app_held",
+                    (false, false) => "app_held_entry_remains",
+                })
+            }
+            // A custom hostname's entry (step 8c): only while every check of routing holds, the hostname's object
+            // asked last. What was read and fails takes the entry down and refuses the host at this version.
+            Some(script) if want.custom => {
+                match custom_write(sql, env, provider, host, script).await? {
+                    Ok(()) => Ok(()),
+                    Err(CustomFail::Retry(code)) => Err(code),
+                    Err(CustomFail::Refuse(code)) => {
+                        let (_, absent) = remove_entry(provider, host).await;
+                        if absent {
+                            refused_code = Some(code);
+                            Err(code)
+                        } else {
+                            Err("custom_host_entry_remains")
+                        }
+                    }
+                }
             }
             // A default host serves only a script under its own label. Anything else is a fault in the room's rows:
             // it is never written, and whatever the host has is removed.
@@ -1153,12 +1198,12 @@ async fn apply_host(
                     Ok(()) => applied(sql, host, &want, now),
                     // What the room asks can't be confirmed, and the host's entry is known to be absent: there is
                     // nothing left to do or to retry for this version.
-                    Err(
-                        code @ ("claim_check_not_built"
-                        | "app_suspended"
-                        | "app_held"
-                        | "script_not_this_hosts"),
-                    ) => refused(sql, host, want.version, code, now),
+                    Err(code @ ("app_suspended" | "app_held" | "script_not_this_hosts")) => {
+                        refused(sql, host, want.version, code, now)
+                    }
+                    Err(code) if refused_code == Some(code) => {
+                        refused(sql, host, want.version, code, now)
+                    }
                     Err(code) => not_applied(sql, host, want.version, code, now),
                 };
             }
@@ -1172,6 +1217,85 @@ async fn apply_host(
         Some(version) => not_applied(sql, host, version, "version_kept_moving", now_ms()),
         None => Ok(()),
     }
+}
+
+/// Why a custom host's entry wasn't written (step 8c).
+enum CustomFail {
+    /// Something couldn't be read, or isn't confirmed yet: nothing is written, what is there is left, and it is tried
+    /// again after a wait.
+    Retry(&'static str),
+    /// A check was read and fails: the entry comes down, and the host is refused at this version.
+    Refuse(&'static str),
+}
+
+/// **A custom hostname's entry, written only while routing holds** (M6 step 8c; ADR 0010's "Custom domains", step 5;
+/// the deep review's D6 on PR #403). In order, each failing closed:
+///
+/// 1. The script is a name Rust made, under one of the room's own labels.
+/// 2. Routing's local checks, from the room's own rows (`custom_hostname::route_local_for`): the gate on claims, the
+///    room's request for the name `claimed`, no unpublish since it was made, the room's own facts, and Cloudflare's
+///    last read `active`. Read and failing refuses; a fact that couldn't be read waits.
+/// 3. The release is served: its marker came back through the default host. A custom host never takes a release
+///    before that, so a commit waiting for its marker leaves the custom host on what it served.
+/// 4. The stop for the whole content domain, as for a default host.
+/// 5. **The hostname's own object, asked last, just before the write:** it must hold exactly this room's and this
+///    request's claim, live, on a name that isn't suspended. No answer waits; anything else refuses.
+///
+/// Then the entry is written in the custom form, naming the host (`podster_core::hostnames::custom_entry_value`), and
+/// read back.
+async fn custom_write(
+    sql: &SqlStorage,
+    env: &Env,
+    provider: &Provider,
+    host: &str,
+    script: &str,
+) -> R<Result<(), CustomFail>> {
+    let own = match script_owner(script) {
+        ScriptOwner::Podster { label, .. } => own_label(sql, label)?,
+        ScriptOwner::Foreign => false,
+    };
+    if !own {
+        return Ok(Err(CustomFail::Refuse("script_not_this_rooms")));
+    }
+    let (local, request) =
+        super::custom_hostname::route_local_for(sql, host, super::hostname::claims_open(sql))?;
+    match local {
+        CustomRoute::Serve => {}
+        CustomRoute::Wait(code) => return Ok(Err(CustomFail::Retry(code))),
+        CustomRoute::Refuse(code) => return Ok(Err(CustomFail::Refuse(code))),
+    }
+    let Some(request) = request else {
+        return Ok(Err(CustomFail::Refuse("hostname_not_claimed")));
+    };
+    let served = !rows(
+        sql,
+        "SELECT 1 AS served FROM release WHERE script_name = ? AND state = 'served' LIMIT 1",
+        vec![script.into()],
+    )?
+    .is_empty();
+    if !served {
+        return Ok(Err(CustomFail::Retry("release_not_served")));
+    }
+    match content_stop::read_from(env).await {
+        Stop::Stopped => return Ok(Err(CustomFail::Retry("content_domain_stopped"))),
+        Stop::Unreadable => return Ok(Err(CustomFail::Retry("stop_unreadable"))),
+        Stop::Clear => {}
+    }
+    let room = rows(sql, "SELECT id FROM workspace", vec![])?
+        .first()
+        .and_then(|row| text(&row["id"]))
+        .unwrap_or_default();
+    match super::custom_hostname::route_at_object(env, sql, host, &room, &request).await {
+        CustomRoute::Serve => {}
+        CustomRoute::Wait(code) => return Ok(Err(CustomFail::Retry(code))),
+        CustomRoute::Refuse(code) => return Ok(Err(CustomFail::Refuse(code))),
+    }
+    let written = provider.write_entry(host, script).await;
+    Ok(match provider.read_entry(host).await {
+        Entry::Present(found) if written && found == script => Ok(()),
+        _ if !written => Err(CustomFail::Retry("write_not_confirmed")),
+        _ => Err(CustomFail::Retry("read_back_differs")),
+    })
 }
 
 /// Whether the room has recorded a release with this script as live or served. A rollback's own record names the

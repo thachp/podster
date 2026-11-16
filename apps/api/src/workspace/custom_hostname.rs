@@ -30,6 +30,12 @@
 //! on a switch, a gate or the room's facts:** it only takes down. It waits only on what it can't read, and on a missing
 //! provider when something may be at Cloudflare, which keeps the name held: that fails closed.
 //!
+//! **Routing (8c):** after each read that finds the custom hostname there, the host starts serving only while routing's
+//! local checks hold (`route_local_for`: the gate on claims, the committed claim, no unpublish since, the room's own
+//! facts, Cloudflare's `active`) and the hostname's object holds exactly this request's claim, live; it stops as soon as
+//! a check is read and fails. The applier asks all of it again before every write of the entry (`takedown`). Once
+//! routed and `active`, the status is read every six hours (the deep review's D5).
+//!
 //! **Room deletion and organization deletion have no source:** nothing deletes either. The room's facts are read before
 //! each provider call, so a room marked deleted, or an organization read gone, ends the claim the day either has one.
 //!
@@ -38,10 +44,11 @@ use super::hostname::{checked, proof_room};
 use super::*;
 use crate::custom_hostnames::HostnameProvider;
 use podster_core::hostname_requests::{
-    after_claimed_read, after_end_read, claimed_step, count_gone, end_step, unpublished_since,
-    AfterClaimedRead, AfterEndRead, ClaimedStep, EndStep, GoneCount, ProviderRead,
+    after_claimed_read, after_end_read, claimed_step, count_gone, end_step, route_claim,
+    route_local, unpublished_since, AfterClaimedRead, AfterEndRead, ClaimedStep, CustomRoute,
+    EndStep, GoneCount, ProviderRead, RoomRead, RouteLocal,
 };
-use podster_core::hostnames::{may_free_claim, ClaimEnd};
+use podster_core::hostnames::{may_free_claim, Claim, ClaimEnd, HostnameRecord};
 use podster_policy::release::{hostname_proof_room, HostnameProofStep};
 
 /// What the room keeps of a request's custom hostname.
@@ -256,22 +263,24 @@ impl Workspace {
                         let (found_id, status) = read.found.into_iter().next().unwrap_or_default();
                         let differs = phase.provider_id.as_deref() != Some(found_id.as_str())
                             || phase.provider_status.as_deref() != Some(status.as_str());
-                        let (store, id) = (sql.clone(), id.clone());
-                        return transaction_sync(&self.state, move || {
+                        let (store, request) = (sql.clone(), id.clone());
+                        transaction_sync(&self.state, move || {
                             // Read there: any read of gone noted before it is forgotten.
-                            set_phase(&store, &id, "first_gone_at = NULL", vec![])?;
+                            set_phase(&store, &request, "first_gone_at = NULL", vec![])?;
                             if differs {
                                 set_phase(
                                     &store,
-                                    &id,
+                                    &request,
                                     "provider_id = ?, provider_status = ?",
                                     vec![found_id.into(), status.into()],
                                 )?;
-                                changed(&store, &id, now)
+                                changed(&store, &request, now)
                             } else {
-                                checked(&store, &id, now)
+                                checked(&store, &request, now)
                             }
-                        });
+                        })?;
+                        // Routing follows what was just read (8c).
+                        return self.route(sql, &room, &id, &hostname, now).await;
                     }
                     AfterClaimedRead::CreateAgain => true,
                 }
@@ -282,6 +291,68 @@ impl Workspace {
                 .await?;
         }
         Ok(())
+    }
+
+    /// **Routing** (M6 step 8c), after each read that found the custom hostname there: the host starts serving only
+    /// while every local check holds (`route_local_for`, Cloudflare's `active` among them) and the hostname's object
+    /// holds exactly this request's claim, live; it stops, closed through `takedown::close_custom_host`, as soon as a
+    /// check is read and fails, so its applier takes the entry down. A check that couldn't be read changes nothing.
+    /// Every condition is read again inside the transaction that opens it, except the object's, which can't be; the
+    /// applier asks the object again before every write of the entry.
+    async fn route(
+        &self,
+        sql: &SqlStorage,
+        room: &str,
+        id: &str,
+        hostname: &str,
+        now: i64,
+    ) -> R<()> {
+        let open = custom_host_open(sql, hostname)?;
+        let local = route_local_for(sql, hostname, self.hostname_claims_open())?.0;
+        let route = match local {
+            CustomRoute::Serve => route_at_object(&self.env, sql, hostname, room, id).await,
+            other => other,
+        };
+        match route {
+            CustomRoute::Serve if open != Some(true) => {
+                let claims_open = self.hostname_claims_open();
+                let (store, host, request) = (sql.clone(), hostname.to_owned(), id.to_owned());
+                let opened = Rc::new(RefCell::new(false));
+                let slot = opened.clone();
+                transaction_sync(&self.state, move || {
+                    let (again, held) = route_local_for(&store, &host, claims_open)?;
+                    if again == CustomRoute::Serve
+                        && held.as_deref() == Some(request.as_str())
+                        && custom_host_open(&store, &host)? != Some(true)
+                    {
+                        *slot.borrow_mut() = open_route(&store, &host, now)?;
+                    }
+                    Ok(())
+                })?;
+                if *opened.borrow() {
+                    console_log!("hostname: a custom host started routing: room={} request={} code=custom_host_routed", room, id);
+                } else {
+                    console_error!("hostname: a custom host couldn't start routing: room={} request={} code=custom_host_not_routed", room, id);
+                }
+                Ok(())
+            }
+            CustomRoute::Serve | CustomRoute::Wait(_) => Ok(()),
+            CustomRoute::Refuse(code) => {
+                if open == Some(true) {
+                    let (store, host) = (sql.clone(), hostname.to_owned());
+                    transaction_sync(&self.state, move || {
+                        takedown::close_custom_host(&store, &host, now).map(|_| ())
+                    })?;
+                    console_error!(
+                        "hostname: a custom host stopped routing: room={} request={} code={}",
+                        room,
+                        id,
+                        code
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Counts a read of gone (`podster_core::hostname_requests::count_gone`): whether it is confirmed. Otherwise the first
@@ -563,6 +634,171 @@ impl Workspace {
             }
         }
     }
+}
+
+/// **Routing's local checks for `hostname`** (M6 step 8c), from the room's own rows, so they run inside a transaction
+/// too: `podster_core::hostname_requests::route_local` over the gate on claims, the room's open request for the name
+/// being `claimed`, no unpublish since it was made, the room's own facts and Cloudflare's last status. Also the open
+/// request's ID, if there is one.
+pub(super) fn route_local_for(
+    sql: &SqlStorage,
+    hostname: &str,
+    claims_open: bool,
+) -> R<(CustomRoute, Option<String>)> {
+    let found = rows(
+        sql,
+        "SELECT q.id, q.state, p.release_epoch, p.provider_status FROM hostname_request q
+           LEFT JOIN hostname_provider p ON p.request_id = q.id WHERE q.hostname = ? AND q.open = 1",
+        vec![hostname.into()],
+    )?;
+    let row = found.first();
+    let request = row.and_then(|row| text(&row["id"]));
+    let request_epoch = row
+        .filter(|row| !row["release_epoch"].is_null())
+        .map(|row| takedown::from_stored(int(&row["release_epoch"])));
+    let status = row.and_then(|row| text(&row["provider_status"]));
+    let room = match hostname_proof_room(&proof_room(sql)?) {
+        HostnameProofStep::Go => RoomRead::Holds,
+        HostnameProofStep::Wait => RoomRead::Unread,
+        HostnameProofStep::End(denial) => RoomRead::Fails(denial.code()),
+    };
+    let route = route_local(&RouteLocal {
+        claims_open,
+        request_claimed: row.is_some_and(|row| row["state"].as_str() == Some("claimed")),
+        unpublished: unpublished_since(
+            request_epoch,
+            takedown::release_epoch(sql).map(takedown::from_stored),
+        ),
+        room,
+        cloudflare_status: status.as_deref(),
+    });
+    Ok((route, request))
+}
+
+/// One call to a hostname's own object, by its normalized name: its answer, or an error for anything but `200`.
+pub(super) async fn claim_call(
+    env: &Env,
+    hostname: &str,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> R<Value> {
+    let stub = env
+        .durable_object("HOSTNAME_CLAIM")?
+        .id_from_name(hostname)?
+        .get_stub()?;
+    let mut response = crate::forward(
+        stub,
+        path,
+        "",
+        Headers::new(),
+        method,
+        body.map(|body| body.to_string()),
+    )
+    .await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("the hostname's object refused"));
+    }
+    Ok(response.json::<Value>().await?)
+}
+
+/// **Routing's check at the hostname's object** (M6 step 8c), read just now: `podster_core::hostname_requests::route_claim`
+/// over what the object holds. An answer that couldn't be read, or isn't exactly the expected shape, is no answer and
+/// waits; a claim in any state but `live` serves nothing.
+pub(super) async fn route_at_object(
+    env: &Env,
+    sql: &SqlStorage,
+    hostname: &str,
+    room: &str,
+    request: &str,
+) -> CustomRoute {
+    // Test builds only: the hostname's object can't be read, as if it hadn't answered.
+    #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_claim_object_unread'",
+        vec![],
+    )
+    .map_or(true, |found| !found.is_empty())
+    {
+        return route_claim(None, room, request);
+    }
+    let _ = sql;
+    let answer = claim_call(env, hostname, Method::Get, "/internal/state", None)
+        .await
+        .ok();
+    let read = answer.as_ref().and_then(|answer| {
+        let suspended = answer["suspended"].as_bool()?;
+        let claim = match &answer["claim"] {
+            Value::Null => None,
+            claim => Some((
+                claim["workspace_id"].as_str()?,
+                claim["request_id"].as_str()?,
+                claim["state"].as_str()?,
+            )),
+        };
+        Some((suspended, claim))
+    });
+    let record = read.map(|(suspended, claim)| HostnameRecord {
+        claim: claim.map(|(room, request, _)| Claim { room, request }),
+        ending: claim.is_some_and(|(_, _, state)| state != "live"),
+        suspended,
+        last_freed_at: None,
+        last_suspended_at: None,
+        last_lifted_at: None,
+        generation: 0,
+    });
+    route_claim(record.as_ref(), room, request)
+}
+
+/// Whether the room's host for `hostname` is a custom host and open: `None` with no row for it.
+fn custom_host_open(sql: &SqlStorage, hostname: &str) -> R<Option<bool>> {
+    Ok(rows(
+        sql,
+        "SELECT closed FROM serve_state WHERE host = ? AND kind = 'custom'",
+        vec![hostname.into()],
+    )?
+    .first()
+    .map(|row| int(&row["closed"]) == 0))
+}
+
+/// **Routing starts** (M6 step 8c; ADR 0010's "Custom domains", step 5), in the caller's transaction: the custom host
+/// is made if the room never had it, closed, and then opened through `podster_core::release::open_host`, on the release
+/// the room last confirmed served on its default host, or on nothing. Each later release switches it, since a commit
+/// writes every open host. Answers whether it opened. A room with no release configuration, or no default host, has
+/// nothing to route, and nothing is written.
+fn open_route(sql: &SqlStorage, hostname: &str, now: i64) -> R<bool> {
+    let has_default = !rows(
+        sql,
+        "SELECT 1 AS d FROM serve_state WHERE kind = 'default'",
+        vec![],
+    )?
+    .is_empty();
+    if takedown::load(sql)?.is_none() || !has_default {
+        return Ok(false);
+    }
+    exec(
+        sql,
+        "INSERT INTO serve_state (host, kind, version, closed, updated_at) VALUES (?, 'custom', 1, 1, ?) ON CONFLICT (host) DO NOTHING",
+        vec![hostname.into(), now.into()],
+    )?;
+    let loaded = takedown::load(sql)?.ok_or_else(|| ApiError::internal("no release state"))?;
+    let index = loaded
+        .hosts
+        .iter()
+        .position(|host| host == hostname)
+        .ok_or_else(|| ApiError::internal("a host that isn't in the serve state"))?;
+    let Some(after) = podster_core::release::open_host(&loaded.state, index) else {
+        return Ok(false);
+    };
+    // Opened first, since a closed host can name no script; then the state core decided, whole.
+    exec(
+        sql,
+        "UPDATE serve_state SET closed = 0 WHERE host = ? AND kind = 'custom'",
+        vec![hostname.into()],
+    )?;
+    release_commit::write_state(sql, &loaded.hosts, &after, now)?;
+    Ok(true)
 }
 
 /// The room's ID.

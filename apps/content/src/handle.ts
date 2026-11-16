@@ -5,14 +5,17 @@
 //
 // For each request:
 //   1. A GET or HEAD that carries a `Service-Worker` header is refused.
-//   2. The host must be an app's default host, `<label>.<content domain>`. Anything else is not-found, and nothing is
-//      read for it. Custom hostnames arrive with custom domains (step 8), with their own entry form.
+//   2. The host must be an app's default host, `<label>.<content domain>`, or a custom hostname: a host off the content
+//      domain (step 8c). Any other name on the content domain, anything that isn't a host, and every host while no
+//      content domain is configured, is not-found, and nothing is read for it.
 //   3. A request that arrived over plain HTTP is sent to the same host and path over HTTPS, and nothing is read.
 //   4. The stop for the whole domain: read at most once every 30 seconds for each running copy, and kept in memory
 //      between. Set, or unreadable, and every host answers not-found.
 //   5. The serve entry for the request's exact host: one read. Missing, unreadable, not a script's name, or a script
 //      under another label than the host's: not-found. The API's applier enforces the label when it writes; this is
-//      the second lock, and the public one.
+//      the second lock, and the public one. A custom hostname's entry is read only in its own form, which names that
+//      very host (`customEntryScript`); the API writes it only while the room holds the name's live claim and
+//      Cloudflare reports it `active`, and the hostname's object agrees.
 //   6. The host's kind, static or with code (`requests.ts`, the mirror of `podster_core::app_requests`). A static
 //      host takes GET and HEAD only, as it always has. A host with code meets the rules for its kind, and then the
 //      code-apps switch, which is off: nothing of an app with code is served, and a write that passes every rule is
@@ -27,7 +30,7 @@
 // instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
 // Nothing is logged for a request (ADR 0010's "Logs").
-import { defaultHostLabel, scriptLabel, STOP_KEY } from "./names";
+import { customEntryScript, defaultHostLabel, isHost, onDomain, scriptLabel, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
@@ -120,11 +123,26 @@ export function sandboxPolicy(origin: string): string {
  */
 type ReadableBy = "*" | typeof CODE_ALLOW_ORIGIN | null;
 
+/**
+ * The host an answer is for: its origin, which the sandbox names, and whether it is a custom hostname.
+ */
+type Site = { origin: string; custom: boolean };
+
+/**
+ * `Strict-Transport-Security`, for a year. On the content domain, which is Podster's own, it covers every name under the
+ * host too. **A custom hostname is a customer's name** (step 8c, Proposed): no `includeSubDomains`, which on an apex name
+ * would pin every other name of the customer's to HTTPS for a year, and no `preload`.
+ */
+export function hstsFor(custom: boolean): string {
+  return custom ? "max-age=31536000" : "max-age=31536000; includeSubDomains";
+}
+
 /** The headers this Worker sets on every answer, an app's and its own. `own` answers are never kept by a browser. */
-function fixedHeaders(headers: Headers, origin: string, own: boolean, readableBy: ReadableBy = "*"): Headers {
+function fixedHeaders(headers: Headers, site: Site, own: boolean, readableBy: ReadableBy = "*"): Headers {
+  const origin = site.origin;
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-content-type-options", "nosniff");
-  headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
+  headers.set("strict-transport-security", hstsFor(site.custom));
   headers.set("cache-control", own ? "no-store" : "max-age=60, no-transform");
   // A sandboxed page is cross-origin to its own host, so its own files need this to load (spike C).
   if (readableBy !== null) headers.set("access-control-allow-origin", readableBy);
@@ -132,9 +150,9 @@ function fixedHeaders(headers: Headers, origin: string, own: boolean, readableBy
   return headers;
 }
 
-function own(request: Request, origin: string, status: number, code: string, extra: Record<string, string> = {}, readableBy: ReadableBy = "*"): Response {
+function own(request: Request, site: Site, status: number, code: string, extra: Record<string, string> = {}, readableBy: ReadableBy = "*"): Response {
   const headers = new Headers({ "content-type": "text/plain; charset=utf-8", ...extra });
-  fixedHeaders(headers, origin, true, readableBy);
+  fixedHeaders(headers, site, true, readableBy);
   return new Response(request.method === "HEAD" ? null : `${code}\n`, { status, headers });
 }
 
@@ -144,7 +162,7 @@ function own(request: Request, origin: string, status: number, code: string, ext
  * an app has no cookies or storage to clear, and the cookies directive is the one under which a browser cleared a
  * sibling host's cookies in spike C.
  */
-const notFound = (request: Request, origin: string) => own(request, origin, 404, "not_found", { "clear-site-data": '"cache"' });
+const notFound = (request: Request, site: Site) => own(request, site, 404, "not_found", { "clear-site-data": '"cache"' });
 
 /** Whether the domain is stopped. Unreadable counts as stopped, and isn't remembered. */
 async function stopped(deps: Deps): Promise<boolean> {
@@ -216,8 +234,8 @@ async function countedBody(request: Request): Promise<number> {
  * here is this Worker's own and is never kept; it is readable by the origin `null` only, except a preflight's, which is
  * readable by nobody, so the browser sends nothing further. Nothing reaches the app.
  */
-async function codeHost(request: Request, origin: string): Promise<Response> {
-  const asCode = (status: number, code: string, extra: Record<string, string> = {}) => own(request, origin, status, code, extra, CODE_ALLOW_ORIGIN);
+async function codeHost(request: Request, site: Site): Promise<Response> {
+  const asCode = (status: number, code: string, extra: Record<string, string> = {}) => own(request, site, status, code, extra, CODE_ALLOW_ORIGIN);
   const checked = checkRequest("code", {
     method: request.method,
     contentType: request.headers.get("content-type"),
@@ -231,8 +249,8 @@ async function codeHost(request: Request, origin: string): Promise<Response> {
   }
   if (checked.value === "preflight") {
     const preflight = checkPreflight("code", request.headers.get("access-control-request-method"), request.headers.get("access-control-request-headers"));
-    if (!preflight.ok) return own(request, origin, 403, preflight.refusal, {}, null);
-    return own(request, origin, 503, "code_apps_off", {}, null);
+    if (!preflight.ok) return own(request, site, 403, preflight.refusal, {}, null);
+    return own(request, site, 503, "code_apps_off", {}, null);
   }
   if (checked.value === "write") {
     if (!bodyWithinCap(await countedBody(request))) return asCode(REFUSAL_STATUS.write_too_large, "write_too_large");
@@ -249,42 +267,48 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   const url = new URL(request.url);
   const host = url.hostname;
   const label = defaultHostLabel(host, deps.domain);
+  // A custom hostname (step 8c): a host off the content domain, only while a content domain is configured, since
+  // without one no host can be told from another.
+  const custom = label === null && isHost(deps.domain) && isHost(host) && !onDomain(host, deps.domain);
   // The sandbox names the host, so a host that is no app's is named as nothing a page could be served from.
-  const origin = label === null ? "'none'" : `https://${host}`;
+  const origin = label === null && !custom ? "'none'" : `https://${host}`;
+  const site: Site = { origin, custom };
   // Learned once the entry is confirmed, so an error after it is answered as that kind of host's own.
   let kind: HostKind | null = null;
   try {
     const read = isRead(request.method);
     // Any other method is refused as it always was, unless the host is confirmed to have code: so a static host, and
     // anything that isn't confirmed, gets exactly today's answer.
-    const methodRefused = () => own(request, origin, 405, "method_not_allowed", { allow: allowedMethods("static").join(", ") });
-    const unconfirmed = () => (read ? notFound(request, origin) : methodRefused());
+    const methodRefused = () => own(request, site, 405, "method_not_allowed", { allow: allowedMethods("static").join(", ") });
+    const unconfirmed = () => (read ? notFound(request, site) : methodRefused());
     // A browser fetches a service worker's script, and what it imports, with this header, and with no other request.
     // Under the sandbox a page can't register one at all, so nothing an app needs carries it: any request that has
     // the header is refused, whatever it holds. Refusing the script is what keeps an app from running on in a
     // browser after it is taken down, and it holds even if the sandbox were ever loosened.
-    if (read && request.headers.has("service-worker")) return own(request, origin, 403, "no_service_workers");
-    if (label === null) return unconfirmed();
+    if (read && request.headers.has("service-worker")) return own(request, site, 403, "no_service_workers");
+    if (label === null && !custom) return unconfirmed();
     // An app is never served over plain HTTP, and this doesn't rest on the zone's own redirect. The scheme is read
     // from the request's URL, which is what Cloudflare's edge received and no header of the visitor's can change.
     // `X-Forwarded-Proto` isn't read: a header is the visitor's to send, and that Cloudflare overwrites it is its
     // documented behaviour toward an origin, which isn't shown here for a Worker.
-    if (url.protocol !== "https:") return read ? own(request, origin, 301, "moved_to_https", { location: `${origin}${url.pathname}${url.search}` }) : methodRefused();
+    if (url.protocol !== "https:") return read ? own(request, site, 301, "moved_to_https", { location: `${origin}${url.pathname}${url.search}` }) : methodRefused();
     // With the switch off, no other method is looked at further: today's answer, and nothing read.
     if (!read && !deps.codeApps) return methodRefused();
     if (await stopped(deps)) return unconfirmed();
 
-    let script: string | null;
+    let value: string | null;
     try {
-      script = await deps.entries.get(host, { cacheTtl: KV_CACHE_SECONDS });
+      value = await deps.entries.get(host, { cacheTtl: KV_CACHE_SECONDS });
     } catch {
       return unconfirmed();
     }
-    // Only a script's name, and only one under this host's own label: a host never serves another app's script.
-    if (script === null || scriptLabel(script) !== label) return unconfirmed();
+    // A default host: only a script's name, and only one under this host's own label, so a host never serves another
+    // app's script. A custom hostname: only its own form, naming this very host.
+    const script = value === null ? null : custom ? customEntryScript(host, value) : scriptLabel(value) === label ? value : null;
+    if (script === null) return unconfirmed();
 
     kind = deps.hostKind(script);
-    if (kind === "code") return await codeHost(request, origin);
+    if (kind === "code") return await codeHost(request, site);
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
 
@@ -294,27 +318,27 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
       // exactly this message (spikes A and C). Any other rejection is an error, and nothing is served for it.
       answer = await deps.apps.get(script).fetch(requestForApp(request, url, "read"));
     } catch (error) {
-      if (error instanceof Error && error.message === "Worker not found.") return notFound(request, origin);
-      return own(request, origin, 502, "app_error");
+      if (error instanceof Error && error.message === "Worker not found.") return notFound(request, site);
+      return own(request, site, 502, "app_error");
     }
     const headers = new Headers();
-    if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, origin, 502, "app_answer_unservable");
+    if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, site, 502, "app_answer_unservable");
     if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {
       const path = REDIRECTS.includes(answer.status) ? sameHostPath(answer.headers.get("location") ?? "", origin) : null;
       // A redirect anywhere but a path on this host is never passed on.
-      if (path === null) return notFound(request, origin);
+      if (path === null) return notFound(request, site);
       headers.set("location", path);
     }
     for (const name of PASSED_RESPONSE_HEADERS) {
       const value = answer.headers.get(name);
       if (value !== null) headers.set(name, value);
     }
-    fixedHeaders(headers, origin, false);
+    fixedHeaders(headers, site, false);
     // A status that can't carry a body gets none, whatever the app sent.
     const bodiless = request.method === "HEAD" || [204, 205, 304].includes(answer.status);
     return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   } catch {
     // Nothing above is expected to throw. If it does, the visitor still gets this Worker's own answer and headers.
-    return own(request, origin, 502, "error", {}, kind === "code" ? CODE_ALLOW_ORIGIN : "*");
+    return own(request, site, 502, "error", {}, kind === "code" ? CODE_ALLOW_ORIGIN : "*");
   }
 }

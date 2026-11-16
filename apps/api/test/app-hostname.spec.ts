@@ -609,8 +609,11 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;");
     expect(Object.values(sources).join("\n").match(/HOSTNAME_CLAIMS_COMPLETE: bool/g)).toHaveLength(1);
-    const gate = sources["workspace/hostname.rs"].split("pub(super) fn hostname_claims_open")[1].split("\n    }\n")[0];
-    expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\][\s\S]*test_hostname_claims_open[\s\S]*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*\{\s*false\s*\}/);
+    // The room's method and the applier both read it through one function (8c).
+    const method = sources["workspace/hostname.rs"].split("pub(super) fn hostname_claims_open")[1].split("\n    }\n")[0];
+    expect(method).toMatch(/^\(&self\) -> bool \{\s*claims_open\(&self\.state\.storage\(\)\.sql\(\)\)\s*$/);
+    const gate = sources["workspace/hostname.rs"].split("pub(super) fn claims_open")[1].split("\n}\n")[0];
+    expect(gate).toMatch(/if HOSTNAME_CLAIMS_COMPLETE \{\s*return true;\s*\}\s*#\[cfg\(feature = "failpoints"\)\][\s\S]*test_hostname_claims_open[\s\S]*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*\{\s*let _ = sql;\s*false\s*\}\s*$/);
   });
 
   it("refuses asking, and switching release on, where a provider is configured while the release path isn't complete", async () => {

@@ -165,11 +165,14 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     expect(await providerRow(r)).toMatchObject({ provider_status: "active" });
     expect((await cloudflare(name)).calls).toEqual(["create", "read"]);
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
-    // A custom host serving, as 8c will write one, to show the end clears it.
-    await inRoom(r.room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'custom', ?, 1, ?, ?, 2, 1)", name, r.label, PREV, `${r.label}.${PREV}`));
+    // Read active with the claim live at its object, the host starts routing on the release served (8c), so the end
+    // below has a serving host to clear.
+    expect(await all(r.room, "SELECT script_name, closed FROM serve_state WHERE host = ?", name)).toEqual([{ script_name: `${r.label}.${PREV}`, closed: 0 }]);
     // Cloudflare reports it moved: the claim ends, and the room stops serving on the name in the same transaction.
     await setAtCloudflare(name, "moved");
-    await step(r);
+    // Routed and active, it is read every six hours (8c, D5): its last read is put that far back.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() - 6 * 3600_000 - 1000));
+    await switchedOn(() => quietPass(r));
     expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1, end_reason: "hostname_moved" });
     expect(await all(r.room, "SELECT script_name, closed FROM serve_state WHERE host = ?", name)).toEqual([{ script_name: null, closed: 1 }]);
     // The object is told first, and the claim, still holding the name, is never granted again.

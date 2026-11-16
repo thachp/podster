@@ -183,6 +183,106 @@ pub fn retry_wait_ms(since: i64, last_try: i64) -> i64 {
         .clamp(RETRY_FIRST_MS, RETRY_MAX_MS)
 }
 
+/// **Proposed** (M6 step 8c, the deep review's D5 on PR #403). Once a committed claim's custom hostname reads `active`
+/// and its host is routed, its status is read this often, and no more: four wakes a day for one room, where it was up
+/// to one an hour for as long as the claim lived. A claim not yet routed keeps [`retry_wait_ms`], so routing starts
+/// within the hour of Cloudflare reporting `active`.
+pub const ROUTED_READ_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// How long the job waits before its next read of a committed claim's custom hostname: [`ROUTED_READ_MS`] once it is
+/// `active` and routed, [`retry_wait_ms`] otherwise.
+pub fn claimed_read_wait_ms(since: i64, last_try: i64, routed_active: bool) -> i64 {
+    if routed_active {
+        ROUTED_READ_MS
+    } else {
+        retry_wait_ms(since, last_try)
+    }
+}
+
+/// What the room reads of its own facts (`podster_policy::release::hostname_proof_room`), as routing takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomRead {
+    /// Every fact was read and holds.
+    Holds,
+    /// One couldn't be read.
+    Unread,
+    /// One was read and fails, with its code.
+    Fails(&'static str),
+}
+
+/// What the room holds of a custom hostname, read from its own rows before anything outside it is asked (M6 step 8c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteLocal<'a> {
+    /// The gate on claims (`HOSTNAME_CLAIMS_COMPLETE`, or a test build's opt-in) is open.
+    pub claims_open: bool,
+    /// The room's open request for this host is `claimed`: a committed claim, not pending and not ending.
+    pub request_claimed: bool,
+    /// The room unpublished since the request was made ([`unpublished_since`]).
+    pub unpublished: bool,
+    pub room: RoomRead,
+    /// Cloudflare's status for the custom hostname as the room last read it, or none if it never read one.
+    pub cloudflare_status: Option<&'a str>,
+}
+
+/// Whether a custom hostname may serve now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustomRoute {
+    Serve,
+    /// A fact couldn't be read: nothing new is written, and it is asked again later.
+    Wait(&'static str),
+    /// A fact was read and fails, with its code: nothing is served on the name.
+    Refuse(&'static str),
+}
+
+/// **Routing's local checks** (M6 step 8c; ADR 0010's "Custom domains", step 5; the deep review's D6 on PR #403): the
+/// gate on claims, the committed claim, no unpublish since the request, the room's own facts and Cloudflare's last
+/// status, exactly `active`. Each read and failing refuses by its code, and outranks one that couldn't be read. Asked
+/// before the hostname's object, which [`route_claim`] reads; both are asked before a custom host starts routing, and
+/// again before every write of its entry.
+pub fn route_local(check: &RouteLocal) -> CustomRoute {
+    let refusals = [
+        (!check.claims_open, "hostname_claims_incomplete"),
+        (!check.request_claimed, "hostname_not_claimed"),
+        (
+            check.unpublished,
+            crate::hostnames::ClaimEnd::Unpublished.code(),
+        ),
+    ];
+    if let Some((_, code)) = refusals.iter().find(|(fails, _)| *fails) {
+        return CustomRoute::Refuse(code);
+    }
+    if let RoomRead::Fails(code) = check.room {
+        return CustomRoute::Refuse(code);
+    }
+    if check.cloudflare_status != Some("active") {
+        return CustomRoute::Refuse("hostname_not_active");
+    }
+    if check.room == RoomRead::Unread {
+        return CustomRoute::Wait("standing_unknown");
+    }
+    CustomRoute::Serve
+}
+
+/// **Routing's check at the hostname's object** (M6 step 8c): the object, read just now, holds exactly this room's and
+/// this request's claim, live, on a name that isn't suspended (`crate::hostnames::custom_host_may_serve`, and the
+/// request too, so a later request never serves on an earlier one's claim). `None` is an object that couldn't be read.
+pub fn route_claim(
+    record: Option<&crate::hostnames::HostnameRecord>,
+    room: &str,
+    request: &str,
+) -> CustomRoute {
+    let Some(record) = record else {
+        return CustomRoute::Wait("standing_unknown");
+    };
+    if crate::hostnames::custom_host_may_serve(true, record, room)
+        && record.claim.is_some_and(|claim| claim.request == request)
+    {
+        CustomRoute::Serve
+    } else {
+        CustomRoute::Refuse("claim_not_live")
+    }
+}
+
 /// **Proposed.** New custom hostname requests a room may make in any hour, whatever became of them.
 pub const MAX_REQUESTS_PER_HOUR: usize = 5;
 

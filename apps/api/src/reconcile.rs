@@ -295,8 +295,17 @@ async fn ask_room(env: &Env, room: &str, question: Value) -> Option<Value> {
     asked.await.ok()
 }
 
-/// The room that holds a custom hostname's claim, by the hostname's own object, which is also woken.
-async fn room_for_hostname(env: &Env, hostname: &str) -> Option<Option<String>> {
+/// What a custom hostname's own object holds, as the reconcile reads it.
+struct HostnameHeld {
+    /// The room that holds the claim, live or ending.
+    room: String,
+    /// What the room is told: `{ request_id, live }`, live only for a claim `live` on a name that isn't suspended.
+    claim: Value,
+}
+
+/// The claim a custom hostname's own object holds, which is also woken: `Some(None)` when it holds none, and `None`
+/// when it gave no answer, or one that isn't exactly the expected shape.
+async fn room_for_hostname(env: &Env, hostname: &str) -> Option<Option<HostnameHeld>> {
     let asked = async {
         let stub = env
             .durable_object("HOSTNAME_CLAIM")?
@@ -317,7 +326,20 @@ async fn room_for_hostname(env: &Env, hostname: &str) -> Option<Option<String>> 
         Ok::<Value, ApiError>(response.json().await?)
     };
     let held = asked.await.ok()?;
-    Some(held["claim"]["workspace_id"].as_str().map(str::to_owned))
+    let suspended = held["suspended"].as_bool()?;
+    let claim = &held["claim"];
+    if claim.is_null() {
+        return Some(None);
+    }
+    let (room, request, state) = (
+        claim["workspace_id"].as_str()?,
+        claim["request_id"].as_str()?,
+        claim["state"].as_str()?,
+    );
+    Some(Some(HostnameHeld {
+        room: room.to_owned(),
+        claim: json!({ "request_id": request, "live": state == "live" && !suspended }),
+    }))
 }
 
 #[derive(Default)]
@@ -473,6 +495,7 @@ async fn entry(
     provider: &Provider,
     host: &str,
     room: Option<String>,
+    claim: Option<Value>,
     counts: &mut Counts,
 ) -> Step {
     let Some(room) = room else {
@@ -499,7 +522,7 @@ async fn entry(
     let Some(answer) = ask_room(
         env,
         &room,
-        json!({ "kind": "entry", "host": host, "found": found }),
+        json!({ "kind": "entry", "host": host, "found": found, "claim": claim }),
     )
     .await
     else {
@@ -604,10 +627,27 @@ async fn one_key(
         Key::Foreign => Ok(counts.finding(sql, "entry_foreign_name", key, now_ms())?),
         Key::Default(label) => {
             let room = crate::releases::room_for_label(env, label).await?;
-            entry(sql, env, provider, key, room, counts).await
+            entry(sql, env, provider, key, room, None, counts).await
         }
+        // A custom hostname's entry is asked of the room its object names, with what the object holds, and the
+        // room's current state decides (step 8c). An object that holds no claim names no room: the entry is told to
+        // operators by its own code and, as ADR 0010 rules for every entry with no room, never removed here. Nothing
+        // routes the name to the content Worker once its claim was freed, since a claim is freed only after its custom
+        // hostname is read gone at Cloudflare.
         Key::Custom => match room_for_hostname(env, key).await {
-            Some(room) => entry(sql, env, provider, key, room, counts).await,
+            Some(Some(held)) => {
+                entry(
+                    sql,
+                    env,
+                    provider,
+                    key,
+                    Some(held.room),
+                    Some(held.claim),
+                    counts,
+                )
+                .await
+            }
+            Some(None) => Ok(counts.finding(sql, "custom_entry_without_claim", key, now_ms())?),
             None => Err(Stopped::Unanswered),
         },
     }

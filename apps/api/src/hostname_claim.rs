@@ -16,9 +16,13 @@
 //! so an ask that arrives after it is refused. Its read also answers the name's generation, which a room keeps with a
 //! request it makes.
 //!
-//! **What isn't:** ending a claim a room committed, deleting its custom hostname at Cloudflare, reading until it is
-//! gone and only then freeing it, which are step 8's later PRs. Its read answers what it holds, and for a hostname
-//! nobody has asked about it answers empty and leaves no state behind.
+//! **Built with step 8b:** the long end of a claim a room committed. The room says the claim is ending, and the object
+//! marks it so (`podster_core::hostnames::begin_end`): it serves nothing from then, and is never granted again. Once
+//! the room has cleared the host and read the custom hostname gone at Cloudflare, it says so, and the object frees the
+//! claim (`free_ended`), only that room's and request's, and only once it is ending. Each answers what it did, and
+//! asking again changes nothing more. The object never calls Cloudflare: the room's job does, and the object takes the
+//! room's word, as it takes its word that its proof matched. Its read answers what it holds, and for a hostname nobody
+//! has asked about it answers empty and leaves no state behind.
 //!
 //! - `hostname`: the name this object is for, with the name's `generation`, which core's `suspend`, `lift` and `free`
 //!   each advance (`podster_core::hostnames::HostnameRecord`), and when it was last freed, suspended and lifted. A
@@ -39,7 +43,8 @@ use crate::error::ApiError;
 use crate::forward;
 use crate::store::{exec, int, rows, text, transaction_sync};
 use podster_core::hostnames::{
-    decide_ask, lift, suspend, withdraw, Claim, ClaimDecision, HostnameRecord, Withdrawal,
+    begin_end, decide_ask, free_ended, lift, suspend, withdraw, Claim, ClaimDecision, EndBegun,
+    FreeOutcome, HostnameRecord, Withdrawal,
 };
 use serde_json::{json, Value};
 use std::{cell::RefCell, rc::Rc};
@@ -263,6 +268,74 @@ fn withdraw_request(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         vec![room.as_str().into(), request.as_str().into(), now.into()],
     )?;
     Ok(json!({ "withdrawn": true, "freed": freed }))
+}
+
+/// The path a room says its committed claim is ending on (M6 step 8b).
+pub(crate) const INTERNAL_END: &str = "/internal/end";
+/// The path a room frees its ending claim on, once Cloudflare read its custom hostname gone (M6 step 8b).
+pub(crate) const INTERNAL_FREE: &str = "/internal/free";
+
+/// `{ hostname, workspace_id, request_id, reason }`: a room says its committed claim is ending, inside the caller's
+/// transaction (`podster_core::hostnames::begin_end`). Only exactly that room's and request's claim is marked, with the
+/// reason as the room gave it, a code. Answers `{ ending: true }` when it now is, or was, and `{ ending: false }` when
+/// the object holds no claim for that request, which changes nothing.
+fn end_request(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (room, request) = room_and_request(body)?;
+    let reason = body["reason"]
+        .as_str()
+        .filter(|code| {
+            (1..=64).contains(&code.len())
+                && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        })
+        .ok_or_else(ApiError::invalid_argument)?;
+    own_name(sql, body, now)?;
+    let before = held(sql)?;
+    let (_, begun) = begin_end(&before.record(), &room, &request);
+    if begun == EndBegun::Ending {
+        exec(
+            sql,
+            "UPDATE claim SET state = 'ending', end_reason = coalesce(end_reason, ?), updated_at = ?
+               WHERE workspace_id = ? AND request_id = ? AND held = 1 AND state = 'live'",
+            vec![reason.into(), now.into(), room.as_str().into(), request.as_str().into()],
+        )?;
+    }
+    Ok(json!({ "ending": begun == EndBegun::Ending }))
+}
+
+/// `{ hostname, workspace_id, request_id }`: a room frees its ending claim, inside the caller's transaction
+/// (`podster_core::hostnames::free_ended`), once it cleared the host and read the custom hostname gone at Cloudflare.
+/// Answers `{ freed, held }`: `held` false when the object holds no claim for that request, freed already or never;
+/// `freed` false and `held` true when the claim is still live, which frees nothing.
+fn free_request(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (room, request) = room_and_request(body)?;
+    own_name(sql, body, now)?;
+    let before = held(sql)?;
+    let (after, outcome) = free_ended(&before.record(), &room, &request, now);
+    if outcome == FreeOutcome::Freed {
+        exec(
+            sql,
+            "UPDATE claim SET state = 'ended', held = NULL, ended_at = ?, updated_at = ?
+               WHERE workspace_id = ? AND request_id = ? AND held = 1 AND state = 'ending'",
+            vec![
+                now.into(),
+                now.into(),
+                room.as_str().into(),
+                request.as_str().into(),
+            ],
+        )?;
+        exec(
+            sql,
+            "UPDATE hostname SET generation = ?, last_freed_at = ?",
+            vec![
+                i64::try_from(after.generation).unwrap_or(i64::MAX).into(),
+                after.last_freed_at.into(),
+            ],
+        )?;
+    }
+    Ok(json!({
+        "freed": outcome == FreeOutcome::Freed,
+        "held": outcome != FreeOutcome::NotHeld,
+    }))
 }
 
 /// The object's path for an operator's suspension and its lifting. Nothing outside the Worker reaches it.
@@ -579,22 +652,26 @@ impl HostnameClaim {
                 self.arm().await?;
                 read(&sql)
             }
-            // A room's ask for the claim, and its withdrawal of a request it never committed (M6 step 8). Each is one
-            // transaction here, and answers what it decided.
-            (Method::Post, path @ (INTERNAL_CLAIM | INTERNAL_WITHDRAW)) => {
+            // A room's ask for the claim, its withdrawal of a request it never committed (M6 step 8), and the long end
+            // of a claim it committed: marked ending, then freed (8b). Each is one transaction here, and answers what it
+            // decided.
+            (
+                Method::Post,
+                path @ (INTERNAL_CLAIM | INTERNAL_WITHDRAW | INTERNAL_END | INTERNAL_FREE),
+            ) => {
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;
-                let claiming = path == INTERNAL_CLAIM;
+                let decide: fn(&SqlStorage, &Value, i64) -> R<Value> = match path {
+                    INTERNAL_CLAIM => ask_claim,
+                    INTERNAL_WITHDRAW => withdraw_request,
+                    INTERNAL_END => end_request,
+                    _ => free_request,
+                };
                 let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
                 let slot = out.clone();
                 let store = sql.clone();
                 transaction_sync(&self.state, move || {
-                    let now = now_ms();
-                    *slot.borrow_mut() = Some(if claiming {
-                        ask_claim(&store, &body, now)?
-                    } else {
-                        withdraw_request(&store, &body, now)?
-                    });
+                    *slot.borrow_mut() = Some(decide(&store, &body, now_ms())?);
                     Ok(())
                 })?;
                 let answer = out.borrow_mut().take();

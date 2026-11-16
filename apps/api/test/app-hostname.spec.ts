@@ -287,7 +287,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
       { type: "app_hostname.requested", actor_id: r.owner.id },
       { type: "app_hostname.claimed", actor_id: "podster" },
     ]);
-    // A claim the room holds owes the job nothing more in this PR.
+    // A claim the room holds owes the job nothing before its turn (8b creates its custom hostname then).
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
   });
@@ -467,7 +467,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     expect((await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 })).body.decision).toBe("hostname_request_withdrawn");
   });
 
-  it("ends a committed claim the long way, which keeps the name held until the next PRs build it", async () => {
+  it("ends a committed claim the long way: the name stays held until its object has marked it ending and freed it", async () => {
     const r = await room("org_ah_committed");
     const name = newName();
     const request = await switchedOn(async () => (await ask(r, name)).body.request);
@@ -477,11 +477,19 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     // A removal now is of a committed claim, not a withdrawal.
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
     expect((await switchedOn(() => remove(r))).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
-    // A committed claim ends the long way, which isn't built: the name stays held and the job owes nothing.
-    await alarmPass(stub(r.room));
-    expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1 });
-    expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id });
+    // The name stays held while the claim ends, and the room can't ask for another.
+    expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id, state: "live" });
     expect((await switchedOn(() => ask(r, newName()))).code).toBe("hostname_limit");
+    // 8b: the object is told, then, with nothing ever made at Cloudflare for it, the claim is freed
+    // (`custom-hostname.spec.ts` has the rest).
+    await rewindLook(r);
+    await alarmPass(stub(r.room));
+    expect((await claimState(name)).claim).toMatchObject({ state: "ending" });
+    expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1 });
+    await rewindLook(r);
+    await alarmPass(stub(r.room));
+    expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_unmapped" });
+    expect((await claimState(name)).claim).toBeNull();
   });
 
   it("stops serving a committed claim's host in the same transaction as its removal", async () => {

@@ -7,6 +7,7 @@ import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fake-github-release.ts";
 import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
+import { FAKE_HOSTNAMES, fakeHostnames } from "./test/fake-hostnames.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
@@ -83,6 +84,10 @@ async function fakeHook(request: Request) {
   if (releaseRead) return releaseRead;
   const github = await fakeGithub(request);
   if (github) return github;
+  // Cloudflare for SaaS's custom hostnames (M6 step 8b): a stand-in, asked before the content provider's, so nothing
+  // ever reaches Cloudflare's API.
+  const hostnames = await fakeHostnames(request);
+  if (hostnames) return hostnames;
   // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
   const content = await fakeContent(request);
   if (content) return content;
@@ -214,6 +219,10 @@ export default defineConfig({
           // Suffix List's rules, in the list's own format. Test values: no environment binds either name.
           HOSTNAME_RESOLVER_URL: FAKE_RESOLVER.url,
           PUBLIC_SUFFIX_RULES: "// A test list, in the Public Suffix List's format.\ncom\nnet\norg\nexample\nuk\nco.uk\nck\n*.ck\n!www.ck\n",
+          // Custom hostnames at Cloudflare (M6 step 8b), pointing at their stand-in. Test values: no environment binds
+          // either name, and the real ones are the owner's to set.
+          CUSTOM_HOSTNAME_ZONE_ID: FAKE_HOSTNAMES.zone,
+          CUSTOM_HOSTNAME_TOKEN: FAKE_HOSTNAMES.token,
           TEST_GATE_LIMIT_MS: GATE_LIMIT_MS,
           // The provider module's source, for the test that reads its settings' names and shows no environment binds one.
           // Every Rust source file of the API, by its path under src, and its Cargo.toml, for the test that shows no

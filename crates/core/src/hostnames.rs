@@ -668,6 +668,63 @@ pub fn custom_host_may_serve(
         && record.claim.is_some_and(|c| c.room == room)
 }
 
+/// What a room's word that its committed claim is ending did in the hostname's object (M6 step 8b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndBegun {
+    /// The object holds exactly that room's and request's claim, and it is ending now, or was already.
+    Ending,
+    /// The object holds no claim for that room and request: none at all, or someone else's. Nothing changes.
+    NotHeld,
+}
+
+/// A room says its committed claim is ending (M6 step 8b): the object marks it so, and from then it serves nothing and is
+/// never granted again ([`decide_claim`] answers `Ending`), while it still holds the name. Only exactly that room's and
+/// request's claim is touched. The generation doesn't move: only freeing moves it.
+pub fn begin_end<'a>(
+    record: &HostnameRecord<'a>,
+    room: &str,
+    request: &str,
+) -> (HostnameRecord<'a>, EndBegun) {
+    match record.claim {
+        Some(claim) if claim.room == room && claim.request == request => {
+            (end_claim(record), EndBegun::Ending)
+        }
+        _ => (*record, EndBegun::NotHeld),
+    }
+}
+
+/// What a room's word that its ending claim's custom hostname is gone did in the hostname's object (M6 step 8b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreeOutcome {
+    /// The object held exactly that room's and request's claim, ending, and freed it.
+    Freed,
+    /// It holds that claim, still live: the room must have it marked ending first, and nothing is freed.
+    NotEnding,
+    /// It holds no claim for that room and request: freed already, or someone else's. Nothing changes.
+    NotHeld,
+}
+
+/// A room frees its ending claim, once it has cleared the host and Cloudflare read the custom hostname gone
+/// ([`may_free_claim`], which the room decides, since both facts are the room's). Only exactly that room's and request's
+/// claim, and only once it is ending. Freeing advances the generation and keeps any suspension ([`free`]).
+pub fn free_ended<'a>(
+    record: &HostnameRecord<'a>,
+    room: &str,
+    request: &str,
+    now: i64,
+) -> (HostnameRecord<'a>, FreeOutcome) {
+    match record.claim {
+        Some(claim) if claim.room == room && claim.request == request => {
+            if record.ending {
+                (free(record, now), FreeOutcome::Freed)
+            } else {
+                (*record, FreeOutcome::NotEnding)
+            }
+        }
+        _ => (*record, FreeOutcome::NotHeld),
+    }
+}
+
 /// The claim starts ending, for any reason in [`ClaimEnd`]: the room clears and closes that host
 /// (`release::clear_host`), the custom hostname is deleted at Cloudflare and read until gone, and only then is the claim
 /// freed ([`may_free_claim`], [`free`]).
@@ -725,6 +782,9 @@ pub enum ClaimEnd {
     Unpublished,
     /// `hostname_suspended`: an operator suspended the hostname.
     Suspended,
+    /// `hostname_gone_at_provider`: Cloudflare read the custom hostname gone after the room had recorded it made (M6
+    /// step 8b). Something outside Podster deleted it, or Cloudflare did after it was `moved` for seven days.
+    GoneAtProvider,
 }
 
 impl ClaimEnd {
@@ -737,6 +797,7 @@ impl ClaimEnd {
             ClaimEnd::Unmapped => "hostname_unmapped",
             ClaimEnd::Unpublished => "hostname_unpublished",
             ClaimEnd::Suspended => "hostname_suspended",
+            ClaimEnd::GoneAtProvider => "hostname_gone_at_provider",
         }
     }
 }

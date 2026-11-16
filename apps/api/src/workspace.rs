@@ -75,6 +75,7 @@ mod asset_links;
 mod changes;
 mod collaboration;
 mod cursor;
+mod custom_hostname;
 mod downloads;
 mod held;
 mod hostname;

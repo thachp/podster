@@ -393,6 +393,19 @@ CREATE TABLE release_uncertain (release_id TEXT PRIMARY KEY REFERENCES release (
   since INTEGER NOT NULL CHECK (typeof(since) = 'integer'), settles INTEGER NOT NULL DEFAULT 0 CHECK (typeof(settles) = 'integer' AND settles >= 0),
   settled_at INTEGER CHECK (settled_at IS NULL OR typeof(settled_at) = 'integer'), last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
   CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
+", "
+CREATE TABLE hostname_provider (request_id TEXT PRIMARY KEY REFERENCES hostname_request (id),
+  release_epoch INTEGER CHECK (release_epoch IS NULL OR (typeof(release_epoch) = 'integer' AND release_epoch >= 0)),
+  create_sent_at INTEGER CHECK (create_sent_at IS NULL OR typeof(create_sent_at) = 'integer'),
+  provider_id TEXT CHECK (provider_id IS NULL OR (length(provider_id) = 36 AND provider_id NOT GLOB '*[^0-9a-f-]*')),
+  provider_status TEXT CHECK (provider_status IS NULL OR (length(provider_status) BETWEEN 1 AND 32 AND provider_status NOT GLOB '*[^a-z_]*')),
+  object_ending_at INTEGER CHECK (object_ending_at IS NULL OR typeof(object_ending_at) = 'integer'),
+  gone_at INTEGER CHECK (gone_at IS NULL OR typeof(gone_at) = 'integer'),
+  first_gone_at INTEGER CHECK (first_gone_at IS NULL OR typeof(first_gone_at) = 'integer'),
+  deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer'),
+  CHECK (provider_id IS NULL OR create_sent_at IS NOT NULL), CHECK (gone_at IS NULL OR create_sent_at IS NOT NULL),
+  CHECK (first_gone_at IS NULL OR create_sent_at IS NOT NULL), CHECK (deleted_at IS NULL OR create_sent_at IS NOT NULL)) WITHOUT ROWID;
+INSERT INTO hostname_provider (request_id, release_epoch) SELECT id, (SELECT release_epoch FROM release_config) FROM hostname_request WHERE open = 1;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

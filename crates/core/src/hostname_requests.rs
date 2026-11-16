@@ -191,6 +191,181 @@ pub fn request_rate_allows(made_in_last_hour: usize) -> bool {
     made_in_last_hour < MAX_REQUESTS_PER_HOUR
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The custom hostname at Cloudflare, and the long end of a committed claim (M6 step 8b)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What a read of the custom hostname at Cloudflare, by its name, showed. Only a whole, well-formed answer is either of
+/// the first two; anything else is `Unknown`, which settles nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderRead {
+    /// Cloudflare holds a custom hostname of exactly this name. `moved` when its status is `moved`.
+    Present { moved: bool },
+    /// Cloudflare said, in a whole answer, that it holds none of this name.
+    Gone,
+    /// No answer, or one that isn't exactly the expected shape.
+    Unknown,
+}
+
+/// What the job does for a request the room committed `claimed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimedStep {
+    /// Nothing was ever asked of Cloudflare for it: create the custom hostname, once the room's recheck allows.
+    Create,
+    /// A create was sent: read what Cloudflare holds, which settles a create whose answer was lost too.
+    Read,
+}
+
+/// The step for a committed claim, from whether a create was ever sent, which the room records before it sends one.
+pub fn claimed_step(create_sent: bool) -> ClaimedStep {
+    if create_sent {
+        ClaimedStep::Read
+    } else {
+        ClaimedStep::Create
+    }
+}
+
+/// What a read of a committed claim's custom hostname does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterClaimedRead {
+    /// It is there and not `moved`: the claim stays.
+    Keep,
+    /// The claim ends the long way, with this reason.
+    End(crate::hostnames::ClaimEnd),
+    /// Read as gone, and no ID was ever recorded for it: the create's answer was lost and nothing was made. It is
+    /// created again, behind the same recheck as the first.
+    CreateAgain,
+    /// The read settled nothing: asked again later.
+    Wait,
+}
+
+/// A read of a committed claim's custom hostname, given whether the room recorded its ID from an earlier answer. The
+/// room passes `Gone` only once [`count_gone`] has confirmed it: one read of gone proves nothing.
+pub fn after_claimed_read(read: ProviderRead, id_recorded: bool) -> AfterClaimedRead {
+    use crate::hostnames::ClaimEnd;
+    match read {
+        ProviderRead::Unknown => AfterClaimedRead::Wait,
+        ProviderRead::Present { moved: true } => AfterClaimedRead::End(ClaimEnd::Moved),
+        ProviderRead::Present { moved: false } => AfterClaimedRead::Keep,
+        ProviderRead::Gone if id_recorded => AfterClaimedRead::End(ClaimEnd::GoneAtProvider),
+        ProviderRead::Gone => AfterClaimedRead::CreateAgain,
+    }
+}
+
+/// What the job does next for a committed claim that is ending (ADR 0010's step 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndStep {
+    /// Tell the hostname's object the claim is ending, so it serves nothing and is never granted again.
+    MarkEnding,
+    /// Read what Cloudflare holds, deleting what is there, until a read reports it gone.
+    Read,
+    /// Free the claim at the object, and only then end the request.
+    Free,
+}
+
+/// The long end's next step, from the room's own row: whether the object recorded the claim ending, whether a create
+/// was ever sent to Cloudflare, and whether a read since reported the custom hostname gone. **A request for which no
+/// create was ever sent has nothing at Cloudflare to delete,** since the room records that it is sending one, in its own
+/// transaction, before it sends it.
+pub fn end_step(object_ending: bool, create_sent: bool, gone: bool) -> EndStep {
+    if !object_ending {
+        EndStep::MarkEnding
+    } else if create_sent && !gone {
+        EndStep::Read
+    } else {
+        EndStep::Free
+    }
+}
+
+/// What a read during the long end does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterEndRead {
+    /// It is still there, whatever its status: delete it, and read again. A delete's own answer is never taken as gone.
+    Delete,
+    /// Cloudflare reports it gone: the claim may be freed.
+    Gone,
+    /// The read settled nothing: asked again later.
+    Wait,
+}
+
+pub fn after_end_read(read: ProviderRead) -> AfterEndRead {
+    match read {
+        ProviderRead::Unknown => AfterEndRead::Wait,
+        ProviderRead::Present { .. } => AfterEndRead::Delete,
+        ProviderRead::Gone => AfterEndRead::Gone,
+    }
+}
+
+/// **Proposed.** How long apart two reads of gone must be, and how long after a create or a delete the first may come
+/// (ruled on the deep review of PR #403). A create whose answer was lost may still land, and Cloudflare's list may not
+/// show a hostname made a moment ago, so one read of gone soon after either proves nothing.
+pub const GONE_SPAN_MS: i64 = 10 * 60 * 1000;
+
+/// What one read of gone counts for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoneCount {
+    /// Too soon after the create, the last delete or the first read of gone: it counts for nothing.
+    NotYet,
+    /// The first that counts: the room notes when, and reads again.
+    First,
+    /// A second, at least [`GONE_SPAN_MS`] after a first that counted: the custom hostname is gone.
+    Confirmed,
+}
+
+/// A read of gone at `now`, for a request whose create was sent at `create_sent_at`, whose last delete was sent at
+/// `last_delete_at`, and whose first read of gone that counted was at `first_gone_at`. A first read only counts at least
+/// [`GONE_SPAN_MS`] after both the create and the last delete; one noted before that is ignored, so a delete since
+/// starts the count again. The room forgets the first whenever a read finds the hostname there.
+pub fn count_gone(
+    create_sent_at: i64,
+    last_delete_at: Option<i64>,
+    first_gone_at: Option<i64>,
+    now: i64,
+) -> GoneCount {
+    let earliest = create_sent_at
+        .max(last_delete_at.unwrap_or(i64::MIN))
+        .saturating_add(GONE_SPAN_MS);
+    if now < earliest {
+        return GoneCount::NotYet;
+    }
+    match first_gone_at {
+        Some(first) if first >= earliest => {
+            if now.saturating_sub(first) >= GONE_SPAN_MS {
+                GoneCount::Confirmed
+            } else {
+                GoneCount::NotYet
+            }
+        }
+        _ => GoneCount::First,
+    }
+}
+
+/// Whether the room has unpublished since a request was made, from the room's release epoch when it was made and now,
+/// which only an unpublish moves (ADR 0010: a claim ends when the room unpublishes). Either one unknown, or any
+/// difference at all, ends it: fails closed.
+pub fn unpublished_since(request_epoch: Option<u64>, epoch: Option<u64>) -> bool {
+    match (request_epoch, epoch) {
+        (Some(then), Some(now)) => then != now,
+        _ => true,
+    }
+}
+
+/// **Assumed, from Cloudflare's documented examples; no spike has seen one.** A custom hostname's ID: a UUID in lower
+/// case. Nothing else is kept, or put into a path.
+pub fn provider_id_form(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(at, b)| match at {
+            8 | 13 | 18 | 23 => *b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(b),
+        })
+}
+
+/// A custom hostname's status as the room keeps it: lower-case letters and `_`, not long. Anything else isn't a status.
+pub fn provider_status_form(status: &str) -> bool {
+    (1..=32).contains(&status.len()) && status.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::HostnameRequestState;

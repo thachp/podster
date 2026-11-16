@@ -22,7 +22,7 @@
 //! ending by a suspension's notice, before the room committed a claim is **withdrawn** at the object, which frees any
 //! claim it gave for it and never grants it after. A claim the room committed ends the long way, which is the next
 //! PRs': the room stops serving on the name here, and the custom hostname at Cloudflare is deleted and read until gone
-//! before the claim is freed. Until those are built, such a request stays `ending` and the name stays held.
+//! before the claim is freed: built in 8b, in `custom_hostname`.
 //!
 //! **An answer of suspended or ending goes `ending`, not refused** (`after_ask`): either is decided before whose the
 //! claim is, so the object may hold one it gave this very request on an ask whose answer was lost, and the job
@@ -39,8 +39,9 @@
 //! proof was recorded and whose granted answer was lost stays held at the object while the gate is closed, which fails
 //! closed, until a removal withdraws it.
 //!
-//! **What this doesn't do:** create anything at Cloudflare, write a serve entry for a custom hostname, recheck a claim,
-//! or end a committed claim at the object. Nothing here serves: the applier still writes nothing for a custom hostname.
+//! **What this doesn't do:** write a serve entry for a custom hostname, or recheck a claim. Nothing here serves: the
+//! applier still writes nothing for a custom hostname. A committed claim's custom hostname at Cloudflare and its long
+//! end are `custom_hostname`'s (8b).
 //!
 //! Logs carry IDs and codes only, never a hostname or a challenge's value.
 use super::*;
@@ -315,6 +316,8 @@ pub(super) fn handle_request(
             now.into(),
         ],
     )?;
+    // The room's release epoch with it, so an unpublish after it ends any claim it gets (8b).
+    super::custom_hostname::record_epoch(sql, &id)?;
     audit(
         sql,
         &who.caller,
@@ -339,7 +342,7 @@ pub(super) fn handle_request(
 /// `DELETE app-hostname`, in the room's transaction (`podster_core::hostname_requests::unmap`). A pending request
 /// nobody was asked about is over at once. One whose proof was taken to the object goes `ending`, and the job
 /// withdraws it there before it is over. A committed claim goes `ending` and the room stops serving on the name in this
-/// same transaction; the rest of its ending is the next PRs'. Asking again changes nothing.
+/// same transaction; the job then ends it the long way (8b, `custom_hostname`). Asking again changes nothing.
 pub(super) fn handle_remove(
     sql: &SqlStorage,
     who: &Participant,
@@ -437,8 +440,8 @@ fn resolver(sql: &SqlStorage, env: &Env) -> Option<Resolver> {
 }
 
 /// When the job is next due for the room's open request, if anything is owed: a pending request's expiry, its next
-/// look for the challenge while a resolver is configured, an ask or a withdrawal that got no answer. A committed claim
-/// owes nothing here.
+/// look for the challenge while a resolver is configured, an ask or a withdrawal that got no answer, and a committed
+/// claim's next step at Cloudflare or of its long end (8b, `custom_hostname`), at the same doubling wait.
 pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
     let Some(row) = open_request(sql)? else {
         return Ok(None);
@@ -459,8 +462,13 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
                 None => expiry,
             })
         }
-        Some(HostnameRequestState::Pending) => Some(retry),
-        Some(HostnameRequestState::Ending) if row["claimed_at"].is_null() => Some(retry),
+        // An ask or a withdrawal out; a committed claim's custom hostname, created or read (8b); and every ending,
+        // withdrawn or the long way.
+        Some(
+            HostnameRequestState::Pending
+            | HostnameRequestState::Claimed
+            | HostnameRequestState::Ending,
+        ) => Some(retry),
         _ => None,
     })
 }
@@ -546,7 +554,7 @@ impl Workspace {
     }
 
     /// One call to a hostname's own object, by its normalized name. Its answer, or an error for anything but `200`.
-    async fn claim_object(
+    pub(super) async fn claim_object(
         &self,
         hostname: &str,
         method: Method,
@@ -593,6 +601,16 @@ impl Workspace {
         let id = text(&row["id"]).unwrap_or_default();
         let hostname = text(&row["hostname"]).unwrap_or_default();
         let state = row["state"].as_str().and_then(HostnameRequestState::parse);
+        // A committed claim: its custom hostname at Cloudflare, and its long end (8b).
+        match state {
+            Some(HostnameRequestState::Claimed) => {
+                return self.claimed_upkeep(&sql, &row, now).await
+            }
+            Some(HostnameRequestState::Ending) if !row["claimed_at"].is_null() => {
+                return self.long_end_upkeep(&sql, &row, now).await
+            }
+            _ => {}
+        }
         let step = match state {
             Some(HostnameRequestState::Pending) if row["proved_at"].is_null() => Step::Look,
             Some(HostnameRequestState::Pending) => Step::Ask,
@@ -723,7 +741,7 @@ impl Workspace {
 
 /// Records that the job looked at a request now, so its next look waits its turn. It isn't a change to the request,
 /// so `updated_at` stays, which is what an unanswered try's wait is measured from.
-fn checked(sql: &SqlStorage, id: &str, now: i64) -> R<()> {
+pub(super) fn checked(sql: &SqlStorage, id: &str, now: i64) -> R<()> {
     exec(
         sql,
         "UPDATE hostname_request SET checked_at = ? WHERE id = ?",
@@ -733,7 +751,7 @@ fn checked(sql: &SqlStorage, id: &str, now: i64) -> R<()> {
 
 /// The room's own facts the proof job reads before each look and each ask, as asking read them. The organization's
 /// release switch is the one the room last applied; one that can't be read is unknown.
-fn proof_room(sql: &SqlStorage) -> R<HostnameProofRoom> {
+pub(super) fn proof_room(sql: &SqlStorage) -> R<HostnameProofRoom> {
     let facts = super::release_recheck::room_facts(sql, true, true)?;
     let switch = super::release_switch::applied(sql)?;
     Ok(HostnameProofRoom {

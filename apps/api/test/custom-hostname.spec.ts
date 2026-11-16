@@ -391,6 +391,30 @@ describe("the deep review's rulings (M6 step 8b)", () => {
     expect((await cloudflare(b.name)).calls).toEqual(["create", "read", "read", "read"]);
   });
 
+  it("forgets a read of gone once a read finds the hostname moved, so the long end counts gone afresh", async () => {
+    const { r, name } = await claimed("org_ch_moved_forgets");
+    await createOpen(r);
+    await step(r);
+    // Gone, once: noted.
+    await setAtCloudflare(name, null);
+    await aged(r);
+    await step(r);
+    expect((await providerRow(r)).first_gone_at).not.toBeNull();
+    // There, and moved: the claim ends, and the first read of gone is forgotten.
+    await setAtCloudflare(name, "moved");
+    await step(r);
+    expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_moved" });
+    expect(await providerRow(r)).toMatchObject({ first_gone_at: null });
+    await step(r);
+    // Gone again, well over ten minutes after the first: on its own it only starts a new count.
+    await setAtCloudflare(name, null);
+    await aged(r);
+    await step(r);
+    expect(await providerRow(r)).toMatchObject({ gone_at: null });
+    expect(await requestRow(r)).toMatchObject({ state: "ending" });
+    expect((await providerRow(r)).first_gone_at).not.toBeNull();
+  });
+
   it("reads every page of a name's search, so a name matched by more than a page is still found and deleted, and only it", async () => {
     const { r, name } = await claimed("org_ch_pages");
     // Sixty other names that contain this one, made first, so this one is on the second page.

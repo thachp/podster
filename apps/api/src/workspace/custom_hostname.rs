@@ -241,7 +241,17 @@ impl Workspace {
                         console_error!("hostname: the custom hostname couldn't be read: room={} request={} code=custom_hostname_unread", room, id);
                         return self.tried(sql, &id, now);
                     }
-                    AfterClaimedRead::End(cause) => return end(cause.code()),
+                    AfterClaimedRead::End(cause) => {
+                        // Read there, `moved`: any read of gone noted before it is forgotten, as on every read that
+                        // finds the hostname, so the long end counts afresh.
+                        if matches!(read.read, ProviderRead::Present { .. }) {
+                            let (store, request) = (sql.clone(), id.clone());
+                            transaction_sync(&self.state, move || {
+                                set_phase(&store, &request, "first_gone_at = NULL", vec![])
+                            })?;
+                        }
+                        return end(cause.code());
+                    }
                     AfterClaimedRead::Keep => {
                         let (found_id, status) = read.found.into_iter().next().unwrap_or_default();
                         let differs = phase.provider_id.as_deref() != Some(found_id.as_str())

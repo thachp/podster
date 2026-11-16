@@ -5,7 +5,7 @@
 //! asserted on. A room a test gave the table `test_alarms_manual` has its alarms under the test's control instead: the
 //! runtime's own firing of the alarm does nothing there, and the job runs only when the test asks for a pass, through
 //! [`INTERNAL_TEST_ALARM_PASS`]. Alarms are still set as before; one due at once is taken by that firing, which runs
-//! nothing and leaves none, while a wait set ahead stays to be read.
+//! nothing and records it ([`held`]), so the test can still read that it was set.
 //!
 //! The module is compiled only with the feature (`mod test_alarms` is under it in `workspace.rs`), so a deployed build
 //! has neither the route nor the read. Each item carries the attribute too, where the source guard in
@@ -27,4 +27,29 @@ pub(super) fn held_for_the_test(sql: &SqlStorage) -> bool {
         vec![],
     )
     .is_ok_and(|found| !found.is_empty())
+}
+
+/// Records the alarm the runtime's firing took, as a row of `test_alarms_manual` holding when it was due, so the test's
+/// `nextAlarm` still reports it until a pass of the test's own runs the job (`apps/api/test/alarm.ts` clears the rows
+/// then). The time due is the alarm as set, or now if it can't be read: either way it came due at once.
+#[cfg(feature = "failpoints")]
+pub(super) async fn held(state: &worker::State) {
+    let now = worker::Date::now().as_millis() as i64;
+    let due = state
+        .storage()
+        .get_alarm()
+        .await
+        .ok()
+        .flatten()
+        .map_or(now, |at| at.min(now));
+    if let Err(error) = crate::store::exec(
+        &state.storage().sql(),
+        "INSERT INTO test_alarms_manual (x) VALUES (?)",
+        vec![due.into()],
+    ) {
+        worker::console_error!(
+            "test alarms: a held alarm wasn't recorded: {:?}",
+            error.code()
+        );
+    }
 }

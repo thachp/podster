@@ -5360,12 +5360,14 @@ impl DurableObject for Workspace {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        // Test builds only: in a room whose alarms the test runs, the runtime's firing does nothing. The flag is set
-        // and read in one poll, so no other run can take it.
+        // Test builds only: in a room whose alarms the test runs, the runtime's firing runs nothing, and records the
+        // alarm it took, so a test can still see it was set. The flag is set and read in one poll, so no other run can
+        // take it.
         #[cfg(feature = "failpoints")]
         if !self.test_pass.replace(false)
             && test_alarms::held_for_the_test(&self.state.storage().sql())
         {
+            test_alarms::held(&self.state).await;
             return Response::ok("held for the test");
         }
         // The platform never runs two alarms of one object at once, and the provisioning job counts on that: it reads

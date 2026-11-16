@@ -17,12 +17,26 @@ function manual(state: any): boolean {
 }
 
 /**
+ * When the alarms the runtime's firing took in a room whose alarms are the test's came due: the room records each as a
+ * row of `test_alarms_manual` (`held` in `src/workspace/test_alarms.rs`), as the runtime deletes an alarm it fired.
+ */
+function held(state: any): number[] {
+  if (!manual(state)) return [];
+  return state.storage.sql.exec("SELECT x FROM test_alarms_manual WHERE x IS NOT NULL").toArray().map((row: any) => row.x as number);
+}
+const forgetHeld = (state: any) => {
+  if (manual(state)) state.storage.sql.exec("DELETE FROM test_alarms_manual");
+};
+
+/**
  * Runs the object's alarm job once, in its turn, from inside `runInDurableObject`. A room whose alarms are the test's
  * runs it through the test's route; any other object through its handler, as the runtime would. Use this, never a
  * bare `instance.alarm()`, which does nothing in a room whose alarms are the test's.
  */
 export async function runAlarm(instance: any, state: any) {
   if (!manual(state)) return instance.alarm();
+  // The pass runs the job any alarm the runtime's firing took was owed, so what it took is no longer pending.
+  forgetHeld(state);
   const response: Response = await instance.fetch(new Request(PASS));
   if (!response.ok) throw new Error(`the test's pass failed: ${response.status}`);
   return response;
@@ -55,14 +69,15 @@ export const alarmQuiet = (room: DurableObjectStub) =>
   runInDurableObject(room, async (instance: any, state: any) => {
     await runAlarm(instance, state);
     await state.storage.deleteAlarm();
+    forgetHeld(state);
   });
 
 /**
  * Puts a room's alarms under the test's control from now on, and hands it back quiet (review standard 1). The
  * runtime's own firing of the room's alarm does nothing from here, so only a pass the test runs (`alarmPass`,
  * `alarmQuiet`, `runAlarm`) runs the job, and a row the test writes after a command is never met by a run it didn't
- * start. Alarms are still set as before, but one due at once is taken by the runtime's firing, which runs nothing and
- * leaves none: read `nextAlarm` only for a due time ahead, as a pass's wait sets.
+ * start. Alarms are still set as before. One due at once is taken by the runtime's firing, which runs nothing and
+ * records when it was due, so `nextAlarm` and `expectNoAlarmSooner` still report it until a pass of the test's own.
  *
  * The shared room helpers call this. A run the runtime started before the switch is waited out, and the alarm left is
  * cleared, as `alarmQuiet` does. A test that needs the runtime's own firing, delivery that nobody passes for, gives
@@ -73,6 +88,7 @@ export const manualAlarms = (room: DurableObjectStub) =>
     state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_alarms_manual (x INTEGER)");
     await runAlarm(instance, state);
     await state.storage.deleteAlarm();
+    forgetHeld(state);
   });
 
 /** Gives a room's alarms back to the runtime, for a test that shows what the runtime's own firing does. */
@@ -81,9 +97,16 @@ export const runtimeAlarms = (room: DurableObjectStub) =>
     state.storage.sql.exec("DROP TABLE IF EXISTS test_alarms_manual");
   });
 
-/** When the room's next alarm is set for, or null if none is. */
+/**
+ * When the room's next alarm is set for, or null if none is. In a room whose alarms are the test's, an alarm the
+ * runtime's firing took counts as still set, at the time it came due, until a pass of the test's own runs the job: so an
+ * alarm wrongly set due at once still fails a check that none is.
+ */
 export const nextAlarm = (room: DurableObjectStub) =>
-  runInDurableObject(room, (_: any, state: any) => state.storage.getAlarm()) as Promise<number | null>;
+  runInDurableObject(room, async (_: any, state: any) => {
+    const times = [await state.storage.getAlarm(), ...held(state)].filter((at): at is number => typeof at === "number");
+    return times.length ? Math.min(...times) : null;
+  }) as Promise<number | null>;
 
 /**
  * Checks that a pass left no alarm sooner than `minMs` from now: either none, or one at least that far off. A pass that

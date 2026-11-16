@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, expectNoAlarmSooner, manualAlarms, runtimeAlarms } from "./alarm";
+import { alarmPass, alarmQuiet, expectNoAlarmSooner, manualAlarms, nextAlarm, runtimeAlarms } from "./alarm";
 import { txtData } from "./fake-resolver";
 
 // M6 step 8, the first PR: a room's custom hostname, its challenge and the claim (ADR 0010's "Custom domains", steps
@@ -743,12 +743,33 @@ describe("a room's alarms are the test's (review standard 1)", () => {
   });
 
   it("runs the job on the runtime's firing again once the room is given back, so the switch is all that differs", async () => {
+    // The reproduction's steps exactly, with the room given back to the runtime first: the forced firing runs the job,
+    // records a look with release off, and the test's pass finds the next one a minute away.
     const r = await room("org_ah_runtime");
     const name = newName();
-    await switchedOn(() => ask(r, name));
+    const request = (await switchedOn(() => ask(r, name))).body.request;
     await runtimeAlarms(stub(r.room));
+    await answerWith(name, request.challenge_value);
+    await rewindLook(r);
     await runtimeFires(r);
     expect((await requestRow(r)).checked_at).not.toBeNull();
+    await pass(r);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
+  });
+
+  it("still reports an alarm set due at once, which the runtime's firing took, until the test's own pass", async () => {
+    const r = await room("org_ah_held");
+    // A wake wrongly set due at once, then what the runtime does with it: it calls the handler, which runs nothing here,
+    // and deletes the alarm it fired.
+    await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.setAlarm(Date.now()));
+    await runtimeFires(r);
+    await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.deleteAlarm());
+    // A check that no wake is set, or none soon, still fails on it.
+    expect(await nextAlarm(stub(r.room))).not.toBeNull();
+    await expect(expectNoAlarmSooner(stub(r.room), 60 * 1000)).rejects.toThrow(/sooner than/);
+    // Quieted, it is gone: the pass ran the job it was owed.
+    await alarmQuiet(stub(r.room));
+    expect(await nextAlarm(stub(r.room))).toBeNull();
   });
 
   it("is read only by a test build: the route, the table and the flag are compiled only under the feature", () => {
@@ -760,8 +781,8 @@ describe("a room's alarms are the test's (review standard 1)", () => {
     expect(sources["workspace.rs"]).toMatch(/#\[cfg\(feature = "failpoints"\)\]\nmod test_alarms;/);
     // Each item in it is under the feature too.
     const module = sources["workspace/test_alarms.rs"];
-    expect(module.match(/^pub\(\w+\) (const|fn) /gm)).toHaveLength(2);
-    expect(module.match(/#\[cfg\(feature = "failpoints"\)\]\npub\(\w+\) (const|fn) /g)).toHaveLength(2);
+    expect(module.match(/^pub\(\w+\) (const|fn|async fn) /gm)).toHaveLength(3);
+    expect(module.match(/#\[cfg\(feature = "failpoints"\)\]\npub\(\w+\) (const|fn|async fn) /g)).toHaveLength(3);
     // Every use of it, and of the flag that marks the test's pass, sits just under the feature's attribute.
     const lines = sources["workspace.rs"].split("\n");
     const uses = lines.flatMap((line, i) => (/test_alarms::|test_pass/.test(line) ? [i] : []));

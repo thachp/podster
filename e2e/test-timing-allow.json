@@ -6,7 +6,7 @@
   "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
   "`lines_when_listed` and `listed_at` are for a reader: the check doesn't use them, and lines move.",
   "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E.",
-  "Rules 4 and 5 (`runtime-alarms`, `direct-alarm`) were added with the test-only switch that puts a room's alarms under the test's control, on branch fix/test-rooms-alarms-manual."
+  "Rules 4 to 6 (`runtime-alarms`, `direct-alarm`, `runtime-opt-out`) were added with the test-only switch that puts a room's alarms under the test's control (PR 406)."
  ],
  "categories": {
   "A": "sleep: a bounded poll for the state itself (right as it is, unless its reason says owed)",
@@ -25,7 +25,8 @@
   "S": "sleep: a stand-in's own bound that only detects a failure (right as it is)",
   "T": "sleep: a stand-in's scripted delay",
   "M": "runtime-alarms: an API spec whose rooms keep the runtime's own alarms",
-  "N": "direct-alarm: a test that calls the handler the runtime calls, on purpose"
+  "N": "direct-alarm: a test that calls the handler the runtime calls, on purpose",
+  "O": "runtime-opt-out: a room given back to the runtime's own alarms with runtimeAlarms"
  },
  "known_gaps": [
   {
@@ -1291,6 +1292,56 @@
    "listed_at": "fix/test-rooms-alarms-manual",
    "code": "const runtimeFires = (r: Room) => runInDurableObject(stub(r.room), (instance: any) => instance.alarm());",
    "reason": "The forced-order reproduction: it calls the very handler the runtime calls when the alarm comes due, at one chosen moment, to show that in a room whose alarms are the test's it does nothing, and that with runtimeAlarms it runs the job."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "runtime-opt-out",
+   "where": "an operator's suspension of a custom hostname > tells operators of a notice no room answers, and gets a lost wake back from the reconcile",
+   "category": "O",
+   "owed": true,
+   "listed_at": "PR 406",
+   "code": "await runtimeAlarms(stub(c.room));",
+   "reason": "What this test shows is the room's own alarm, woken by the reconcile, delivering the notice and taking the entry down with no pass of the test's. Owed: show the reconcile's wake with the room under the test, by reading that the reconcile set the room's alarm (nextAlarm, which reports one the runtime's firing took) and then running the test's own pass, instead of waiting for the runtime's run."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "runtime-opt-out",
+   "where": "the two reconciles > wakes a room whose wake was lost, and a room whose work was owed from before a provider existed",
+   "category": "O",
+   "owed": true,
+   "listed_at": "PR 406",
+   "code": "await runtimeAlarms(stub(a.room));",
+   "reason": "The first room's lost wake is brought back by the reconcile, and the test sees the runtime's run of it remove the entry. Owed: show the reconcile's wake with the room under the test, by reading that the reconcile set the room's alarm (nextAlarm, which reports one the runtime's firing took) and then running the test's own pass, instead of waiting for the runtime's run."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "runtime-opt-out",
+   "where": "the two reconciles > wakes a room whose wake was lost, and a room whose work was owed from before a provider existed",
+   "category": "O",
+   "owed": true,
+   "listed_at": "PR 406",
+   "code": "await runtimeAlarms(stub(b.room));",
+   "reason": "The second room, owing work from before a provider existed, is reached by the reconcile's walk and the runtime's run of its alarm removes the entry. Owed: show the reconcile's wake with the room under the test, by reading that the reconcile set the room's alarm (nextAlarm, which reports one the runtime's firing took) and then running the test's own pass, instead of waiting for the runtime's run."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "runtime-opt-out",
+   "where": "the two reconciles > takes back an unpublish's \"scripts gone\" while one of its scripts is owed again",
+   "category": "O",
+   "owed": true,
+   "listed_at": "PR 406",
+   "code": "await runtimeAlarms(stub(a.room));",
+   "reason": "The delete owed again is sent by the room's own alarm, which the reconcile wakes; the test holds it at the stand-in's gate. Owed: show the reconcile's wake with the room under the test, by reading that the reconcile set the room's alarm (nextAlarm, which reports one the runtime's firing took) and then running the test's own pass, instead of waiting for the runtime's run."
+  },
+  {
+   "file": "apps/api/test/app-hostname.spec.ts",
+   "rule": "runtime-opt-out",
+   "where": "a room's alarms are the test's (review standard 1) > runs the job on the runtime's firing again once the room is given back, so the switch is all that differs",
+   "category": "O",
+   "owed": false,
+   "listed_at": "PR 406",
+   "code": "await runtimeAlarms(stub(r.room));",
+   "reason": "The switch's own control: the reproduction's steps with the room given back to the runtime, to show the forced firing runs the job there and the switch is the only difference. Right as it is, not a debt."
   }
  ]
 }

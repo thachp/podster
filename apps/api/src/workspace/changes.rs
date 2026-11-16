@@ -1150,24 +1150,40 @@ fn apply_checks(sql: &SqlStorage, task_id: &str, head: &str, seen: &ChecksSeen, 
 }
 
 /// What a task's release status needs from outside the room's rows (M6 step 7): the deployment's release switch, the
-/// content domain, and the stop for the whole content domain. The stop is asked only when the room has a release of the
-/// task's merged commit recorded `served`, since nothing else could be shown served; unasked, it reads as stopped.
+/// content domain, and the stop for the whole content domain. Asked only after the caller is authorized, and the stop
+/// only for a caller shown the task's change while the room has a release of the task's merged commit recorded
+/// `served`, since nothing else could be shown served; unasked, it reads as stopped.
 pub(super) struct ReleaseFacts {
     pub(super) switched_on: bool,
     pub(super) domain: Option<String>,
     pub(super) stop: StopSeen,
 }
 
+/// Who may read the task's release status, and whether they are shown the task's change (`true`) or given the merge
+/// alone, by `podster_policy::repositories::authorize_release_status` on the room's rows. Refused callers are answered
+/// here, before anything outside the room is asked.
+fn release_status_view(sql: &SqlStorage, who: &Participant, task_id: &str) -> R<bool> {
+    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
+    let asked = change_row(sql, task_id)?
+        .is_some_and(|row| row["merge_requested_by"].as_str() == Some(who.caller.id.as_str()));
+    let view = podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
+        .map_err(repositories::denied)?;
+    Ok(view == podster_policy::repositories::ReleaseView::Whole)
+}
+
 impl Workspace {
     pub(super) async fn release_status_facts(
         &self,
         sql: &SqlStorage,
+        who: &Participant,
         task_id: &str,
-    ) -> ReleaseFacts {
+    ) -> R<ReleaseFacts> {
+        // Authorize first: a caller who is refused causes no read of the switch or the stop.
+        let whole = release_status_view(sql, who, task_id)?;
         let switched_on = crate::releases::switched_on(&self.env).await;
         // A row that can't be read here is read again by the status itself, which then refuses; the stop is asked
         // anyway, so nothing is shown served on a guess.
-        let candidate = switched_on && served_attempt(sql, task_id).unwrap_or(true);
+        let candidate = whole && switched_on && served_attempt(sql, task_id).unwrap_or(true);
         let stop = if candidate {
             match crate::content_stop::read_from(&self.env).await {
                 crate::content_stop::Stop::Clear => StopSeen::Clear,
@@ -1177,11 +1193,11 @@ impl Workspace {
         } else {
             StopSeen::Unread
         };
-        ReleaseFacts {
+        Ok(ReleaseFacts {
             switched_on,
             domain: crate::content_provider::content_domain(&self.env),
             stop,
-        }
+        })
     }
 }
 
@@ -1295,14 +1311,10 @@ pub(super) fn release_status(
     task_id: &str,
     facts: &ReleaseFacts,
 ) -> R<Value> {
+    // Decided again on the same rows, in the same turn as the facts were read.
+    let whole = release_status_view(sql, who, task_id)?;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     let row = change_row(sql, task_id)?;
-    let asked = row
-        .as_ref()
-        .is_some_and(|row| row["merge_requested_by"].as_str() == Some(who.caller.id.as_str()));
-    let view = podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
-        .map_err(repositories::denied)?;
-    let whole = view == podster_policy::repositories::ReleaseView::Whole;
     // Checks are reported only for the commit they were read for. If the head is another now, they're unobserved.
     let stored = row
         .as_ref()

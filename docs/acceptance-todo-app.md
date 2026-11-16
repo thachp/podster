@@ -72,7 +72,7 @@ Items marked **[code]** are needed only if the app has code and a store. A stati
 
 From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's order](m6-plan.md#stage-1-of-apps-as-workers-the-build-order):
 
-- `deploy_release` in the contract and capabilities (step 6, alone in its turn). *The release fields of `get_task_release_status` (step 7) are built, by the PR `feat/m6-release-status`.*
+- `deploy_release` in the contract and capabilities (step 6, alone in its turn). *The release fields of `get_task_release_status` (step 7) are built, by #407.*
 - Step 10's screens: release in room settings, *Needs approval*, what an approver is told, and the operators' page for apps' reports.
 - The reconcile's cron entry, and an explicit `RELEASES` value, in staging's configuration (by PR; turning it on is the owner's, below). Then the PR that flips `RELEASE_PATH_COMPLETE`.
 - The rerun of spike C's checks on `podster.site`, and spike G's timings (the takedown time the test asserts).
@@ -222,7 +222,7 @@ Each task has the lead as requester, the reviewer above (`set_reviewer`), and is
 | 9. Merge | Both | A3 | `merge_task` | `merge.succeeded` for the reviewed commit, on the default branch. A merge by A1 is refused `self_merge` | `get_task_release_status` (checks and merge); `listEvents`; `listDenials` (row 6) |
 | 10. Release refused | Private | P1 | `setReleaseConfig` on | Refused `release_needs_public_room`. The private run ends here, after cleanup | `listDenials`; `getReleaseConfig` |
 | 11. Release on | Public | P1 | `setReleaseConfig` | Release on for the room, a default host assigned | `getReleaseConfig` |
-| 12. Ask | Public | A1 | *`deploy_release`, not built yet (M6 step 6)* | One release record for the merged commit, asked for by A1 | Release fields of `get_task_release_status` (M6 step 7): the latest attempt, `served` false until its marker comes back (row 7) |
+| 12. Ask | Public | A1 | *`deploy_release`, not built yet (M6 step 6)* | One release record for the merged commit, asked for by A1 | Release fields of `get_task_release_status` (M6 step 7): the latest attempt, `awaiting_confirmation` and `served` false until its marker comes back (row 7) |
 | 13. Approve | Public | P2 | `approveRelease`; an agent's attempt refused | Approved by P2 | `listDenials`; *what P2 is told, step 10's screens, not built yet* (row 7) |
 | 14. Live | Public | The release job | Release job and marker job, built behind `RELEASES` and `RELEASE_PATH_COMPLETE` | The record reaches `live`; the marker names the merged commit | `https://<label>.podster.site/.well-known/podster-release.json` (row 8) |
 | 15. App works | Public | The observer | A scripted browser | Add, change, remove, reload, and the list holds, in three engines. *The write path is not built yet* ([stage 1's order](m6-plan.md#stage-1-of-apps-as-workers-the-build-order)) | The host (rows 9, 10) |

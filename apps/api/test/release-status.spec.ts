@@ -201,7 +201,7 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     expect((await pass(r.room)).state).toBe("live");
     await serve(r.host, { script: r.script });
     await switchHost(r.room);
-    expect(await shown(r.room)).toEqual(attempt("live", T));
+    expect(await shown(r.room)).toEqual(attempt("awaiting_confirmation", T));
     // The marker comes back through the host: served, with the default host's address, at the marker's time.
     await at(r.room, T + POLL);
     expect((await pass(r.room)).outcome).toBe("served");
@@ -214,7 +214,7 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     await switchHost(r.room);
     // Switched at `T`, and the host answers another release's marker: fetched again, still not served.
     expect((await pass(r.room)).code).toBe("release_awaiting_marker");
-    expect(await shown(r.room)).toEqual(attempt("live", T));
+    expect(await shown(r.room)).toEqual(attempt("awaiting_confirmation", T));
     await at(r.room, T + WAIT);
     expect((await pass(r.room)).code).toBe("release_marker_missing");
     const got = (await switchedOn(() => status(r.room))).body;
@@ -229,7 +229,7 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     await switchHost(r.room);
     expect((await pass(r.room)).code).toBe("release_awaiting_marker");
     // Live and not yet served, while the host is set to it: so the commit isn't shown served by the release before.
-    expect(await shown(r.room)).toEqual(attempt("live", T));
+    expect(await shown(r.room)).toEqual(attempt("awaiting_confirmation", T));
     await at(r.room, T + WAIT);
     expect((await pass(r.room)).code).toBe("release_marker_missing");
     expect(await shown(r.room)).toEqual(attempt("failed", T + WAIT, { failure_code: "release_marker_missing", served: true, result_url: `https://${r.host}/` }));
@@ -276,6 +276,36 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     // No merged commit at all.
     await inRoom(r.room, (sql) => void sql.exec("UPDATE task_change SET merge_sha = NULL, merge_state = 'not_requested'"));
     expect(await shown(r.room)).toEqual({ exists: false });
+  });
+
+  it("authorizes first: a refused caller, and whoever is given the merge alone, cause no read of the content domain's stop", async () => {
+    const r = await served();
+    await inRoom(r.room, (sql) => {
+      sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'member', ?, 1)", MERGER.id, ORG, OWNER.id);
+      sql.exec("UPDATE task SET requester_id = ? WHERE id = ?", MERGER.id, TASK);
+    });
+    await inModeration((sql) => void sql.exec("CREATE TABLE IF NOT EXISTS test_stop_reads (n INTEGER)"));
+    const reads = () => inModeration((sql) => sql.exec("SELECT count(*) AS n FROM test_stop_reads").one().n as number);
+    const read = (who: Who) => switchedOn(() => api(who, "GET", `/v1/workspaces/${r.room}/tasks/${TASK}/release-status`));
+    try {
+      // Control: the owner, shown the change, with a served release: the stop is asked once.
+      const before = await reads();
+      expect((await read(OWNER)).body.release.served).toBe(true);
+      expect(await reads()).toBe(before + 1);
+      // An agent that reads the task but isn't shown its change and didn't ask for its merge: refused, nothing asked.
+      const refused = await read(MERGER);
+      expect([refused.status, refused.body.error.code]).toEqual([403, "not_allowed"]);
+      // Someone outside the room: refused, nothing asked.
+      const outside = await read({ id: "per_rs_outsider", org: ORG });
+      expect(outside.status).toBeGreaterThanOrEqual(400);
+      // Given the merge alone: answered, with no release, and nothing asked.
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE task_change SET merge_requested_by = ?", MERGER.id));
+      const merged = await read(MERGER);
+      expect([merged.status, merged.body.release]).toEqual([200, null]);
+      expect(await reads()).toBe(before + 1);
+    } finally {
+      await inModeration((sql) => void sql.exec("DROP TABLE IF EXISTS test_stop_reads"));
+    }
   });
 
   it("gives whoever is given the merge alone no release while it's on, and the same answer as everyone while it's off", async () => {

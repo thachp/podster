@@ -51,7 +51,7 @@ check(throws(() => subset(asks("matches!(self, Colour::Red)"), "Colour", "cold",
 
 // The real sources read whole.
 const real = coreSets(new URL("../../", import.meta.url));
-check(real.releaseStates.length >= 10 && real.unpublishCauses.length >= 11 && real.hostnameRequestStates.length === 6 && real.openHostnameRequestStates.length === 3 && real.servingReleaseStates.join() === "live,served" && real.holdingHostnameClaimStates.join() === "live,ending", "core's own sets are read");
+check(real.releaseStatusStates.length === real.releaseStates.length && !real.releaseStatusStates.includes("live") && real.releaseStatusStates.includes("awaiting_confirmation") && real.releaseStates.length >= 10 && real.unpublishCauses.length >= 11 && real.hostnameRequestStates.length === 6 && real.openHostnameRequestStates.length === 3 && real.servingReleaseStates.join() === "live,served" && real.holdingHostnameClaimStates.join() === "live,ending", "core's own sets are read");
 
 if (failed) { console.error(`${failed} core-sets check(s) failed`); process.exit(1); }
 console.log("core-sets selftest passed");

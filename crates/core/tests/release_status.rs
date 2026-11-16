@@ -4,9 +4,45 @@
 
 use podster_core::release::ReleaseState;
 use podster_core::release_status::{
-    release_report, release_state_from_name, AttemptHeld, HostHeld, ReleaseReport, StopSeen,
-    UnknownReleaseState,
+    release_report, release_state_from_name, AttemptHeld, HostHeld, ReleaseReport,
+    ReleaseStatusState, StopSeen, UnknownReleaseState,
 };
+
+#[test]
+fn the_status_never_says_live_and_says_every_other_state_as_the_room_does() {
+    // The room's `live` is switched with its marker not yet back: the status says `awaiting_confirmation`.
+    assert_eq!(
+        ReleaseStatusState::of(ReleaseState::Live),
+        ReleaseStatusState::AwaitingConfirmation
+    );
+    assert_eq!(
+        ReleaseStatusState::AwaitingConfirmation.name(),
+        "awaiting_confirmation"
+    );
+    for state in ReleaseState::ALL {
+        let said = ReleaseStatusState::of(state);
+        assert_ne!(said.name(), "live", "{state:?}");
+        if state != ReleaseState::Live {
+            assert_eq!(said.name(), state.name(), "{state:?}");
+        }
+    }
+    // One wire state for each of the room's, and none other: the mapping is onto, in the room's order.
+    let said: Vec<_> = ReleaseState::ALL
+        .into_iter()
+        .map(ReleaseStatusState::of)
+        .collect();
+    assert_eq!(said, ReleaseStatusState::ALL.to_vec());
+    // And through the report: a live attempt is awaiting confirmation, and not served.
+    let Ok(ReleaseReport::Attempt { state, served, .. }) =
+        release_report(true, &[attempt("live")], &host())
+    else {
+        panic!("no attempt");
+    };
+    assert_eq!(
+        (state, served),
+        (ReleaseStatusState::AwaitingConfirmation, false)
+    );
+}
 
 const SCRIPT: &str = "app1.rel_aa";
 const OTHER: &str = "app1.rel_bb";
@@ -73,7 +109,11 @@ fn the_latest_attempt_is_reported_in_its_own_state_with_the_time_it_was_recorded
         else {
             panic!("{state:?}: no attempt");
         };
-        assert_eq!((id, shown, observed_at), ("rel_aa", state, 70), "{state:?}");
+        assert_eq!(
+            (id, shown, observed_at),
+            ("rel_aa", ReleaseStatusState::of(state), 70),
+            "{state:?}"
+        );
     }
     let older = AttemptHeld {
         id: "rel_00",
@@ -169,7 +209,7 @@ fn an_earlier_attempt_still_served_stays_served_beside_a_later_one_that_failed()
         release_report(true, &[earlier, later], &host()),
         Ok(ReleaseReport::Attempt {
             id: "rel_bb",
-            state: ReleaseState::Failed,
+            state: ReleaseStatusState::Failed,
             observed_at: 90,
             failure_code: Some("release_marker_missing"),
             served: true,

@@ -1491,6 +1491,7 @@ describe("rate limits", () => {
     // that only `served` means live, and its fields are still only the task: nothing an agent sends reaches a release.
     expect(status.description).toContain("live only when release.served is true");
     expect(status.description).not.toContain("No release exists");
+    expect(status.description).toContain("awaiting_confirmation");
     // The merge tool (M5 step 7b) is listed the same way: only with the switch exactly on. Off, no agent is offered one (AC-17).
     for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("merge_task");
     expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("merge_task");

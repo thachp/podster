@@ -141,7 +141,7 @@ for (const [name, cap] of Object.entries(capabilities)) {
 const root = new URL("../../", import.meta.url);
 const core = coreSets(root);
 const releaseEnums = {
-  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStates.join(),
+  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStatusStates.join(),
   "AppHostnameRequest.state": core.hostnameRequestStates.join(),
 };
 const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
@@ -182,6 +182,7 @@ if (!store.includes(`environments_json = '[\\"${core.environment}\\"]'`)) proble
   if (variants.join("|") !== [JSON.stringify({ type: "null" }), JSON.stringify({ type: "object", additionalProperties: false, required: ["exists"], properties: { exists: { type: "boolean", enum: [false] } } }), "#/components/schemas/TaskRelease"].join("|")) problems.push("TaskReleaseStatus.release: must be null, { exists: false } or a TaskRelease");
   if (shown?.properties?.served?.type !== "boolean" || JSON.stringify(shown?.properties?.result_url?.type) !== JSON.stringify(["string", "null"]) || shown?.properties?.exists?.enum?.join() !== "true" || shown?.additionalProperties !== false) problems.push("TaskRelease: must say served as a boolean and result_url as a string or null, apart from its state");
   if (shown?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("TaskRelease.commit_sha: must be 40 lower-case hexadecimal characters");
+  if (shown?.properties?.state?.enum?.includes("live") || core.releaseStatusStates.includes("live")) problems.push("TaskRelease.state: the status never says live; live-ness is `served` alone");
 }
 if (api.components.schemas.Release?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("Release.commit_sha: must be 40 lower-case hexadecimal characters");
 for (const [what, text] of [["approval policy", `approval_policy = '${core.approvalPolicies.join()}'`], ["environment", `environment = '${core.environment}'`], ["release ID's prefix", `id GLOB '${core.releaseIdPrefix}*'`], ["release ID's length", `length(id) = ${core.idLen}`], ["label's length", `length(label) BETWEEN 1 AND ${core.maxLabelLen}`]]) {

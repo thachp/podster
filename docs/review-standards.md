@@ -74,6 +74,8 @@ Taking an app down commits in its own transaction and runs before anything slowe
 
 Hostnames and script names are kept only in operator-only stores: the Moderation object's tables and the operators' queue and findings. They never reach a log, an event or an answer to anyone who isn't an operator. Logs carry IDs and codes.
 
+*Exception, 2026-11-16 (architect, for the owner to review; #407):* a public room's default-host address, while its app is served there, may be shown to those shown the task's change, as `get_task_release_status`'s `result_url`. It never reaches a log or an event, and a custom hostname is never shown this way.
+
 **Why:** a name says what someone published or reported. CLAUDE.md's "logs carry IDs only" doesn't protect anything if a name is treated as one.
 
 - Learned in #322 (2026-11-13): a mismatch is logged as the room's and the request's IDs with a code, `hostname_generation_mismatch`, not the hostname.

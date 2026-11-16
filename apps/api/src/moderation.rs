@@ -738,6 +738,17 @@ impl Moderation {
             // The stop for the whole content domain (M6 step 4(a)): this object is its home. A room asks here before
             // it writes a default host's serve entry.
             (Method::Get, content_stop::PATH) => {
+                // Test builds only: a test counts the stop's reads while it holds `test_stop_reads`, to show who asks.
+                #[cfg(feature = "failpoints")]
+                if !rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_stop_reads'",
+                    vec![],
+                )?
+                .is_empty()
+                {
+                    exec(&sql, "INSERT INTO test_stop_reads (n) VALUES (1)", vec![])?;
+                }
                 // Test builds only: a test makes the stop unreadable, to show a room then writes nothing.
                 #[cfg(feature = "failpoints")]
                 if !rows(

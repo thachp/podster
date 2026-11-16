@@ -187,6 +187,69 @@ pub fn report<'a>(held: Option<&Held<'a>>) -> (ChecksReport, MergeReport<'a>) {
 // The release (M6 step 7, ADR 0010)
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// A release's state as a task's release status says it. The room's own states but one: the room's `live` (switched,
+/// its marker not yet back) is `awaiting_confirmation`, so the word `live` is never said of a release at all. Whether
+/// the app is live is `served` alone, with its address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseStatusState {
+    AwaitingApproval,
+    Queued,
+    Uploading,
+    Uncertain,
+    AwaitingConfirmation,
+    Served,
+    Replaced,
+    Unpublished,
+    Declined,
+    Failed,
+}
+
+impl ReleaseStatusState {
+    pub fn name(self) -> &'static str {
+        match self {
+            ReleaseStatusState::AwaitingApproval => "awaiting_approval",
+            ReleaseStatusState::Queued => "queued",
+            ReleaseStatusState::Uploading => "uploading",
+            ReleaseStatusState::Uncertain => "uncertain",
+            ReleaseStatusState::AwaitingConfirmation => "awaiting_confirmation",
+            ReleaseStatusState::Served => "served",
+            ReleaseStatusState::Replaced => "replaced",
+            ReleaseStatusState::Unpublished => "unpublished",
+            ReleaseStatusState::Declined => "declined",
+            ReleaseStatusState::Failed => "failed",
+        }
+    }
+
+    pub const ALL: [ReleaseStatusState; 10] = [
+        ReleaseStatusState::AwaitingApproval,
+        ReleaseStatusState::Queued,
+        ReleaseStatusState::Uploading,
+        ReleaseStatusState::Uncertain,
+        ReleaseStatusState::AwaitingConfirmation,
+        ReleaseStatusState::Served,
+        ReleaseStatusState::Replaced,
+        ReleaseStatusState::Unpublished,
+        ReleaseStatusState::Declined,
+        ReleaseStatusState::Failed,
+    ];
+
+    /// The room's state, as the status says it.
+    pub fn of(state: ReleaseState) -> ReleaseStatusState {
+        match state {
+            ReleaseState::AwaitingApproval => ReleaseStatusState::AwaitingApproval,
+            ReleaseState::Queued => ReleaseStatusState::Queued,
+            ReleaseState::Uploading => ReleaseStatusState::Uploading,
+            ReleaseState::Uncertain => ReleaseStatusState::Uncertain,
+            ReleaseState::Live => ReleaseStatusState::AwaitingConfirmation,
+            ReleaseState::Served => ReleaseStatusState::Served,
+            ReleaseState::Replaced => ReleaseStatusState::Replaced,
+            ReleaseState::Unpublished => ReleaseStatusState::Unpublished,
+            ReleaseState::Declined => ReleaseStatusState::Declined,
+            ReleaseState::Failed => ReleaseStatusState::Failed,
+        }
+    }
+}
+
 /// A release's state by its stored name: exactly one of the room's states, or nothing.
 pub fn release_state_from_name(name: &str) -> Option<ReleaseState> {
     ReleaseState::ALL
@@ -232,10 +295,11 @@ pub struct HostHeld<'a> {
 pub enum ReleaseReport<'a> {
     /// Release is switched off for the deployment or the room, or nothing was asked for this commit.
     NoRelease,
-    /// The latest attempt for the commit, in the room's own state, with the time the room recorded it.
+    /// The latest attempt for the commit, in the room's own state as the status says it, with the time the room
+    /// recorded it.
     Attempt {
         id: &'a str,
-        state: ReleaseState,
+        state: ReleaseStatusState,
         observed_at: i64,
         /// Only for a failed attempt.
         failure_code: Option<&'a str>,
@@ -276,7 +340,7 @@ pub fn release_report<'a>(
         });
     Ok(ReleaseReport::Attempt {
         id: latest.id,
-        state,
+        state: ReleaseStatusState::of(state),
         observed_at: latest.recorded_at,
         failure_code: latest
             .failure_code

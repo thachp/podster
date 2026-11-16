@@ -482,7 +482,9 @@ check "--merge that GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "
 check "  and it doesn't try another way" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
 check "  after reading the pull request again, five times, while it stays open" \
   test "$(grep -c -- '--json state,headRefOid,mergeCommit ' "$fix/calls")" -eq 5
-check "  and says it is still open and nothing was merged" said 'REFUSE +the merge was not accepted: #77 is still open at the given sha. Nothing was merged'
+check "  and says it is still open at the given sha, not merged as of the last read" \
+  said 'REFUSE +the merge was not accepted: #77 is still open at the given sha, and was not merged as of the last read, about 30s after the merge call'
+check "  and never claims nothing was merged" test "$(grep -c -i 'nothing was merged' "$tmp/out")" -eq 0
 check "  and waits for no run on main" never_called 'gh run list'
 healthy
 
@@ -551,7 +553,25 @@ healthy
 echo gh-fails > "$fix/merge-result"
 printf 'CLOSED\t%s\t\n' "$sha" > "$fix/after-merge"
 check "--merge whose answer is lost, and which reads as closed, is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
-check "  and says it is closed and nothing was merged" said 'REFUSE +the merge was not accepted: #77 is CLOSED. Nothing was merged'
+check "  and says it is closed, naming the head read, not merged as of that read" \
+  said "REFUSE +the merge was not accepted: #77 is CLOSED at $sha, and was not merged as of that read"
+check "  and never claims nothing was merged" test "$(grep -c -i 'nothing was merged' "$tmp/out")" -eq 0
+healthy
+
+# Someone pushed a new head while the merge's answer was lost: the gate mustn't say it is open at the given sha.
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\n' "$other" > "$fix/after-merge"
+check "--merge whose answer is lost, and which reads as open at another head, is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
+check "  and names the head it read" \
+  said "REFUSE +the merge was not accepted: #77 is open at $other, not the given $sha, and was not merged as of the last read, about 30s after the merge call"
+check "  and never says it is open at the given sha" test "$(grep -c 'at the given sha' "$tmp/out")" -eq 0
+check "  and merged once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\nOPEN\t%s\t\n' "$other" "$sha" > "$fix/after-merge"
+check "--merge whose answer is lost, open at another head and then at the given sha, names the last head read" run 1 "$gate" 77 "$sha" --merge
+check "  which is the given sha" said 'REFUSE +the merge was not accepted: #77 is still open at the given sha'
 healthy
 
 : > "$fix/merged"

@@ -32,7 +32,9 @@ reported here.
                      If that merge call fails or its answer is lost, the merge is not asked for again.
                      The pull request is read again, up to five times, six seconds apart. Merged at the
                      given sha: reported as merged, and main's CI is waited for. Still open on the last
-                     read, or closed: refused. Unreadable on the last read, or merged at another head:
+                     read, or closed: refused, saying only that it was not merged as of that read
+                     (about 30s after the merge call; a merge queue or auto-merge could merge it later),
+                     and naming the head it read. Unreadable on the last read, or merged at another head:
                      the outcome is unknown, exit 5, with the command to check it.
 It never dismisses an alert, resolves a conflict, updates a branch or reruns anything. A failed job is a failure,
 and is looked into.
@@ -275,6 +277,7 @@ if [ "$accepted" != true ]; then
   # through. So the pull request is read again, and that decides what is reported. The merge is never asked for again.
   echo "        the merge's answer was lost or was an error, so #$pr is read again to see what happened"
   last=
+  last_head=
   for tries in 1 2 3 4 5; do
     sleep 6
     after=$(gh pr view "$pr" --json state,headRefOid,mergeCommit \
@@ -292,14 +295,21 @@ if [ "$accepted" != true ]; then
         fi
         if [[ "$after_commit" =~ ^[0-9a-f]{40}$ ]]; then merged=$after_commit; break; fi
         ;;
-      OPEN) ;;
-      CLOSED) refuse "the merge was not accepted: #$pr is CLOSED. Nothing was merged" ;;
+      OPEN) last_head=$after_head ;;
+      CLOSED) refuse "the merge was not accepted: #$pr is CLOSED at $after_head, and was not merged as of that read" ;;
       *) last= ;;
     esac
   done
   if [ -z "$merged" ]; then
     case "$last" in
-      OPEN) refuse "the merge was not accepted: #$pr is still open at the given sha. Nothing was merged" ;;
+      OPEN)
+        # Open isn't proof it never merges: a merge queue or auto-merge could still merge it later. Only what was read
+        # is said, and the head that was read is named, since someone may have pushed a new one.
+        if [ "$last_head" = "$sha" ]; then
+          refuse "the merge was not accepted: #$pr is still open at the given sha, and was not merged as of the last read, about 30s after the merge call"
+        fi
+        refuse "the merge was not accepted: #$pr is open at $last_head, not the given $sha, and was not merged as of the last read, about 30s after the merge call"
+        ;;
       MERGED)
         echo "merge-gate: merged at $sha, but the merge commit could not be read. Check main's CI yourself."
         exit 4

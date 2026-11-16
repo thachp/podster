@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { ReleaseSection } from "./release-section";
-import { describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseAvailability, releaseView, UNAVAILABLE, type AppHostname, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
+import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
 
 const config = (over: Partial<ReleaseConfig> = {}): ReleaseConfig => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 4, set_by: null, updated_at: null, ...over });
 const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
@@ -34,7 +34,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as AppHostname | null | "failed", mayConfigure = true, archived = false, setByName = null as string | null, requestedByName = null as string | null } = {}) =>
+const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as HostnameRead | null, mayConfigure = true, archived = false, setByName = null as string | null, requestedByName = null as string | null } = {}) =>
   render(<ReleaseSection roomId="ws_1" view={view} hostname={hostname} mayConfigure={mayConfigure} archived={archived} setByName={setByName} requestedByName={requestedByName} />);
 
 const confirm = async (open: string, button: string) => {
@@ -100,6 +100,10 @@ describe("switching release on and off", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("This publishes nothing by itself.");
     expect(dialog).toHaveTextContent("A released app is public");
+    // Stage 1 of apps as Workers: the person is told an app runs code on a server and has a store anyone can write to.
+    expect(dialog).toHaveTextContent(WHAT_AN_APP_IS);
+    expect(WHAT_AN_APP_IS).toMatch(/run its own code on Podster's servers/);
+    expect(WHAT_AN_APP_IS).toMatch(/a store that anyone who opens the app can write to/);
     await userEvent.click(within(dialog).getByRole("button", { name: "Switch release on" }));
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ method: "PUT", url: "/api/v1/workspaces/ws_1/release-config", body: { enabled: true, expected_version: 4 } });
@@ -233,6 +237,87 @@ describe("the custom domain", () => {
     show(on(), { hostname: "failed" });
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
     expect(screen.queryByLabelText("Hostname")).toBeNull();
+    expect(screen.queryByText("Not available yet")).toBeNull();
+  });
+
+  it("while custom domains aren't built, says they aren't available yet and offers no field or control", () => {
+    show(on(), { hostname: "unavailable" });
+    expect(screen.getByText("Not available yet")).toBeInTheDocument();
+    expect(screen.getByText(CUSTOM_DOMAIN_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Hostname")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Switch release off"]);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reads the custom domain's routes answering as missing, or release_not_available, as not yet available, and nothing else", () => {
+    expect(hostnameAvailability({ ok: true, data: { request: null } })).toEqual({ request: null });
+    expect(hostnameAvailability({ ok: false, status: 404, code: "not_found" })).toBe("unavailable");
+    expect(hostnameAvailability({ ok: false, status: 409, code: "release_not_available" })).toBe("unavailable");
+    for (const failure of [{ status: 404, code: "workspace_not_found" }, { status: 403, code: "access_revoked" }, { status: 409, code: "hostname_limit" }, { status: 0, code: "read_failed" }, { status: 500, code: "internal_error" }])
+      expect(hostnameAvailability({ ok: false, ...failure })).toBe("failed");
+  });
+});
+
+describe("what isn't available yet", () => {
+  it("shows deployment grants as Unavailable wherever release answers, and offers none", () => {
+    for (const enabled of [false, true]) {
+      const { unmount } = show(releaseView({ kind: "on", data: config({ enabled }) }, ready));
+      expect(screen.getByText("Deployment grants")).toBeInTheDocument();
+      expect(screen.getByText(DEPLOY_GRANTS_UNAVAILABLE)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /grant/i })).toBeNull();
+      // Nothing says a deployment grant can be given.
+      expect(document.body.textContent).not.toMatch(/give a deployment grant/);
+      unmount();
+    }
+  });
+
+  it("while release is off for the deployment, says nothing of grants, addresses or serving", () => {
+    show(releaseView({ kind: "off" }, ready));
+    expect(document.body.textContent).not.toMatch(/Deployment grants|App address|Live|served at|is live/);
+  });
+});
+
+describe("the organization's release switch", () => {
+  it("lists an operator's take as what's missing, and never lists the switch it couldn't read", () => {
+    const taken = releaseView({ kind: "on", data: config() }, { ...ready, delegated: false });
+    expect(taken).toMatchObject({ state: "needs-approval" });
+    expect(taken.state === "needs-approval" && taken.missing).toEqual(["A Podster operator has taken release away from this workroom's organization. Only an operator can give it back."]);
+    expect(releaseView({ kind: "on", data: config() }, { ...ready, delegated: null })).toMatchObject({ state: "not-configured", missing: [] });
+    expect(releaseView({ kind: "on", data: config() }, { ...ready, delegated: true })).toMatchObject({ state: "not-configured" });
+  });
+});
+
+describe("refusals of release's configuration, as the contract lists them", () => {
+  it("explains each code setReleaseConfig can refuse with, in its own words, and says nothing changed", () => {
+    const generic = explainReleaseRefusal("something_unlisted");
+    for (const code of ["release_off_for_deployment", "release_not_delegated", "release_needs_public_room", "workspace_archived", "public_surface_suspended", "app_suspended", "repo_not_ready", "organization_deleted", "workspace_deleted", "not_allowed", "not_a_participant", "release_not_available"]) {
+      const text = explainReleaseRefusal(code, 409);
+      expect(text, code).not.toBe(generic);
+      expect(text, code).toMatch(/Nothing changed\./);
+    }
+    // standing_unknown is a 503 that wrote nothing, so it says so, rather than "can't tell whether this saved".
+    expect(explainReleaseRefusal("standing_unknown", 503)).toMatch(/Nothing changed\. Try again\./);
+  });
+});
+
+describe("release at setup", () => {
+  it("is Unavailable while the switch's route answers as a missing one, and never guesses from a failure", () => {
+    expect(setupRelease({ ok: false, status: 404, code: "not_found" })).toBe("unavailable");
+    expect(setupRelease({ ok: true, data: { granted: true, generation: 0, last_take: 0, set_by: null, set_at: null } })).toBe("not-configured");
+    expect(setupRelease({ ok: true, data: { granted: false, generation: 2, last_take: 2, set_by: "per_op", set_at: 1 } })).toBe("needs-approval");
+    for (const failure of [{ status: 403, code: "not_allowed" }, { status: 404, code: "organization_not_found" }, { status: 429, code: "rate_limited" }, { status: 0, code: "read_failed" }]) expect(setupRelease({ ok: false, ...failure })).toBe("unknown");
+    expect(setupRelease(null)).toBe("unknown");
+  });
+
+  it("takes a 200 of any other shape as unknown, never as an operator's take, and never throws", () => {
+    for (const data of [{}, null, { granted: "false" }, { granted: 0 }, { granted: null }, "granted", []]) {
+      const result = { ok: true as const, data: data as never };
+      expect(setupRelease(result)).toBe("unknown");
+      expect(switchGranted(result)).toBeNull();
+    }
+    expect(switchGranted({ ok: true, data: { granted: false, generation: 1, last_take: 1, set_by: null, set_at: null } })).toBe(false);
+    expect(switchGranted({ ok: false, status: 500, code: "error" })).toBeNull();
   });
 });
 

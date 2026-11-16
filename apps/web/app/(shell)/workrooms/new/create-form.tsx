@@ -12,6 +12,7 @@ import { FIELD, MOBILE_TARGET } from "../../w/[id]/team/field";
 import { canBePublic, PRESET_LABELS, presetOptions, roleFitsLimits } from "../../w/[id]/team/model";
 import { PublicClaimToggle } from "../../w/[id]/team/public-claim-toggle";
 import { StateBadge } from "../../w/[id]/settings/state-badge";
+import type { SetupRelease } from "../../w/[id]/settings/release-model";
 
 const MAX_NAME_BYTES = 200;
 const MAX_GOAL_BYTES = 2048;
@@ -68,7 +69,32 @@ async function addOpening(base: string, role: RoleDraft, key: string): Promise<A
   }
 }
 
-export function CreateWorkroomForm({ organization, personal = false }: { organization: string | null; personal?: boolean }) {
+/**
+ * Release at setup (M6 step 10(a)), from the organization's release switch the page read. It offers nothing: release is
+ * switched on later, in the workroom's Settings, and a new workroom always starts with it off. While release is off for
+ * the deployment it says only that release is unavailable.
+ */
+function SetupReleaseState({ release }: { release: SetupRelease }) {
+  const badge = { unavailable: ["Unavailable", "neutral"], "needs-approval": ["Needs approval", "amber"], "not-configured": ["Not configured", "neutral"], unknown: ["Couldn't check", "neutral"] } as const;
+  const [label, tone] = badge[release];
+  const text = {
+    unavailable: "Release isn't available on this Podster deployment, so a workroom can't publish an app. Nothing is published.",
+    "needs-approval": "A Podster operator has taken release away from this organization, so its workrooms can't switch release on until an operator gives it back. A new workroom starts with release off, which publishes nothing.",
+    "not-configured": "A new workroom starts with release off, which publishes nothing.",
+    unknown: "We couldn't check whether this Podster deployment offers release. A new workroom starts with release off, which publishes nothing.",
+  }[release];
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <StateBadge label={label} tone={tone} />
+        <span className="text-sm">{text}</span>
+      </div>
+      {release === "not-configured" ? <p className="text-sm text-muted-foreground">The owner or an admin can switch it on in the workroom&apos;s Settings once it&apos;s public and its repository is ready. Each release still needs their approval.</p> : null}
+    </>
+  );
+}
+
+export function CreateWorkroomForm({ organization, personal = false, release = "unknown" }: { organization: string | null; personal?: boolean; release?: SetupRelease }) {
   const router = useRouter();
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
@@ -290,11 +316,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
         <h2 id="create-release" className="font-medium">
           Release
         </h2>
-        <div className="flex flex-wrap items-center gap-2">
-          <StateBadge label="Not configured" tone="neutral" />
-          <span className="text-sm">A new workroom starts with release off, which publishes nothing.</span>
-        </div>
-        <p className="text-sm text-muted-foreground">Where this Podster deployment offers release, the owner or an admin can switch it on in the workroom&apos;s Settings once it&apos;s public and its repository is ready. Each release still needs their approval.</p>
+        <SetupReleaseState release={release} />
       </section>
       <p className="text-sm text-muted-foreground">{organization ? <>Owned by {plainName(organization)}. You can switch organization from your profile menu. You'll be its owner.</> : "Owned by your current organization. You'll be its owner."}</p>
       {personal ? <p className="text-sm text-muted-foreground">This is your personal organization, so nobody can take this workroom over if you can't get back into your account. Use a team organization if it may need a successor.</p> : null}

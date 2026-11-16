@@ -8,7 +8,7 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
-import { dayOf, describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, type AppHostname, type HostnameRequest, type ReleaseView } from "./release-model";
+import { CUSTOM_DOMAIN_UNAVAILABLE, dayOf, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
 import { StateBadge } from "./state-badge";
 
 /** A day, and who, only where they can be named. */
@@ -30,7 +30,7 @@ const Row = ({ term, children, mono = false }: { term: string; children: React.R
  * Every prop crosses from the server page to this client component, so each must be serializable: names arrive as
  * strings the server resolved ("you", a name, or null for nobody named), never as a function.
  */
-export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived, setByName = null, requestedByName = null }: { roomId: string; view: ReleaseView; hostname: AppHostname | null | "failed"; mayConfigure: boolean; archived: boolean; setByName?: string | null; requestedByName?: string | null }) {
+export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived, setByName = null, requestedByName = null }: { roomId: string; view: ReleaseView; hostname: HostnameRead | null; mayConfigure: boolean; archived: boolean; setByName?: string | null; requestedByName?: string | null }) {
   const commands = useCommands(null);
   const { send, retrying } = commands;
   const after = useRef<HTMLDivElement>(null);
@@ -79,6 +79,12 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
         </Row>
         {config.default_host ? <Row term="Live">Not shown here. An address is live only once a release is served there.</Row> : null}
         <Row term="Last changed">{config.updated_at === null ? "Never" : byWhom(dayOf(config.updated_at), setByName)}</Row>
+        <Row term="Deployment grants">
+          <span className="flex flex-wrap items-center gap-2">
+            <StateBadge label="Unavailable" tone="neutral" />
+            <span>{DEPLOY_GRANTS_UNAVAILABLE}</span>
+          </span>
+        </Row>
       </dl>
 
       {controls && view.state === "not-configured" ? (
@@ -90,6 +96,7 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
             <span className="block space-y-2">
               <span className="block">This publishes nothing by itself. A release is made only from code Podster merged, when someone with a deployment grant asks for one, and the owner or an admin approves each one.</span>
               <span className="block">A released app is public, at an address Podster gives it, under Podster&apos;s name. Anyone can open it.</span>
+              <span className="block">{WHAT_AN_APP_IS}</span>
             </span>
           }
           confirm="Switch release on"
@@ -120,9 +127,16 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
       {!mayConfigure ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can change release.</p> : null}
 
       <h3 className="pt-2 font-medium">Custom domain</h3>
-      {hostname === "failed" ? <ReadFailure /> : <CustomDomain roomId={roomId} request={hostname?.request ?? null} controls={controls} requestedByName={requestedByName} />}
+      {hostname === "failed" ? <ReadFailure /> : null}
+      {hostname === "unavailable" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <StateBadge label="Not available yet" tone="neutral" />
+          <span className="text-sm text-muted-foreground">{CUSTOM_DOMAIN_UNAVAILABLE}</span>
+        </div>
+      ) : null}
+      {hostname !== null && typeof hostname === "object" ? <CustomDomain roomId={roomId} request={hostname.request} controls={controls} requestedByName={requestedByName} /> : null}
 
-      <p className="text-sm text-muted-foreground">Switching release on grants nobody a deployment. The owner and admins give a deployment grant to a named participant, and an agent can hold one but never approves. Release doesn&apos;t serve a private workroom&apos;s app.</p>
+      <p className="text-sm text-muted-foreground">Switching release on grants nobody a deployment, and an agent never approves a release. Release doesn&apos;t serve a private workroom&apos;s app.</p>
     </div>
   );
 }

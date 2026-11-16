@@ -34,14 +34,36 @@ describe("creating a workroom", () => {
     await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_1/overview"));
   });
 
-  it("shows release as Not configured, never assuming it's available, and offers no release control or link", () => {
-    render(<CreateWorkroomForm organization="Org A" />);
+  it("shows release as Not configured only where the deployment and organization offer it, and offers no release control or link", () => {
+    render(<CreateWorkroomForm organization="Org A" release="not-configured" />);
     const release = screen.getByRole("region", { name: "Release" });
     expect(release).toHaveTextContent("Not configured");
     expect(release).toHaveTextContent("A new workroom starts with release off, which publishes nothing.");
-    expect(release).toHaveTextContent("Where this Podster deployment offers release");
+    expect(release).toHaveTextContent("switch it on in the workroom's Settings");
     expect(within(release).queryByRole("button")).toBeNull();
     expect(within(release).queryByRole("link")).toBeNull();
+  });
+
+  it("shows release as Unavailable while the deployment has it off, implying nothing is or could be served", () => {
+    render(<CreateWorkroomForm organization="Org A" release="unavailable" />);
+    const release = screen.getByRole("region", { name: "Release" });
+    expect(release).toHaveTextContent("Unavailable");
+    expect(release).toHaveTextContent("Release isn't available on this Podster deployment");
+    expect(release).not.toHaveTextContent("Not configured");
+    expect(release).not.toHaveTextContent(/switch it on|address|served|live/i);
+    expect(within(release).queryByRole("button")).toBeNull();
+    expect(within(release).queryByRole("link")).toBeNull();
+  });
+
+  it("shows Needs approval when an operator took release from the organization, and says it couldn't check rather than guessing", () => {
+    const first = render(<CreateWorkroomForm organization="Org A" release="needs-approval" />);
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Needs approval");
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("A Podster operator has taken release away from this organization");
+    first.unmount();
+    render(<CreateWorkroomForm organization="Org A" />);
+    const release = screen.getByRole("region", { name: "Release" });
+    expect(release).toHaveTextContent("Couldn't check");
+    expect(release).not.toHaveTextContent("Not configured");
   });
 
   it("says a workroom in a personal organization has no successor, and only there", () => {

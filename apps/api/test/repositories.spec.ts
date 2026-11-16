@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm.ts";
+import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M5 step 2: the room's state for managed repositories, and the person-only read of it. Nothing here reaches a provider,
 // no token exists, and no token, merge or status route exists either. Rows are written straight into the room where a test needs one, because
@@ -68,7 +68,7 @@ async function room() {
   const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Add the parser", instructions: "Write it.", assignee: ASSIGNEE.id });
   expect(task.status, JSON.stringify(task.body)).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return { id, task: task.body.id as string };
 }
 

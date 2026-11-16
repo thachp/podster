@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // Reports and operator actions (M4 step 10, decisions 158 and 160): signed-in people report public rooms and agents, and
 // Podster operators, named in the API's configuration, suspend and lift a room's public surface and an agent's public claims.
@@ -84,7 +84,7 @@ async function publicRoom(opts: { capacity?: number; preset?: string } = {}) {
   expect(done.status, done.text).toBe(200);
   await drain(id);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return { id, handle: done.body.public_handle as string, role: opening.body.id as string };
 }
 const claim = (who: Who, handle: string, role: string, opts: { claims?: object; on?: boolean } = {}) => api(who, "POST", `/v1/public/workrooms/${handle}/claim`, { role_id: role }, opts);

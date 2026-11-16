@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M3 step 13: reading remote tasks back (ADR 0007, decision 117). A sent attempt's remote task is read by GetTask, one
 // queued job at a time, which the room's alarm queues once it's due. Each read goes through step 5's decide_remote, and its
@@ -57,6 +57,8 @@ afterEach(async () => {
 async function newRoom() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `Readback ${++counter}` })).id as string;
   madeRooms.push(room);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(room)));
   await join(room, LEAD);
   return room;
 }

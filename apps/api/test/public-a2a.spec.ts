@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M4 step 13, M4-17 (criterion 4 across protocols): in one public room, a public participant takes an offer and submits over
 // A2A, and another takes one and submits through the API an MCP client calls. Each task has one history, and redelivered
@@ -67,6 +67,8 @@ afterEach(async () => {
 async function publicRoom() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `Public A2A ${++counter}` })).id as string;
   madeRooms.push(room);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(room)));
   await must(OWNER, "PUT", `/v1/agents/${LEAD.id}`, { org_id: ORG, name: LEAD.id });
   await must(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: LEAD.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(room) });
   await must(OWNER, "PUT", `/v1/workspaces/${room}/review-policy`, { require_person: true, policy_version: await version(room) });

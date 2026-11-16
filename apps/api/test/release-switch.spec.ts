@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet, nextAlarm } from "./alarm";
+import { alarmQuiet, clearAlarm, manualAlarms, nextAlarm, runAlarm } from "./alarm";
 
 // Decision 218's release switch, PR C: what a room does when an operator takes release from its organization or gives
 // it back. The organization's own object sends each room it lists a notice, again until the room acknowledges it; a
@@ -80,7 +80,7 @@ async function room(org: string, opts: { state?: string } = {}): Promise<Room> {
   const id: string = created.body.id;
   made.push(id);
   // The room's index is written by its alarm: so the organization's listing names it, as a real room's would.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const requester: Who = { id: `per_rs_req_${n}`, org };
   const admin: Who = { id: `per_rs_adm_${n}`, org };
@@ -134,11 +134,11 @@ const FAR = () => Date.now() + 24 * 60 * 60 * 1000;
  */
 const notify = (org: string) => runInDurableObject(principal(org), async (instance: any, state: any) => {
   const sql = state.storage.sql;
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
   if (hasTable(sql, "org_release_notice")) sql.exec("UPDATE org_release_notice SET next_attempt_at = 0");
-  try { await instance.alarm(); } finally {
+  try { await runAlarm(instance, state); } finally {
     if (hasTable(sql, "org_release_notice")) sql.exec("UPDATE org_release_notice SET next_attempt_at = ?", FAR());
-    await state.storage.deleteAlarm();
+    await clearAlarm(state);
   }
 });
 const notices = (org: string) => inOrg(org, (sql) => hasTable(sql, "org_release_notice") ? sql.exec("SELECT workspace_id, generation, tries FROM org_release_notice ORDER BY workspace_id").toArray() : []);
@@ -449,7 +449,7 @@ describe("the follow-up to decision 218's PR C", () => {
       // A public room's first discovery-index check is set at random within six hours: put past the applier's time, so
       // the room's next alarm is the applier's alone.
       await state.storage.put("public_index_verify_next", FAR());
-      await state.storage.deleteAlarm();
+      await clearAlarm(state);
     });
     // The notice again: the room has applied it, so it is stale, and the room arms for what the applier owes all the
     // same, at exactly the time it owes it, the room's soonest.

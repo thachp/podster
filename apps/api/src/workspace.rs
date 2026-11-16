@@ -105,6 +105,8 @@ mod repositories;
 mod roles;
 mod submission_files;
 mod takedown;
+#[cfg(feature = "failpoints")]
+mod test_alarms;
 mod visibility;
 
 pub(crate) use hostname::HOSTNAME_REQUEST_PREFIX;
@@ -2859,6 +2861,9 @@ pub struct Workspace {
     /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
     #[cfg(feature = "failpoints")]
     test_alarm_turn: futures_util::lock::Mutex<()>,
+    /// Test builds only: the run under way is the test's own pass, not the runtime's firing. See `test_alarms`.
+    #[cfg(feature = "failpoints")]
+    test_pass: std::cell::Cell<bool>,
 }
 
 type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
@@ -5299,10 +5304,18 @@ impl DurableObject for Workspace {
             creating: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
             test_alarm_turn: futures_util::lock::Mutex::new(()),
+            #[cfg(feature = "failpoints")]
+            test_pass: std::cell::Cell::new(false),
         }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
+        // Test builds only: the test's own pass, the one way a room under the test's control runs its alarm job.
+        #[cfg(feature = "failpoints")]
+        if req.path() == test_alarms::INTERNAL_TEST_ALARM_PASS {
+            self.test_pass.set(true);
+            return <Self as DurableObject>::alarm(self).await;
+        }
         let is_write = req.method() != Method::Get;
         // A request that migrates the room arms it afterwards, a read included, so scans left over from before the migration still
         // end on time.
@@ -5347,6 +5360,16 @@ impl DurableObject for Workspace {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // Test builds only: in a room whose alarms the test runs, the runtime's firing runs nothing, and records the
+        // alarm it took, so a test can still see it was set. The flag is set and read in one poll, so no other run can
+        // take it.
+        #[cfg(feature = "failpoints")]
+        if !self.test_pass.replace(false)
+            && test_alarms::held_for_the_test(&self.state.storage().sql())
+        {
+            test_alarms::held(&self.state).await;
+            return Response::ok("held for the test");
+        }
         // The platform never runs two alarms of one object at once, and the provisioning job counts on that: it reads
         // an attempt with no recorded outcome as a run that died. The test pool's `runDurableObjectAlarm` calls this
         // handler directly, beside a run the runtime started itself. In test builds a direct call waits its turn.

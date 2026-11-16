@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmQuiet, manualAlarms } from "./alarm";
 
 // M6 step 5, the first PR: the room's recheck of a release (ADR 0010's "The release job", step 1). On every pass the
 // room gathers every fact `podster_core::release::recheck` asks for, from current state, and fails the release when
@@ -67,7 +67,7 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
   const owner = { ...OWNER, org, adminOrgs: [org] };
   const room: string = (await api(owner, "POST", "/v1/workspaces", { name: "Release" })).body.id;
   made.push(room);
-  await alarmQuiet(stub(room));
+  await manualAlarms(stub(room));
   const n = ++people;
   const requester: Who = { id: `per_rr_req_${n}`, kind: "person", org };
   const admin: Who = { id: `per_rr_adm_${n}`, kind: "person", org };

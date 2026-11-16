@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm";
+import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, runAlarm } from "./alarm";
 import { txtData } from "./fake-resolver";
 
 // M6 step 8b: a committed claim's custom hostname at Cloudflare, created only for it, and the long end of every
@@ -71,7 +71,7 @@ async function room(org: string): Promise<Room> {
   expect(created.status, org).toBe(200);
   const id: string = created.body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const label = `ch${n.toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const host = `${label}.${FAKE.domain}`;
@@ -105,9 +105,9 @@ const events = (r: Room) => all(r.room, "SELECT type FROM event WHERE type LIKE 
 const due = (r: Room) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = updated_at - 61000 WHERE checked_at IS NOT NULL"));
 /** One pass of the room's alarm, alone, handing the room back quiet. */
 const quietPass = (r: Room) => runInDurableObject(stub(r.room), async (instance: any, state: any) => {
-  await state.storage.deleteAlarm();
-  await instance.alarm();
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
+  await runAlarm(instance, state);
+  await clearAlarm(state);
 });
 /** One pass of the room's job, its turn made due first, with release switched on for the deployment. */
 const step = async (r: Room) => { await due(r); await switchedOn(() => quietPass(r)); };

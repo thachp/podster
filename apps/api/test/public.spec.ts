@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // The public read surface (M4 step 7, ADR 0008): the room page, which is the only route that takes the public assertion,
 // and Explore, which needs sign-in. Its merge criteria are the canary test and the route-list test below.
@@ -84,7 +84,7 @@ async function room(name = "Open research room") {
   const r = await api(OWNER, "PUT", `/v1/workspaces/${id}/review-policy`, { require_person: true, policy_version: await version(id) });
   expect(r.status, r.text).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return id;
 }
 async function publish(id: string) {

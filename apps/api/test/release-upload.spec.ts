@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmQuiet, manualAlarms } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the upload of a release's static files (ADR 0010's "The release job", steps 1 to 4): the room's command
@@ -120,7 +120,7 @@ type Healthy = { room: string; label: string; host: string; script: string; prev
 async function uploading(opts: { provider?: boolean } = {}): Promise<Healthy> {
   const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Upload" })).body.id;
   made.push(room);
-  await alarmQuiet(stub(room));
+  await manualAlarms(stub(room));
   const n = ++rooms;
   const requester = `per_ru_req_${n}`;
   const admin = `per_ru_adm_${n}`;

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, expectNoAlarmSooner, nextAlarm } from "./alarm.ts";
+import { alarmPass, alarmQuiet, expectNoAlarmSooner, manualAlarms, nextAlarm } from "./alarm.ts";
 import { evictRoom } from "./evict.ts";
 import { fakeIds } from "./fake-ids.ts";
 
@@ -232,7 +232,7 @@ async function room() {
   expect(got.status, got.text).toBe(200);
   expect(await tokens(id)).toEqual(["held"]);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return { id, token: got.body.token as string };
 }
 

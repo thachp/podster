@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 4: provisioning a room's managed repository. Every GitHub call lands on test/fake-github.ts, which the test
@@ -102,6 +102,8 @@ async function room(options: { delegated?: boolean; script?: object; switchedOn?
   const owner: Who = { id: `per_pv_owner_${orgs}`, kind: "person", org, adminOrgs: [org] };
   const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
   made.push(id);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(stub(id));
   if (options.switchedOn !== false) await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   await known(org, id);
   // Every organization holds the delegation until an operator takes it back, so `delegated: false` is a take-back.
@@ -112,6 +114,8 @@ async function room(options: { delegated?: boolean; script?: object; switchedOn?
 async function roomOf(owner: Who) {
   const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
   made.push(id);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(stub(id));
   await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   return { id, org: owner.org, owner };
 }

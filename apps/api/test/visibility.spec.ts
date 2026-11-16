@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // A room's visibility (M4 step 5, ADR 0008): the owner's preview, publishing with its hash, going private, the topic, and
 // `publicly_claimable` on openings. `PUBLIC_ROOMS` is off unless a test build's request says `x-test-public-rooms: on`.
@@ -66,7 +66,7 @@ async function room(personReview = true) {
     expect(r.status, r.text).toBe(200);
   }
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return id;
 }
 

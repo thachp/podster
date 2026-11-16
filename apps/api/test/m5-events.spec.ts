@@ -4,7 +4,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -67,6 +67,8 @@ afterEach(async () => {
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
   madeRooms.push(id);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(stub(id));
   await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "person", org_id: ORG, role: "member", policy_version: await version(id) }, { target_member: { person: MEMBER.id, orgs: { [ORG]: 1 } } });
   for (const who of [AGENT, OTHER]) await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(id) });
   const task: string = (await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id })).id;

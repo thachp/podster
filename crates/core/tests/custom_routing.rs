@@ -226,3 +226,92 @@ fn a_routed_active_hostname_is_read_at_most_every_six_hours_and_any_other_as_bef
     assert_eq!(ROUTED_READ_MS, 6 * HOUR);
     const { assert!(ROUTED_READ_MS >= RETRY_MAX_MS) };
 }
+
+mod waiting_entry {
+    use podster_core::release::{
+        commit_live, confirm_served, rollback, waiting_entry_keeps, DesiredServe, ReleaseState,
+        ServeState,
+    };
+
+    const PREV: &str = "rel_6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d";
+    const NEXT: &str = "rel_7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+    const ROLL: &str = "rel_4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b";
+    const OLD: &str = "rel_3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a";
+
+    fn script(release: &str) -> String {
+        format!("app.{release}")
+    }
+
+    /// A room serving `PREV` on its default host and on a custom host, with `OLD` kept for a rollback.
+    fn serving() -> ServeState {
+        let host = |version| DesiredServe {
+            script: Some(script(PREV)),
+            version,
+            closed: false,
+        };
+        ServeState {
+            epoch: 2,
+            hosts: vec![host(5), host(2)],
+            kept_previous: Some(script(OLD)),
+            in_flight: None,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_commit_keeps_the_release_last_served_while_its_marker_is_out() {
+        let Ok((during, _)) =
+            commit_live(&serving(), 2, &script(NEXT), NEXT, ReleaseState::Uploading)
+        else {
+            unreachable!("the commit should go live");
+        };
+        let wanted = script(NEXT);
+        assert!(waiting_entry_keeps(&during, &wanted, &script(PREV)));
+        // What it wants is kept too, and anything else comes down.
+        assert!(waiting_entry_keeps(&during, &wanted, &wanted));
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(OLD)));
+    }
+
+    #[test]
+    fn a_rollback_takes_down_the_release_it_rolls_away_from() {
+        let Ok((during, _)) = rollback(&serving(), 2, true, ROLL, ReleaseState::Uploading) else {
+            unreachable!("the rollback should go live");
+        };
+        let wanted = script(OLD);
+        // The flight's own record is the rollback's, so the release being rolled away from isn't kept.
+        assert_eq!(
+            during.in_flight.as_ref().map(|f| f.release_id.as_str()),
+            Some(ROLL)
+        );
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(PREV)));
+        assert!(waiting_entry_keeps(&during, &wanted, &wanted));
+    }
+
+    #[test]
+    fn once_the_marker_confirms_nothing_but_the_new_release_is_kept() {
+        let Ok((during, mark)) =
+            commit_live(&serving(), 2, &script(NEXT), NEXT, ReleaseState::Uploading)
+        else {
+            unreachable!("the commit should go live");
+        };
+        let Ok(after) = confirm_served(&during, &mark, &script(NEXT)) else {
+            unreachable!("the marker should confirm");
+        };
+        // No flight: a host waiting for anything keeps only what it wants, which the applier then writes.
+        assert!(!waiting_entry_keeps(
+            &after.state,
+            &script(NEXT),
+            &script(PREV)
+        ));
+        assert!(waiting_entry_keeps(
+            &after.state,
+            &script(NEXT),
+            &script(NEXT)
+        ));
+        // And with no flight at all, a wanted release that isn't served keeps nothing else.
+        assert!(!waiting_entry_keeps(
+            &serving(),
+            &script(NEXT),
+            &script(PREV)
+        ));
+    }
+}

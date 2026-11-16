@@ -1285,8 +1285,8 @@ enum CustomFail {
 ///    isn't suspended. No answer waits; anything else refuses. Asked before anything that only waits, so a claim that
 ///    isn't live takes the entry down whatever else holds (the review of PR #404, S2).
 /// 4. The release is served: its marker came back through the default host. A custom host never takes a release
-///    before that. While it waits, an entry that isn't already the release it wants is taken down, a rollback's
-///    included, and the host serves nothing until then ([`stale_taken_down`]).
+///    before that. While it waits, an ordinary commit's flight keeps the release last served; anything else that
+///    isn't the release it wants is taken down, what a rollback rolls away from included ([`stale_taken_down`]).
 /// 5. The stop for the whole content domain, as for a default host.
 ///
 /// Then the entry is written in the custom form, naming the host (`podster_core::hostnames::custom_entry_value`), and
@@ -1333,7 +1333,7 @@ async fn custom_write(
     )?
     .is_empty();
     if !served {
-        return Ok(Err(stale_taken_down(provider, host, script).await?));
+        return Ok(Err(stale_taken_down(sql, provider, host, script).await?));
     }
     match content_stop::read_from(env).await {
         Stop::Stopped => return Ok(Err(CustomFail::Retry("content_domain_stopped"))),
@@ -1349,15 +1349,25 @@ async fn custom_write(
 }
 
 /// **While a custom host waits for the release it wants to be served** (the review of PR #404, S2, and its security
-/// re-check): `wanted` isn't confirmed served, so what is there may stay only if it already is `wanted`. Any other
-/// entry is taken down, and the custom host serves nothing until `wanted` is served: the release a new commit replaces,
-/// the release a rollback rolls away from (which `podster_core::release::confirmed_script` still names while the
-/// rollback's flight is out), and an entry that couldn't be read alike. A stale release is worse than none. Either way
-/// it is tried again.
-async fn stale_taken_down(provider: &Provider, host: &str, wanted: &str) -> R<CustomFail> {
+/// re-check): what is there stays only as `podster_core::release::waiting_entry_keeps` decides. The release it wants
+/// stays; during an ordinary commit's flight, so does the release last confirmed served, so a release never darkens a
+/// custom host while its marker is out. Anything else is taken down and the host serves nothing until the release it
+/// wants is served: the release a rollback rolls away from, an earlier one, and an entry that couldn't be read alike. A
+/// stale release is worse than none. Either way it is tried again.
+async fn stale_taken_down(
+    sql: &SqlStorage,
+    provider: &Provider,
+    host: &str,
+    wanted: &str,
+) -> R<CustomFail> {
+    let state = load(sql)?.map(|loaded| loaded.state);
     match provider.read_entry(host).await {
         Entry::Absent => return Ok(CustomFail::Retry("release_not_served")),
-        Entry::Present(found) if found == wanted => {
+        Entry::Present(found)
+            if state.as_ref().is_some_and(|state| {
+                podster_core::release::waiting_entry_keeps(state, wanted, &found)
+            }) =>
+        {
             return Ok(CustomFail::Retry("release_not_served"))
         }
         _ => {}

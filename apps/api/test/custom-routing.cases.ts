@@ -231,24 +231,31 @@ export function customRoutingCases() {
         expect((await held()).entries[name]).toBe(`${r.script}@${name}`);
       });
 
-      it("is switched by each release once that release is served, and serves nothing while the release waits for its marker", async () => {
+      it("is switched by each release once that release is served, and keeps the release last served while the new one waits for its marker", async () => {
         const { r, name } = await routed("org_cr_switch");
         const next = `${r.label}.${NEXT}`;
         await content("/seed", { scripts: [next] });
-        // A release committed live: every open host is set to its script, the custom host among them.
+        // A release committed live: every open host is set to its script, the custom host among them, with the flight's
+        // mark of what each served before.
         await inRoom(r.room, (sql) => {
           sql.exec(
             `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
                VALUES (?, ?, 'live', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 2, ?, 2, 2, 2)`, NEXT, SHA, r.label, next, NEXT, r.owner.id, r.owner.id);
-          sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = version + 1 WHERE kind = 'custom'", NEXT, next);
+          sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", NEXT, next);
+          sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = script_name, version = version + 1", NEXT, next);
         });
         await pass(r);
-        // Not served yet: what the custom host held isn't what the room wants now, so it comes down, nothing new is
-        // written, and it waits (the security re-check of PR #404: a stale release is worse than none).
-        expect((await held()).entries[name]).toBeUndefined();
-        expect(await applyRow(r, name)).toMatchObject({ attempts: 1, last_code: "release_not_served_taken_down" });
-        // Served: written.
-        await inRoom(r.room, (sql) => { sql.exec("UPDATE release SET state = 'served' WHERE id = ?", NEXT); sql.exec("UPDATE release SET state = 'replaced' WHERE id = ?", PREV); });
+        // Not served yet: an ordinary commit's flight keeps the release last served on the custom host, nothing new is
+        // written, and it waits (podster_core::release::waiting_entry_keeps).
+        expect((await held()).entries[name]).toBe(`${r.script}@${name}`);
+        expect(await applyRow(r, name)).toMatchObject({ attempts: 1, last_code: "release_not_served" });
+        // The marker confirms: served, the flight over, and the new release written.
+        await inRoom(r.room, (sql) => {
+          sql.exec("UPDATE release SET state = 'served' WHERE id = ?", NEXT);
+          sql.exec("UPDATE release SET state = 'replaced' WHERE id = ?", PREV);
+          sql.exec("UPDATE release_config SET in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL, in_flight_at = NULL");
+          sql.exec("UPDATE serve_state SET flight_version = NULL, flight_before = NULL");
+        });
         await applyDue(r);
         await pass(r);
         expect((await held()).entries[name]).toBe(`${next}@${name}`);
@@ -264,7 +271,8 @@ export function customRoutingCases() {
           sql.exec(
             `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
                VALUES (?, ?, 'live', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 2, ?, 2, 2, 2)`, NEXT, SHA, c.r.label, next, NEXT, c.r.owner.id, c.r.owner.id);
-          sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = version + 1 WHERE kind = 'custom'", NEXT, next);
+          sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", NEXT, next);
+          sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = script_name, version = version + 1", NEXT, next);
         });
         return next;
       };

@@ -1098,6 +1098,27 @@ pub fn confirmed_script(state: &ServeState) -> Option<String> {
     }
 }
 
+/// **What a custom hostname's entry may keep while the release it wants isn't confirmed served** (M6 step 8c, the
+/// security re-check of PR #404): `held` is what the entry holds, `wanted` what the host wants now. It keeps `wanted`
+/// itself. And during an ordinary commit's flight, the commit's own release going live with `wanted` as its script, it
+/// keeps the release last confirmed served ([`confirmed_script`]), so a release never darkens a custom host while its
+/// marker is out. During a rollback's flight, whose own record names another release's script, the release being
+/// rolled away from is what the rollback is for taking down, so it isn't kept; nor is anything else, with no flight or
+/// another. A stale release is worse than none.
+pub fn waiting_entry_keeps(state: &ServeState, wanted: &str, held: &str) -> bool {
+    if held == wanted {
+        return true;
+    }
+    let Some(flight) = state.in_flight.as_ref() else {
+        return false;
+    };
+    let commit = matches!(
+        script_owner(&flight.script),
+        ScriptOwner::Podster { release_id, .. } if release_id == flight.release_id
+    );
+    commit && flight.script == wanted && confirmed_script(state).as_deref() == Some(held)
+}
+
 /// A custom hostname newly claimed and reported `active` (`hostnames::routing_may_start`): that host opens on the
 /// release the room last confirmed served ([`confirmed_script`]), or nothing. It takes no script from its caller: what it
 /// serves comes from the room's state and its own flight, never a mark from the caller, so an unpublished room opens it

@@ -24,19 +24,35 @@
 //! PRs': the room stops serving on the name here, and the custom hostname at Cloudflare is deleted and read until gone
 //! before the claim is freed. Until those are built, such a request stays `ending` and the name stays held.
 //!
+//! **An answer of suspended or ending goes `ending`, not refused** (`after_ask`): either is decided before whose the
+//! claim is, so the object may hold one it gave this very request on an ask whose answer was lost, and the job
+//! withdraws it. **Before each look and each ask** the job reads the room's own facts again
+//! (`podster_policy::release::hostname_proof_room`): one read and failing ends the request, withdrawn at the object if
+//! its proof was taken there; one that can't be read makes it wait. An ask or a withdrawal that got no answer is tried
+//! again after a wait that doubles from a minute up to an hour (`retry_wait_ms`), and never given up.
+//!
+//! **The gate on claims, [`HOSTNAME_CLAIMS_COMPLETE`], false.** While it is false, a deployment with release switched
+//! on and a content provider configured refuses every ask for a hostname as a route that isn't built
+//! (`release_not_available`), and its proof job neither looks nor asks the object, each saying so in one log line by
+//! its code. It is flipped only once a committed claim can end the long way (8b) and claims are rechecked (8d).
+//!
 //! **What this doesn't do:** create anything at Cloudflare, write a serve entry for a custom hostname, recheck a claim,
-//! or end a committed claim at the object. Nothing here is gated by the release path's constant, since nothing here
-//! serves: the applier still writes nothing for a custom hostname.
+//! or end a committed claim at the object. Nothing here serves: the applier still writes nothing for a custom hostname.
 //!
 //! Logs carry IDs and codes only, never a hostname or a challenge's value.
 use super::*;
 use crate::hostname_proof::Resolver;
-use podster_core::hostname_requests::{after_ask, unmap, HostnameRequestState, Unmap};
+use podster_core::hostname_requests::{
+    after_ask, request_rate_allows, retry_wait_ms, unmap, HostnameRequestState, Unmap,
+};
 use podster_core::hostnames::{
     challenge_record_name, challenge_value, mappable, next_proof_check, normalize, proof_matches,
     public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, PENDING_TTL_MS,
 };
-use podster_policy::release::{authorize_custom_hostname, HostnameChange, ReleaseRoom};
+use podster_policy::release::{
+    authorize_custom_hostname, hostname_proof_room, HostnameChange, HostnameProofRoom,
+    HostnameProofStep, ReleaseRoom,
+};
 use release_config::ConfigReads;
 
 /// A hostname request's ID begins with this, then 32 lower-case hexadecimal digits.
@@ -44,9 +60,13 @@ pub(crate) const HOSTNAME_REQUEST_PREFIX: &str = "hnr_";
 /// The setting that holds the Public Suffix List's rules, as the list writes them. Bound in no environment: with none,
 /// every name is refused `hostname_unavailable`.
 const PUBLIC_SUFFIX_RULES: &str = "PUBLIC_SUFFIX_RULES";
-/// **Proposed.** How long the job waits before asking the object again, or withdrawing again, after a try that got no
-/// answer.
-const RETRY_MS: i64 = 60 * 1000;
+/// **Whether custom hostname claims are complete.** False until 8b (a committed claim's long end) and 8d (the daily
+/// recheck) have both merged, and this is the only place it is set. While false, a deployment with release switched on
+/// and a content provider configured refuses every ask for a hostname and its proof job neither looks nor asks
+/// (`Workspace::hostname_claims_open`). What must be true first is in `docs/m6-plan.md`, under "Step 8: the build plan".
+pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;
+/// The rolling window [`request_rate_allows`] counts a room's new requests in.
+const RATE_WINDOW_MS: i64 = 60 * 60 * 1000;
 
 /// What a request asks for, read before anything outside the room is asked.
 pub(super) struct Asked {
@@ -151,7 +171,7 @@ fn request_view(row: &Value, now: i64) -> Value {
     })
 }
 
-const COLUMNS: &str = "id, hostname, state, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, checked_at, end_reason";
+const COLUMNS: &str = "id, hostname, state, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, checked_at, end_reason, updated_at";
 
 /// The room's open request, if it has one: at most one, by the table's own constraint.
 fn open_request(sql: &SqlStorage) -> R<Option<Value>> {
@@ -246,10 +266,11 @@ pub(super) fn handle_request(
     )?
     .first()
     .map_or(0, |row| int(&row["n"]));
-    // The object's answer is about the name it was asked for, which is this one: both come from this body.
+    // The object's answer is about the name it was asked for, which is this one: both come from this body. Unread, the
+    // name's suspension is unknown, and nothing is written.
     let (suspended, generation) = reads
         .object
-        .ok_or_else(|| ApiError::internal("the hostname's object wasn't read"))?;
+        .ok_or_else(super::release_recheck::standing_unknown)?;
     let rules = reads.rules.as_deref().unwrap_or("");
     let name = mappable(
         &asked.input,
@@ -261,6 +282,18 @@ pub(super) fn handle_request(
     .map_err(refusal)?;
     if name != asked.name {
         return Err(ApiError::internal("the name was read two ways"));
+    }
+    // **Proposed:** at most five new requests a room in any hour, whatever became of them, so removing and asking
+    // again can't churn challenges and lookups.
+    let made = rows(
+        sql,
+        "SELECT count(*) AS n FROM hostname_request WHERE requested_at > ?",
+        vec![now.saturating_sub(RATE_WINDOW_MS).into()],
+    )?
+    .first()
+    .map_or(0, |row| int(&row["n"]));
+    if !request_rate_allows(usize::try_from(made).unwrap_or(usize::MAX)) {
+        return Err(ApiError::api(429, "hostname_rate_limited"));
     }
     let id = format!("{HOSTNAME_REQUEST_PREFIX}{}", uuid::Uuid::new_v4().simple());
     let challenge = challenge_value(random_32()?);
@@ -409,7 +442,11 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
     };
     let state = row["state"].as_str().and_then(HostnameRequestState::parse);
     let checked = (!row["checked_at"].is_null()).then(|| int(&row["checked_at"]));
-    let retry = checked.map_or(0, |at| at.saturating_add(RETRY_MS));
+    // An ask or a withdrawal that got no answer waits as long as has gone by since the request last changed, which
+    // `checked` never moves, so the wait doubles from a minute up to an hour.
+    let retry = checked.map_or(0, |at| {
+        at.saturating_add(retry_wait_ms(int(&row["updated_at"]), at))
+    });
     Ok(match state {
         Some(HostnameRequestState::Pending) if row["proved_at"].is_null() => {
             let requested_at = int(&row["requested_at"]);
@@ -440,6 +477,18 @@ impl Workspace {
         caller_id: &str,
         asked: &Asked,
     ) -> R<RequestReads> {
+        if !self.hostname_claims_open().await {
+            let sql = self.state.storage().sql();
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])?
+                .first()
+                .and_then(|row| text(&row["id"]))
+                .unwrap_or_default();
+            console_error!(
+                "hostname: an ask for a hostname was refused: room={} code=hostname_claims_incomplete",
+                room
+            );
+            return Err(crate::releases::release_not_available());
+        }
         let config = self.config_reads(caller_id, true).await?;
         let object = self
             .claim_object(&asked.name, Method::Get, "/internal/state", None)
@@ -451,12 +500,34 @@ impl Workspace {
                     answer["generation"].as_u64()?,
                 ))
             });
+        // Test builds only: the hostname's object can't be read, as if it hadn't answered.
+        #[cfg(feature = "failpoints")]
+        let object = object.filter(|_| {
+            rows(
+                &self.state.storage().sql(),
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_object_unread'",
+                vec![],
+            )
+            .is_ok_and(|found| found.is_empty())
+        });
         Ok(RequestReads {
             config,
             object,
             domain: crate::content_provider::content_domain(&self.env),
             rules: rules(&self.env),
         })
+    }
+
+    /// **The gate on claims** ([`HOSTNAME_CLAIMS_COMPLETE`]): whether a hostname may be asked for and its proof job may
+    /// look and ask. Until claims are complete, not in a deployment that has release switched on and a provider
+    /// configured. With either missing nothing can be served, which is every deployment today, and every test of this.
+    pub(super) async fn hostname_claims_open(&self) -> bool {
+        if HOSTNAME_CLAIMS_COMPLETE {
+            return true;
+        }
+        let sql = self.state.storage().sql();
+        takedown::provider(&self.env, &sql).is_none()
+            || !crate::releases::switched_on(&self.env).await
     }
 
     /// One call to a hostname's own object, by its normalized name. Its answer, or an error for anything but `200`.
@@ -534,6 +605,34 @@ impl Workspace {
                 withdrawn_recorded(&store, &id, withdrawn, now)
             });
         }
+        // Before a look or an ask: the gate on claims, then the room's own facts, read again now.
+        if !self.hostname_claims_open().await {
+            console_error!(
+                "hostname: the proof job didn't go on: room={} request={} code=hostname_claims_incomplete",
+                room,
+                id
+            );
+            let store = sql.clone();
+            return transaction_sync(&self.state, move || checked(&store, &id, now));
+        }
+        match hostname_proof_room(&proof_room(&sql)?) {
+            HostnameProofStep::Go => {}
+            HostnameProofStep::Wait => {
+                console_error!(
+                    "hostname: the proof job waits on what it couldn't read: room={} request={} code=standing_unknown",
+                    room,
+                    id
+                );
+                let store = sql.clone();
+                return transaction_sync(&self.state, move || checked(&store, &id, now));
+            }
+            HostnameProofStep::End(denial) => {
+                let store = sql.clone();
+                return transaction_sync(&self.state, move || {
+                    room_refused(&store, &id, denial.code(), now)
+                });
+            }
+        }
         if let Step::Look = step {
             // A new proof is looked for only while release is switched on for the deployment and in the room. Off,
             // the request waits its turn, and expires. An ask already out is finished whatever the switches say:
@@ -607,12 +706,76 @@ impl Workspace {
     }
 }
 
-/// Records that the job looked at a request now, so its next look waits its turn.
+/// Records that the job looked at a request now, so its next look waits its turn. It isn't a change to the request,
+/// so `updated_at` stays, which is what an unanswered try's wait is measured from.
 fn checked(sql: &SqlStorage, id: &str, now: i64) -> R<()> {
     exec(
         sql,
-        "UPDATE hostname_request SET checked_at = ?, updated_at = ? WHERE id = ?",
-        vec![now.into(), now.into(), id.into()],
+        "UPDATE hostname_request SET checked_at = ? WHERE id = ?",
+        vec![now.into(), id.into()],
+    )
+}
+
+/// The room's own facts the proof job reads before each look and each ask, as asking read them. The organization's
+/// release switch is the one the room last applied; one that can't be read is unknown.
+fn proof_room(sql: &SqlStorage) -> R<HostnameProofRoom> {
+    let facts = super::release_recheck::room_facts(sql, true, true)?;
+    let switch = super::release_switch::applied(sql)?;
+    Ok(HostnameProofRoom {
+        organization_exists: facts.organization_exists,
+        organization_may_release: switch.well_formed().then_some(switch.granted),
+        deleted: facts.deleted,
+        public: facts.public,
+        archived: facts.archived,
+        public_surface_suspended: facts.public_surface_suspended,
+        app_suspended: facts.app_suspended,
+    })
+}
+
+/// The room's own facts no longer allow a pending request, by `code`. One whose proof was never taken to the object is
+/// over at once; one whose proof was is set `ending`, never committed, so the job withdraws it there.
+fn room_refused(sql: &SqlStorage, id: &str, code: &'static str, now: i64) -> R<()> {
+    let found = rows(
+        sql,
+        "SELECT proved_at FROM hostname_request WHERE id = ? AND state = 'pending'",
+        vec![id.into()],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(());
+    };
+    let state = if row["proved_at"].is_null() {
+        exec(
+            sql,
+            "UPDATE hostname_request SET state = 'ended', open = NULL, end_reason = ?, ended_at = ?, updated_at = ? WHERE id = ?",
+            vec![code.into(), now.into(), now.into(), id.into()],
+        )?;
+        HostnameRequestState::Ended
+    } else {
+        exec(
+            sql,
+            "UPDATE hostname_request SET state = 'ending', end_reason = ?, updated_at = ? WHERE id = ?",
+            vec![code.into(), now.into(), id.into()],
+        )?;
+        HostnameRequestState::Ending
+    };
+    audit_as(
+        sql,
+        moderation::PODSTER,
+        moderation::PODSTER_KIND,
+        "app_hostname.refused",
+        "app_hostname",
+        None,
+        Some(json!({ "request_id": id, "state": state.name(), "reason": code }).to_string()),
+        now,
+    )?;
+    record_event(
+        sql,
+        "app_hostname.refused",
+        moderation::PODSTER,
+        None,
+        &Transition::NONE,
+        roles::room_managers(sql, moderation::PODSTER)?,
+        now,
     )
 }
 

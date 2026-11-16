@@ -52,7 +52,7 @@ impl Resolver {
 
     /// The TXT values at `name`, each one record's text with its strings joined. An empty list when the resolver said
     /// there are none, or that the name doesn't exist. `None` when there was no answer to read: unreachable, timed
-    /// out, too long, any other response code, or any answer that isn't exactly the documented form.
+    /// out, too long, truncated, any other response code, or any answer that isn't exactly the documented form.
     pub(crate) async fn txt(&self, name: &str) -> Option<Vec<String>> {
         if !plain_name(name) {
             return None;
@@ -89,8 +89,13 @@ impl Resolver {
 }
 
 /// A DNS-over-HTTPS JSON answer's TXT values. A record that can't be read as text is passed over: it can't be the
-/// request's value, and the others may still be.
+/// request's value, and the others may still be. **A truncated answer (`TC` true) is no answer:** it may be missing
+/// records, so it can't be read as what the name holds; a `TC` of any other form than a boolean is no answer either.
 fn read_answer(answer: &Value) -> Option<Vec<String>> {
+    match &answer["TC"] {
+        Value::Null | Value::Bool(false) => {}
+        _ => return None,
+    }
     match answer["Status"].as_i64()? {
         NXDOMAIN => return Some(Vec::new()),
         NOERROR => {}

@@ -303,6 +303,69 @@ pub fn authorize_custom_hostname(
     authorize_release_config(caller, authority_holds, room, config)
 }
 
+/// The room's own facts the custom hostname's proof job reads before each look in DNS and each ask of the hostname's
+/// object (M6 step 8): those asking checked that only the room's rows can say, read again now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostnameProofRoom {
+    pub organization_exists: bool,
+    /// The organization's release switch as the room last applied it; `None` when that can't be read.
+    pub organization_may_release: Option<bool>,
+    pub deleted: bool,
+    pub public: bool,
+    pub archived: bool,
+    pub public_surface_suspended: bool,
+    pub app_suspended: bool,
+}
+
+impl HostnameProofRoom {
+    /// A room where nothing stands in the way.
+    pub const OPEN: HostnameProofRoom = HostnameProofRoom {
+        organization_exists: true,
+        organization_may_release: Some(true),
+        deleted: false,
+        public: true,
+        archived: false,
+        public_surface_suspended: false,
+        app_suspended: false,
+    };
+}
+
+/// What the proof job may do next for a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameProofStep {
+    /// Look, or ask.
+    Go,
+    /// A fact couldn't be read: nothing is looked up or asked, nothing ends, and the job looks again in its turn.
+    Wait,
+    /// A fact was read and fails, with its code: the request ends, withdrawn at the object if its proof was taken there.
+    End(ReleaseDenial),
+}
+
+/// Whether the proof job may go on, in [`release_room_allows`]'s order. A fact read and failing ends the request even
+/// while another can't be read; only when nothing read fails does an unread one make it wait.
+pub fn hostname_proof_room(room: &HostnameProofRoom) -> HostnameProofStep {
+    let checks = [
+        (room.organization_exists, ReleaseDenial::OrganizationDeleted),
+        (
+            room.organization_may_release != Some(false),
+            ReleaseDenial::NotDelegated,
+        ),
+        (!room.deleted, ReleaseDenial::Deleted),
+        (room.public, ReleaseDenial::NeedsPublicRoom),
+        (!room.archived, ReleaseDenial::Archived),
+        (
+            !room.public_surface_suspended,
+            ReleaseDenial::PublicSurfaceSuspended,
+        ),
+        (!room.app_suspended, ReleaseDenial::AppSuspended),
+    ];
+    match checks.into_iter().find(|(holds, _)| !holds) {
+        Some((_, denial)) => HostnameProofStep::End(denial),
+        None if room.organization_may_release.is_none() => HostnameProofStep::Wait,
+        None => HostnameProofStep::Go,
+    }
+}
+
 /// Who may approve a release, and where: the same people as configure it (decision 215), where release may happen now. Holding the deployment grant gives nothing here, and isn't needed: an agent never approves. A person who
 /// may approve may approve a release they asked for, or that an agent they control asked for (decided by the architect
 /// on the review of PR #309, for the owner to review): the commit was already merged under decision 195's independent

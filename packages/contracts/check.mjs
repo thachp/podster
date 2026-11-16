@@ -123,7 +123,11 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 8's first PR built the room's custom hostname, read, asked for and removed, which the room itself answers.
     const built = ["suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
-    if (built ? found.op.summary?.includes("Not built") || found.op.summary?.includes("`release_not_available`") : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);
+    // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
+    // and a provider answers it `release_not_available`, and its summary must say exactly when.
+    const gated = id === "requestAppHostname";
+    if (gated && !found.op.summary?.includes("**Until custom hostname claims are complete**")) problems.push(`${id}: its summary must say when its gate answers \`release_not_available\``);
+    if (built ? found.op.summary?.includes("Not built") || (!gated && found.op.summary?.includes("`release_not_available`")) : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);
   }
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 }

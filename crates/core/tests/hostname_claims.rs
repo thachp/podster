@@ -264,10 +264,8 @@ fn the_room_records_the_objects_answer_only_for_a_request_still_pending() {
     );
     for refusal in [
         ClaimDecision::HeldElsewhere,
-        ClaimDecision::Suspended,
         ClaimDecision::Unproven,
         ClaimDecision::StaleChallenge,
-        ClaimDecision::Ending,
         ClaimDecision::Withdrawn,
     ] {
         assert_eq!(
@@ -282,5 +280,111 @@ fn the_room_records_the_objects_answer_only_for_a_request_still_pending() {
     // withdrawn, never committed.
     for state in [S::Claimed, S::Ending, S::Refused, S::Expired, S::Ended] {
         assert_eq!(after_ask(state, ClaimDecision::Granted), None, "{state:?}");
+    }
+}
+
+#[test]
+fn an_answer_that_may_hide_a_claim_given_for_this_request_goes_ending_so_it_is_withdrawn() {
+    use HostnameRequestState as S;
+    // Suspended and ending are decided before whose the claim is, so the object may hold one it gave this very request
+    // on an ask whose answer was lost. Refused would leave that claim held for ever: the request goes `ending`, never
+    // committed, and the job withdraws it, which frees only a claim for exactly this room and request.
+    for decision in [ClaimDecision::Suspended, ClaimDecision::Ending] {
+        assert_eq!(
+            after_ask(S::Pending, decision),
+            Some(AskOutcome {
+                state: S::Ending,
+                end_reason: Some(decision.code())
+            }),
+            "{decision:?}"
+        );
+    }
+    // The retried ask that meets the suspension before its notice does: the object holds this request's claim, and
+    // answers suspended.
+    let given = HostnameRecord {
+        claim: Some(Claim {
+            room: "ws_a",
+            request: "hnr_a",
+        }),
+        ..EMPTY
+    };
+    let (suspended, _) = suspend(&given, NOW + MINUTE);
+    assert_eq!(
+        decide_ask(
+            &suspended,
+            &ask("ws_a", "hnr_a", 0),
+            false,
+            NOW + 2 * MINUTE
+        ),
+        ClaimDecision::Suspended
+    );
+    // Withdrawn, it is freed, and the name is free again once the suspension is lifted.
+    let (freed, outcome) = withdraw(&suspended, "ws_a", "hnr_a", NOW + 3 * MINUTE);
+    assert_eq!(outcome, Withdrawal::Freed);
+    assert!(freed.claim.is_none());
+    assert!(lift(&freed, NOW + 4 * MINUTE).claim.is_none());
+}
+
+#[test]
+fn an_unanswered_ask_or_withdrawal_waits_longer_each_time_up_to_an_hour_and_never_gives_up() {
+    use podster_core::hostname_requests::{retry_wait_ms, RETRY_FIRST_MS, RETRY_MAX_MS};
+    assert_eq!((RETRY_FIRST_MS, RETRY_MAX_MS), (MINUTE, HOUR));
+    // The first retry waits a minute; each wait is then as long as the time already spent, so it doubles.
+    let since = NOW;
+    let mut at = since;
+    let mut waits = Vec::new();
+    for _ in 0..9 {
+        let wait = retry_wait_ms(since, at);
+        waits.push(wait / MINUTE);
+        at += wait;
+    }
+    assert_eq!(waits, [1, 1, 2, 4, 8, 16, 32, 60, 60]);
+    // A day, or a year, later it still tries every hour.
+    assert_eq!(retry_wait_ms(since, since + 365 * 24 * HOUR), HOUR);
+    // A last try recorded before the request's last change, as a clock set back would make, waits the shortest.
+    assert_eq!(retry_wait_ms(since, since - HOUR), MINUTE);
+}
+
+#[test]
+fn podsters_own_domains_and_the_content_domains_are_reserved_with_every_name_under_them() {
+    let rules = ["com", "net", "dev", "site", "example"];
+    for name in [
+        "podster.dev",
+        "app.podster.dev",
+        "opster.dev",
+        "x.opster.dev",
+        "podster.site",
+        "anything.podster.site",
+        "a.b.content.example",
+    ] {
+        assert_eq!(
+            mappable(name, "content.example", &rules, false, 0),
+            Err(HostnameRefusal::Reserved),
+            "{name}"
+        );
+    }
+    // Neighbours that only end in the same letters aren't under them.
+    for name in ["mypodster.dev", "notopster.dev", "xpodster.site"] {
+        assert_eq!(
+            mappable(name, "content.example", &rules, false, 0).as_deref(),
+            Ok(name),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        RESERVED_DOMAINS,
+        ["podster.dev", "opster.dev", "podster.site"]
+    );
+}
+
+#[test]
+fn a_room_asks_for_at_most_five_new_hostnames_in_any_hour() {
+    use podster_core::hostname_requests::{request_rate_allows, MAX_REQUESTS_PER_HOUR};
+    assert_eq!(MAX_REQUESTS_PER_HOUR, 5);
+    for made in 0..5 {
+        assert!(request_rate_allows(made), "{made}");
+    }
+    for made in [5, 6, 100] {
+        assert!(!request_rate_allows(made), "{made}");
     }
 }

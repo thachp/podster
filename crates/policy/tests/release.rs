@@ -710,3 +710,54 @@ fn someone_may_release_while_the_owner_holds_or_a_person_admin_keeps_their_place
     assert!(!someone_may_release(false, &[agent(true)]));
     assert!(!someone_may_release(false, &[agent(true), person(false)]));
 }
+
+#[test]
+fn the_proof_job_goes_on_only_where_asking_still_could_and_waits_on_what_it_cant_read() {
+    // M6 step 8, the deep review's S3: before each look and each ask, the room's own facts that asking checked.
+    let open = HostnameProofRoom::OPEN;
+    assert_eq!(hostname_proof_room(&open), HostnameProofStep::Go);
+    type Change = fn(&mut HostnameProofRoom);
+    let ends: [(Change, ReleaseDenial); 7] = [
+        (
+            |r| r.organization_exists = false,
+            ReleaseDenial::OrganizationDeleted,
+        ),
+        (
+            |r| r.organization_may_release = Some(false),
+            ReleaseDenial::NotDelegated,
+        ),
+        (|r| r.deleted = true, ReleaseDenial::Deleted),
+        (|r| r.public = false, ReleaseDenial::NeedsPublicRoom),
+        (|r| r.archived = true, ReleaseDenial::Archived),
+        (
+            |r| r.public_surface_suspended = true,
+            ReleaseDenial::PublicSurfaceSuspended,
+        ),
+        (|r| r.app_suspended = true, ReleaseDenial::AppSuspended),
+    ];
+    for (change, denial) in ends {
+        let mut room = open;
+        change(&mut room);
+        assert_eq!(
+            hostname_proof_room(&room),
+            HostnameProofStep::End(denial),
+            "{denial:?}"
+        );
+        // A fact read and failing ends it even while the organization's switch can't be read.
+        if denial != ReleaseDenial::NotDelegated {
+            room.organization_may_release = None;
+            assert_eq!(
+                hostname_proof_room(&room),
+                HostnameProofStep::End(denial),
+                "{denial:?}, the switch unread"
+            );
+        }
+    }
+    // The organization's switch, as the room last applied it, can't be read: nothing is looked up or asked, and
+    // nothing ends.
+    let unread = HostnameProofRoom {
+        organization_may_release: None,
+        ..open
+    };
+    assert_eq!(hostname_proof_room(&unread), HostnameProofStep::Wait);
+}

@@ -23,6 +23,10 @@ pub const MAX_HOSTNAME_LEN: usize = 253;
 pub const MAX_HOSTNAME_LABEL_LEN: usize = 63;
 /// Podster's own domain. Neither it nor anything under it may be mapped.
 pub const PODSTER_DOMAIN: &str = "podster.dev";
+/// Every domain of Podster's that no room may map, nor any name under one: its own, the content domain first named
+/// (`opster.dev`, replaced the same day and still Podster's), and the content domain named since (`podster.site`). A
+/// deployment's configured content domain is refused as well, whatever it is.
+pub const RESERVED_DOMAINS: [&str; 3] = [PODSTER_DOMAIN, "opster.dev", "podster.site"];
 /// The name the challenge's TXT record goes at, before the hostname.
 pub const CHALLENGE_PREFIX: &str = "_podster-challenge";
 /// How long a pending request lives. Pending holds nothing.
@@ -47,7 +51,7 @@ pub enum HostnameRefusal {
     IpAddress,
     /// `hostname_single_label`
     SingleLabel,
-    /// `hostname_reserved`: `podster.dev`, the content domain, or a name under either.
+    /// `hostname_reserved`: one of [`RESERVED_DOMAINS`], the content domain, or a name under one.
     Reserved,
     /// `hostname_public_suffix`: a public suffix itself.
     PublicSuffix,
@@ -300,7 +304,11 @@ pub fn mappable(
     if !content.contains('.') {
         return Err(HostnameRefusal::Unclassified);
     }
-    if is_or_under(&name, PODSTER_DOMAIN) || is_or_under(&name, &content) {
+    if RESERVED_DOMAINS
+        .iter()
+        .any(|domain| is_or_under(&name, domain))
+        || is_or_under(&name, &content)
+    {
         return Err(HostnameRefusal::Reserved);
     }
     let rules: Option<Vec<SuffixRule>> =

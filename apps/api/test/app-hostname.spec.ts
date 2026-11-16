@@ -113,6 +113,19 @@ const requestRow = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT id, hos
 const rewindLook = (r: Room, ms = 61_000) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = checked_at - ? WHERE checked_at IS NOT NULL", ms));
 const pass = (r: Room) => switchedOn(() => alarmPass(stub(r.room)));
 const events = (r: Room) => all(r.room, "SELECT type, actor_id FROM event WHERE type LIKE 'app_hostname.%' ORDER BY seq");
+/** Asks for `name` with release switched on, then quiets the room, so the ask's own alarm can't act on rows the test
+ *  writes next. */
+async function askedQuiet(r: Room, name: string) {
+  const request = (await switchedOn(() => ask(r, name))).body.request;
+  await alarmQuiet(stub(r.room));
+  return request;
+}
+const refusedBy = (answer: { status: number; code?: string }) => [answer.status, answer.code];
+/** The room's provider configured, as a deployment with one has it, while `run` runs. */
+async function withProvider<T>(r: Room, run: () => Promise<T>): Promise<T> {
+  await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+  try { return await run(); } finally { await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
+}
 
 afterEach(async () => {
   for (const id of made.splice(0)) await alarmQuiet(stub(id));
@@ -180,6 +193,11 @@ describe("a room's custom hostname: the request and its challenge (M6 step 8)", 
         [{ hostname: "bad_name.example.net" }, 400, "hostname_invalid"],
         [{ hostname: "app.podster.dev" }, 409, "hostname_reserved"],
         [{ hostname: `other.${FAKE.domain}` }, 409, "hostname_reserved"],
+        // Podster's other domains, the content domain first named and the one named since, and every name under them.
+        [{ hostname: "opster.dev" }, 409, "hostname_reserved"],
+        [{ hostname: "x.opster.dev" }, 409, "hostname_reserved"],
+        [{ hostname: "podster.site" }, 409, "hostname_reserved"],
+        [{ hostname: "app.podster.site" }, 409, "hostname_reserved"],
         [{ hostname: "co.uk" }, 409, "hostname_public_suffix"],
         [{ hostname: "anything.ck" }, 409, "hostname_public_suffix"],
         // No rule covers the name's top-level label: it can't be classified, which fails closed.
@@ -359,6 +377,10 @@ describe("the proof job and the claim (M6 step 8)", () => {
       { body: { Status: 0, Answer: [{ name: at, type: 16, data: `${value} x` }] } },
       // Another record type carrying the value isn't a TXT record.
       { body: { Status: 0, Answer: [{ name: at, type: 1, data: txtData(value) }] } },
+      // A truncated answer may be missing records, so it is no answer, even with the value in it; and so is a `TC`
+      // that isn't a boolean.
+      { body: { Status: 0, TC: true, Answer: [{ name: at, type: 16, data: txtData(value) }] } },
+      { body: { Status: 0, TC: "false", Answer: [{ name: at, type: 16, data: txtData(value) }] } },
     ];
     for (const answer of bad) {
       await resolver({ name: at, answer });
@@ -376,7 +398,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("ends a request whose proof was taken to the object only by the object's answer, expired among them", async () => {
     const r = await room("org_ah_lateask");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     // As if the job had recorded the proof and then lost the object's answer, 73 hours ago.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?, expires_at = expires_at - ?, proved_at = 1, checked_at = ?", 73 * 3600_000, 73 * 3600_000, Date.now()));
     // The room's own clock doesn't end it: the object may have given the claim.
@@ -408,7 +430,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("withdraws a request whose ask was out, so the object never grants it, whichever arrives first", async () => {
     const r = await room("org_ah_withdraw");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     // The proof was recorded, and the ask is out.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     expect((await switchedOn(() => remove(r))).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
@@ -426,7 +448,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("frees a claim the object gave for a request the room removed before committing it", async () => {
     const r = await room("org_ah_free");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     // The object granted the ask, and the answer never reached the room.
     const granted = await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 });
@@ -477,7 +499,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("withdraws a request a suspension's notice ended before the room committed its claim, and frees the name", async () => {
     const r = await room("org_ah_notice");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 });
     await switchedOn(async () => expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/suspend`, { reason: "abuse" })).status).toBe(200));
@@ -493,5 +515,150 @@ describe("removing a custom hostname, and withdrawing a request never committed 
       expect((await ask(r, name)).code).toBe("hostname_suspended");
       expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/lift`, { reason: "other" })).status).toBe(200);
     });
+  });
+});
+
+describe("the reviews' rulings on the claim (M6 step 8)", () => {
+  it("withdraws a request whose retried ask met the name's suspension before its notice did, so the name is free once lifted", async () => {
+    const r = await room("org_ah_retry_first");
+    const name = newName();
+    const request = await askedQuiet(r, name);
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
+    // The object granted the ask, and its answer never reached the room.
+    const ask0 = { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 };
+    expect((await toClaim(name, "/internal/claim", ask0)).body).toEqual({ decision: "granted" });
+    // The room refuses the suspension's notice for now, so its retried ask reaches the object first, whenever the
+    // object's own alarm runs.
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
+    await switchedOn(async () => expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/suspend`, { reason: "abuse" })).status).toBe(200));
+    await rewindLook(r);
+    await alarmPass(stub(r.room));
+    // Suspended may hide a claim given for this very request: not refused, but ending, never committed.
+    expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1, claimed_at: null, end_reason: "hostname_suspended" });
+    await rewindLook(r);
+    await alarmPass(stub(r.room));
+    expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, claimed_at: null, end_reason: "hostname_suspended" });
+    // Withdrawn, so freed: suspended, then freed, so the generation moved twice. Nothing is left held.
+    expect(await claimState(name)).toEqual({ claim: null, suspended: true, generation: 2 });
+    // The notice, once the room answers it, finds the request over and changes nothing.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
+    await inClaim(name, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
+    await alarmPass(claimOf(name));
+    expect(await inClaim(name, (sql) => sql.exec("SELECT count(*) AS n FROM notice WHERE answered_at IS NULL").toArray())).toEqual([{ n: 0 }]);
+    expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_suspended" });
+    // Lifted, the name is free again, and the room may ask for it.
+    await switchedOn(async () => {
+      expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/lift`, { reason: "other" })).status).toBe(200);
+      expect((await ask(r, name)).status).toBe(200);
+    });
+  });
+
+  it("asks for no hostname, and its job neither looks nor asks, where release and a provider are both on, until claims are complete", async () => {
+    const r = await room("org_ah_gate");
+    const name = newName();
+    const request = await askedQuiet(r, name);
+    await answerWith(name, request.challenge_value);
+    await rewindLook(r);
+    const before = (await asked()).length;
+    await withProvider(r, async () => {
+      expect(refusedBy(await switchedOn(() => ask(r, newName())))).toEqual([409, "release_not_available"]);
+      await pass(r);
+    });
+    expect((await asked()).length).toBe(before);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
+    expect((await claimState(name)).claim).toBeNull();
+    // With no provider, which is every deployment today, the same pass looks and claims.
+    await rewindLook(r);
+    await pass(r);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    // One constant, false, set in one place.
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;");
+    expect(Object.values(sources).join("\n").match(/HOSTNAME_CLAIMS_COMPLETE: bool/g)).toHaveLength(1);
+  });
+
+  it("refuses asking, and switching release on, where a provider is configured while the release path isn't complete", async () => {
+    const r = await room("org_ah_path");
+    await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
+    await withProvider(r, () => switchedOn(async () => {
+      const on = await api(r.owner, "PUT", `/v1/workspaces/${r.room}/release-config`, { enabled: true, expected_version: 3 });
+      expect(refusedBy(on)).toEqual([409, "release_not_available"]);
+      expect(refusedBy(await ask(r, newName()))).toEqual([409, "release_not_available"]);
+    }));
+    expect(await all(r.room, "SELECT enabled, version FROM release_config")).toEqual([{ enabled: 0, version: 3 }]);
+    expect(await requestRow(r)).toBeNull();
+  });
+
+  it("answers standing_unknown, and writes nothing, when the hostname's object can't be read", async () => {
+    const r = await room("org_ah_unread");
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_object_unread (x INTEGER)"));
+    expect(refusedBy(await switchedOn(() => ask(r, newName())))).toEqual([503, "standing_unknown"]);
+    expect(await requestRow(r)).toBeNull();
+    expect(await events(r)).toEqual([]);
+    // Readable again, the same ask is answered.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_object_unread"));
+    expect((await switchedOn(() => ask(r, newName()))).status).toBe(200);
+  });
+
+  it("ends a request the room's own facts no longer allow before its next look, and withdraws one whose proof was out", async () => {
+    // Archived: the request's proof was never taken anywhere, so it is over at once, and nothing is looked up.
+    const a = await room("org_ah_facts_archived");
+    const nameA = newName();
+    const ra = await askedQuiet(a, nameA);
+    await answerWith(nameA, ra.challenge_value);
+    await inRoom(a.room, (sql) => sql.exec("UPDATE workspace SET status = 'archived'"));
+    await rewindLook(a);
+    const before = (await asked()).length;
+    await pass(a);
+    expect(await requestRow(a)).toMatchObject({ state: "ended", open: null, proved_at: null, end_reason: "workspace_archived" });
+    expect((await asked()).length).toBe(before);
+    expect(await events(a)).toEqual([
+      { type: "app_hostname.requested", actor_id: a.owner.id },
+      { type: "app_hostname.refused", actor_id: "podster" },
+    ]);
+    // The app suspended while an ask was out: the object may have given the claim, so it is withdrawn there, never asked
+    // again.
+    const b = await room("org_ah_facts_app");
+    const nameB = newName();
+    const rb = await askedQuiet(b, nameB);
+    await inRoom(b.room, (sql) => {
+      sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now());
+      sql.exec("UPDATE app_label SET suspended_at = 1, suspension_reason = 'abuse'");
+    });
+    await rewindLook(b);
+    await pass(b);
+    expect(await requestRow(b)).toMatchObject({ state: "ending", open: 1, claimed_at: null, end_reason: "app_suspended" });
+    await rewindLook(b);
+    await alarmPass(stub(b.room));
+    expect(await requestRow(b)).toMatchObject({ state: "ended", open: null, end_reason: "app_suspended" });
+    expect(await inClaim(nameB, (sql) => sql.exec("SELECT workspace_id, request_id FROM withdrawn").toArray())).toEqual([{ workspace_id: b.room, request_id: rb.id }]);
+    expect((await claimState(nameB)).claim).toBeNull();
+    // The organization's release switch, as the room applied it, can't be read: nothing is looked up, and nothing ends.
+    const c = await room("org_ah_facts_unread");
+    const nameC = newName();
+    const rc = await askedQuiet(c, nameC);
+    await answerWith(nameC, rc.challenge_value);
+    // Held at a generation its last take equals, which no set makes.
+    await inRoom(c.room, (sql) => sql.exec("UPDATE release_switch_applied SET granted = 1, generation = 1, last_take = 1"));
+    await rewindLook(c);
+    const beforeC = (await asked()).length;
+    await pass(c);
+    expect((await asked()).length).toBe(beforeC);
+    expect(await requestRow(c)).toMatchObject({ state: "pending", open: 1, proved_at: null });
+  });
+
+  it("lets a room make five new requests in an hour, whatever became of them, and refuses the sixth", async () => {
+    const r = await room("org_ah_rate");
+    await switchedOn(async () => {
+      for (let n = 0; n < 5; n += 1) {
+        expect((await ask(r, newName())).status, `${n}`).toBe(200);
+        expect((await remove(r)).body).toEqual({ request: null });
+      }
+      expect(refusedBy(await ask(r, newName()))).toEqual([429, "hostname_rate_limited"]);
+    });
+    expect(await all(r.room, "SELECT count(*) AS n FROM hostname_request")).toEqual([{ n: 5 }]);
+    // Once the five were made over an hour ago, the room may ask again.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?", 3600_000));
+    expect((await switchedOn(() => ask(r, newName()))).status).toBe(200);
   });
 });

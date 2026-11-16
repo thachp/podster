@@ -863,7 +863,8 @@ pub fn custom_entry_value(host: &str, script: &str) -> Option<String> {
         crate::release::script_owner(script),
         crate::release::ScriptOwner::Podster { .. }
     );
-    (made && normalize(host).ok().as_deref() == Some(host))
+    // More than one label, as a room's request stores a name (a single label is never mappable).
+    (made && host.contains('.') && normalize(host).ok().as_deref() == Some(host))
         .then(|| format!("{script}{CUSTOM_ENTRY_SEPARATOR}{host}"))
 }
 

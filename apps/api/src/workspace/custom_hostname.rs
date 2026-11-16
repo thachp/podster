@@ -308,51 +308,63 @@ impl Workspace {
         now: i64,
     ) -> R<()> {
         let open = custom_host_open(sql, hostname)?;
+        let refused = custom_host_refused(sql, hostname)?;
         let local = route_local_for(sql, hostname, self.hostname_claims_open())?.0;
         let route = match local {
             CustomRoute::Serve => route_at_object(&self.env, sql, hostname, room, id).await,
             other => other,
         };
-        match route {
-            CustomRoute::Serve if open != Some(true) => {
+        let cause: &'static str = match route {
+            // Not routed, or routed and refused by the applier at the version it has: (re)opened, so its version moves
+            // and the applier asks every check again (the review of PR #404, S3).
+            CustomRoute::Serve if open != Some(true) || refused => {
                 let claims_open = self.hostname_claims_open();
                 let (store, host, request) = (sql.clone(), hostname.to_owned(), id.to_owned());
                 let opened = Rc::new(RefCell::new(false));
                 let slot = opened.clone();
                 transaction_sync(&self.state, move || {
                     let (again, held) = route_local_for(&store, &host, claims_open)?;
-                    if again == CustomRoute::Serve
-                        && held.as_deref() == Some(request.as_str())
-                        && custom_host_open(&store, &host)? != Some(true)
-                    {
-                        *slot.borrow_mut() = open_route(&store, &host, now)?;
+                    if again != CustomRoute::Serve || held.as_deref() != Some(request.as_str()) {
+                        return Ok(());
                     }
+                    if custom_host_open(&store, &host)? == Some(true) {
+                        if !custom_host_refused(&store, &host)? {
+                            return Ok(());
+                        }
+                        takedown::close_custom_host(&store, &host, now)?;
+                    }
+                    *slot.borrow_mut() = open_route(&store, &host, now)?;
                     Ok(())
                 })?;
-                if *opened.borrow() {
-                    console_log!("hostname: a custom host started routing: room={} request={} code=custom_host_routed", room, id);
-                } else {
-                    console_error!("hostname: a custom host couldn't start routing: room={} request={} code=custom_host_not_routed", room, id);
+                let did_open = *opened.borrow();
+                match (did_open, open == Some(true)) {
+                    (true, false) => "custom_host_routed",
+                    (true, true) => "custom_host_reopened",
+                    (false, _) => "custom_host_not_routed",
                 }
-                Ok(())
             }
-            CustomRoute::Serve | CustomRoute::Wait(_) => Ok(()),
+            CustomRoute::Serve => "custom_host_routed",
+            CustomRoute::Wait(code) => code,
             CustomRoute::Refuse(code) => {
                 if open == Some(true) {
                     let (store, host) = (sql.clone(), hostname.to_owned());
                     transaction_sync(&self.state, move || {
                         takedown::close_custom_host(&store, &host, now).map(|_| ())
                     })?;
-                    console_error!(
-                        "hostname: a custom host stopped routing: room={} request={} code={}",
-                        room,
-                        id,
-                        code
-                    );
                 }
-                Ok(())
+                code
             }
+        };
+        // Once for each change of cause, not on every read (the review of PR #404, Q3).
+        if cause_changed(id, cause) {
+            console_log!(
+                "hostname: a custom host's routing: room={} request={} code={}",
+                room,
+                id,
+                cause
+            );
         }
+        Ok(())
     }
 
     /// Counts a read of gone (`podster_core::hostname_requests::count_gone`): whether it is confirmed. Otherwise the first
@@ -599,6 +611,14 @@ impl Workspace {
                         checked(&store, &id, now)
                     });
                 }
+                // **And the applier has confirmed the entry gone at the host's version** (the review of PR #404, S1).
+                // Freed before that, another room could claim the name while this room's entry, which names the
+                // same host, is still there to serve on it. Until then the applier keeps trying, from the room's
+                // alarm, and the free waits its turn.
+                if !takedown::entry_confirmed_absent(sql, &hostname)? {
+                    console_error!("hostname: the claim waits for its entry to be removed: room={} request={} code=entry_not_confirmed_gone", room, id);
+                    return self.tried(sql, &id, now);
+                }
                 let body = json!({ "hostname": hostname, "workspace_id": room, "request_id": id });
                 let answer = self
                     .claim_object(
@@ -799,6 +819,29 @@ fn open_route(sql: &SqlStorage, hostname: &str, now: i64) -> R<bool> {
     )?;
     release_commit::write_state(sql, &loaded.hosts, &after, now)?;
     Ok(true)
+}
+
+thread_local! {
+    /// What routing last found for each request this running copy has looked at, so a cause is logged once for each
+    /// change, not on every read. Kept in memory only: a restarted object logs its first cause again.
+    static ROUTE_CAUSE: RefCell<std::collections::HashMap<String, &'static str>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// Records `cause` for `request`: whether it differs from the last one recorded.
+fn cause_changed(request: &str, cause: &'static str) -> bool {
+    ROUTE_CAUSE.with(|known| known.borrow_mut().insert(request.to_owned(), cause) != Some(cause))
+}
+
+/// Whether the applier refused the custom host for `hostname` at the version it has now.
+fn custom_host_refused(sql: &SqlStorage, hostname: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS r FROM serve_state s JOIN serve_apply a ON a.host = s.host
+           WHERE s.host = ? AND s.kind = 'custom' AND a.refused_version = s.version",
+        vec![hostname.into()],
+    )?
+    .is_empty())
 }
 
 /// The room's ID.

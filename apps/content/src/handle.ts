@@ -30,7 +30,7 @@
 // instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
 // Nothing is logged for a request (ADR 0010's "Logs").
-import { customEntryScript, defaultHostLabel, isHost, onDomain, scriptLabel, STOP_KEY } from "./names";
+import { customEntryScript, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
@@ -269,7 +269,7 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   const label = defaultHostLabel(host, deps.domain);
   // A custom hostname (step 8c): a host off the content domain, only while a content domain is configured, since
   // without one no host can be told from another.
-  const custom = label === null && isHost(deps.domain) && isHost(host) && !onDomain(host, deps.domain);
+  const custom = label === null && isHost(deps.domain) && isWrittenHost(host) && !onDomain(host, deps.domain);
   // The sandbox names the host, so a host that is no app's is named as nothing a page could be served from.
   const origin = label === null && !custom ? "'none'" : `https://${host}`;
   const site: Site = { origin, custom };

@@ -153,6 +153,7 @@ const reconcile = async () => {
     await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run();
   }
 };
+const claimState = async (hostname: string) => (await claimOf(hostname).fetch("https://claim/internal/state")).json() as Promise<any>;
 const findings = async () => ((await switchedOn(() => api(OPERATOR, "GET", "/v1/moderation/takedown-findings"))).body.findings as { code: string; subject: string; detail: string | null }[]);
 /** A pass starts from nothing: no room in the lookup table, no finding kept, and each pass at the start of its list. */
 async function fresh() {
@@ -194,16 +195,17 @@ describe("routing a custom hostname (M6 step 8c)", () => {
     const { r, name } = await routed("org_cr_cap");
     const reads = async () => (await cloudflareCalls(name)).filter((call) => call === "read").length;
     const before = await reads();
-    // The shortest wait before routing, a minute, is over: once routed it reads nothing.
-    await step(r);
-    expect(await reads()).toBe(before);
-    // Five hours after its last read, far past the hour it waited before routing: still nothing. (An hour short of the
-    // cap, so no run of this test is slow enough to reach it.)
-    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() - 5 * 3600_000));
+    // The job's clock passed in (review standard 1): its last read at T, its last change two hours before, so the wait
+    // before routing would be its longest, an hour.
+    const T = 1_900_000_000_000;
+    const clockAt = (now: number) => inRoom(r.room, (sql) => { sql.exec("DELETE FROM test_hostname_clock"); sql.exec("INSERT INTO test_hostname_clock (now) VALUES (?)", now); });
+    await inRoom(r.room, (sql) => { sql.exec("CREATE TABLE test_hostname_clock (now INTEGER)"); sql.exec("UPDATE hostname_request SET checked_at = ?, updated_at = ?", T, T - 2 * 3600_000); });
+    // A millisecond short of six hours, five past the hour it would have waited: nothing is read.
+    await clockAt(T + 6 * 3600_000 - 1);
     await switchedOn(() => quietPass(r));
     expect(await reads()).toBe(before);
-    // Six hours: it reads.
-    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() - 6 * 3600_000 - 1000));
+    // Six hours to the millisecond: it reads.
+    await clockAt(T + 6 * 3600_000);
     await switchedOn(() => quietPass(r));
     expect(await reads()).toBe(before + 1);
   });
@@ -244,6 +246,106 @@ describe("routing a custom hostname (M6 step 8c)", () => {
     await applyDue(r);
     await pass(r);
     expect((await held()).entries[name]).toBe(`${next}@${name}`);
+  });
+});
+
+describe("the review of PR #404", () => {
+  /** A release committed live and waiting for its marker: the custom host wants its script. */
+  const commitNext = async (c: Awaited<ReturnType<typeof routed>>) => {
+    const next = `${c.r.label}.${NEXT}`;
+    await content("/seed", { scripts: [next] });
+    await inRoom(c.r.room, (sql) => {
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'live', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 2, ?, 2, 2, 2)`, NEXT, SHA, c.r.label, next, NEXT, c.r.owner.id, c.r.owner.id);
+      sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = version + 1 WHERE kind = 'custom'", NEXT, next);
+    });
+    return next;
+  };
+  /** The job's turn put a day ahead, so only the applier acts in a pass. */
+  const jobLater = (c: Awaited<ReturnType<typeof routed>>) => inRoom(c.r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() + 24 * 3600_000));
+
+  it("S1: holds the claim until the applier has confirmed the entry gone, however long its deletes fail", async () => {
+    const { r, name } = await routed("org_cr_s1");
+    // Cloudflare reports it moved: the claim ends and the host closes. The entry is still there.
+    await setAtCloudflare(name, "moved");
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = 0"));
+    await switchedOn(() => quietPass(r));
+    expect(await requestRow(r)).toMatchObject({ state: "ending" });
+    expect((await held()).entries[name]).toBe(`${r.script}@${name}`);
+    // Two deletes fail. The object marks the claim ending meanwhile.
+    await content("/fault", { op: "entry.delete", times: 2, status: 500 });
+    await step(r);
+    expect((await claimState(name)).claim).toMatchObject({ state: "ending" });
+    // Cloudflare's hostname is gone, as its two reads would show: the free's turn. The delete fails again, so the
+    // entry is still there, and the claim isn't freed.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_provider SET gone_at = 1"));
+    await applyDue(r);
+    await step(r);
+    expect((await held()).entries[name]).toBe(`${r.script}@${name}`);
+    expect(await requestRow(r)).toMatchObject({ state: "ending" });
+    expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, state: "ending" });
+    // A removal confirmed at an earlier version isn't one at this version: still held. (The applier's own wait is put
+    // far ahead, so only the free's check acts in this pass.)
+    await inRoom(r.room, (sql) => sql.exec(
+      "UPDATE serve_apply SET applied_version = (SELECT version - 1 FROM serve_state WHERE host = ?), applied_script = NULL, next_attempt_at = ? WHERE host = ?",
+      name, Date.now() + 24 * 3600_000, name));
+    await step(r);
+    expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, state: "ending" });
+    // The delete goes through: confirmed absent at the host's version, then freed, in the same pass.
+    await applyDue(r);
+    await step(r);
+    expect((await held()).entries[name]).toBeUndefined();
+    expect(await requestRow(r)).toMatchObject({ state: "ended" });
+    expect((await claimState(name)).claim).toBeNull();
+  });
+
+  it("S2a: takes down an entry that isn't the release last served while a new one waits for its marker", async () => {
+    const c = await routed("org_cr_s2a");
+    await jobLater(c);
+    await commitNext(c);
+    // What the host holds is an earlier release's, as a rollback or a lost write could leave: down, and nothing served.
+    const older = `${c.r.label}.rel_${"5c".repeat(16)}`;
+    await content("/seed", { entries: { [c.name]: `${older}@${c.name}` } });
+    await pass(c.r);
+    expect((await held()).entries[c.name]).toBeUndefined();
+    expect(await applyRow(c.r, c.name)).toMatchObject({ attempts: 1, last_code: "release_not_served_taken_down" });
+  });
+
+  it("S2b: has a custom host the reconcile finds without a live claim due at once, even while it waits", async () => {
+    await fresh();
+    const c = await routed("org_cr_s2b");
+    await jobLater(c);
+    await commitNext(c);
+    await pass(c.r);
+    expect(await applyRow(c.r, c.name)).toMatchObject({ last_code: "release_not_served" });
+    // Its wait is put far ahead, so only the reconcile can make it due.
+    await inRoom(c.r.room, (sql) => sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE host = ?", Date.now() + 24 * 3600_000, c.name));
+    await inClaim(c.name, (sql) => sql.exec("UPDATE claim SET state = 'ending' WHERE held = 1"));
+    expect(await reconcile()).toMatchObject({ changed: 1 });
+    await pass(c.r);
+    expect((await held()).entries[c.name]).toBeUndefined();
+    expect(await applyRow(c.r, c.name)).toMatchObject({ refused_version: (await customRow(c.r, c.name)).version, last_code: "claim_not_live" });
+  });
+
+  it("S3: a host the applier refused is looked at again at the shortest wait, and reopens once the cause clears", async () => {
+    const c = await routed("org_cr_s3");
+    await jobLater(c);
+    await inClaim(c.name, (sql) => sql.exec("UPDATE claim SET state = 'ending' WHERE held = 1"));
+    await reapply(c.r, c.name);
+    await pass(c.r);
+    expect((await held()).entries[c.name]).toBeUndefined();
+    const refusedAt = await customRow(c.r, c.name);
+    expect(await applyRow(c.r, c.name)).toMatchObject({ refused_version: refusedAt.version, last_code: "claim_not_live" });
+    // The request changed at the refusal: its next read waits the shortest time, not six hours.
+    const request = (await all(c.r.room, "SELECT updated_at, checked_at FROM hostname_request"))[0] as any;
+    expect(request.updated_at).toBe(request.checked_at);
+    // The cause clears. A minute on, the read sees every check hold and reopens the host; the applier writes again.
+    await inClaim(c.name, (sql) => sql.exec("UPDATE claim SET state = 'live' WHERE held = 1"));
+    await step(c.r);
+    expect(await customRow(c.r, c.name)).toMatchObject({ script_name: c.r.script, closed: 0, version: refusedAt.version + 2 });
+    await pass(c.r);
+    expect((await held()).entries[c.name]).toBe(`${c.r.script}@${c.name}`);
   });
 });
 

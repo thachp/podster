@@ -54,5 +54,22 @@
     "someone-elses-script@app.example.com",
     "stopped",
     "_stop"
+  ],
+  "custom_entry_hosts_about": "Hosts no custom entry is ever written or read for, since Rust never writes such a name: an IP address or a name whose last label reads as a number, upper case, a trailing dot, a single label, a label with a leading hyphen, and punycode that does not decode. For each, the value would be the valid script name, the separator, then that host. Public-suffix-only names are formed hosts: the entry form does not judge public suffixes, which the claim refuses (podster_core::hostnames::mappable), so both sides read them the same.",
+  "custom_entry_refused_hosts": [
+    "192.0.2.1",
+    "app.123",
+    "app.0x7f",
+    "App.Example.com",
+    "APP.EXAMPLE.COM",
+    "app.example.com.",
+    "com",
+    "-app.example.com",
+    "app-.example.com",
+    "xn--zz.example"
+  ],
+  "custom_entry_formed_hosts": [
+    "co.uk",
+    "app.example.com"
   ]
 }

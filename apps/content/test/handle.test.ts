@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS } from "../src/handle";
-import { customEntryScript, defaultHostLabel, isHost, isScriptName, scriptLabel, STOP_KEY } from "../src/names";
+import { customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
 
 // The content Worker's handler, against stand-ins for its two bindings (M6 step 4(b), ADR 0010). Nothing here reaches
@@ -329,6 +329,22 @@ describe("a custom hostname (M6 step 8c)", () => {
       w.kv.set(fixture.custom_entry_host, value);
       w.apps.set(script, () => new Response("ok"));
       expect([customEntryScript(fixture.custom_entry_host, value), (await get(w, "/", {}, fixture.custom_entry_host)).status, w.sent.map((sent) => sent.script)], value).toEqual([script, 200, [script]]);
+    }
+  });
+
+  it("reads no entry for a host Rust never writes, and reads a formed host as core does, by the fixture's vectors", async () => {
+    expect(fixture.custom_entry_refused_hosts.length).toBeGreaterThanOrEqual(10);
+    for (const host of fixture.custom_entry_refused_hosts) {
+      expect([isWrittenHost(host), customEntryScript(host, `${SCRIPT}@${host}`)], host).toEqual([false, null]);
+    }
+    // An IP address reaches the Worker as what it is, and nothing is read for it. (A request can't even name a host
+    // whose last label is a number but isn't an address: the URL parser refuses it.)
+    const ip = world();
+    ip.kv.set("192.0.2.1", `${SCRIPT}@192.0.2.1`);
+    expect([(await get(ip, "/", {}, "192.0.2.1")).status, ip.reads.length, ip.sent.length]).toEqual([404, 0, 0]);
+    // A public suffix alone is a formed host, read the same on both sides: the claim refuses it, not the entry's form.
+    for (const host of fixture.custom_entry_formed_hosts) {
+      expect([isWrittenHost(host), customEntryScript(host, `${SCRIPT}@${host}`)], host).toEqual([true, SCRIPT]);
     }
   });
 

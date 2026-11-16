@@ -709,6 +709,25 @@ fn claim_live_for(sql: &SqlStorage, host: &str, claim: &Value) -> R<bool> {
     .is_empty())
 }
 
+/// Whether the applier has confirmed `host` has no entry at the version the room wants now (the review of PR #404, S1):
+/// the host wants nothing and was applied at exactly its version with nothing written. A host the room never had a row
+/// for was never written by it. Before a custom hostname's claim is freed, so no other room can be served the entry.
+pub(super) fn entry_confirmed_absent(sql: &SqlStorage, host: &str) -> R<bool> {
+    let found = rows(
+        sql,
+        "SELECT s.script_name, s.version, a.applied_version, a.applied_script FROM serve_state s
+           LEFT JOIN serve_apply a ON a.host = s.host WHERE s.host = ?",
+        vec![host.into()],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(true);
+    };
+    Ok(row["script_name"].is_null()
+        && !row["applied_version"].is_null()
+        && int(&row["applied_version"]) == int(&row["version"])
+        && row["applied_script"].is_null())
+}
+
 /// The 5-minute reconcile found an entry for `host` naming `found`, or one it couldn't read (`None`). `(known,
 /// changed)`: whether the host is this room's to answer for, and whether the room now owes it a new pass.
 ///
@@ -746,8 +765,19 @@ fn check_entry(
         // The room has a row for it and may not touch it. To the reconcile that is an entry with no room.
         return Ok((false, false));
     }
+    let custom = row["kind"].as_str() != Some("default");
     if !is_applied && !is_refused {
-        // Already owed: the applier will make it right, and this changes nothing.
+        // Already owed: the applier will make it right. A custom host whose object's claim isn't live is due at once
+        // (the review of PR #404, S2): its applier asks the object before anything that only waits, and takes the
+        // entry down.
+        if custom && !claim_live_for(sql, host, claim)? {
+            exec(
+                sql,
+                "UPDATE serve_apply SET next_attempt_at = 0, updated_at = ? WHERE host = ? AND next_attempt_at IS NOT NULL",
+                vec![now.into(), host.into()],
+            )?;
+            return Ok((true, true));
+        }
         return Ok((true, false));
     }
     // The entry is there, since the pass listed it. It matches only when the room wants a script for this host and
@@ -757,8 +787,7 @@ fn check_entry(
         (Some(found), Some(wanted)) => found == wanted,
         _ => false,
     };
-    let matches =
-        matches && (row["kind"].as_str() == Some("default") || claim_live_for(sql, host, claim)?);
+    let matches = matches && (!custom || claim_live_for(sql, host, claim)?);
     if is_applied && matches {
         return Ok((true, false));
     }
@@ -1037,6 +1066,23 @@ fn not_applied(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64)
 /// and sets no wait. It is logged once for each version, by the room's ID and the code. Telling an operator is the
 /// reconcile's.
 fn refused(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64) -> R<()> {
+    // A custom host refused while routing last saw it may serve (the review of PR #404, S3): its request changes now,
+    // so routing reads again at the shortest wait, never the six hours of a routed name, and reopens the host once the
+    // cause has cleared. Only when it was last applied cleanly: a host refused again after routing reopened it keeps
+    // the wait doubling from that first refusal, so a cause routing can't see never wakes the room every minute.
+    exec(
+        sql,
+        "UPDATE hostname_request SET updated_at = ?, checked_at = ? WHERE hostname = ? AND open = 1 AND state = 'claimed'
+           AND EXISTS (SELECT 1 FROM serve_state WHERE host = ? AND kind = 'custom')
+           AND NOT EXISTS (SELECT 1 FROM serve_apply WHERE host = ? AND last_code IS NOT NULL)",
+        vec![
+            now.into(),
+            now.into(),
+            host.into(),
+            host.into(),
+            host.into(),
+        ],
+    )?;
     let known = !rows(
         sql,
         "SELECT 1 AS known FROM serve_apply WHERE host = ? AND refused_version = ? AND last_code = ?",
@@ -1235,11 +1281,13 @@ enum CustomFail {
 /// 2. Routing's local checks, from the room's own rows (`custom_hostname::route_local_for`): the gate on claims, the
 ///    room's request for the name `claimed`, no unpublish since it was made, the room's own facts, and Cloudflare's
 ///    last read `active`. Read and failing refuses; a fact that couldn't be read waits.
-/// 3. The release is served: its marker came back through the default host. A custom host never takes a release
-///    before that, so a commit waiting for its marker leaves the custom host on what it served.
-/// 4. The stop for the whole content domain, as for a default host.
-/// 5. **The hostname's own object, asked last, just before the write:** it must hold exactly this room's and this
-///    request's claim, live, on a name that isn't suspended. No answer waits; anything else refuses.
+/// 3. **The hostname's own object:** it must hold exactly this room's and this request's claim, live, on a name that
+///    isn't suspended. No answer waits; anything else refuses. Asked before anything that only waits, so a claim that
+///    isn't live takes the entry down whatever else holds (the review of PR #404, S2).
+/// 4. The release is served: its marker came back through the default host. A custom host never takes a release
+///    before that. While it waits, the entry stays only if it is the release last confirmed served; any other is taken
+///    down ([`stale_taken_down`]).
+/// 5. The stop for the whole content domain, as for a default host.
 ///
 /// Then the entry is written in the custom form, naming the host (`podster_core::hostnames::custom_entry_value`), and
 /// read back.
@@ -1267,20 +1315,8 @@ async fn custom_write(
     let Some(request) = request else {
         return Ok(Err(CustomFail::Refuse("hostname_not_claimed")));
     };
-    let served = !rows(
-        sql,
-        "SELECT 1 AS served FROM release WHERE script_name = ? AND state = 'served' LIMIT 1",
-        vec![script.into()],
-    )?
-    .is_empty();
-    if !served {
-        return Ok(Err(CustomFail::Retry("release_not_served")));
-    }
-    match content_stop::read_from(env).await {
-        Stop::Stopped => return Ok(Err(CustomFail::Retry("content_domain_stopped"))),
-        Stop::Unreadable => return Ok(Err(CustomFail::Retry("stop_unreadable"))),
-        Stop::Clear => {}
-    }
+    // The object before anything that only waits (the review of PR #404, S2): a claim that isn't live takes the entry
+    // down even while the release waits for its marker or the domain is stopped.
     let room = rows(sql, "SELECT id FROM workspace", vec![])?
         .first()
         .and_then(|row| text(&row["id"]))
@@ -1290,12 +1326,48 @@ async fn custom_write(
         CustomRoute::Wait(code) => return Ok(Err(CustomFail::Retry(code))),
         CustomRoute::Refuse(code) => return Ok(Err(CustomFail::Refuse(code))),
     }
+    let served = !rows(
+        sql,
+        "SELECT 1 AS served FROM release WHERE script_name = ? AND state = 'served' LIMIT 1",
+        vec![script.into()],
+    )?
+    .is_empty();
+    if !served {
+        return Ok(Err(stale_taken_down(sql, provider, host).await?));
+    }
+    match content_stop::read_from(env).await {
+        Stop::Stopped => return Ok(Err(CustomFail::Retry("content_domain_stopped"))),
+        Stop::Unreadable => return Ok(Err(CustomFail::Retry("stop_unreadable"))),
+        Stop::Clear => {}
+    }
     let written = provider.write_entry(host, script).await;
     Ok(match provider.read_entry(host).await {
         Entry::Present(found) if written && found == script => Ok(()),
         _ if !written => Err(CustomFail::Retry("write_not_confirmed")),
         _ => Err(CustomFail::Retry("read_back_differs")),
     })
+}
+
+/// **While a custom host waits for its release's marker** (the review of PR #404, S2): what is there may stay only if it
+/// is the release the room last confirmed served (`podster_core::release::confirmed_script`). Any other entry, a
+/// rollback's earlier release or one that couldn't be read among them, is taken down, and the custom host serves
+/// nothing until the new release is served: a stale release is worse than none. Either way it is tried again.
+async fn stale_taken_down(sql: &SqlStorage, provider: &Provider, host: &str) -> R<CustomFail> {
+    let confirmed =
+        load(sql)?.and_then(|loaded| podster_core::release::confirmed_script(&loaded.state));
+    match provider.read_entry(host).await {
+        Entry::Absent => return Ok(CustomFail::Retry("release_not_served")),
+        Entry::Present(found) if Some(&found) == confirmed.as_ref() => {
+            return Ok(CustomFail::Retry("release_not_served"))
+        }
+        _ => {}
+    }
+    let (_, absent) = remove_entry(provider, host).await;
+    Ok(CustomFail::Retry(if absent {
+        "release_not_served_taken_down"
+    } else {
+        "custom_host_entry_remains"
+    }))
 }
 
 /// Whether the room has recorded a release with this script as live or served. A rollback's own record names the

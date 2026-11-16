@@ -138,6 +138,26 @@ fn now_ms() -> i64 {
     Date::now().as_millis() as i64
 }
 
+/// The proof job's clock. Test builds only: a room a test gave `test_hostname_clock (now)` reads that, so a wait's edge
+/// is shown to the millisecond with no real time spent (review standard 1).
+fn job_now(sql: &SqlStorage) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if let Some(now) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_clock'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| rows(sql, "SELECT now FROM test_hostname_clock", vec![]).ok())
+    .and_then(|found| found.first().map(|row| int(&row["now"])))
+    {
+        return now;
+    }
+    let _ = sql;
+    now_ms()
+}
+
 /// One request as the contract's `AppHostnameRequest` gives it. A pending request past its 72 hours whose proof was
 /// never taken to the object reads as `expired`, as the job will record it.
 fn request_view(row: &Value, now: i64) -> Value {
@@ -451,12 +471,15 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
     // An ask or a withdrawal that got no answer waits as long as has gone by since the request last changed, which
     // `checked` never moves, so the wait doubles from a minute up to an hour.
     // A committed claim whose custom hostname reads `active` and is routed is read less often (8c, the deep review's
-    // D5): routing gives the read its purpose, and once routed it only has to notice a change.
+    // D5): routing gives the read its purpose, and once routed it only has to notice a change. A host the applier
+    // refused isn't routed in that sense: it is read again at the shortest wait, so it opens again once the cause clears
+    // (the review of PR #404, S3).
     let routed_active = state == Some(HostnameRequestState::Claimed)
         && !rows(
             sql,
             "SELECT 1 AS r FROM hostname_provider p JOIN serve_state s ON s.host = ? AND s.kind = 'custom' AND s.closed = 0
-               WHERE p.request_id = ? AND p.provider_status = 'active'",
+               WHERE p.request_id = ? AND p.provider_status = 'active'
+                 AND NOT EXISTS (SELECT 1 FROM serve_apply a WHERE a.host = s.host AND a.refused_version = s.version)",
             vec![
                 row["hostname"].as_str().unwrap_or_default().into(),
                 row["id"].as_str().unwrap_or_default().into(),
@@ -574,7 +597,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
         }
-        let now = now_ms();
+        let now = job_now(&sql);
         let store = sql.clone();
         transaction_sync(&self.state, move || sweep_expired(&store, now))?;
         let Some(row) = open_request(&sql)? else {

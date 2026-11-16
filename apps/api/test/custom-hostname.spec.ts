@@ -191,7 +191,15 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     await confirmGone(r);
     expect((await providerRow(r)).gone_at).not.toBeNull();
     expect((await claimState(name)).claim).not.toBeNull();
+    // The host was routed (8c), and with no content provider its applier can't confirm the entry gone, so the claim is
+    // still held (the review of PR #404, S1).
     await step(r);
+    expect(await requestRow(r)).toMatchObject({ state: "ending" });
+    expect((await claimState(name)).claim).not.toBeNull();
+    // With one, the applier confirms the host has no entry, and the claim is freed in the same pass.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    await step(r);
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
     expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_moved" });
     expect(await claimState(name)).toEqual({ claim: null, suspended: false, generation: 1 });
     expect(await inClaim(name, (sql) => sql.exec("SELECT state, held, end_reason FROM claim").toArray())).toEqual([{ state: "ended", held: null, end_reason: "hostname_moved" }]);

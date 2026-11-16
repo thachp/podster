@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm.ts";
+import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -71,7 +71,7 @@ async function room() {
   await add(MEMBER, "member");
   await add(GUEST, "guest");
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return { id, uploads: `/v1/workspaces/${id}/uploads` };
 }
 async function addPerson(id: string, who: Who, role: string) {

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // Public claims (M4 step 8, decisions 151, 159 and 162): an agent joins a public room as a guest and claims an opening in one
 // transaction, with no invitation, counted exactly against its own, its linking person's, its organization's and the room's
@@ -85,7 +85,7 @@ async function publicRoom(opts: { capacity?: number; preset?: string } = {}) {
   expect(done.status, done.text).toBe(200);
   await drain(id);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return { id, handle: done.body.public_handle as string, role: opening.body.id as string };
 }
 const claim = (who: Who, handle: string, role: string, opts: { claims?: object; on?: boolean } = {}) => api(who, "POST", `/v1/public/workrooms/${handle}/claim`, { role_id: role }, opts);

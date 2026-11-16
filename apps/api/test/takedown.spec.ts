@@ -3,7 +3,7 @@ import { createExecutionContext, createScheduledController, env, runInDurableObj
 import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm, runAlarm, runtimeAlarms } from "./alarm";
 import { customRoutingCases } from "./custom-routing.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
@@ -85,7 +85,7 @@ async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = 
   // Making a room sets its alarm a moment ahead. It is run out and cleared here, before any row is written, so no run
   // of it can land between the rows below or between a test's next steps: nothing is set or running after this, and
   // only a command or a test's own pass runs one.
-  await alarmQuiet(stub(room));
+  await manualAlarms(stub(room));
   const label = newLabel();
   const host = `${label}.${FAKE.domain}`;
   const script = (id: string) => `${label}.${id}`;
@@ -193,7 +193,7 @@ const pass = (room: string) => alarmPass(stub(room));
  */
 const passAndHold = (room: string) => runInDurableObject(stub(room), async (instance: any, state: any) => {
   await state.storage.deleteAlarm();
-  await instance.alarm();
+  await runAlarm(instance, state);
   state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
   state.storage.sql.exec("UPDATE script_delete SET next_attempt_at = ? WHERE gone_at IS NULL AND attempts > 0", FAR());
 });
@@ -387,7 +387,7 @@ describe("an operator's suspension of an app", () => {
      * No alarm is set again until the question has been answered.
      */
     const toldFrom = (before: (sql: any) => void) => runInDurableObject(stub(a.room), async (instance: any, state: any) => {
-      await instance.alarm();
+      await runAlarm(instance, state);
       await state.storage.deleteAlarm();
       before(state.storage.sql);
       const response: Response = await instance.fetch(new Request("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }));
@@ -1703,7 +1703,7 @@ describe("an operator's suspension of a custom hostname", () => {
    */
   const settleAndHold = (hostname: string) => runInDurableObject(claimOf(hostname), async (instance: any, state: any) => {
     await state.storage.deleteAlarm();
-    await instance.alarm();
+    await runAlarm(instance, state);
     const alarm = await state.storage.getAlarm();
     const row = state.storage.sql.exec("SELECT attempts, next_attempt_at, answered_at FROM notice ORDER BY seq DESC LIMIT 1").one();
     state.storage.sql.exec("UPDATE notice SET next_attempt_at = ? WHERE answered_at IS NULL", FAR());
@@ -1978,6 +1978,8 @@ describe("an operator's suspension of a custom hostname", () => {
   it("tells operators of a notice no room answers, and gets a lost wake back from the reconcile", async () => {
     await fresh();
     const c = await claimed();
+    // What this shows is the room's own alarm, woken by the reconcile, at work: so the room's alarms are the runtime's.
+    await runtimeAlarms(stub(c.room));
     await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
     await switchedOn(() => suspendHost(c.hostname));
     const first = await settleAndHold(c.hostname);
@@ -2158,6 +2160,8 @@ describe("the two reconciles", () => {
     await fresh();
     // Its app is down in its own state, its entry is still at the provider, and no alarm is set: the wake was lost.
     const a = await downButNotApplied();
+    // What this shows is each room's own alarm, woken by the reconcile, at work: so the rooms' alarms are the runtime's.
+    await runtimeAlarms(stub(a.room));
     await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label != ?").bind(a.label).run();
     expect(await nextAlarm(stub(a.room))).toBeNull();
     // The removal is held at the stand-in. Only the room's applier removes an entry, and this test runs no pass of
@@ -2174,6 +2178,7 @@ describe("the two reconciles", () => {
     // A second room owes the same from a time with no provider, when it set no alarm. Nothing of its is at the
     // provider, so no list names it: the walk of the lookup table reaches it, from either pass.
     const b = await downButNotApplied();
+    await runtimeAlarms(stub(b.room));
     await fake("/reset", {});
     await inRoom(b.room, (sql) => sql.exec("UPDATE script_delete SET attempts = 12, last_code = 'delete_500' WHERE script_name = ?", b.kept));
     expect(await nextAlarm(stub(b.room))).toBeNull();
@@ -2402,6 +2407,8 @@ describe("the two reconciles", () => {
     const a = await app({ plain: true });
     await switchedOn(() => suspend(a.label));
     await pass(a.room);
+    // The delete owed again is sent by the room's own alarm, which the reconcile wakes: the runtime's, here.
+    await runtimeAlarms(stub(a.room));
     const unpublish = () => one(a.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish");
     const queue = async () => (await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch, row.gone]);
     expect(await unpublish()).toEqual({ release_epoch: 5, done: 1 });

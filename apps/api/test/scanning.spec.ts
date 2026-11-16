@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, runAlarm } from "./alarm.ts";
 
 const BINDINGS = env as any;
 const SECRET = "test-scanner-secret";
@@ -45,6 +45,8 @@ async function room() {
   const id = (await api("POST", "/v1/workspaces", { name: "Scans" })).body.id as string;
   madeRooms.push(id);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  // The room's alarms stay the runtime's, not `manualAlarms`: this file's tests wait for the scan queue's sends the
+  // runtime's own firing makes, and a test here that writes rows after a command quiets the room first.
   await alarmQuiet(stub(id));
   return id;
 }
@@ -304,7 +306,7 @@ describe("a scan with no verdict", () => {
     const file = await stored(id);
     await send(verdict(id, file));
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", 1, file.id));
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    await runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
     expect((await row(id, file.id)).state).toBe("ready");
     const next = await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM stored_object WHERE state = 'scanning'").one().n);
     expect(next).toBe(0);
@@ -357,7 +359,7 @@ describe("a file ready or not", () => {
     expect((await answer(await send(verdict(id, found, { report: "malware_found", database: null })))).body.state).toBe("blocked");
     const late = await stored(id, "late.txt");
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, late.id));
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    await runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
     expect((await row(id, late.id)).state).toBe("failed");
     for (const object of [found.id, late.id]) {
       const refused = await download(object);

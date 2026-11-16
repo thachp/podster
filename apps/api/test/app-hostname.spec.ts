@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, expectNoAlarmSooner } from "./alarm";
+import { alarmPass, alarmQuiet, expectNoAlarmSooner, manualAlarms, runtimeAlarms } from "./alarm";
 import { txtData } from "./fake-resolver";
 
 // M6 step 8, the first PR: a room's custom hostname, its challenge and the claim (ADR 0010's "Custom domains", steps
@@ -79,7 +79,8 @@ async function room(org: string): Promise<Room> {
   expect(created.status, org).toBe(200);
   const id: string = created.body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const member: Who = { id: `per_ah_mem_${n}`, org };
   const admin: Who = { id: `per_ah_adm_${n}`, org };
@@ -116,21 +117,19 @@ const requestRow = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT id, hos
 const rewindLook = (r: Room, ms = 61_000) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = checked_at - ? WHERE checked_at IS NOT NULL", ms));
 const pass = (r: Room) => switchedOn(() => alarmPass(stub(r.room)));
 const events = (r: Room) => all(r.room, "SELECT type, actor_id FROM event WHERE type LIKE 'app_hostname.%' ORDER BY seq");
-/** Asks for `name` with release switched on, then quiets the room, so the ask's own alarm can't act on rows the test
- *  writes next. The ask sets the room's alarm due at once; unquieted, the runtime's run of it can look with release
- *  off and record `checked_at` after the test's `rewindLook`, so the test's own pass finds the look not due and the
- *  request stays `pending` (main's CI run 43949493084). */
-async function askedQuiet(r: Room, name: string) {
-  const request = (await switchedOn(() => ask(r, name))).body.request;
-  await alarmQuiet(stub(r.room));
-  return request;
-}
-/** Removes the room's hostname with release switched on, then quiets the room, as `askedQuiet` does for an ask. */
-async function removedQuiet(r: Room) {
-  const answer = await switchedOn(() => remove(r));
-  await alarmQuiet(stub(r.room));
-  return answer;
-}
+/** Asks for `name` with release switched on. The ask leaves the room's alarm due at once, and only the test's own
+ *  passes run it, since `room` made the room's alarms the test's: nothing needs quieting before the rows it writes next. */
+const askFor = async (r: Room, name: string) => (await switchedOn(() => ask(r, name))).body.request;
+/** Removes the room's hostname with release switched on. */
+const removed = (r: Room) => switchedOn(() => remove(r));
+/** The proof job's clock (`test_hostname_clock`) stopped at `now`, or given back to real time with null. */
+const jobClock = (r: Room, now: number | null) => inRoom(r.room, (sql) => {
+  sql.exec("DROP TABLE IF EXISTS test_hostname_clock");
+  if (now !== null) {
+    sql.exec("CREATE TABLE test_hostname_clock (now INTEGER)");
+    sql.exec("INSERT INTO test_hostname_clock (now) VALUES (?)", now);
+  }
+});
 const refusedBy = (answer: { status: number; code?: string }) => [answer.status, answer.code];
 /** The room's provider configured, as a deployment with one has it, while `run` runs. */
 async function withProvider<T>(r: Room, run: () => Promise<T>): Promise<T> {
@@ -265,7 +264,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("claims the name only once the room's own value is in DNS, and records the request's ID and generation with the claim", async () => {
     const r = await room("org_ah_claim");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     // Another value at the name proves nothing.
     await answerWith(name, "0".repeat(64), "v=spf1 -all");
     await rewindLook(r);
@@ -273,9 +272,12 @@ describe("the proof job and the claim (M6 step 8)", () => {
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
     const looks = (await asked()).filter((line) => line.includes(name));
     expect(new Set(looks)).toEqual(new Set([`GET _podster-challenge.${name} TXT application/dns-json`]));
-    // Not looked at again before its turn.
+    // Not looked at again before its turn: the job's clock stopped at the moment of its last look, so no real time
+    // the test takes can bring the turn round (review standard 1).
+    await jobClock(r, (await requestRow(r)).checked_at);
     await pass(r);
     expect((await asked()).filter((line) => line.includes(name))).toHaveLength(looks.length);
+    await jobClock(r, null);
     // The room's own value, among others, in two strings, as a long value comes: the claim is the room's.
     await answerWith(name, "unrelated", request.challenge_value);
     await rewindLook(r);
@@ -295,19 +297,19 @@ describe("the proof job and the claim (M6 step 8)", () => {
       { type: "app_hostname.requested", actor_id: r.owner.id },
       { type: "app_hostname.claimed", actor_id: "podster" },
     ]);
-    // A claim the room holds owes the job nothing before its turn (8b creates its custom hostname then).
+    // A claim the room holds owes the job nothing before its turn (8b creates its custom hostname then), with the
+    // job's clock stopped at the claim's last look.
+    const claimed = await requestRow(r);
+    await jobClock(r, claimed.checked_at);
     await pass(r);
-    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    expect(await requestRow(r)).toEqual(claimed);
   });
 
   it("gives one hostname to one room: a second room's proof is refused while the claim lives", async () => {
     const [a, b] = [await room("org_ah_one_a"), await room("org_ah_one_b")];
     const name = newName();
     const [ra, rb] = await switchedOn(async () => [(await ask(a, name)).body.request, (await ask(b, name)).body.request]);
-    // Each ask set its room's alarm, due at once. Quieted, so only the passes below look, a's first: otherwise b's own
-    // run could look while a's pass has release switched on, and claim the name first.
-    await alarmQuiet(stub(a.room));
-    await alarmQuiet(stub(b.room));
+    // Each ask set its room's alarm, due at once, and only the passes below run either room's job, a's first.
     await answerWith(name, ra.challenge_value, rb.challenge_value);
     await rewindLook(a);
     await pass(a);
@@ -328,7 +330,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
     const r = await room("org_ah_noresolver");
     const name = newName();
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_resolver_off (x INTEGER)"));
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
     // A public room's first check of its discovery row comes at a random time within six hours, which can be sooner
     // than the hour below. Set past it, so the only wake left to read is the proof job's.
@@ -349,24 +351,34 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("while release is switched off, looks nothing up and asks for nothing", async () => {
     const r = await room("org_ah_jobsoff");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
-    await rewindLook(r);
+    // Each pass below is the test's own, and is shown to have looked: the look it records is past the rewound one.
+    // The job's clock is set past the rewound look by a minute and a second, so its turn has come by the job's clock
+    // alone, whatever real time the test takes.
+    const looked = async (run: () => Promise<unknown>) => {
+      const rewound = (await requestRow(r)).checked_at ?? 0;
+      await jobClock(r, Math.max(rewound, Date.now()) + 61_000);
+      await run();
+      expect((await requestRow(r)).checked_at).toBeGreaterThan(rewound);
+      await jobClock(r, null);
+    };
     const before = (await asked()).filter((line) => line.includes(name)).length;
-    await alarmPass(stub(r.room));
+    await looked(() => alarmPass(stub(r.room)));
     expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
-    expect((await requestRow(r)).checked_at).not.toBeNull();
     // Nor while release is switched off in the room, with the deployment's switch on.
     await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
     await rewindLook(r);
-    await pass(r);
+    await looked(() => pass(r));
     expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
     expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
     // An ask already out is finished whatever the switches say: only the object's answer settles it.
+    // Its turn comes by the job's clock: an hour, the longest an ask waits, after the last look.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?", Date.now()));
-    await rewindLook(r);
+    await jobClock(r, (await requestRow(r)).checked_at + 3600_000);
     await alarmPass(stub(r.room));
+    await jobClock(r, null);
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
     expect((await asked()).filter((line) => line.includes(name)).length).toBe(before);
   });
@@ -374,7 +386,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("proves nothing from a resolver that fails, or answers in any other form", async () => {
     const r = await room("org_ah_badresolver");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     const value = request.challenge_value;
     const at = `_podster-challenge.${name}`;
     const bad: unknown[] = [
@@ -409,7 +421,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("ends a request whose proof was taken to the object only by the object's answer, expired among them", async () => {
     const r = await room("org_ah_lateask");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     // As if the job had recorded the proof and then lost the object's answer, 73 hours ago.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?, expires_at = expires_at - ?, proved_at = 1, checked_at = ?", 73 * 3600_000, 73 * 3600_000, Date.now()));
     // The room's own clock doesn't end it: the object may have given the claim.
@@ -441,10 +453,10 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("withdraws a request whose ask was out, so the object never grants it, whichever arrives first", async () => {
     const r = await room("org_ah_withdraw");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     // The proof was recorded, and the ask is out.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
-    expect((await removedQuiet(r)).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
+    expect((await removed(r)).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
     // The withdrawal reaches the object first, the next time the job runs: it is recorded, with nothing to free.
     await rewindLook(r);
     await alarmPass(stub(r.room));
@@ -459,12 +471,12 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("frees a claim the object gave for a request the room removed before committing it", async () => {
     const r = await room("org_ah_free");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     // The object granted the ask, and the answer never reached the room.
     const granted = await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 });
     expect(granted.body).toEqual({ decision: "granted" });
-    await removedQuiet(r);
+    await removed(r);
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", claimed_at: null });
@@ -478,24 +490,22 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("ends a committed claim the long way: the name stays held until its object has marked it ending and freed it", async () => {
     const r = await room("org_ah_committed");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
     await pass(r);
     // A removal now is of a committed claim, not a withdrawal.
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
-    expect((await removedQuiet(r)).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
+    expect((await removed(r)).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
     // The name stays held while the claim ends, and the room can't ask for another.
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id, state: "live" });
     expect((await switchedOn(() => ask(r, newName()))).code).toBe("hostname_limit");
-    await alarmQuiet(stub(r.room));
     // 8b: the object is told, then, with nothing ever made at Cloudflare for it, the claim is freed
-    // (`custom-hostname.spec.ts` has the rest). Each step is the test's own pass, the room quiet before each rewind.
+    // (`custom-hostname.spec.ts` has the rest). Each step is the test's own pass, the only runs the room's job gets.
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect((await claimState(name)).claim).toMatchObject({ state: "ending" });
     expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1 });
-    await alarmQuiet(stub(r.room));
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_unmapped" });
@@ -505,7 +515,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("stops serving a committed claim's host in the same transaction as its removal", async () => {
     const r = await room("org_ah_close");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
     await pass(r);
@@ -520,14 +530,13 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("withdraws a request a suspension's notice ended before the room committed its claim, and frees the name", async () => {
     const r = await room("org_ah_notice");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 });
     await switchedOn(async () => expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${name}/suspend`, { reason: "abuse" })).status).toBe(200));
     // The object tells the room, under the generation the claim was given under, which is the request's own.
     await alarmPass(claimOf(name));
     expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_suspended", claimed_at: null });
-    await alarmQuiet(stub(r.room));
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_suspended" });
@@ -544,7 +553,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
   it("withdraws a request whose retried ask met the name's suspension before its notice did, so the name is free once lifted", async () => {
     const r = await room("org_ah_retry_first");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
     // The object granted the ask, and its answer never reached the room.
     const ask0 = { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 };
@@ -578,7 +587,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
   it("is closed everywhere until claims are complete: without the test build's opt-in nothing is asked for, looked up or claimed, provider or not", async () => {
     const r = await room("org_ah_gate");
     const name = newName();
-    const request = await askedQuiet(r, name);
+    const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
     await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_open"));
     const before = (await asked()).filter((line) => line.includes(name)).length;
@@ -604,14 +613,14 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "pending", claimed_at: null });
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id });
-    expect((await removedQuiet(r)).body.request).toMatchObject({ state: "ending" });
+    expect((await removed(r)).body.request).toMatchObject({ state: "ending" });
     await rewindLook(r);
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_unmapped" });
     expect((await claimState(name)).claim).toBeNull();
     // Opted in, as a test build lets a room be, the same path asks and claims.
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)"));
-    const again = await askedQuiet(r, newName());
+    const again = await askFor(r, newName());
     await answerWith(again.hostname, again.challenge_value);
     await rewindLook(r);
     await pass(r);
@@ -654,7 +663,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     // Archived: the request's proof was never taken anywhere, so it is over at once, and nothing is looked up.
     const a = await room("org_ah_facts_archived");
     const nameA = newName();
-    const ra = await askedQuiet(a, nameA);
+    const ra = await askFor(a, nameA);
     await answerWith(nameA, ra.challenge_value);
     await inRoom(a.room, (sql) => sql.exec("UPDATE workspace SET status = 'archived'"));
     await rewindLook(a);
@@ -670,7 +679,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     // again.
     const b = await room("org_ah_facts_app");
     const nameB = newName();
-    const rb = await askedQuiet(b, nameB);
+    const rb = await askFor(b, nameB);
     await inRoom(b.room, (sql) => {
       sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now());
       sql.exec("UPDATE app_label SET suspended_at = 1, suspension_reason = 'abuse'");
@@ -686,7 +695,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     // The organization's release switch, as the room applied it, can't be read: nothing is looked up, and nothing ends.
     const c = await room("org_ah_facts_unread");
     const nameC = newName();
-    const rc = await askedQuiet(c, nameC);
+    const rc = await askFor(c, nameC);
     await answerWith(nameC, rc.challenge_value);
     // Held at a generation its last take equals, which no set makes.
     await inRoom(c.room, (sql) => sql.exec("UPDATE release_switch_applied SET granted = 1, generation = 1, last_take = 1"));
@@ -710,5 +719,53 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     // Once the five were made over an hour ago, the room may ask again.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?", 3600_000));
     expect((await switchedOn(() => ask(r, newName()))).status).toBe(200);
+  });
+});
+
+describe("a room's alarms are the test's (review standard 1)", () => {
+  /** The handler the runtime calls when the room's alarm comes due: here, forced to come at one chosen moment. */
+  const runtimeFires = (r: Room) => runInDurableObject(stub(r.room), (instance: any) => instance.alarm());
+
+  it("lets no run the test didn't start take the step its own pass asserts on", async () => {
+    // main's CI run 43949493084, in the order that failed it. The ask leaves the room's alarm due at once, and nothing
+    // here quiets the room: the runtime's own firing of that alarm comes between the test's rows and its pass, with
+    // release switched off. Had it run the job, it would have recorded a look, so the test's pass found the next one a
+    // minute away and the request stayed pending.
+    const r = await room("org_ah_forced");
+    const name = newName();
+    const request = (await switchedOn(() => ask(r, name))).body.request;
+    await answerWith(name, request.challenge_value);
+    await rewindLook(r);
+    await runtimeFires(r);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", checked_at: null });
+    await pass(r);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+  });
+
+  it("runs the job on the runtime's firing again once the room is given back, so the switch is all that differs", async () => {
+    const r = await room("org_ah_runtime");
+    const name = newName();
+    await switchedOn(() => ask(r, name));
+    await runtimeAlarms(stub(r.room));
+    await runtimeFires(r);
+    expect((await requestRow(r)).checked_at).not.toBeNull();
+  });
+
+  it("is read only by a test build: the route, the table and the flag are compiled only under the feature", () => {
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    const files = Object.entries(sources);
+    // The table and the route are named in one file, which a deployed build doesn't compile.
+    expect(files.filter(([, text]) => text.includes("test_alarms_manual")).map(([file]) => file)).toEqual(["workspace/test_alarms.rs"]);
+    expect(files.filter(([, text]) => text.includes("/internal/test-alarm-pass")).map(([file]) => file)).toEqual(["workspace/test_alarms.rs"]);
+    expect(sources["workspace.rs"]).toMatch(/#\[cfg\(feature = "failpoints"\)\]\nmod test_alarms;/);
+    // Each item in it is under the feature too.
+    const module = sources["workspace/test_alarms.rs"];
+    expect(module.match(/^pub\(\w+\) (const|fn) /gm)).toHaveLength(2);
+    expect(module.match(/#\[cfg\(feature = "failpoints"\)\]\npub\(\w+\) (const|fn) /g)).toHaveLength(2);
+    // Every use of it, and of the flag that marks the test's pass, sits just under the feature's attribute.
+    const lines = sources["workspace.rs"].split("\n");
+    const uses = lines.flatMap((line, i) => (/test_alarms::|test_pass/.test(line) ? [i] : []));
+    expect(uses.length).toBeGreaterThanOrEqual(5);
+    for (const i of uses) expect(lines.slice(Math.max(0, i - 4), i).join("\n"), lines[i]).toContain('#[cfg(feature = "failpoints")]');
   });
 });

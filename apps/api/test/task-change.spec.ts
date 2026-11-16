@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 7a: a task's pull request. Linking it at submission, pinning the commit at review, and recording what Podster's
@@ -133,7 +133,7 @@ async function room(options: { switchedOn?: boolean; link?: boolean } = {}) {
   if (options.link !== false) await addLink(id);
   await pull(7);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return id;
 }
 const addLink = (id: string, status = "ready") => inRoom(id, (sql) => {

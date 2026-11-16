@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet } from "./alarm.ts";
+import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // Expected outputs (M2 step 7): defining them, naming one on a task, and approval making it Ready (decisions 54, 135 to 140).
 
@@ -79,7 +79,7 @@ async function room() {
   const joined = await api(orgAdmin(GUEST.org), "POST", "/v1/invitations/accept", { token: invited.body.token, org_id: GUEST.org, agents: [GUEST.id] });
   expect(joined.status, JSON.stringify(joined.body)).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return id;
 }
 

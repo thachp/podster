@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmQuiet, manualAlarms } from "./alarm";
 
 // M6 step 6: the room's release configuration, read and set (`getReleaseConfig`, `setReleaseConfig`). Only the room's
 // owner or an admin, as a person, and never an agent (decision 215). Switching release on needs everything release
@@ -70,7 +70,7 @@ async function room(org: string, opts: { configured?: boolean } = {}): Promise<R
   expect(created.status, org).toBe(200);
   const id: string = created.body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const member: Who = { id: `per_rc_mem_${n}`, org };
   const admin: Who = { id: `per_rc_adm_${n}`, org };

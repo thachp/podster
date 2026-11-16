@@ -5,7 +5,8 @@
   "`calls_allowed: true` allows every call to the helper the entry's sleep is in, and only an entry with `owed: false` may say it (a poll, or a stand-in's own failure bound). A call to any other helper that sleeps is its own finding and its own entry, so a new one fails.",
   "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
   "`lines_when_listed` and `listed_at` are for a reader: the check doesn't use them, and lines move.",
-  "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E."
+  "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E.",
+  "Rules 4 and 5 (`runtime-alarms`, `direct-alarm`) were added with the test-only switch that puts a room's alarms under the test's control, on branch fix/test-rooms-alarms-manual."
  ],
  "categories": {
   "A": "sleep: a bounded poll for the state itself (right as it is, unless its reason says owed)",
@@ -22,7 +23,9 @@
   "L": "margin: elapsed wall-clock time asserted",
   "R": "unquieted: an API spec that makes rooms and quiets none",
   "S": "sleep: a stand-in's own bound that only detects a failure (right as it is)",
-  "T": "sleep: a stand-in's scripted delay"
+  "T": "sleep: a stand-in's scripted delay",
+  "M": "runtime-alarms: an API spec whose rooms keep the runtime's own alarms",
+  "N": "direct-alarm: a test that calls the handler the runtime calls, on purpose"
  },
  "known_gaps": [
   {
@@ -1218,6 +1221,76 @@
    ],
    "code": "if (mode === \"slow\") await new Promise((resolve) => setTimeout(resolve, 200));",
    "reason": "The \"slow\" mode's 200 ms before answering a mint: a test using it may pass only because 200 ms sits on one side of the caller's wait. Owed: a hold the test releases instead of a fixed delay."
+  },
+  {
+   "file": "apps/api/test/a2a-fasta2a.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "function sentToFasta2a",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `fasta2a ${++counter}` })).id as string;",
+   "reason": "Not tried under manualAlarms: these tests need a third-party agent, so local runs and CI's api job skip them, and a change to how their rooms run can't be shown here. Owed: put the room under the test and pass for the send, in a run that has the agent."
+  },
+  {
+   "file": "apps/api/test/a2a-langgraph.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "function sentToLangGraph",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `LangGraph ${++counter}` })).id as string;",
+   "reason": "Not tried under manualAlarms: these tests run only from e2e/run-langgraph-check.mjs with a LangGraph server, which local runs skip. Owed: put the room under the test and pass for the send, in a run that has the server."
+  },
+  {
+   "file": "apps/api/test/asset-links.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "function room",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Inputs\" })).body.id;",
+   "reason": "Three tests wait for wakes that the runtime's own firing of the room's alarm sends, and failed under manualAlarms. Owed: manualAlarms in the room helper, with those tests either passing for the wake or giving their room back with runtimeAlarms."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "function room",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const created = await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" });",
+   "reason": "Twelve tests wait for delivery, index projection or a sweep that the runtime's own firing of the room's alarm does, and failed under manualAlarms. Owed: manualAlarms in the room helper, with those tests passing for what they wait on or giving their room back with runtimeAlarms."
+  },
+  {
+   "file": "apps/api/test/releases.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "M6's routes, none of them built > can't be told from a path nobody defined while release is switched off, by anyone",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const room: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
+   "reason": "Makes rooms inside its tests with no room helper and quiets none (its `unquieted` entry, also owed). Owed with that fix: one room helper that ends with manualAlarms."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "runtime-alarms",
+   "where": "function room",
+   "category": "M",
+   "owed": true,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const id = (await api(\"POST\", \"/v1/workspaces\", { name: \"Scans\" })).body.id as string;",
+   "reason": "Five tests wait for the scan queue's sends that the runtime's own firing of the room's alarm makes, and failed under manualAlarms. Owed: manualAlarms in the room helper, with those tests passing for the send or giving their room back with runtimeAlarms."
+  },
+  {
+   "file": "apps/api/test/app-hostname.spec.ts",
+   "rule": "direct-alarm",
+   "where": "a room's alarms are the test's (review standard 1)",
+   "category": "N",
+   "owed": false,
+   "listed_at": "fix/test-rooms-alarms-manual",
+   "code": "const runtimeFires = (r: Room) => runInDurableObject(stub(r.room), (instance: any) => instance.alarm());",
+   "reason": "The forced-order reproduction: it calls the very handler the runtime calls when the alarm comes due, at one chosen moment, to show that in a room whose alarms are the test's it does nothing, and that with runtimeAlarms it runs the job."
   }
  ]
 }

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm";
 
 // M6 step 6 (6d and its follow-up): ADR 0010's trigger "nobody who may release now remains", as the architect's interim
 // rule (ruling 3, for the owner to review): no person who is the room's owner or one of its admins is in the room and
@@ -66,7 +66,7 @@ async function room(org: string, opts: { up?: boolean; configured?: boolean; sta
   expect(created.status, org).toBe(200);
   const id: string = created.body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const member: Who = { id: `per_nr_mem_${n}`, org };
   const admin: Who = { id: `per_nr_adm_${n}`, org };

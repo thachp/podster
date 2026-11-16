@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the release job's marker (ADR 0010's "The release job", step 6): once the room commits a release live, its
@@ -108,7 +108,7 @@ type Room = { room: string; label: string; host: string; script: string; previou
 async function room(extra: string[] = []): Promise<Room> {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Marker" })).body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const requester = `per_rm_req_${n}`;
   const admin = `per_rm_adm_${n}`;

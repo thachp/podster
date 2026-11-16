@@ -3,7 +3,7 @@
 //
 //   node test-timing-check.mjs [--self-test] [--json] [file.spec.ts ...]
 //
-// It reports three things:
+// It reports five things:
 //
 // - sleep: a timer used as a wait.
 //   - `setTimeout` or `setInterval` inside a `new Promise(...)`, or awaited. That includes reaching it as
@@ -35,10 +35,17 @@
 //   path ending `/v1/workspaces` (a literal, a template's fixed tail, a concatenation's last part, or a constant), a `fetch` of that path with
 //   `method: "POST"`, or a call to a function, in the file or in a helper file it imports, that does one of those.
 //   This is per file: it doesn't follow which rooms reach the quieting call.
+// - runtime-alarms: an API spec that makes a room and never calls `manualAlarms` (apps/api/test/alarm.ts), which puts a
+//   room's alarms under the test's control: the runtime's own firing does nothing there, and only the test's passes run
+//   the job. That is the default a room helper gives; a spec that keeps the runtime's alarms is listed with its reason.
+//   Per file too: it doesn't show that every room reaches the call, or which tests give a room back (`runtimeAlarms`).
+// - direct-alarm: a Durable Object's alarm handler called directly (`instance.alarm()` or `runDurableObjectAlarm`)
+//   outside alarm.ts, in the API's test folder. In a room whose alarms are the test's that call does nothing; the
+//   helpers there run the job through the room's test-only route.
 //
 // It reads every file under apps/api/test and apps/gateway/test, specs and the helpers and stand-ins beside them, whether a
-// spec imports them or not; rule 3 applies to the API's specs only. An imported helper file's sleeping and room-making
-// exports are followed into the specs that call them.
+// spec imports them or not; the room rules (unquieted, runtime-alarms) apply to the API's specs only, and direct-alarm to
+// the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them.
 //
 // How it reads TypeScript: esbuild (pinned in e2e/package.json, so a bump elsewhere can't change it) strips the types
 // with a source map. acorn parses what is left, as static-check.mjs does, and each finding is mapped back to its line.
@@ -451,6 +458,19 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
       return false;
     });
     if (makes.length && !quieted) report(makes[0], "unquieted", `makes a room${makes.length > 1 ? ` (and ${makes.length - 1} more calls do)` : ""} and quiets none with alarmQuiet in afterEach, afterAll or finally`);
+    // Rule 4: a room's alarms are the test's by default. A spec that makes rooms and never calls `manualAlarms` leaves
+    // every room's alarm to the runtime, which runs it beside whatever the test writes.
+    const manual = [...every(tree)].some((n) => n.type === "CallExpression" && calleeName(n) === "manualAlarms");
+    if (makes.length && !manual) report(makes[0], "runtime-alarms", `makes a room${makes.length > 1 ? ` (and ${makes.length - 1} more calls do)` : ""} and puts none under the test with manualAlarms`);
+  }
+  // Rule 5: an object's alarm handler called directly, not through `alarm.ts`. In a room whose alarms are the test's it
+  // does nothing, and anywhere it can overlap a run the runtime started.
+  if (!file.endsWith("/alarm.ts") && file !== "alarm.ts" && !file.startsWith("apps/gateway/")) {
+    for (const node of every(tree)) {
+      if (node.type !== "CallExpression") continue;
+      const direct = (node.callee.type === "MemberExpression" && calleeName(node) === "alarm" && node.arguments.length === 0) || calleeName(node) === "runDurableObjectAlarm";
+      if (direct) report(node, "direct-alarm", "runs an alarm handler directly: use alarmPass, alarmQuiet or runAlarm from alarm.ts");
+    }
   }
 
   makers.delete(null);
@@ -634,15 +654,22 @@ async function selfTest() {
   await expect("margin: a time built as an input inside expect(...) is no expectation of time", 'expect((await depart({ left_at: Date.now() - 600_000 })).status).toBe(200);\nexpect(await send(a, { org_a: Date.now() + 60_000 })).toBe("not_in_organization");\n', []);
   await expect("margin: a reading plus a number outside any expectation is fine", 'await sql("UPDATE t SET at = ?", Date.now() - 1);\nconst far = Date.now() + 60_000;\nawait setDue(far);\n', []);
   // Rule 3.
-  await expect("unquieted: an API spec that makes rooms and never quiets one", 'it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  await alarmQuiet(stub(id));\n});\n', ["2: unquieted"]);
-  await expect("unquieted: through a local helper, a constant path, a template's tail, or fetch", 'const ROOMS = "/v1/workspaces";\nconst newRoom = async () => (await api(OWNER, "POST", ROOMS, {})).body.id;\nit("a", async () => { await newRoom(); });\n', ["2: unquieted"]);
-  await expect("unquieted: a path by concatenation with a constant", 'const BASE = "https://api.test";\nit("a", async () => {\n  await fetch(BASE + "/v1/workspaces", { method: "POST" });\n});\n', ["3: unquieted"]);
-  await expect("unquieted: fetch with method POST", 'it("a", async () => {\n  await fetch(`${BASE}/v1/workspaces`, { method: "POST", body: "{}" });\n});\n', ["2: unquieted"]);
-  await expect("unquieted: a helper imported from a helper file that makes rooms", 'import { room } from "./rooms.ts";\nit("a", async () => { await room(); });\n', ["2: unquieted"], { api: true, path: "/t/x.spec.ts", helpers: new Map([["/t/rooms.ts", { rooms: new Set(["room"]), sleepers: new Set() }]]) });
-  await expect("unquieted: quieted in afterEach", `${quiet}it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  made.push(id);\n});\n`, []);
-  await expect("unquieted: quieted in finally", 'it("a", async () => {\n  const id = (await api(OWNER, "POST", `/v1/workspaces`, {})).body.id;\n  try {\n    await go(id);\n  } finally {\n    await alarmQuiet(stub(id));\n  }\n});\n', []);
+  await expect("unquieted: an API spec that makes rooms and never quiets one", 'it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  await alarmQuiet(stub(id));\n  await manualAlarms(stub(id));\n});\n', ["2: unquieted"]);
+  await expect("unquieted: through a local helper, a constant path, a template's tail, or fetch", 'const ROOMS = "/v1/workspaces";\nconst newRoom = async () => (await api(OWNER, "POST", ROOMS, {})).body.id;\nit("a", async () => { await newRoom(); });\n', ["2: runtime-alarms", "2: unquieted"]);
+  await expect("unquieted: a path by concatenation with a constant", 'const BASE = "https://api.test";\nit("a", async () => {\n  await fetch(BASE + "/v1/workspaces", { method: "POST" });\n});\n', ["3: runtime-alarms", "3: unquieted"]);
+  await expect("unquieted: fetch with method POST", 'it("a", async () => {\n  await fetch(`${BASE}/v1/workspaces`, { method: "POST", body: "{}" });\n});\n', ["2: runtime-alarms", "2: unquieted"]);
+  await expect("unquieted: a helper imported from a helper file that makes rooms", 'import { room } from "./rooms.ts";\nit("a", async () => { await room(); });\n', ["2: runtime-alarms", "2: unquieted"], { api: true, path: "/t/x.spec.ts", helpers: new Map([["/t/rooms.ts", { rooms: new Set(["room"]), sleepers: new Set() }]]) });
+  await expect("unquieted: quieted in afterEach", `${quiet}it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  made.push(id);\n  await manualAlarms(stub(id));\n});\n`, []);
+  await expect("unquieted: quieted in finally", 'it("a", async () => {\n  const id = (await api(OWNER, "POST", `/v1/workspaces`, {})).body.id;\n  await manualAlarms(stub(id));\n  try {\n    await go(id);\n  } finally {\n    await alarmQuiet(stub(id));\n  }\n});\n', []);
   await expect("unquieted: another path under /v1/workspaces doesn't make a room", 'await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, {});\nawait api(OWNER, "GET", "/v1/workspaces");\nawait fetch("https://x/v1/workspaces");\n', []);
   await expect("unquieted: a gateway spec is outside the room rule", 'await api(OWNER, "POST", "/v1/workspaces", {});\n', [], { api: false });
+  // Rule 4: a room's alarms are the test's by default.
+  await expect("runtime-alarms: a spec that makes rooms, quiets them, and puts none under the test", `${quiet}const room = async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", {})).body.id;\n  made.push(id);\n  await alarmQuiet(stub(id));\n  return id;\n};\n`, ["6: runtime-alarms"]);
+  await expect("runtime-alarms: a room helper that ends with manualAlarms", `${quiet}const room = async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", {})).body.id;\n  made.push(id);\n  await manualAlarms(stub(id));\n  return id;\n};\n`, []);
+  // Rule 5: an alarm handler called directly.
+  await expect("direct-alarm: instance.alarm() and runDurableObjectAlarm, in a spec or a helper", 'await runInDurableObject(room, (instance: any) => instance.alarm());\nawait runInDurableObject(room, async (i: any) => { await i.alarm(); });\nawait runDurableObjectAlarm(room);\n', ["1: direct-alarm", "2: direct-alarm", "3: direct-alarm"], { api: false });
+  await expect("direct-alarm: the helpers, and a call named alarm with an argument, aren't", 'await alarmPass(room);\nawait runInDurableObject(room, (instance: any, state: any) => runAlarm(instance, state));\nschedule.alarm(5);\nawait alarm();\n', [], { api: false });
+  await expect("direct-alarm: alarm.ts itself may call the handler", "export const pass = (instance: any) => instance.alarm();\n", [], { api: false, file: "apps/api/test/alarm.ts" });
   // Where a finding is, for the allow-list's key.
   const wheres = ((await findings('describe("rooms", () => {\n  it("waits", async () => {\n    await new Promise((r) => setTimeout(r, 5));\n  });\n});\nconst poll = async () => {\n  await new Promise((r) => setTimeout(r, 5));\n};\n')) ?? []).map((f) => f.where);
   const whereOk = JSON.stringify(wheres) === JSON.stringify(["rooms > waits", "function poll"]);

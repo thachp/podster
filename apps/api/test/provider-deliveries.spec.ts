@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M5 step 5: a provider's webhook delivery, from the API's one route for it to the room. The gateway has verified GitHub's
 // signature by the time anything arrives here, and says so with an assertion that names no one. A delivery is a nudge: it
@@ -94,7 +94,7 @@ async function room(repo?: number, options: { routed?: boolean; change?: boolean
     if (options.routed !== false) await route(repo, id);
   }
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return { id, task };
 }
 

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, runAlarm } from "./alarm.ts";
 import { evictRoom } from "./evict.ts";
 
 const BINDINGS = env as any;
@@ -86,6 +86,8 @@ async function room() {
   }
   for (const who of [BOB, CAROL]) expect((await admit(id, who)).status).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  // The room's alarms stay the runtime's, not `manualAlarms`: this file's tests wait for delivery the runtime's own
+  // firing does, and a test here that writes rows after a command quiets the room first (review standard 1).
   await alarmQuiet(stub(id));
   return { id, add, tasks: `/v1/workspaces/${id}/tasks` };
 }
@@ -3340,7 +3342,7 @@ describe("transferring and recovering a room's ownership", () => {
       expect((await recover(id, human(), helper.id, founder.id)).code).toBe("workspace_not_found");
       expect((await ownerRow(id)).policy_version).toBe(v);
       await vi.waitFor(async () => {
-        await runInDurableObject(stub(id), async (instance: any) => { await instance.alarm(); });
+        await runInDurableObject(stub(id), async (instance: any, state: any) => { await runAlarm(instance, state); });
         const rows = (await api(founder, "GET", `${path(id)}/denials`)).body.denials as any[];
         expect(rows.filter((d) => d.action === "owner.recover").map((d) => [d.actor_id, d.code])).toEqual([["outsider", "workspace_not_found"]]);
       }, { timeout: 5000 });
@@ -3941,7 +3943,7 @@ describe("an organization's oversight of its own agent", () => {
 
 describe("the record of denied changes", () => {
   /** Writes what's held, as the alarm does a few seconds after a refusal. */
-  const flush = (id: string) => runInDurableObject(stub(id), (instance: any) => instance.alarm());
+  const flush = (id: string) => runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
   const denials = async (id: string, who: Who = OWNER, query = "") => {
     await flush(id);
     return (await api(who, "GET", `/v1/workspaces/${id}/denials${query}`)).body;

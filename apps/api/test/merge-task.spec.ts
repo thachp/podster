@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, runAlarm } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 7b: `merge_task`. Asking for a task's reviewed commit to be merged, and the room's job that marks it and
@@ -117,7 +117,7 @@ const pass = (id: string) =>
     sql.exec("DELETE FROM test_merge_dies WHERE at = 'start'");
     sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state IN ('requested', 'outcome_unknown')");
     await state.storage.deleteAlarm();
-    await instance.alarm();
+    await runAlarm(instance, state);
   });
 const made: string[] = [];
 
@@ -160,7 +160,7 @@ async function room(options: { switchedOn?: boolean } = {}) {
   });
   await pull(7);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return id;
 }
 

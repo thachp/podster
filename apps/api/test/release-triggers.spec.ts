@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmQuiet, manualAlarms } from "./alarm";
 
 // M6 step 6: ADR 0010's unpublish triggers that are the room's own state, each fired in the transaction of the command
 // that changes it, and the deployment's own switch, read by the room. Archiving the room, making it private and an
@@ -79,7 +79,7 @@ async function room(org: string, opts: { state?: string; up?: boolean; configure
   expect(created.status, org).toBe(200);
   const id: string = created.body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const requester: Who = { id: `per_rt_req_${n}`, org };
   const admin: Who = { id: `per_rt_adm_${n}`, org };

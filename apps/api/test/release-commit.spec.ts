@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm";
+import { alarmPass, alarmQuiet, manualAlarms, runAlarm } from "./alarm";
 
 // M6 step 5, the second PR: starting a release's upload, committing it live, and ending one that can't go on (ADR
 // 0010's "The release job", steps 1 and 5). Nothing takes a release's request yet (step 6) and nothing calls these
@@ -73,7 +73,7 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
   const owner = { ...OWNER, org, adminOrgs: [org] };
   const room: string = (await api(owner, "POST", "/v1/workspaces", { name: "Release" })).body.id;
   made.push(room);
-  await alarmQuiet(stub(room));
+  await manualAlarms(stub(room));
   const n = ++rooms;
   const requester: Who = { id: `per_rc_req_${n}`, kind: "person", org };
   const admin: Who = { id: `per_rc_adm_${n}`, kind: "person", org };
@@ -150,7 +150,7 @@ const passWithProvider = (room: string) => runInDurableObject(stub(room), async 
   await state.storage.deleteAlarm();
   state.storage.sql.exec("DROP TABLE IF EXISTS test_content_provider_off");
   state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = 0 WHERE next_attempt_at IS NOT NULL");
-  try { await instance.alarm(); } finally {
+  try { await runAlarm(instance, state); } finally {
     state.storage.sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
     await state.storage.deleteAlarm();

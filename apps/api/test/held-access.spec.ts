@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, runAlarm } from "./alarm.ts";
 
 // A room whose migration fails answers every request with an error. Removing someone's access still has to reach it: a
 // disconnect's fence and an organization departure are held, acknowledged, and applied before anything else once the room
@@ -61,7 +61,7 @@ async function room() {
   const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: LEAVER.id, kind: "person", org_id: LEAVER.org, role: "member", policy_version: await version(id) }, { target_member: { person: LEAVER.id, orgs: { [LEAVER.org]: 1 } } });
   expect(added.status, JSON.stringify(added.body)).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return id;
 }
 
@@ -198,7 +198,7 @@ describe("a room whose migration fails", () => {
       sql.exec("DROP TABLE test_hold_outbox");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    await runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
     expect(await queued()).toBe(0);
   });
 
@@ -210,12 +210,12 @@ describe("a room whose migration fails", () => {
     await breakMigration(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(500);
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_outbox"));
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    await runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
     expect(await queued()).toBeGreaterThan(0);
     await fixMigration(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await inRoom(id, (sql) => sql.exec("SELECT failing FROM migration_failure").one().failing)).toBe(0);
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    await runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
     expect(await queued()).toBe(0);
   });
 

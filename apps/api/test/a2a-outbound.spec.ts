@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M3 step 12: outbound offers (ADR 0007, decisions 117, 118, 122 and 129). An offer to an agent records an attempt with the
 // offer. The room's outbox puts it on the A2A queue with IDs only. The consumer asks the agent's Principal, then the room,
@@ -57,6 +57,8 @@ afterEach(async () => {
 async function newRoom() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `Out ${++counter}` })).id as string;
   madeRooms.push(room);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(room)));
   await join(room, LEAD);
   return room;
 }
@@ -118,6 +120,8 @@ describe("an offer to an agent", () => {
     const { agent } = await target(room);
     const task = await offer(room, agent.id);
     const [attempt] = await attempts(room, task.id);
+    // The room's alarms are the test's, so the offer is sent to the queue by this pass; the queue delivers it later.
+    await alarmPass(roomStub(room));
     let job: any;
     for (let i = 0; i < 100 && !job; i++) {
       job = (await hookLog()).filter((r) => r.path === "/__queue").map((r) => JSON.parse(r.body)).find((b) => b.attempt === attempt.id);

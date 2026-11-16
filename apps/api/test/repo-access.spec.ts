@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 6: `get_repo_access`, an agent's short-lived token for the room's repository, against the fake GitHub. Links
@@ -171,7 +171,7 @@ async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: b
   if (options.switchedOn === false) await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const task = await newTask(id, options.assignee ?? AGENT, options);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return { id, task, grant: grant! };
 }
 

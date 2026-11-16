@@ -66,6 +66,8 @@ async function room() {
   const joined = await api(orgAdmin(INVITED.org), "POST", "/v1/invitations/accept", { token: invited.body.token, org_id: INVITED.org, agents: [INVITED.id] });
   expect(joined.status, JSON.stringify(joined.body)).toBe(200);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
+  // The room's alarms stay the runtime's, not `manualAlarms`: this file's tests wait for wakes the runtime's own firing
+  // sends, and a test here that writes rows after a command quiets the room first.
   await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
   return id;
 }

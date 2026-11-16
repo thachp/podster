@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet, nextAlarm } from "./alarm";
+import { alarmQuiet, manualAlarms, nextAlarm, runAlarm } from "./alarm";
 
 // Decision 218's release switch, PR C: what a room does when an operator takes release from its organization or gives
 // it back. The organization's own object sends each room it lists a notice, again until the room acknowledges it; a
@@ -80,7 +80,7 @@ async function room(org: string, opts: { state?: string } = {}): Promise<Room> {
   const id: string = created.body.id;
   made.push(id);
   // The room's index is written by its alarm: so the organization's listing names it, as a real room's would.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const requester: Who = { id: `per_rs_req_${n}`, org };
   const admin: Who = { id: `per_rs_adm_${n}`, org };
@@ -136,7 +136,7 @@ const notify = (org: string) => runInDurableObject(principal(org), async (instan
   const sql = state.storage.sql;
   await state.storage.deleteAlarm();
   if (hasTable(sql, "org_release_notice")) sql.exec("UPDATE org_release_notice SET next_attempt_at = 0");
-  try { await instance.alarm(); } finally {
+  try { await runAlarm(instance, state); } finally {
     if (hasTable(sql, "org_release_notice")) sql.exec("UPDATE org_release_notice SET next_attempt_at = ?", FAR());
     await state.storage.deleteAlarm();
   }

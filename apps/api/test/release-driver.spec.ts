@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the release job's driver (ADR 0010's "The release job"): the room's alarm takes a release through the
@@ -113,7 +113,7 @@ type Room = { room: string; label: string; script: string };
 async function room(state: "queued" | "uploading", extra: string[] = []): Promise<Room> {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Driver" })).body.id;
   made.push(id);
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   const n = ++rooms;
   const requester = `per_rd_req_${n}`;
   const admin = `per_rd_adm_${n}`;

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet } from "./alarm.ts";
+import { alarmQuiet, manualAlarms, runAlarm } from "./alarm.ts";
 
 // M5 step 5b: the room's owner gives and takes back `push` and `merge` grants on the room's repository, a list of them
 // for people, and the two commands that end grants as a side effect: removing a participant, and moving ownership. Links
@@ -89,7 +89,7 @@ async function room(options: { link?: string | null } = {}) {
   });
   if (options.link !== null) await link(id, options.link ?? "ready");
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
-  await alarmQuiet(stub(id));
+  await manualAlarms(stub(id));
   return id;
 }
 
@@ -121,7 +121,7 @@ const footprint = (id: string) => inRoom(id, (sql) => ({
 const holdOutbox = (id: string) => inRoom(id, (sql) => void sql.exec("CREATE TABLE test_hold_outbox (x)"));
 /** Who a grant's revocation was sent to, read while delivery is held. */
 const toldOfRevocation = (id: string) => inRoom(id, (sql) => sql.exec("SELECT o.recipient_principal_id AS r FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'repo_grant.revoked' ORDER BY o.recipient_principal_id").toArray().map((row: any) => row.r) as string[]);
-const flush = (id: string) => runInDurableObject(stub(id), (instance: any) => instance.alarm());
+const flush = (id: string) => runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
 
 describe("giving a grant", () => {
   it("lets the room's owner give a participant one action on the room's repository, audited and told to them", async () => {

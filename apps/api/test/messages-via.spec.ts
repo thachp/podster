@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm.ts";
+import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 /**
  * M3 step 9: a message the gateway marks `via: a2a` is refused once its task is finished (spec 3.1.1, ADR 0007), by
@@ -58,6 +58,8 @@ beforeAll(async () => {
   }
   room = (await api(OWNER, "POST", "/v1/workspaces", { name: "Via" })).body.id;
   madeRooms.push(room);
+  // The room's alarms are the test's from here: only its own passes run the job (review standard 1).
+  await manualAlarms(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(room)));
   for (const [who, role] of [[MEMBER, "member"], [GUEST, "guest"]] as const) {
     const r = await api(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role, policy_version: await version() });
     expect(r.status, JSON.stringify(r.body)).toBe(200);

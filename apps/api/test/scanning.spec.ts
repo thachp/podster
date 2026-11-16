@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, runAlarm } from "./alarm.ts";
+import { alarmPass, alarmQuiet, clearAlarm, runAlarm } from "./alarm.ts";
 
 const BINDINGS = env as any;
 const SECRET = "test-scanner-secret";
@@ -550,7 +550,7 @@ describe("a room from before this", () => {
     const since = Date.now() - 10 * 60 * 1000;
     await runInDurableObject(stub(id), async (_: any, state: any) => {
       state.storage.sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", since, stuck.id);
-      await state.storage.deleteAlarm();
+      await clearAlarm(state);
     });
     expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).toBeNull();
     expect((await api("GET", `/v1/workspaces/${id}`)).status).toBe(200);

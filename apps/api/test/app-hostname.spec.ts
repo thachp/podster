@@ -772,6 +772,21 @@ describe("a room's alarms are the test's (review standard 1)", () => {
     expect(await nextAlarm(stub(r.room))).toBeNull();
   });
 
+  it("reports the alarm the room set after one the runtime's firing took, not the one taken", async () => {
+    // As a pass that sets a wake due at once part way through and its own next wake at the end does (main's CI, PR 406's
+    // release-uncertain run): the alarm set later is the room's next one, and the one taken is no longer reported.
+    const r = await room("org_ah_superseded");
+    await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.setAlarm(Date.now()));
+    await runtimeFires(r);
+    const later = Date.now() + 60 * 60 * 1000;
+    await runInDurableObject(stub(r.room), async (_: any, state: any) => {
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(later);
+    });
+    expect(await nextAlarm(stub(r.room))).toBe(later);
+    await expectNoAlarmSooner(stub(r.room), 60 * 1000);
+  });
+
   it("is read only by a test build: the route, the table and the flag are compiled only under the feature", () => {
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     const files = Object.entries(sources);

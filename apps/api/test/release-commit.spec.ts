@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms, runAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, runAlarm } from "./alarm";
 
 // M6 step 5, the second PR: starting a release's upload, committing it live, and ending one that can't go on (ADR
 // 0010's "The release job", steps 1 and 5). Nothing takes a release's request yet (step 6) and nothing calls these
@@ -147,13 +147,13 @@ const pass = (room: string) => alarmPass(stub(room));
 const FAR = () => Date.now() + 24 * 60 * 60 * 1000;
 /** One pass of the room's alarm with a provider, and in the same turn every wait it left is put far ahead and the provider switched off again: no later run tries anything by itself, however long the test takes. */
 const passWithProvider = (room: string) => runInDurableObject(stub(room), async (instance: any, state: any) => {
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
   state.storage.sql.exec("DROP TABLE IF EXISTS test_content_provider_off");
   state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = 0 WHERE next_attempt_at IS NOT NULL");
   try { await runAlarm(instance, state); } finally {
     state.storage.sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
-    await state.storage.deleteAlarm();
+    await clearAlarm(state);
   }
 });
 /** The room's clock for release commands, set by the test (test builds only), so a bound is shown at its exact edge. */

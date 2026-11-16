@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm";
+import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, nextAlarm } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the release job's marker (ADR 0010's "The release job", step 6): once the room commits a release live, its
@@ -513,7 +513,7 @@ describe("the room's stored alarm for the marker", () => {
       return { before, after: Date.now(), armed };
     } finally {
       await inRoom(id, (sql) => void sql.exec("UPDATE test_release_driver SET from_alarm = 0"));
-      await runInDurableObject(stub(id), (_: any, state: any) => state.storage.deleteAlarm());
+      await runInDurableObject(stub(id), (_: any, state: any) => clearAlarm(state));
     }
   }
 

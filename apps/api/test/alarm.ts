@@ -29,6 +29,16 @@ const forgetHeld = (state: any) => {
 };
 
 /**
+ * Clears an object's alarm from inside `runInDurableObject`, and in a room whose alarms are the test's any alarm the
+ * runtime's firing took too, so `nextAlarm` reads none after it. Use this rather than `state.storage.deleteAlarm()`
+ * where a test means "no wake left".
+ */
+export async function clearAlarm(state: any) {
+  await state.storage.deleteAlarm();
+  forgetHeld(state);
+}
+
+/**
  * Runs the object's alarm job once, in its turn, from inside `runInDurableObject`. A room whose alarms are the test's
  * runs it through the test's route; any other object through its handler, as the runtime would. Use this, never a
  * bare `instance.alarm()`, which does nothing in a room whose alarms are the test's.
@@ -77,7 +87,8 @@ export const alarmQuiet = (room: DurableObjectStub) =>
  * runtime's own firing of the room's alarm does nothing from here, so only a pass the test runs (`alarmPass`,
  * `alarmQuiet`, `runAlarm`) runs the job, and a row the test writes after a command is never met by a run it didn't
  * start. Alarms are still set as before. One due at once is taken by the runtime's firing, which runs nothing and
- * records when it was due, so `nextAlarm` and `expectNoAlarmSooner` still report it until a pass of the test's own.
+ * records when it was due, so `nextAlarm` and `expectNoAlarmSooner` still report it until a pass of the test's own, or
+ * until the room sets its alarm again.
  *
  * The shared room helpers call this. A run the runtime started before the switch is waited out, and the alarm left is
  * cleared, as `alarmQuiet` does. A test that needs the runtime's own firing, delivery that nobody passes for, gives
@@ -99,13 +110,17 @@ export const runtimeAlarms = (room: DurableObjectStub) =>
 
 /**
  * When the room's next alarm is set for, or null if none is. In a room whose alarms are the test's, an alarm the
- * runtime's firing took counts as still set, at the time it came due, until a pass of the test's own runs the job: so an
- * alarm wrongly set due at once still fails a check that none is.
+ * runtime's firing took counts as still set, at the time it came due, while the room has set no other since and no
+ * pass of the test's own has run: so an alarm wrongly set due at once still fails a check that none is. An alarm the
+ * room set after it is its next one, as it would be had the runtime run the job (a pass can set a wake due at once part
+ * way through and its own next wake at the end).
  */
 export const nextAlarm = (room: DurableObjectStub) =>
   runInDurableObject(room, async (_: any, state: any) => {
-    const times = [await state.storage.getAlarm(), ...held(state)].filter((at): at is number => typeof at === "number");
-    return times.length ? Math.min(...times) : null;
+    const set = await state.storage.getAlarm();
+    if (typeof set === "number") return set;
+    const taken = held(state);
+    return taken.length ? Math.min(...taken) : null;
   }) as Promise<number | null>;
 
 /**

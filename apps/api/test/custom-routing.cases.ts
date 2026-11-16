@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmQuiet, manualAlarms, runAlarm } from "./alarm";
+import { alarmQuiet, clearAlarm, manualAlarms, runAlarm } from "./alarm";
 import { txtData } from "./fake-resolver";
 
 // M6 step 8c: routing a custom hostname (ADR 0010's "Custom domains", step 5; the deep review's D5 and D6 on PR #403).
@@ -107,9 +107,9 @@ const applyRow = (r: Room, name: string) => inRoom(r.room, (sql) => sql.exec("SE
 const due = (r: Room) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = updated_at - 61000 WHERE checked_at IS NOT NULL"));
 /** One pass of the room's alarm, alone, handing the room back quiet. */
 const quietPass = (r: Room) => runInDurableObject(stub(r.room), async (instance: any, state: any) => {
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
   await runAlarm(instance, state);
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
 });
 /** One pass of the room's job, its turn made due first, with release switched on for the deployment. */
 const step = async (r: Room) => { await due(r); await switchedOn(() => quietPass(r)); };

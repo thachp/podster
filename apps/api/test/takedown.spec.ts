@@ -3,7 +3,7 @@ import { createExecutionContext, createScheduledController, env, runInDurableObj
 import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms, nextAlarm, runAlarm, runtimeAlarms } from "./alarm";
+import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, nextAlarm, runAlarm, runtimeAlarms } from "./alarm";
 import { customRoutingCases } from "./custom-routing.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
@@ -192,7 +192,7 @@ const pass = (room: string) => alarmPass(stub(room));
  * later run can try again by itself, however long the test takes, until the test says a wait is over with `due`.
  */
 const passAndHold = (room: string) => runInDurableObject(stub(room), async (instance: any, state: any) => {
-  await state.storage.deleteAlarm();
+  await clearAlarm(state);
   await runAlarm(instance, state);
   state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
   state.storage.sql.exec("UPDATE script_delete SET next_attempt_at = ? WHERE gone_at IS NULL AND attempts > 0", FAR());
@@ -354,7 +354,7 @@ describe("an operator's suspension of an app", () => {
     // A commit that committed and couldn't set the alarm: asked again it finds the release live, and sets the alarm.
     const b = await app();
     await inRoom(b.room, (sql) => sql.exec("UPDATE serve_apply SET applied_version = 5"));
-    await runInDurableObject(stub(b.room), (_: any, s: any) => s.storage.deleteAlarm());
+    await runInDurableObject(stub(b.room), (_: any, s: any) => clearAlarm(s));
     expect(await nextAlarm(stub(b.room))).toBeNull();
     expect(await applyRows(b.room)).toEqual([{ host: b.host, applied_version: 5, applied_script: b.flight, attempts: 0, last_code: null }]);
     // The alarm it sets is due at once, and the test runtime runs a due alarm by itself, so a read of it in a later call
@@ -388,7 +388,7 @@ describe("an operator's suspension of an app", () => {
      */
     const toldFrom = (before: (sql: any) => void) => runInDurableObject(stub(a.room), async (instance: any, state: any) => {
       await runAlarm(instance, state);
-      await state.storage.deleteAlarm();
+      await clearAlarm(state);
       before(state.storage.sql);
       const response: Response = await instance.fetch(new Request("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }));
       return ((await response.json()) as any).findings.filter((finding: any) => finding.code === "release_bookkeeping_failing");
@@ -1702,7 +1702,7 @@ describe("an operator's suspension of a custom hostname", () => {
    * takes between steps. `alarm` is the alarm as that run set it.
    */
   const settleAndHold = (hostname: string) => runInDurableObject(claimOf(hostname), async (instance: any, state: any) => {
-    await state.storage.deleteAlarm();
+    await clearAlarm(state);
     await runAlarm(instance, state);
     const alarm = await state.storage.getAlarm();
     const row = state.storage.sql.exec("SELECT attempts, next_attempt_at, answered_at FROM notice ORDER BY seq DESC LIMIT 1").one();
@@ -1996,7 +1996,7 @@ describe("an operator's suspension of a custom hostname", () => {
     // The room can answer again, the notice is due, and the wake for it is lost: no alarm is set.
     await inRoom(c.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
     await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
-    await runInDurableObject(claimOf(c.hostname), (_: any, state: any) => state.storage.deleteAlarm());
+    await runInDurableObject(claimOf(c.hostname), (_: any, state: any) => clearAlarm(state));
     // The removal of the name's entry is held at the stand-in. Only the room's applier removes it, and only after
     // the notice has reached the room. This test runs no alarm of its own from here, so a removal that arrives means
     // the pass asked the name's own object, which set its alarm again, sent the notice, and the room acted on it.

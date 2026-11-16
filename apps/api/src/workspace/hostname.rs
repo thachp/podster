@@ -31,10 +31,13 @@
 //! its proof was taken there; one that can't be read makes it wait. An ask or a withdrawal that got no answer is tried
 //! again after a wait that doubles from a minute up to an hour (`retry_wait_ms`), and never given up.
 //!
-//! **The gate on claims, [`HOSTNAME_CLAIMS_COMPLETE`], false.** While it is false, a deployment with release switched
-//! on and a content provider configured refuses every ask for a hostname as a route that isn't built
-//! (`release_not_available`), and its proof job neither looks nor asks the object, each saying so in one log line by
-//! its code. It is flipped only once a committed claim can end the long way (8b) and claims are rechecked (8d).
+//! **The gate on claims, [`HOSTNAME_CLAIMS_COMPLETE`], false: closed everywhere until 8b and 8d.** While it is false,
+//! every build and environment refuses every ask for a hostname as a route that isn't built (`release_not_available`),
+//! whatever the provider, the resolver, the Public Suffix List or `RELEASES` say, and its proof job neither looks nor
+//! asks the object, each saying so in one log line by its code. Only a test build opens it, for a room a test opts in.
+//! It is flipped only once a committed claim can end the long way (8b) and claims are rechecked (8d). A request whose
+//! proof was recorded and whose granted answer was lost stays held at the object while the gate is closed, which fails
+//! closed, until a removal withdraws it.
 //!
 //! **What this doesn't do:** create anything at Cloudflare, write a serve entry for a custom hostname, recheck a claim,
 //! or end a committed claim at the object. Nothing here serves: the applier still writes nothing for a custom hostname.
@@ -61,9 +64,9 @@ pub(crate) const HOSTNAME_REQUEST_PREFIX: &str = "hnr_";
 /// every name is refused `hostname_unavailable`.
 const PUBLIC_SUFFIX_RULES: &str = "PUBLIC_SUFFIX_RULES";
 /// **Whether custom hostname claims are complete.** False until 8b (a committed claim's long end) and 8d (the daily
-/// recheck) have both merged, and this is the only place it is set. While false, a deployment with release switched on
-/// and a content provider configured refuses every ask for a hostname and its proof job neither looks nor asks
-/// (`Workspace::hostname_claims_open`). What must be true first is in `docs/m6-plan.md`, under "Step 8: the build plan".
+/// recheck) have both merged, and this is the only place it is set. While false, every build and environment refuses
+/// every ask for a hostname and its proof job neither looks nor asks (`Workspace::hostname_claims_open`); only a test
+/// build opens it, for a room a test opts in. What must be true first is in `docs/m6-plan.md`, under "Step 8: the build plan".
 pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;
 /// The rolling window [`request_rate_allows`] counts a room's new requests in.
 const RATE_WINDOW_MS: i64 = 60 * 60 * 1000;
@@ -477,7 +480,7 @@ impl Workspace {
         caller_id: &str,
         asked: &Asked,
     ) -> R<RequestReads> {
-        if !self.hostname_claims_open().await {
+        if !self.hostname_claims_open() {
             let sql = self.state.storage().sql();
             let room = rows(&sql, "SELECT id FROM workspace", vec![])?
                 .first()
@@ -519,15 +522,27 @@ impl Workspace {
     }
 
     /// **The gate on claims** ([`HOSTNAME_CLAIMS_COMPLETE`]): whether a hostname may be asked for and its proof job may
-    /// look and ask. Until claims are complete, not in a deployment that has release switched on and a provider
-    /// configured. With either missing nothing can be served, which is every deployment today, and every test of this.
-    pub(super) async fn hostname_claims_open(&self) -> bool {
+    /// look and ask. **Closed everywhere until claims are complete,** whatever the provider, the resolver, the Public
+    /// Suffix List or `RELEASES` say: a claim is permanent until 8b can end one and 8d rechecks it. Test builds only: a
+    /// room a test gave the table `test_hostname_claims_open` has it open, so the rest of the path can be shown. A
+    /// build without the `failpoints` feature never reads that table.
+    pub(super) fn hostname_claims_open(&self) -> bool {
         if HOSTNAME_CLAIMS_COMPLETE {
             return true;
         }
-        let sql = self.state.storage().sql();
-        takedown::provider(&self.env, &sql).is_none()
-            || !crate::releases::switched_on(&self.env).await
+        #[cfg(feature = "failpoints")]
+        {
+            rows(
+                &self.state.storage().sql(),
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_claims_open'",
+                vec![],
+            )
+            .is_ok_and(|found| !found.is_empty())
+        }
+        #[cfg(not(feature = "failpoints"))]
+        {
+            false
+        }
     }
 
     /// One call to a hostname's own object, by its normalized name. Its answer, or an error for anything but `200`.
@@ -606,7 +621,7 @@ impl Workspace {
             });
         }
         // Before a look or an ask: the gate on claims, then the room's own facts, read again now.
-        if !self.hostname_claims_open().await {
+        if !self.hostname_claims_open() {
             console_error!(
                 "hostname: the proof job didn't go on: room={} request={} code=hostname_claims_incomplete",
                 room,

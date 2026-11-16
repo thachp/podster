@@ -117,11 +117,19 @@ const rewindLook = (r: Room, ms = 61_000) => inRoom(r.room, (sql) => sql.exec("U
 const pass = (r: Room) => switchedOn(() => alarmPass(stub(r.room)));
 const events = (r: Room) => all(r.room, "SELECT type, actor_id FROM event WHERE type LIKE 'app_hostname.%' ORDER BY seq");
 /** Asks for `name` with release switched on, then quiets the room, so the ask's own alarm can't act on rows the test
- *  writes next. */
+ *  writes next. The ask sets the room's alarm due at once; unquieted, the runtime's run of it can look with release
+ *  off and record `checked_at` after the test's `rewindLook`, so the test's own pass finds the look not due and the
+ *  request stays `pending` (main's CI run 43949493084). */
 async function askedQuiet(r: Room, name: string) {
   const request = (await switchedOn(() => ask(r, name))).body.request;
   await alarmQuiet(stub(r.room));
   return request;
+}
+/** Removes the room's hostname with release switched on, then quiets the room, as `askedQuiet` does for an ask. */
+async function removedQuiet(r: Room) {
+  const answer = await switchedOn(() => remove(r));
+  await alarmQuiet(stub(r.room));
+  return answer;
 }
 const refusedBy = (answer: { status: number; code?: string }) => [answer.status, answer.code];
 /** The room's provider configured, as a deployment with one has it, while `run` runs. */
@@ -257,7 +265,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("claims the name only once the room's own value is in DNS, and records the request's ID and generation with the claim", async () => {
     const r = await room("org_ah_claim");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     // Another value at the name proves nothing.
     await answerWith(name, "0".repeat(64), "v=spf1 -all");
     await rewindLook(r);
@@ -320,7 +328,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
     const r = await room("org_ah_noresolver");
     const name = newName();
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_resolver_off (x INTEGER)"));
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await answerWith(name, request.challenge_value);
     // A public room's first check of its discovery row comes at a random time within six hours, which can be sooner
     // than the hour below. Set past it, so the only wake left to read is the proof job's.
@@ -341,7 +349,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("while release is switched off, looks nothing up and asks for nothing", async () => {
     const r = await room("org_ah_jobsoff");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
     const before = (await asked()).filter((line) => line.includes(name)).length;
@@ -366,7 +374,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
   it("proves nothing from a resolver that fails, or answers in any other form", async () => {
     const r = await room("org_ah_badresolver");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     const value = request.challenge_value;
     const at = `_podster-challenge.${name}`;
     const bad: unknown[] = [
@@ -436,7 +444,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     const request = await askedQuiet(r, name);
     // The proof was recorded, and the ask is out.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
-    expect((await switchedOn(() => remove(r))).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
+    expect((await removedQuiet(r)).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
     // The withdrawal reaches the object first, the next time the job runs: it is recorded, with nothing to free.
     await rewindLook(r);
     await alarmPass(stub(r.room));
@@ -456,7 +464,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     // The object granted the ask, and the answer never reached the room.
     const granted = await toClaim(name, "/internal/claim", { hostname: name, workspace_id: r.room, request_id: request.id, requested_at: request.requested_at, generation: 0 });
     expect(granted.body).toEqual({ decision: "granted" });
-    await switchedOn(() => remove(r));
+    await removedQuiet(r);
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", claimed_at: null });
@@ -470,22 +478,24 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("ends a committed claim the long way: the name stays held until its object has marked it ending and freed it", async () => {
     const r = await room("org_ah_committed");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
     await pass(r);
     // A removal now is of a committed claim, not a withdrawal.
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
-    expect((await switchedOn(() => remove(r))).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
+    expect((await removedQuiet(r)).body.request).toMatchObject({ state: "ending", end_reason: "hostname_unmapped" });
     // The name stays held while the claim ends, and the room can't ask for another.
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id, state: "live" });
     expect((await switchedOn(() => ask(r, newName()))).code).toBe("hostname_limit");
+    await alarmQuiet(stub(r.room));
     // 8b: the object is told, then, with nothing ever made at Cloudflare for it, the claim is freed
-    // (`custom-hostname.spec.ts` has the rest).
+    // (`custom-hostname.spec.ts` has the rest). Each step is the test's own pass, the room quiet before each rewind.
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect((await claimState(name)).claim).toMatchObject({ state: "ending" });
     expect(await requestRow(r)).toMatchObject({ state: "ending", open: 1 });
+    await alarmQuiet(stub(r.room));
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", open: null, end_reason: "hostname_unmapped" });
@@ -495,7 +505,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
   it("stops serving a committed claim's host in the same transaction as its removal", async () => {
     const r = await room("org_ah_close");
     const name = newName();
-    const request = await switchedOn(async () => (await ask(r, name)).body.request);
+    const request = await askedQuiet(r, name);
     await answerWith(name, request.challenge_value);
     await rewindLook(r);
     await pass(r);
@@ -517,6 +527,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     // The object tells the room, under the generation the claim was given under, which is the request's own.
     await alarmPass(claimOf(name));
     expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_suspended", claimed_at: null });
+    await alarmQuiet(stub(r.room));
     await rewindLook(r);
     await alarmPass(stub(r.room));
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_suspended" });
@@ -593,7 +604,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "pending", claimed_at: null });
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id });
-    expect((await switchedOn(() => remove(r))).body.request).toMatchObject({ state: "ending" });
+    expect((await removedQuiet(r)).body.request).toMatchObject({ state: "ending" });
     await rewindLook(r);
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_unmapped" });

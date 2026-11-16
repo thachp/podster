@@ -4,6 +4,7 @@ import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { customRoutingCases } from "./custom-routing.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
 // room unpublishes in one transaction, its applier removes the serve entries, and its delete job removes the scripts
@@ -2465,3 +2466,6 @@ describe("the two reconciles", () => {
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 });
+
+// M6 step 8c's cases: here, so they never run beside this file's resets of the content provider's stand-in.
+customRoutingCases();

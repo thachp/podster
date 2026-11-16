@@ -314,7 +314,13 @@ impl Workspace {
             CustomRoute::Serve => route_at_object(&self.env, sql, hostname, room, id).await,
             other => other,
         };
+        // No content provider, no applier to write or remove an entry: no custom host is made or reopened, so no row
+        // is left that the long end would wait on for ever (the security re-check of PR #404).
+        let content = takedown::provider(&self.env, sql).is_some();
         let cause: &'static str = match route {
+            CustomRoute::Serve if (open != Some(true) || refused) && !content => {
+                "content_provider_missing"
+            }
             // Not routed, or routed and refused by the applier at the version it has: (re)opened, so its version moves
             // and the applier asks every check again (the review of PR #404, S3).
             CustomRoute::Serve if open != Some(true) || refused => {
@@ -614,7 +620,8 @@ impl Workspace {
                 // **And the applier has confirmed the entry gone at the host's version** (the review of PR #404, S1).
                 // Freed before that, another room could claim the name while this room's entry, which names the
                 // same host, is still there to serve on it. Until then the applier keeps trying, from the room's
-                // alarm, and the free waits its turn.
+                // alarm, and the free waits its turn. A room with no row for the host never wrote an entry for it,
+                // which is every room with no content provider, since routing makes no row without one.
                 if !takedown::entry_confirmed_absent(sql, &hostname)? {
                     console_error!("hostname: the claim waits for its entry to be removed: room={} request={} code=entry_not_confirmed_gone", room, id);
                     return self.tried(sql, &id, now);

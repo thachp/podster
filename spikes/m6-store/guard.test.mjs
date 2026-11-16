@@ -14,8 +14,10 @@ const D1_MADE = "11111111-2222-3333-4444-555555555555";
 const D1_OTHER = "99999999-2222-3333-4444-555555555555";
 const made = { kv: new Set([KV_MADE]), d1: new Set([D1_MADE]) };
 const WRITES = ["PUT", "POST", "PATCH", "DELETE"];
-const ok = (method, url, body = null) => assert.equal(allow(method, url, ACCOUNT, { body, made }), url);
-const no = (method, url, body = null) => assert.throws(() => allow(method, url, ACCOUNT, { body, made }));
+const ok = (method, url, body = null, metadata = null) => assert.equal(allow(method, url, ACCOUNT, { body, made, metadata }), url);
+const no = (method, url, body = null, metadata = null) => assert.throws(() => allow(method, url, ACCOUNT, { body, made, metadata }));
+const meta = (extra = {}) => JSON.stringify({ main_module: "index.js", compatibility_date: "2026-11-01", ...extra });
+const PLAIN = meta();
 
 test("names", () => {
   assert.ok(spikeNamed("spike-store-ab12-kv-a"));
@@ -34,18 +36,61 @@ test("GET goes anywhere on the API, and nowhere else", () => {
 
 test("scripts: only spike names, in the namespace or at account level", () => {
   for (const base of [inNamespace, atAccount]) {
-    ok("PUT", `${base}/spike-store-ab12-app-kv-a`);
+    ok("PUT", `${base}/spike-store-ab12-app-kv-a`, null, PLAIN);
     ok("DELETE", `${base}/spike-store-ab12-app-kv-a`);
     ok("DELETE", `${base}/spike-store-ab12-app-kv-a?force=true`);
-    no("PUT", `${base}/podster-api-staging`);
+    no("PUT", `${base}/podster-api-staging`, null, PLAIN);
     no("DELETE", `${base}/spike-m6-b-canary`);
-    no("PUT", `${base}/spike-store-ab12-x?y=1`);
-    no("PUT", `${base}/spike-store-ab12-x/secrets`);
+    no("PUT", `${base}/spike-store-ab12-x?y=1`, null, PLAIN);
+    no("PUT", `${base}/spike-store-ab12-x/secrets`, null, PLAIN);
   }
   ok("POST", `${atAccount}/spike-store-ab12-dispatch/subdomain`);
   no("POST", `${atAccount}/podster-api-staging/subdomain`);
   no("POST", `${inNamespace}/spike-store-ab12-x/subdomain`);
   no("PUT", `${account}/workers/dispatch/namespaces/other-namespace/scripts/spike-store-ab12-x`);
+});
+
+test("an upload binds only stores this spike made, and migrates only its own class", () => {
+  const app = `${inNamespace}/spike-store-ab12-app`;
+  const dispatch = `${atAccount}/spike-store-ab12-dispatch`;
+  const kv = (id) => ({ type: "kv_namespace", name: "STORE", namespace_id: id });
+  const d1 = (id) => ({ type: "d1", name: "STORE", id });
+  const ns = { type: "dispatch_namespace", name: "NS", namespace: NAMESPACE };
+  const counter = (cls) => ({ type: "durable_object_namespace", name: "COUNTER", class_name: cls });
+
+  // What the spike sends.
+  ok("PUT", app, null, meta({ bindings: [kv(KV_MADE)] }));
+  ok("PUT", app, null, meta({ bindings: [d1(D1_MADE)] }));
+  ok("PUT", dispatch, null, meta({ bindings: [ns, counter("SpikeCounter")], migrations: { new_tag: "v1", new_sqlite_classes: ["SpikeCounter"] } }));
+  ok("PUT", dispatch, null, meta({ bindings: [], migrations: { old_tag: "v1", new_tag: "v2", deleted_classes: ["SpikeCounter"] } }));
+
+  // A foreign KV namespace, a foreign D1 database, a class that isn't the spike's.
+  no("PUT", app, null, meta({ bindings: [kv(KV_OTHER)] }));
+  no("PUT", app, null, meta({ bindings: [d1(D1_OTHER)] }));
+  no("PUT", dispatch, null, meta({ bindings: [ns, counter("Workspace")] }));
+  no("PUT", dispatch, null, meta({ bindings: [counter("SpikeCounter"), { ...counter("SpikeCounter"), script_name: "podster-api-staging" }] }));
+  no("PUT", dispatch, null, meta({ migrations: { new_tag: "v1", new_sqlite_classes: ["Workspace"] } }));
+  no("PUT", dispatch, null, meta({ migrations: { old_tag: "v1", new_tag: "v2", deleted_classes: ["Principal"] } }));
+  no("PUT", dispatch, null, meta({ migrations: { new_tag: "v1", new_classes: ["SpikeCounter"] } }));
+  no("PUT", dispatch, null, meta({ migrations: { new_tag: "v2", renamed_classes: [{ from: "Workspace", to: "SpikeCounter" }] } }));
+
+  // Every other kind of binding, a dispatch or class binding inside the namespace, a migration there, extra keys.
+  no("PUT", app, null, meta({ bindings: [{ ...kv(KV_MADE), extra: 1 }] }));
+  no("PUT", app, null, meta({ bindings: [ns] }));
+  no("PUT", app, null, meta({ bindings: [counter("SpikeCounter")] }));
+  no("PUT", app, null, meta({ migrations: { new_tag: "v1", new_sqlite_classes: ["SpikeCounter"] } }));
+  no("PUT", dispatch, null, meta({ bindings: [{ ...ns, namespace: "podster-apps" }] }));
+  no("PUT", dispatch, null, meta({ bindings: [{ ...ns, outbound: { worker: { service: "x" } } }] }));
+  for (const type of ["r2_bucket", "service", "secret_text", "plain_text", "queue", "analytics_engine", "hyperdrive", "ai"]) {
+    no("PUT", app, null, meta({ bindings: [{ type, name: "STORE" }] }));
+  }
+  no("PUT", app, null, meta({ tail_consumers: [{ service: "podster-api-staging" }] }));
+  no("PUT", app, null, meta({ keep_bindings: ["secret_text"] }));
+
+  // No metadata, or metadata the guard can't read.
+  no("PUT", app, null, null);
+  no("PUT", app, null, "{not json");
+  no("PUT", app, null, JSON.stringify([]));
 });
 
 test("KV: create only with a spike title; write and delete only what was made", () => {

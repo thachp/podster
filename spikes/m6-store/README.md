@@ -2,6 +2,8 @@
 
 **Status, 2026-11-16 UTC: run twice on the staging account, 13:39:14 to 13:40:16 and 13:41:26 to 13:43:48, by the owner's yes of 2026-11-16 ("run_store_spike: yes"). Everything it created is deleted, confirmed by listing with the read token.** It answers the spike in the [M6 plan](../../docs/m6-plan.md#first-the-spike-for-a-store-and-its-credential), for [the revision of ADR 0010](../../docs/adr/0010-revision-apps-are-workers.md#33-its-store). The answers and what they change are in the plan's [Store spike results](../../docs/m6-plan.md#store-spike-results-2026-11-16). Nothing builds on this folder.
 
+**Beyond the approved scope.** The owner approved KV namespaces, a D1 database and scripts in the namespace, and the brief said to record the Durable Object measurement as owed rather than add a class. Each run also made **a public account-level Worker on the account's `workers.dev` address with a Durable Object class** (`SpikeCounter`), the spike's dispatch Worker, and in the second run **the apps fetched `https://example.com/`** (three `HEAD` requests each) as the subrequest limit's control. Those Workers existed from 13:39:36 to 13:40:12 UTC (run `370d26`) and from 13:41:29 to 13:43:46 UTC (run `80cd35`); each answered only requests carrying a random key held in the runner's memory. Both were deleted, their class first by a migration, and no Durable Object namespace was left (see Resources). **The runner no longer makes that Worker unless `SPIKE_STORE_PUBLIC_WORKER=owner-approved` is set, which needs the owner's own yes for that run;** without it the steps that need the apps (3 and 4 below, and `limits`) are skipped. The second account's repeat doesn't include them without that yes.
+
 "The staging account" is the Cloudflare account that holds `podster.dev` and the dispatch namespace `podster-staging-apps`. Its ID stays out of this repository.
 
 ## What is here
@@ -19,7 +21,9 @@
   - a KV namespace or D1 database whose ID the runner holds because a create with a spike title or name returned it, or because a listing showed it with a spike title or name;
   - a create, only when the body is exactly `{"title": <spike name>}` or `{"name": <spike name>}`;
   - a KV value, only under a spike-named key, in a namespace the spike made.
-- **So no write reached anything of Podster's.** What a token can do to Podster's own stores is **inferred**, never observed on them. The `GET`s the runner makes are lists, kept as counts, and reads of what it made.
+- **An upload's metadata is checked too, since 2026-11-16 after the runs.** A script's upload is refused unless every binding is a KV namespace or D1 database the spike made, or, at account level only, the staging namespace or the class `SpikeCounter`; and unless its migrations create or delete only `SpikeCounter`. Any other metadata key, binding type or migration kind is refused. `guard.test.mjs` covers a foreign KV ID, a foreign D1 ID and a class that isn't the spike's.
+- **During both runs the guard checked a script's upload by its URL alone, not its metadata.** What the uploads bound came from the runner's own code, which bound only the spike's stores, the staging namespace and `SpikeCounter`; the guard would not have stopped a binding to anything else.
+- **No write was sent to anything of Podster's,** by the paths recorded in `results.jsonl` and the runner's code. What a token can do to Podster's own stores is **inferred**, never observed on them. The `GET`s the runner makes are lists, kept as counts, and reads of what it made.
 - **The tokens are read from the owner's files into memory** (`~/.podster/spike-store-{kv,d1,scripts,read}.token`, mode 600), sent in a header and nowhere else. The account ID comes from `CLOUDFLARE_ACCOUNT_ID`.
 - **What is kept:** status, Cloudflare's codes and messages, counts, and what the spike's own apps answered. Every 32-hex ID, every UUID, the account, the `workers.dev` subdomain and the dispatch Worker's access key are redacted before anything is written or printed.
 - **The apps run behind a dispatch Worker of the spike's own,** `spike-store-<run>-dispatch`, at account level on the account's `workers.dev` address, as spike A's was. It answers only a request carrying a random key the runner held in memory, and dispatches only to spike-named scripts. It holds the Durable Object class `SpikeCounter`, the stand-in for the write counter, so no real Worker got a class. The class was deleted by a migration before the Worker was.
@@ -27,7 +31,7 @@
 
 ## Run it again
 
-It makes KV namespaces, D1 databases, scripts in the namespace, and a public Worker with a Durable Object class on the account, so it needs the owner's yes each time, and the owner's four tokens.
+It makes KV namespaces, D1 databases and scripts in the namespace, so it needs the owner's yes each time, and the owner's four tokens. The public dispatch Worker with its Durable Object class, and the apps' fetch of `example.com`, run only with `SPIKE_STORE_PUBLIC_WORKER=owner-approved` set, for a run the owner has said yes to by name.
 
 ```bash
 node --test spikes/m6-store/guard.test.mjs
@@ -47,9 +51,11 @@ Each ends with the clean-up, in a `finally`. To run it alone:
 cd spikes/m6-store && CLOUDFLARE_ACCOUNT_ID="$(cat ~/.podster/cloudflare-account-id.staging)" node spike.mjs cleanup
 ```
 
-It lists, with the read token, every KV namespace, D1 database, namespace script and account Worker named `spike-store-…`, deletes each with the token that can, and records the counts left, Durable Object namespaces included.
+It lists, with the read token (or the writing token if the read token can't list), every account Worker, namespace script, KV namespace and D1 database named `spike-store-…`, in that order, and deletes each with the token that can. An account Worker that still holds `SpikeCounter` has the class deleted by a migration first, and is then deleted with `?force=true`. **Each listing and each delete stands alone:** one that fails is recorded and the rest still run, and a closing record, `clean-up: NOT everything was deleted`, lists what it couldn't delete. It ends by listing again and recording the counts left, Durable Object namespaces included.
 
-*Changed after both runs, not rerun:* the reads that ask whether a deleted namespace script is there now keep whether the answer's `script` is `null`. The runs recorded only the status, which is 200 either way (see 5 below).
+**A Durable Object namespace can't be deleted on its own.** Cloudflare's documentation shows no API call for it: it goes when its class is deleted by a migration on its own script, or with its script. If one is ever left after its script is gone, the clean-up reports it; a person removes it by uploading a script of that name with a migration that deletes the class, or through Cloudflare's support. None was left by either run.
+
+*Changed after both runs, not rerun:* the reads that ask whether a deleted namespace script is there now keep whether the answer's `script` is `null` (the runs recorded only the status, which is 200 either way; see 5 below); the guard checks an upload's metadata; the clean-up stands each step alone and retires a leftover class; and the public Worker needs `SPIKE_STORE_PUBLIC_WORKER`. Only `guard.test.mjs` has run since.
 
 ## What was observed
 
@@ -75,7 +81,7 @@ Status, with Cloudflare's code in brackets.
 | Query `d1-gone`, deleted | 403 (7403) | **404 (7404)** | 403 (7403) | 404 (7404) |
 
 - **No other token could make a KV namespace or a D1 database,** so "a store another token made" could not be built for `kv` against KV, or for `d1` against D1. Each wrote only in stores it had made itself, including its own second one.
-- **The probe that stands in for it:** against a store that no longer exists, a token with the store's permission is told "not found", and every token without it "Authentication error". The permission is checked before the store's ID is looked at, for any ID in the account.
+- **The probe that stands in for it:** against a store that no longer exists, a token with the store's permission is told "not found", and every token without it "Authentication error". So the permission is checked before the store's ID is looked at. **That it holds for any ID in the account is inferred** from one deleted ID per kind (`kv-gone`, `d1-gone`, each made by the spike), not observed on any other store.
 - **Before the run the account held one KV namespace and two D1 databases that aren't the spike's.** `kv` and `read` listed the first, `d1` and `read` the two. Nothing was sent to any of them. The counts were the same at the end.
 
 ### 2. Binding a store at an upload

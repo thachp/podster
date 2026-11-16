@@ -18,7 +18,7 @@ import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NAMESPACE, allow, spikeNamed } from "./guard.mjs";
+import { NAMESPACE, SPIKE_CLASSES, allow, spikeNamed } from "./guard.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const API = "https://api.cloudflare.com/client/v4";
@@ -88,8 +88,9 @@ async function send(bearer, method, path, { json, text, form } = {}) {
   let bodyText = null;
   if (json !== undefined) [headers["content-type"], body, bodyText] = ["application/json", JSON.stringify(json), JSON.stringify(json)];
   if (text !== undefined) [headers["content-type"], body] = ["text/plain", text];
-  if (form !== undefined) body = form;
-  const url = allow(method, API + path, ACCOUNT, { body: bodyText, made });
+  let metadata = null;
+  if (form !== undefined) [body, metadata] = [form.form, form.metadata];
+  const url = allow(method, API + path, ACCOUNT, { body: bodyText, made, metadata });
   const response = await fetch(url, { method, headers, body, redirect: "error" });
   const raw = await response.text();
   let parsed = null;
@@ -319,11 +320,13 @@ export default {
 
 const DISPATCH_NO_COUNTER = `export default { fetch() { return new Response("gone", { status: 410 }); } };\n`;
 
+/** An upload's multipart body, with its metadata as text too, so the guard checks exactly what is sent. */
 function moduleForm(code, metadata) {
+  const text = JSON.stringify({ main_module: "index.js", compatibility_date: COMPAT, ...metadata });
   const form = new FormData();
-  form.append("metadata", new Blob([JSON.stringify({ main_module: "index.js", compatibility_date: COMPAT, ...metadata })], { type: "application/json" }));
+  form.append("metadata", new Blob([text], { type: "application/json" }));
   form.append("index.js", new Blob([code], { type: "application/javascript+module" }), "index.js");
-  return form;
+  return { form, metadata: text };
 }
 
 const kvBinding = (id) => ({ type: "kv_namespace", name: "STORE", namespace_id: id });
@@ -474,7 +477,12 @@ async function apps(tokens) {
     }
   }
 
-  // 7. The dispatch Worker, at account level, on workers.dev, with the counter's class.
+  // 7. The dispatch Worker, at account level, on workers.dev, with the counter's class. Beyond what the owner
+  // approved for the run of 2026-11-16, so it now waits for the owner's own yes, given for each run.
+  if (process.env.SPIKE_STORE_PUBLIC_WORKER !== "owner-approved") {
+    record({ op: "7. skipped: the public dispatch Worker, its Durable Object class and the apps' outbound control need the owner's yes (SPIKE_STORE_PUBLIC_WORKER=owner-approved)" });
+    return false;
+  }
   const dispatch = N("dispatch");
   const put = await call("scripts", tokens, "7. scripts: upload the dispatch Worker with a Durable Object class", "PUT", atAccount(dispatch), {
     form: moduleForm(DISPATCH_WITH_COUNTER(KEY), {
@@ -629,34 +637,86 @@ async function listFor(tokens, writer, path, all = true) {
   return listed.status === 200 ? listed : list(tokens, writer, path);
 }
 
+/**
+ * Deletes everything named `spike-store-…`, found by listing. Each listing and each delete stands alone: one that
+ * fails is recorded and the rest still run. Scripts go before stores, so no script still binds a store; an
+ * account Worker holding the spike's class has the class deleted by a migration first.
+ *
+ * A Durable Object namespace has no delete call of its own in Cloudflare's API, as far as its documentation shows:
+ * it goes when its class is deleted by a migration on its own script, or with the script (`?force=true`). One left
+ * behind, whose script is already gone, can't be removed from here; it is reported, for a person to remove by
+ * uploading a script of the same name with a migration that deletes the class, or through Cloudflare's support.
+ */
 async function cleanup(tokens) {
-  const kv = await listFor(tokens, "kv", kvPath());
-  for (const ns of kv.items.filter((x) => spikeNamed(x.title))) {
-    made.kv.add(ns.id);
-    await call("kv", tokens, `clean-up: delete KV namespace ${ns.title}`, "DELETE", kvPath(ns.id), { keep: () => ({}) });
-  }
-  const d1 = await listFor(tokens, "d1", d1Path());
-  for (const db of d1.items.filter((x) => spikeNamed(x.name))) {
-    made.d1.add(db.uuid);
-    await call("d1", tokens, `clean-up: delete D1 database ${db.name}`, "DELETE", d1Path(db.uuid), { keep: () => ({}) });
-  }
-  const inside = await listFor(tokens, "scripts", `${account}/workers/dispatch/namespaces/${NAMESPACE}/scripts`, false);
-  for (const name of inside.items.map((s) => s.id ?? s.script?.id).filter(spikeNamed)) {
-    await call("scripts", tokens, `clean-up: delete ${name} (namespace)`, "DELETE", `${inNamespace(name)}?force=true`, { keep: () => ({}) });
-  }
-  const workers = await listFor(tokens, "scripts", `${account}/workers/scripts`, false);
-  for (const name of workers.items.map((s) => s.id).filter(spikeNamed)) {
-    await call("scripts", tokens, `clean-up: delete ${name} (account)`, "DELETE", `${atAccount(name)}?force=true`, { keep: () => ({}) });
-  }
-  await confirm(tokens);
+  const failed = [];
+  const step = async (label, fn) => {
+    try {
+      await fn();
+    } catch (error) {
+      failed.push({ step: label, error: redact(String(error.message)).slice(0, 200) });
+    }
+  };
+  const del = async (who, label, path) => {
+    const answer = await call(who, tokens, `clean-up: delete ${label}`, "DELETE", path, { keep: () => ({}) });
+    if (answer.status !== 200) failed.push({ step: `delete ${label}`, status: answer.status, codes: errorsOf(answer.body).map((e) => e.code) });
+  };
+
+  await step("account Workers", async () => {
+    const workers = await listFor(tokens, "scripts", `${account}/workers/scripts`, false);
+    if (workers.status !== 200) throw new Error(`listing answered ${workers.status}`);
+    const dos = await listAll(tokens, "read", `${account}/workers/durable_objects/namespaces`);
+    for (const name of workers.items.map((s) => s.id).filter(spikeNamed)) {
+      await step(`retire the class on ${name}`, async () => {
+        const classes = dos.items.filter((x) => x.script === name).map((x) => x.class);
+        if (classes.length && classes.every((c) => SPIKE_CLASSES.has(c))) {
+          await call("scripts", tokens, `clean-up: delete the class on ${name} by a migration`, "PUT", atAccount(name), {
+            form: moduleForm(DISPATCH_NO_COUNTER, { bindings: [], migrations: { old_tag: "v1", new_tag: "v2", deleted_classes: classes } }),
+            keep: () => ({}),
+          });
+        }
+      });
+      await step(`delete ${name}`, () => del("scripts", `${name} (account)`, `${atAccount(name)}?force=true`));
+    }
+  });
+  await step("namespace scripts", async () => {
+    const inside = await listFor(tokens, "scripts", `${account}/workers/dispatch/namespaces/${NAMESPACE}/scripts`, false);
+    if (inside.status !== 200) throw new Error(`listing answered ${inside.status}`);
+    for (const name of inside.items.map((s) => s.id ?? s.script?.id).filter(spikeNamed)) {
+      await step(`delete ${name}`, () => del("scripts", `${name} (namespace)`, `${inNamespace(name)}?force=true`));
+    }
+  });
+  await step("KV namespaces", async () => {
+    const kv = await listFor(tokens, "kv", kvPath());
+    if (kv.status !== 200) throw new Error(`listing answered ${kv.status}`);
+    for (const ns of kv.items.filter((x) => spikeNamed(x.title))) {
+      made.kv.add(ns.id);
+      await step(`delete ${ns.title}`, () => del("kv", `KV namespace ${ns.title}`, kvPath(ns.id)));
+    }
+  });
+  await step("D1 databases", async () => {
+    const d1 = await listFor(tokens, "d1", d1Path());
+    if (d1.status !== 200) throw new Error(`listing answered ${d1.status}`);
+    for (const db of d1.items.filter((x) => spikeNamed(x.name))) {
+      made.d1.add(db.uuid);
+      await step(`delete ${db.name}`, () => del("d1", `D1 database ${db.name}`, d1Path(db.uuid)));
+    }
+  });
+  await step("confirm", () => confirm(tokens, failed));
+  if (failed.length) record({ op: "clean-up: NOT everything was deleted; see could_not", could_not: failed });
 }
 
-async function confirm(tokens) {
+async function confirm(tokens, failed = []) {
   const kv = await listAll(tokens, "read", kvPath());
   const d1 = await listAll(tokens, "read", d1Path());
   const inside = await sendList(tokens, "read", `${account}/workers/dispatch/namespaces/${NAMESPACE}/scripts`);
   const workers = await sendList(tokens, "read", `${account}/workers/scripts`);
   const dos = await listAll(tokens, "read", `${account}/workers/durable_objects/namespaces`);
+  for (const [what, status] of [["KV", kv.status], ["D1", d1.status], ["namespace", inside.status], ["account", workers.status], ["Durable Objects", dos.status]]) {
+    if (status !== 200) failed.push({ step: `confirm: list ${what}`, status });
+  }
+  for (const x of dos.items.filter((x) => String(x.script ?? "").startsWith("spike-store-"))) {
+    failed.push({ step: `Durable Object namespace left for ${x.script} (${x.class}): no API call deletes it; upload a script of that name with a migration deleting the class, or ask Cloudflare` });
+  }
   record({
     op: "clean-up: confirmed by listing, with the read token",
     kv_status: kv.status,

@@ -56,7 +56,9 @@ next() { # the fixture's next line each time, repeating its last
   echo "$n" > "$fix/$1.n"
   total=$(wc -l < "$fix/$1" | tr -d ' ')
   [ "$n" -gt "$total" ] && n=$total
-  sed -n "${n}p" "$fix/$1"
+  line=$(sed -n "${n}p" "$fix/$1")
+  [ "$line" = gh-fails ] && { echo "gh: read: operation timed out" >&2; exit 1; }
+  printf '%s\n' "$line"
 }
 case "$*" in
   "pr view "*" --json state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid "*) answer pull ;;
@@ -65,6 +67,7 @@ case "$*" in
   "api repos/{owner}/{repo}/pulls/"*" --jq .changed_files | tostring") answer changed ;;
   "pr view "*" --json mergeStateStatus "*) next merge-state ;;
   "pr view "*" --json state,mergeCommit "*) answer merged ;;
+  "pr view "*" --json state,headRefOid,mergeCommit "*) next after-merge ;;
   "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/"*"/merge&state=open "*) answer alerts-merge ;;
   "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/"*"/head&state=open "*) answer alerts-head ;;
   "api repos/{owner}/{repo}/code-scanning/default-setup "*) answer languages ;;
@@ -124,6 +127,7 @@ healthy() {
   printf 'UNKNOWN\nUNKNOWN\nCLEAN\n' > "$fix/merge-state"
   : > "$fix/merge-result"
   echo "$merged" > "$fix/merged"
+  printf 'OPEN\t%s\t\n' "$sha" > "$fix/after-merge" # what the pull request reads as after a merge whose answer was lost
   printf '\n900\tin_progress\tnone\thttps://github.invalid/runs/900\n900\tcompleted\tsuccess\thttps://github.invalid/runs/900\n' > "$fix/main-run"
 }
 changes='gh pr merge|gh run rerun'
@@ -476,6 +480,98 @@ healthy
 echo gh-fails > "$fix/merge-result"
 check "--merge that GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
 check "  and it doesn't try another way" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+check "  after reading the pull request again, five times, while it stays open" \
+  test "$(grep -c -- '--json state,headRefOid,mergeCommit ' "$fix/calls")" -eq 5
+check "  and says it is still open at the given sha, not merged as of the last read" \
+  said 'REFUSE +the merge was not accepted: #77 is still open at the given sha, and was not merged as of the last read, about 30s after the merge call'
+check "  and never claims nothing was merged" test "$(grep -c -i 'nothing was merged' "$tmp/out")" -eq 0
+check "  and waits for no run on main" never_called 'gh run list'
+healthy
+
+# The merge's answer is lost (on 2026-11-15 GitHub's reply timed out and the pull request had merged). What the pull
+# request reads as afterwards decides what is reported, never the lost answer.
+echo gh-fails > "$fix/merge-result"
+printf 'MERGED\t%s\t%s\n' "$sha" "$merged" > "$fix/after-merge"
+check "--merge whose answer is lost, but which merged at the given sha, reports it merged, exit 0" run 0 "$gate" 77 "$sha" --merge
+check "  and says the answer was lost" said "the merge's answer was lost"
+check "  and never says refused" test "$(grep -c -i 'refuse' "$tmp/out")" -eq 0
+check "  and merged once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+check "  and waited for the run on the merge commit" called "^gh run list --workflow ci.yml --branch main --event push --commit $merged "
+check "  and reports main's CI" said "ci.yml on main for $merged: success"
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'gh-fails\ngh-fails\nMERGED\t%s\t%s\n' "$sha" "$merged" > "$fix/after-merge"
+check "--merge whose answer is lost, and whose first two re-reads fail, still finds it merged, exit 0" run 0 "$gate" 77 "$sha" --merge
+check "  after three reads" test "$(grep -c -- '--json state,headRefOid,mergeCommit ' "$fix/calls")" -eq 3
+check "  and merged once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'MERGED\t%s\t%s\n' "$sha" "$merged" > "$fix/after-merge"
+printf '900\tcompleted\tfailure\thttps://github.invalid/runs/900\n' > "$fix/main-run"
+check "--merge whose answer is lost, merged, with main's CI failing, exits 3" run 3 "$gate" 77 "$sha" --merge
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\nOPEN\t%s\t\nMERGED\t%s\t%s\n' "$sha" "$sha" "$sha" "$merged" > "$fix/after-merge"
+check "--merge whose answer is lost, open at first and merged by the third read, reports it merged, exit 0" run 0 "$gate" 77 "$sha" --merge
+healthy
+
+echo gh-fails > "$fix/merge-result"
+echo gh-fails > "$fix/after-merge"
+check "--merge whose answer is lost, and whose pull request can't be read again, exits 5" run 5 "$gate" 77 "$sha" --merge
+check "  after five reads" test "$(grep -c -- '--json state,headRefOid,mergeCommit ' "$fix/calls")" -eq 5
+check "  and says the outcome is unknown" said "outcome is unknown"
+check "  and says how to check" said "gh pr view 77 --json state,mergeCommit,headRefOid"
+check "  and never says refused" test "$(grep -c -i 'refuse' "$tmp/out")" -eq 0
+check "  and merged once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+check "  and waits for no run on main" never_called 'gh run list'
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\nOPEN\t%s\t\nOPEN\t%s\t\nOPEN\t%s\t\ngh-fails\n' "$sha" "$sha" "$sha" "$sha" > "$fix/after-merge"
+check "--merge whose answer is lost, open four times and then unreadable, exits 5, not refused" run 5 "$gate" 77 "$sha" --merge
+check "  and never says refused" test "$(grep -c -i 'refuse' "$tmp/out")" -eq 0
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'MERGED\t%s\t%s\n' "$other" "$merged" > "$fix/after-merge"
+check "--merge whose answer is lost, and which reads as merged at another head, exits 5" run 5 "$gate" 77 "$sha" --merge
+check "  and names that head" said "merged at $other, not the given $sha"
+check "  and never says refused" test "$(grep -c -i 'refuse' "$tmp/out")" -eq 0
+check "  and waits for no run on main" never_called 'gh run list'
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'MERGED\t%s\t\n' "$sha" > "$fix/after-merge"
+check "--merge whose answer is lost, merged at the given sha with no merge commit read, exits 4" run 4 "$gate" 77 "$sha" --merge
+check "  after five reads" test "$(grep -c -- '--json state,headRefOid,mergeCommit ' "$fix/calls")" -eq 5
+check "  and never says refused" test "$(grep -c -i 'refuse' "$tmp/out")" -eq 0
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'CLOSED\t%s\t\n' "$sha" > "$fix/after-merge"
+check "--merge whose answer is lost, and which reads as closed, is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
+check "  and says it is closed, naming the head read, not merged as of that read" \
+  said "REFUSE +the merge was not accepted: #77 is CLOSED at $sha, and was not merged as of that read"
+check "  and never claims nothing was merged" test "$(grep -c -i 'nothing was merged' "$tmp/out")" -eq 0
+healthy
+
+# Someone pushed a new head while the merge's answer was lost: the gate mustn't say it is open at the given sha.
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\n' "$other" > "$fix/after-merge"
+check "--merge whose answer is lost, and which reads as open at another head, is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
+check "  and names the head it read" \
+  said "REFUSE +the merge was not accepted: #77 is open at $other, not the given $sha, and was not merged as of the last read, about 30s after the merge call"
+check "  and never says it is open at the given sha" test "$(grep -c 'at the given sha' "$tmp/out")" -eq 0
+check "  and merged once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+healthy
+
+echo gh-fails > "$fix/merge-result"
+printf 'OPEN\t%s\t\nOPEN\t%s\t\n' "$other" "$sha" > "$fix/after-merge"
+check "--merge whose answer is lost, open at another head and then at the given sha, names the last head read" run 1 "$gate" 77 "$sha" --merge
+check "  which is the given sha" said 'REFUSE +the merge was not accepted: #77 is still open at the given sha'
 healthy
 
 : > "$fix/merged"

@@ -29,11 +29,17 @@ reported here.
 --merge              After the gate passes, runs `gh pr merge <n> --merge --match-head-commit <sha>`
                      (a merge commit), then waits for ci.yml on the merge commit on main and reports
                      its conclusion.
+                     If that merge call fails or its answer is lost, the merge is not asked for again.
+                     The pull request is read again, up to five times, six seconds apart. Merged at the
+                     given sha: reported as merged, and main's CI is waited for. Still open on the last
+                     read, or closed: refused. Unreadable on the last read, or merged at another head:
+                     the outcome is unknown, exit 5, with the command to check it.
 It never dismisses an alert, resolves a conflict, updates a branch or reruns anything. A failed job is a failure,
 and is looked into.
 
 Exit codes: 0 passed (and, with --merge, main's CI succeeded); 1 refused; 2 wrong usage;
-3 merged, but main's CI did not succeed; 4 merged, but main's CI did not finish in time.
+3 merged, but main's CI did not succeed; 4 merged, but main's CI did not finish in time (or the merge
+commit could not be read); 5 the merge's answer was lost and whether it merged is unknown.
 EOF
 }
 
@@ -261,11 +267,54 @@ if [ "$mode" = report ]; then
 fi
 
 echo "merging #$pr with a merge commit, only if its head is still $sha"
-gh pr merge "$pr" --merge --match-head-commit "$sha" || refuse "the merge was not accepted"
-
 merged=
+accepted=true
+gh pr merge "$pr" --merge --match-head-commit "$sha" || accepted=false
+if [ "$accepted" != true ]; then
+  # A failed merge call isn't proof nothing merged: on 2026-11-15 GitHub's answer timed out after the merge had gone
+  # through. So the pull request is read again, and that decides what is reported. The merge is never asked for again.
+  echo "        the merge's answer was lost or was an error, so #$pr is read again to see what happened"
+  last=
+  for tries in 1 2 3 4 5; do
+    sleep 6
+    after=$(gh pr view "$pr" --json state,headRefOid,mergeCommit \
+      --jq '[.state, .headRefOid, (.mergeCommit.oid // "")] | @tsv') || after=
+    last=
+    [ -n "$after" ] || { echo "        could not read #$pr ($tries of 5)"; continue; }
+    IFS=$tab read -r after_state after_head after_commit <<< "$after"
+    last=$after_state
+    case "$after_state" in
+      MERGED)
+        if [ "$after_head" != "$sha" ]; then
+          echo "merge-gate: #$pr reads as merged at $after_head, not the given $sha, so the outcome is unknown. Check it with:"
+          echo "  gh pr view $pr --json state,mergeCommit,headRefOid"
+          exit 5
+        fi
+        if [[ "$after_commit" =~ ^[0-9a-f]{40}$ ]]; then merged=$after_commit; break; fi
+        ;;
+      OPEN) ;;
+      CLOSED) refuse "the merge was not accepted: #$pr is CLOSED. Nothing was merged" ;;
+      *) last= ;;
+    esac
+  done
+  if [ -z "$merged" ]; then
+    case "$last" in
+      OPEN) refuse "the merge was not accepted: #$pr is still open at the given sha. Nothing was merged" ;;
+      MERGED)
+        echo "merge-gate: merged at $sha, but the merge commit could not be read. Check main's CI yourself."
+        exit 4
+        ;;
+    esac
+    echo "merge-gate: the merge's answer was lost and #$pr could not be read again, so the outcome is unknown: it may"
+    echo "have merged. Nothing more was tried. Check it with:"
+    echo "  gh pr view $pr --json state,mergeCommit,headRefOid"
+    exit 5
+  fi
+  echo "        the merge's answer was lost, but #$pr reads as merged at the given sha"
+fi
+
 tries=0
-while [ "$tries" -lt 10 ]; do
+while [ -z "$merged" ] && [ "$tries" -lt 10 ]; do
   merged=$(gh pr view "$pr" --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid // ""') || merged=
   if [[ "$merged" =~ ^[0-9a-f]{40}$ ]]; then break; fi
   merged=

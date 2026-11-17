@@ -50,12 +50,13 @@ pub(crate) const FINDING: &str = "repo_unpublish_held";
 /// The operators' finding for a room whose ask stalled, by the room's ID, with why in `detail`.
 pub(crate) const STALLED: &str = "repo_unpublish_stalled";
 
-/// How many rooms have apps, by the app-label lookup table, or `None` when it can't be read.
+/// How many rooms have apps, by the app-label lookup table, or `None` when it can't be read: rooms with a label an
+/// approval held for (M6 step 6, 6f), not rooms that only asked for a release.
 pub(crate) async fn rooms_with_apps(env: &Env) -> Option<u64> {
     let found = env
         .d1("DB")
         .ok()?
-        .prepare("SELECT count(DISTINCT workspace_id) AS n FROM app_label_index")
+        .prepare("SELECT count(DISTINCT workspace_id) AS n FROM app_label_index WHERE approved_at IS NOT NULL")
         .first::<Value>(None)
         .await
         .ok()??;

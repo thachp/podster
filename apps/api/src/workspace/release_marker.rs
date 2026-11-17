@@ -87,7 +87,8 @@ fn switched(sql: &SqlStorage) -> R<bool> {
     let found = rows(
         sql,
         "SELECT s.version, s.script_name, s.flight_version, a.applied_version, a.applied_script, c.in_flight_script
-           FROM serve_state s JOIN release_config c LEFT JOIN serve_apply a ON a.host = s.host WHERE s.kind = 'default'",
+           FROM serve_state s JOIN release_config c LEFT JOIN serve_apply a ON a.host = s.host
+           WHERE s.kind = 'default' AND s.host NOT IN (SELECT host FROM serve_retired)",
         vec![],
     )?;
     Ok(found.first().is_some_and(|row| {
@@ -308,7 +309,7 @@ fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, St
     };
     let host = rows(
         sql,
-        "SELECT host FROM serve_state WHERE kind = 'default'",
+        "SELECT host FROM serve_state WHERE kind = 'default' AND host NOT IN (SELECT host FROM serve_retired)",
         vec![],
     )?
     .first()

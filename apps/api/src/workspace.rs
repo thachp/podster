@@ -3759,7 +3759,10 @@ impl Workspace {
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
             || (migrated && visibility::public_index_due(&sql)?)
             || (migrated && repositories::index_due(&sql)?)
-            || (migrated && release_approval::label_index_due(&sql)?)
+            // Only where the labels' upkeep may run at all, so a room whose gate is closed isn't woken for it.
+            || (migrated
+                && release_approval::label_index_due(&sql)?
+                && self.label_index_open(&sql).await)
         {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
@@ -5328,7 +5331,7 @@ impl Workspace {
                 release_approval::may_decide(&who)?;
                 let release = release_approval::named(release)?;
                 if *verb == "approve" {
-                    let reads = Rc::new(self.approval_reads(&release, &identity.id).await?);
+                    let reads = Rc::new(self.approval_reads(&release, &who.caller).await?);
                     let again = reads.clone();
                     let domain = crate::content_provider::content_domain(&self.env);
                     self.command_checked(

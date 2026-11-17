@@ -108,9 +108,9 @@ async function resetCeiling() {
   });
   await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label LIKE ?").bind(`${COUNTED}%`).run();
 }
-/** `n` rooms with apps in the lookup table, which makes the ceiling the smaller of 5 and 10% of them, rounded up. */
+/** `n` rooms with apps in the lookup table, each with a label an approval held for (6f), which makes the ceiling the smaller of 5 and 10% of them, rounded up. */
 async function roomsWithApps(n: number) {
-  for (let i = 0; i < n; i++) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(`${COUNTED}${i}`, `ws_${COUNTED}_${i}`).run();
+  for (let i = 0; i < n; i++) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at, approved_at) VALUES (?, ?, 1, 1)").bind(`${COUNTED}${i}`, `ws_${COUNTED}_${i}`).run();
 }
 /** The ceiling's state: grants, held rooms, whether it's tripped, and its findings, each held or stalled room by its ID. */
 const ceiling = () => inModeration((sql) => ({
@@ -152,9 +152,7 @@ async function withApp(id: string, opts: { up?: boolean } = {}) {
   const script = `${label}.${served}`;
   await inRoom(id, (sql) => {
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-    // Marked as indexed, so the room's alarm doesn't write it to the lookup table, whose rooms this file counts itself
-    // (`roomsWithApps`).
-    sql.exec("INSERT INTO app_label (label, current, created_at, indexed_at) VALUES (?, 1, 1, 1)", label);
+    sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
     if (opts.up === false) return;

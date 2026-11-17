@@ -110,6 +110,8 @@ const recipients = async (r: Room, type: string) => {
   const [event] = await all(r.room, "SELECT id FROM event WHERE type = ? AND subject_id = ?", type, r.release);
   return (await all(r.room, "SELECT recipient_principal_id AS who FROM outbox WHERE event_id = ? ORDER BY who", event.id)).map((o: any) => o.who);
 };
+/** The operators' finding that a label's lookup row is another room's, if they were told. */
+const finding = (label: string) => inModeration((sql) => sql.exec("SELECT code, subject FROM takedown_finding WHERE code = 'app_label_taken' AND subject = ?", label).toArray());
 const departs = (who: Who) => api({ ...who, departure: { person: who.id, org: who.org, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
 /** The content domain's stop, set or cleared in its home, the Moderation object. */
 async function stop(stopped: boolean) {
@@ -232,6 +234,34 @@ describe("who may approve or decline", () => {
     }
   });
 
+  it("reads the approver's own record before anything else outside the room, and writes nothing to D1 for one who left", async () => {
+    for (const [why, admin, change, want] of [
+      ["left their organization", undefined, (r: Room) => departs(r.admin), [403, "not_allowed"]],
+      ["their record doesn't answer", `per_unavailable_ra_s5_${rooms + 1}`, async () => undefined, [503, "standing_unknown"]],
+    ] as const) {
+      const r = await room({ admin });
+      await change(r);
+      // Test builds: each round of the release's outside reads, which apply the deployment's setting and the
+      // organization's switch, is counted here.
+      await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_release_reads_seen (release_id TEXT)"));
+      const before = await everything(r);
+      expect(refused(await approve(r, r.admin)), why).toEqual(want);
+      expect(await all(r.room, "SELECT * FROM test_release_reads_seen"), why).toEqual([]);
+      expect(await indexRow(r.label), why).toBeNull();
+      expect(await everything(r), why).toBe(before);
+      // The control: the owner's approval makes those reads.
+      expect((await approve(r)).body.state, why).toBe("queued");
+      expect(await all(r.room, "SELECT release_id FROM test_release_reads_seen"), why).toEqual([{ release_id: r.release }]);
+    }
+  });
+
+  it("refuses a decline whose decider's own record can't answer, writing nothing", async () => {
+    const r = await room({ admin: `per_unavailable_ra_dec_${rooms + 1}` });
+    const before = await everything(r);
+    expect(refused(await decline(r, r.admin))).toEqual([503, "standing_unknown"]);
+    expect(await everything(r)).toBe(before);
+  });
+
   it("refuses a release that isn't awaiting approval, or that the room doesn't have", async () => {
     const r = await room();
     await inRoom(r.room, (s) => void s.exec("UPDATE release SET state = 'declined', declined_by = ?, declined_at = 1 WHERE id = ?", r.owner.id, r.release));
@@ -265,6 +295,9 @@ describe("approval reads every outside fact again, and runs core's whole recheck
       ["the requester's grant was revoked", (r) => inRoom(r.room, (s) => void s.exec("UPDATE provider_grant SET revoked_at = 1")), "requester_lost_authority"],
       ["the organization's provisioning delegation was taken back", (r) => inRoom(r.room, (s) => { s.exec("CREATE TABLE test_release_delegation_answer (answer TEXT)"); s.exec("INSERT INTO test_release_delegation_answer (answer) VALUES (?)", '{"granted":false}'); }), "release_not_delegated"],
       ["the room was made private", (r) => inRoom(r.room, (s) => void s.exec("UPDATE workspace SET visibility = 'private'")), "release_needs_public_room"],
+      // Archived and suspended by direct writes, which move no epoch, so the recheck itself is what refuses.
+      ["the room was archived", (r) => inRoom(r.room, (s) => void s.exec("UPDATE workspace SET status = 'archived'")), "workspace_archived"],
+      ["the app was suspended by an operator", (r) => inRoom(r.room, (s) => void s.exec("UPDATE app_label SET suspended_at = 1, suspension_reason = 'abuse' WHERE label = ?", r.label)), "app_suspended"],
       ["the repository's link isn't ready", (r) => inRoom(r.room, (s) => void s.exec("UPDATE repo_link SET status = 'degraded'")), "repo_not_ready"],
       ["the room now requires a person as reviewer", (r) => inRoom(r.room, (s) => { s.exec("UPDATE workspace SET require_person_review = 1"); s.exec("UPDATE task_change SET reviewer_id = 'agt_ra_reviewer'"); }), "reviewer_rule_changed"],
       // The release's configuration version and epoch must still be the room's current ones.
@@ -341,53 +374,150 @@ describe("approval reads every outside fact again, and runs core's whole recheck
 });
 
 describe("the app's address", () => {
-  it("waits, writing nothing in the room, while the label's lookup row is another room's", async () => {
+  it("refuses for good, telling operators, while the label's lookup row names another room; never replaced", async () => {
     const r = await room();
     await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, 'ws_ra_someone_else', 1)").bind(r.label).run();
     const before = await everything(r);
-    expect(refused(await approve(r))).toEqual([503, "release_address_pending"]);
+    expect(refused(await approve(r))).toEqual([409, "release_label_taken"]);
     expect(await everything(r)).toBe(before);
-    // Never replaced on this room's word.
     expect(await indexRow(r.label)).toEqual({ label: r.label, workspace_id: "ws_ra_someone_else", created_at: 1 });
-    // The control: once the row is this room's, the same release is approved.
+    expect(await finding(r.label)).toEqual([{ code: "app_label_taken", subject: r.label }]);
+    // The control: once the row is gone, the same release is approved, and the row is this room's.
     await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label = ?").bind(r.label).run();
     expect((await approve(r)).body.state).toBe("queued");
+    expect(await indexRow(r.label)).toMatchObject({ workspace_id: r.room });
   });
 
-  it("replaces an earlier address only once the room's applier has confirmed it serves nothing", async () => {
+  it("waits, writing nothing in the room, while D1 can't be written", async () => {
     const r = await room();
-    const old = `raold${rooms}.${FAKE.domain}`;
-    await inRoom(r.room, (s) => {
-      s.exec("INSERT INTO app_label (label, current, retired_at, created_at, indexed_at) VALUES (?, NULL, 1, 1, 1)", `raold${rooms}`);
-      s.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 4, 1)", old);
-      s.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 3, ?, 1, 1)", old, `raold${rooms}.rel_${"1".repeat(32)}`);
-    });
+    const create = (BINDINGS.TEST_D1_SCHEMA as string).split(";").map((x) => x.trim()).filter((x) => /^(CREATE TABLE\s+app_label_index|ALTER TABLE\s+app_label_index)\b/i.test(x));
+    expect(create).toHaveLength(2);
+    const kept = (await BINDINGS.DB.prepare("SELECT * FROM app_label_index").all()).results;
     const before = await everything(r);
-    expect(refused(await approve(r))).toEqual([503, "release_address_pending"]);
+    await BINDINGS.DB.prepare("DROP TABLE app_label_index").run();
+    try {
+      expect(refused(await approve(r))).toEqual([503, "release_address_pending"]);
+    } finally {
+      for (const statement of create) await BINDINGS.DB.prepare(statement).run();
+      for (const row of kept as any[]) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at, approved_at) VALUES (?, ?, ?, ?)").bind(row.label, row.workspace_id, row.created_at, row.approved_at).run();
+    }
     expect(await everything(r)).toBe(before);
-    // Applied: nothing is served there any more.
-    await inRoom(r.room, (s) => void s.exec("UPDATE serve_apply SET applied_version = 4, applied_script = NULL WHERE host = ?", old));
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
     expect((await approve(r)).body.state).toBe("queued");
-    expect(await all(r.room, "SELECT host, script_name FROM serve_state")).toEqual([{ host: `${r.label}.${FAKE.domain}`, script_name: null }]);
-    expect(await all(r.room, "SELECT host FROM serve_apply")).toEqual([]);
   });
 
-  it("is written by the room's alarm for every label not in the lookup table yet, labels asked for before approval existed included", async () => {
+  it("answers release_not_available, writing nothing in the room, where no content domain is configured", async () => {
     const r = await room();
-    const other = await room();
-    // `other`'s label is held by someone else's row: it is marked refused, and the row is left.
-    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, 'ws_ra_someone_else', 1)").bind(other.label).run();
+    await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_domain_unset (x INTEGER)"));
+    const before = await everything(r);
+    expect(refused(await approve(r))).toEqual([409, "release_not_available"]);
+    expect(await everything(r)).toBe(before);
     expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
+  });
+
+  describe("an earlier address, from a label an unpublish retired", () => {
+    /** A room whose earlier default host, `old`, was taken down at version 4, and whatever its applier says of it. */
+    async function earlier(apply: string | null) {
+      const r = await room();
+      const oldLabel = `raold${rooms}`;
+      const old = `${oldLabel}.${FAKE.domain}`;
+      await inRoom(r.room, (s) => {
+        s.exec("INSERT INTO app_label (label, current, retired_at, created_at, indexed_at) VALUES (?, NULL, 1, 1, 1)", oldLabel);
+        s.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 4, 1)", old);
+        if (apply) s.exec(apply, ...[old, `${oldLabel}.rel_${"1".repeat(32)}`].slice(0, apply.split("?").length - 1));
+      });
+      return { r, old };
+    }
+    const STILL_SERVING = "INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 3, ?, 1, 1)";
+
+    it("waits while it may still serve something, writing nothing", async () => {
+      const { r } = await earlier(STILL_SERVING);
+      const before = await everything(r);
+      expect(refused(await approve(r))).toEqual([503, "release_address_pending"]);
+      expect(await everything(r)).toBe(before);
+    });
+
+    it("counts it down when the applier confirmed it, when the provider refused that version, or when no applier ever wrote it", async () => {
+      for (const [why, apply] of [
+        ["applied, with nothing served", "INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 4, NULL, 1, 1)"],
+        ["refused at that version", "INSERT INTO serve_apply (host, refused_version, last_code, updated_at) VALUES (?, 4, 'host_not_this_rooms', 1)"],
+        ["never written, as with no provider", null],
+      ] as const) {
+        const { r, old } = await earlier(apply);
+        const answer = await approve(r);
+        expect([answer.status, answer.body?.state], `${why}: ${answer.text}`).toEqual([200, "queued"]);
+        // The new address is the room's default host; the earlier one is kept, retired, for its applier to answer for.
+        expect(await all(r.room, "SELECT host, script_name FROM serve_state ORDER BY host = ?", old), why).toEqual([
+          { host: `${r.label}.${FAKE.domain}`, script_name: null }, { host: old, script_name: null },
+        ]);
+        expect(await all(r.room, "SELECT host, retired_at FROM serve_retired"), why).toEqual([{ host: old, retired_at: T }]);
+      }
+    });
+
+    it("keeps the earlier host's rows, so a write to it that lands late is still put right", async () => {
+      const { r, old } = await earlier("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 4, NULL, 1, 1)");
+      expect((await approve(r)).body.state).toBe("queued");
+      // The rows are still there, and the reconcile's question about the old host gets the room's answer: nothing.
+      expect(await all(r.room, "SELECT host, version FROM serve_state WHERE host = ?", old)).toEqual([{ host: old, version: 4 }]);
+      expect(await all(r.room, "SELECT host, applied_version FROM serve_apply WHERE host = ?", old)).toEqual([{ host: old, applied_version: 4 }]);
+      // A late write landed: the room forgets it applied the host, as the reconcile does, and its applier is due for
+      // it again, wanting nothing there.
+      await inRoom(r.room, (s) => void s.exec("UPDATE serve_apply SET applied_version = NULL, applied_at = NULL WHERE host = ?", old));
+      const due = await inRoom(r.room, (s) => s.exec("SELECT s.host, s.script_name FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE a.applied_version IS NULL OR a.applied_version != s.version ORDER BY s.host = ?", old).toArray());
+      expect(due).toContainEqual({ host: old, script_name: null });
+    });
+  });
+});
+
+describe("the labels' upkeep", () => {
+  it("writes nothing to D1 while release is off, or while the gate on the release path is closed", async () => {
+    const r = await room();
+    // Release off for the deployment: the alarm writes nothing.
     await alarmPass(stub(r.room));
-    await alarmPass(stub(other.room));
-    expect(await indexRow(r.label)).toMatchObject({ label: r.label, workspace_id: r.room });
-    expect((await all(r.room, "SELECT indexed_at FROM app_label"))[0].indexed_at).toBeGreaterThan(0);
+    expect(await indexRow(r.label)).toBeNull();
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
+    // Release on, and a provider configured, with the release path incomplete: nothing either.
+    await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
+    try {
+      await switchedOn(() => alarmPass(stub(r.room)));
+    } finally { await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
+    expect(await indexRow(r.label)).toBeNull();
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
+    // The control: on, with the gate open, the label is written, by the release commands' clock.
+    await switchedOn(() => alarmPass(stub(r.room)));
+    expect(await indexRow(r.label)).toEqual({ label: r.label, workspace_id: r.room, created_at: T });
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: T }]);
+  });
+
+  it("marks a label another room holds refused, tells operators, and an approval then refuses for good", async () => {
+    const other = await room();
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, 'ws_ra_someone_else', 1)").bind(other.label).run();
+    await switchedOn(() => alarmPass(stub(other.room)));
     expect(await all(other.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: 0 }]);
     expect(await indexRow(other.label)).toMatchObject({ workspace_id: "ws_ra_someone_else" });
-    // An approval of `other`'s release waits: its label was never this room's to route.
-    expect(refused(await approve(other))).toEqual([503, "release_address_pending"]);
-    // And `r`'s, already indexed, needs no further write to D1.
-    expect((await approve(r)).body.state).toBe("queued");
+    expect(await finding(other.label)).toEqual([{ code: "app_label_taken", subject: other.label }]);
+    expect(refused(await approve(other))).toEqual([409, "release_label_taken"]);
+  });
+
+  it("counts toward the repository-unpublish ceiling only a room an approval held for", async () => {
+    // The ceiling's own query, as the source has it.
+    const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["repo_ceiling.rs"];
+    const from = source.slice(source.indexOf("fn rooms_with_apps"));
+    const query = /\.prepare\("([^"]*)"\)/.exec(from)![1];
+    expect(query).toContain("app_label_index");
+    const count = async () => ((await BINDINGS.DB.prepare(query).first()) as any).n as number;
+    const asked = await room();
+    const approved = await room();
+    const start = await count();
+    // Both labels written to the lookup table; only one has had an approval.
+    await switchedOn(() => alarmPass(stub(asked.room)));
+    await switchedOn(() => alarmPass(stub(approved.room)));
+    expect(await count()).toBe(start);
+    expect((await approve(approved)).body.state).toBe("queued");
+    await switchedOn(() => alarmPass(stub(approved.room)));
+    expect(await count()).toBe(start + 1);
+    expect(await all(approved.room, "SELECT approved_at, indexed_at FROM app_label_approval")).toEqual([{ approved_at: T, indexed_at: T }]);
+    expect(await BINDINGS.DB.prepare("SELECT approved_at FROM app_label_index WHERE label = ?").bind(asked.label).first()).toEqual({ approved_at: null });
   });
 });
 

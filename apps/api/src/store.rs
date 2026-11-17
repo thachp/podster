@@ -406,6 +406,13 @@ CREATE TABLE hostname_provider (request_id TEXT PRIMARY KEY REFERENCES hostname_
   CHECK (provider_id IS NULL OR create_sent_at IS NOT NULL), CHECK (gone_at IS NULL OR create_sent_at IS NOT NULL),
   CHECK (first_gone_at IS NULL OR create_sent_at IS NOT NULL), CHECK (deleted_at IS NULL OR create_sent_at IS NOT NULL)) WITHOUT ROWID;
 INSERT INTO hostname_provider (request_id, release_epoch) SELECT id, (SELECT release_epoch FROM release_config) FROM hostname_request WHERE open = 1;
+", "
+CREATE TABLE IF NOT EXISTS app_label_approval (label TEXT PRIMARY KEY REFERENCES app_label (label),
+  approved_at INTEGER NOT NULL CHECK (typeof(approved_at) = 'integer'), indexed_at INTEGER CHECK (indexed_at IS NULL OR typeof(indexed_at) = 'integer')) WITHOUT ROWID;
+INSERT OR IGNORE INTO app_label_approval (label, approved_at) SELECT label, min(approved_at) FROM release WHERE approved_by IS NOT NULL GROUP BY label;
+CREATE TABLE IF NOT EXISTS serve_retired (host TEXT PRIMARY KEY REFERENCES serve_state (host), retired_at INTEGER NOT NULL CHECK (typeof(retired_at) = 'integer')) WITHOUT ROWID;
+DROP INDEX IF EXISTS serve_state_default;
+CREATE UNIQUE INDEX IF NOT EXISTS serve_state_default_serving ON serve_state (kind) WHERE kind = 'default' AND script_name IS NOT NULL;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

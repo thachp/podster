@@ -797,7 +797,7 @@ fn custom_host_open(sql: &SqlStorage, hostname: &str) -> R<Option<bool>> {
 fn open_route(sql: &SqlStorage, hostname: &str, now: i64) -> R<bool> {
     let has_default = !rows(
         sql,
-        "SELECT 1 AS d FROM serve_state WHERE kind = 'default'",
+        "SELECT 1 AS d FROM serve_state WHERE kind = 'default' AND host NOT IN (SELECT host FROM serve_retired)",
         vec![],
     )?
     .is_empty();

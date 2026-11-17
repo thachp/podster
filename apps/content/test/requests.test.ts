@@ -223,7 +223,9 @@ describe("the rule, as core has it", () => {
 
   it("sends the body's headers on only with a write, and never a cookie", () => {
     expect([...forwardedHeaders("read")]).toEqual(["accept", "if-none-match", "if-modified-since"]);
-    expect([...forwardedHeaders("write")]).toEqual(["accept", "if-none-match", "if-modified-since", "content-type", "content-length"]);
+    expect([...forwardedHeaders("write")]).toEqual(["accept", "content-type", "content-length"]);
+    // A write carries no condition: a conditional write would only ever be answered 304, which isn't served.
+    for (const name of ["if-none-match", "if-modified-since"]) expect(forwardedHeaders("write"), name).not.toContain(name);
     expect(forwardedHeaders("preflight")).toBe(forwardedHeaders("read"));
     for (const cls of ["read", "write", "preflight"] as const) {
       for (const name of ["cookie", "authorization", "origin", "upgrade", "service-worker", "host"]) expect(forwardedHeaders(cls), name).not.toContain(name);

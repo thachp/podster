@@ -29,8 +29,8 @@ export const CODE_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as
 export const WRITE_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
 /** The visitor's headers sent on to an app with every request, as today. */
 export const READ_HEADERS = ["accept", "if-none-match", "if-modified-since"] as const;
-/** The visitor's headers sent on to an app with a write: those of a read, and the body's type and length. */
-export const WRITE_HEADERS = ["accept", "if-none-match", "if-modified-since", "content-type", "content-length"] as const;
+/** The visitor's headers sent on to an app with a write: `Accept`, and the body's type and length. A read's two conditions don't pass: a conditional write could only ever be answered `304`, which isn't served. */
+export const WRITE_HEADERS = ["accept", "content-type", "content-length"] as const;
 /** The only media type a write may carry. */
 export const JSON_TYPE = "application/json";
 /** The `Access-Control-Allow-Origin` of every answer for a host with code: the origin a sandboxed page has. */

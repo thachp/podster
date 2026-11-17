@@ -243,14 +243,15 @@ fn only_a_write_sends_the_bodys_headers_on_and_never_a_cookie() {
     );
     assert_eq!(
         forwarded_headers(RequestClass::Write),
-        [
-            "accept",
-            "if-none-match",
-            "if-modified-since",
-            "content-type",
-            "content-length"
-        ]
+        ["accept", "content-type", "content-length"]
     );
+    // A write carries no condition: a conditional write would only ever be answered 304, which isn't served.
+    for name in ["if-none-match", "if-modified-since"] {
+        assert!(
+            !forwarded_headers(RequestClass::Write).contains(&name),
+            "{name}"
+        );
+    }
     for class in [
         RequestClass::Read,
         RequestClass::Write,

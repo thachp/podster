@@ -20,8 +20,10 @@
 //      `names.ts`): an entry with code begins with the mark, and a static entry carries none and is read exactly as
 //      before. The rules for each kind are `requests.ts`, the mirror of `podster_core::app_requests`. A static
 //      host takes GET and HEAD only, as it always has. A host with code meets the rules for its kind, and then the
-//      code-apps switch, which is off: nothing of an app with code is served, and a write that passes every rule is
-//      refused as not available, since the store and the write budget aren't built.
+//      code-apps switch, which is off: nothing of an app with code is served. With it on, which only a test can do, a
+//      read is still refused, and a write that passes every rule is counted against its app's write budget
+//      (`counter.ts`, by the app's label) and then sent to the app with its body; over the budget, or with a budget
+//      that can't be read, it is refused and the app never sees it.
 //   7. The script that entry names, asked of the namespace, with a request built from nothing: three of the
 //      visitor's headers and nothing else of the visitor's.
 //   8. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
@@ -32,6 +34,8 @@
 // instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
 // Nothing is logged for a request (ADR 0010's "Logs").
+import { BUDGET_REFUSAL_STATUS, retryAfterSeconds } from "./budget";
+import type { WriteGate } from "./counter";
 import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
@@ -76,6 +80,11 @@ export interface Deps {
    * anything is read, so no host's kind is learned for it, and no rule for hosts with code applies to it.
    */
   codeApps: boolean;
+  /**
+   * The write counter: asked once for each write to a host with code that passes every rule here, right before the
+   * write is sent to the app, and never for anything else. With the switch off it is never asked.
+   */
+  writes: WriteGate;
 }
 
 /** The visitor's headers that go through to an app with a read. Each calls only for answer headers let through below. */
@@ -185,52 +194,82 @@ function sameHostPath(location: string, origin: string): string | null {
 }
 
 /**
- * The request the app is sent, built from nothing: the URL, the method, and three of the visitor's headers. The
- * visitor's request object is never passed on or copied, so nothing else of it can reach an app: no other header, no
- * body, and none of its settings.
+ * The request the app is sent, built from nothing: the URL, the method, the visitor's headers for its class, and for a
+ * write the body as this Worker read it. The visitor's request object is never passed on or copied, so nothing else
+ * of it can reach an app: no other header, and none of its settings. A write's `Content-Length` is the body's own,
+ * set by the runtime from the bytes, never the visitor's claim, which could understate them.
  */
-function requestForApp(request: Request, url: URL, cls: RequestClass): Request {
+function requestForApp(request: Request, url: URL, cls: RequestClass, body: Uint8Array<ArrayBuffer> | null = null): Request {
   const headers = new Headers();
   for (const name of forwardedHeaders(cls)) {
+    if (name === "content-length") continue;
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  return new Request(url.toString(), { method: request.method, headers, redirect: "manual" });
+  return new Request(url.toString(), { method: request.method, headers, redirect: "manual", body });
+}
+
+/**
+ * The app's answer, from the dispatch namespace: the one place an app is asked. Asking the namespace for a script that
+ * isn't there returns without error; the fetch is what rejects, with exactly this message (spikes A and C). Any other
+ * rejection is an error, and nothing is served for it.
+ */
+async function dispatch(deps: Deps, script: string, request: Request): Promise<Response | "missing" | "error"> {
+  try {
+    return await deps.apps.get(script).fetch(request);
+  } catch (error) {
+    return error instanceof Error && error.message === "Worker not found." ? "missing" : "error";
+  }
 }
 
 /** Whether a method is one a static host takes: the only ones any host has ever been served for. */
 const isRead = (method: string) => method === "GET" || method === "HEAD";
 
 /**
- * A body's length, counted, stopping at the first byte over the cap: the number counted, so any number over the cap
- * means over. A body that came with a `Content-Length` is counted too, so a length that understates it changes nothing.
+ * A write's body, read up to the cap and no further: its bytes, or null at the first chunk over the cap. A body that
+ * came with a `Content-Length` is counted too, so a length that understates it changes nothing.
  */
-async function countedBody(request: Request): Promise<number> {
-  if (request.body === null) return 0;
+async function bodyWithin(request: Request): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (request.body === null) return new Uint8Array(0);
   const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
   let counted = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) return counted;
+      if (done) break;
       counted += value.byteLength;
-      if (!bodyWithinCap(counted)) return counted;
+      if (!bodyWithinCap(counted)) return null;
+      chunks.push(value);
     }
   } finally {
     // Whatever is left is never read: a body over the cap is not taken in.
     reader.cancel().catch(() => {});
   }
+  const body = new Uint8Array(counted);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
 }
 
 /**
- * A request to a host whose release carries code, with the code-apps switch off. The rules for its kind come first,
- * each refusal with its own code and status, so a page can tell what it got wrong. What passes every rule is still
- * refused: a write as not available, because the store and the write budget aren't built (ADR 0010's revision, rows
- * 1, 4a and 6, which wait for the owner's store spike); a read or a preflight because the switch is off. Every answer
- * here is this Worker's own and is never kept; it is readable by the origin `null` only, except a preflight's, which is
- * readable by nobody, so the browser sends nothing further. Nothing reaches the app.
+ * A request to a host whose release carries code. The rules for its kind come first, each refusal with its own code
+ * and status, so a page can tell what it got wrong. A read or a preflight that passes them is still refused, because
+ * the switch is off and serving an app with code isn't built.
+ *
+ * A write that passes them, which only a test can send here while the switch is off, is counted against its app's
+ * write budget and then sent to the app, in that order: **the counter is asked before the app is**, so a write over
+ * the budget never reaches the app, and a write the app then fails still counts (the plan's S6). A write this Worker
+ * refuses itself, before the count, isn't counted. The count is the app's, by its label, the same across its releases
+ * and its hosts. Over the budget, `429` with when to come back; a budget that can't be read, `503`.
+ *
+ * Every answer here is never kept and is readable by the origin `null` only, an app's answer to a write included,
+ * except a preflight's, which is readable by nobody, so the browser sends nothing further.
  */
-async function codeHost(request: Request, site: Site): Promise<Response> {
+async function codeHost(request: Request, url: URL, site: Site, script: string, deps: Deps): Promise<Response> {
   const asCode = (status: number, code: string, extra: Record<string, string> = {}) => own(request, site, status, code, extra, CODE_ALLOW_ORIGIN);
   const checked = checkRequest("code", {
     method: request.method,
@@ -249,8 +288,32 @@ async function codeHost(request: Request, site: Site): Promise<Response> {
     return own(request, site, 503, "code_apps_off", {}, null);
   }
   if (checked.value === "write") {
-    if (!bodyWithinCap(await countedBody(request))) return asCode(REFUSAL_STATUS.write_too_large, "write_too_large");
-    return asCode(503, "writes_not_available");
+    const body = await bodyWithin(request);
+    if (body === null) return asCode(REFUSAL_STATUS.write_too_large, "write_too_large");
+    // Counted first. The label is the script's, which a confirmed entry always has.
+    const label = scriptLabel(script);
+    const budget = label === null ? null : await deps.writes.admit(label);
+    if (budget === null || !budget.ok) {
+      const refusal = budget === null ? ({ code: "write_budget_unknown" } as const) : budget.refusal;
+      // The wait is readable by the page, so it can tell its visitor when to try again.
+      const wait: Record<string, string> = refusal.code === "write_budget_spent" ? { "retry-after": String(retryAfterSeconds(refusal.retryAfterMs)), "access-control-expose-headers": "retry-after" } : {};
+      return asCode(BUDGET_REFUSAL_STATUS[refusal.code], refusal.code, wait);
+    }
+    // Then sent on.
+    const answer = await dispatch(deps, script, requestForApp(request, url, "write", body));
+    if (answer === "missing") return asCode(404, "not_found", { "clear-site-data": '"cache"' });
+    if (answer === "error") return asCode(502, "app_error");
+    // A write's answer is the app's, but never a redirect, a part, or a body that isn't the plain bytes.
+    if (answer.status < 200 || answer.status === 206 || (answer.status >= 300 && answer.status < 400) || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return asCode(502, "app_answer_unservable");
+    // A status that can't carry a body gets none, and no length for the body that was dropped.
+    const bodiless = [204, 205].includes(answer.status);
+    const headers = new Headers();
+    for (const name of PASSED_RESPONSE_HEADERS) {
+      const value = answer.headers.get(name);
+      if (value !== null && !(bodiless && name === "content-length")) headers.set(name, value);
+    }
+    fixedHeaders(headers, site, true, CODE_ALLOW_ORIGIN);
+    return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   }
   // A read. Serving one is not built: the switch is pinned to `false` by type here, so turning it on fails to compile
   // until this line is replaced by the code that serves an app with code.
@@ -306,19 +369,13 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     const script = entry.script;
 
     kind = entry.kind;
-    if (kind === "code") return await codeHost(request, site);
+    if (kind === "code") return await codeHost(request, url, site, script, deps);
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
 
-    let answer: Response;
-    try {
-      // Asking the namespace for a script that isn't there returns without error; the fetch is what rejects, with
-      // exactly this message (spikes A and C). Any other rejection is an error, and nothing is served for it.
-      answer = await deps.apps.get(script).fetch(requestForApp(request, url, "read"));
-    } catch (error) {
-      if (error instanceof Error && error.message === "Worker not found.") return notFound(request, site);
-      return own(request, site, 502, "app_error");
-    }
+    const answer = await dispatch(deps, script, requestForApp(request, url, "read"));
+    if (answer === "missing") return notFound(request, site);
+    if (answer === "error") return own(request, site, 502, "app_error");
     const headers = new Headers();
     if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, site, 502, "app_answer_unservable");
     if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {

@@ -169,6 +169,8 @@ export default {
       stop,
       domain: DOMAIN,
       codeApps: false,
+      // No counter: with the switch off no write reaches one, and this run has no Durable Object.
+      writes: { admit: async () => ({ ok: false, refusal: { code: "write_budget_unknown" } }) },
     });
   },
 } satisfies ExportedHandler<{ BROWSER_RUN_ID?: unknown }>;

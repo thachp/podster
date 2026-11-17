@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS } from "../src/handle";
 import { CODE_MARK, customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
+import type { Admission } from "../src/counter";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
 
 // The content Worker's handler, against stand-ins for its two bindings (M6 step 4(b), ADR 0010). Nothing here reaches
@@ -24,10 +25,16 @@ type World = {
   apps: Map<string, (request: Request) => Response | Promise<Response>>;
   clock: { now: number };
   failReads: { all: boolean; keys: Set<string> };
+  /** Every label the write counter was asked to count a write for. */
+  counted: string[];
+  /** What the write counter answers. */
+  budget: Admission;
+  /** The order in which the counter and the app were asked. */
+  order: ("count" | "dispatch")[];
 };
 
 function world(): World {
-  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, deps: undefined as unknown as Deps };
+  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, counted: [], budget: { ok: true }, order: [], deps: undefined as unknown as Deps };
   w.apps.set(SCRIPT, () => new Response("<h1>app</h1>", { headers: { "content-type": "text/html" } }));
   w.deps = {
     entries: {
@@ -41,6 +48,7 @@ function world(): World {
       get(script) {
         return {
           async fetch(request) {
+            w.order.push("dispatch");
             w.sent.push({ script, request });
             const app = w.apps.get(script);
             if (!app) throw new Error("Worker not found.");
@@ -53,6 +61,13 @@ function world(): World {
     stop: { read: null },
     domain: DOMAIN,
     codeApps: false,
+    writes: {
+      async admit(label) {
+        w.order.push("count");
+        w.counted.push(label);
+        return w.budget;
+      },
+    },
   };
   return w;
 }
@@ -635,6 +650,8 @@ describe("the sandbox", () => {
 // `Deps.codeApps` set by the test, which only a test can do; serving an app with code stays refused even then.
 
 const CODE_OWN = { ...OWN, "access-control-allow-origin": "null" };
+/** What this Worker sets on an app's answer to a write, for a host with code: never kept, readable by the origin null. */
+const CODE_APP = { ...FIXED, "access-control-allow-origin": "null", "cache-control": "no-store" };
 /** A refused preflight's headers: this Worker's own, readable by nobody. */
 const PREFLIGHT_OWN = Object.fromEntries(Object.entries(OWN).filter(([name]) => name !== "access-control-allow-origin"));
 const STATIC_405 = { ...OWN, allow: "GET, HEAD" };
@@ -663,10 +680,26 @@ describe("the code-apps switch", () => {
     for (const [method, init] of [["POST", { body: "{}", headers: JSON_HEADERS }], ["PUT", { body: bodyOf(MAX_WRITE_BODY_BYTES + 1), headers: JSON_HEADERS }], ["DELETE", {}], ["OPTIONS", { headers: { "access-control-request-method": "POST" } }], ["PATCH", { body: "x" }]] as [string, RequestInit][]) {
       expect(await answerOf(await get(w, "/", { method, ...init })), method).toEqual([405, STATIC_405, "method_not_allowed\n"]);
     }
-    expect([w.reads, w.sent]).toEqual([[], []]);
+    expect([w.reads, w.sent, w.counted]).toEqual([[], [], []]);
     // A read on that host still learns its kind, and is refused: nothing of an app with code is served.
     expect(await answerOf(await get(w))).toEqual([503, CODE_OWN, "code_apps_off\n"]);
     expect(w.sent).toEqual([]);
+  });
+
+  it("while off, never asks the write counter, for any method on any host, and answers exactly as before it existed", async () => {
+    const hosts: [string, string | null][] = [[HOST, SCRIPT], [HOST, `${CODE_MARK}${SCRIPT}`], [HOST, null], ["app.example.org", `${CODE_MARK}${SCRIPT}@app.example.org`], [`deep.${HOST}`, null]];
+    for (const [host, entry] of hosts) {
+      for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+        const w = world();
+        if (entry === null) w.kv.delete(host);
+        else w.kv.set(host, entry);
+        // A counter that would refuse, so a request that reached it would answer differently.
+        w.budget = { ok: false, refusal: { code: "write_budget_spent", retryAfterMs: 1n } };
+        const answer = await get(w, "/api/items", { method, ...(["GET", "HEAD", "OPTIONS"].includes(method) ? {} : { body: "{}", headers: JSON_HEADERS }) }, host);
+        expect([w.counted, answer.status === 429], `${host} ${method}`).toEqual([[], false]);
+        if (!["GET", "HEAD"].includes(method)) expect(answer.status, `${host} ${method}`).toBe(405);
+      }
+    }
   });
 });
 
@@ -700,20 +733,140 @@ describe("a host whose release carries code", () => {
     expect(await answerOf(await get(s))).toEqual([502, OWN, "error\n"]);
   });
 
-  it("refuses a write that passes every rule as not available, at the body's cap and one under it, declared or counted", async () => {
+  it("counts a write that passes every rule, then sends it to the app with its body, at the body's cap and one under it, declared or counted", async () => {
     for (const method of WRITE_METHODS) {
       for (const bytes of [MAX_WRITE_BODY_BYTES - 1, MAX_WRITE_BODY_BYTES]) {
-        const w = codeWorld();
-        const declared = await get(w, "/api/items", { method, body: bodyOf(bytes), headers: { ...JSON_HEADERS, "content-length": String(bytes) } });
-        expect(await answerOf(declared), `${method} ${bytes} declared`).toEqual([503, CODE_OWN, "writes_not_available\n"]);
-        const counted = await get(w, "/api/items", { method, body: bodyOf(bytes), headers: JSON_HEADERS });
-        expect(await answerOf(counted), `${method} ${bytes} counted`).toEqual([503, CODE_OWN, "writes_not_available\n"]);
-        expect(w.sent, method).toEqual([]);
+        for (const declared of [true, false]) {
+          const w = codeWorld();
+          const headers: Record<string, string> = { ...JSON_HEADERS, accept: "application/json", cookie: "a=b", authorization: "Bearer x", origin: "null" };
+          if (declared) headers["content-length"] = String(bytes);
+          const answer = await get(w, "/api/items?x=1", { method, body: bodyOf(bytes), headers });
+          const label = `${method} ${bytes} ${declared ? "declared" : "counted"}`;
+          expect(await answerOf(answer), label).toEqual([200, { ...CODE_APP, "content-type": "text/html" }, "<h1>app</h1>"]);
+          // Counted once, for the app's label, before the app was asked.
+          expect([w.counted, w.order], label).toEqual([["k3v9q2"], ["count", "dispatch"]]);
+          // The app gets the method, the URL, the body as counted, and the write's headers, and nothing else.
+          const sent = w.sent[0].request;
+          expect([w.sent.length, w.sent[0].script, sent.method, sent.url, await sent.text()], label).toEqual([1, SCRIPT, method, `${ORIGIN}/api/items?x=1`, bodyOf(bytes)]);
+          expect(Object.keys(Object.fromEntries(sent.headers.entries())).filter((name) => name !== "content-length").sort(), label).toEqual(["accept", "content-type"]);
+        }
       }
     }
-    // A write with no body at all, as a DELETE often is, still names JSON, and still isn't available.
+    // A write with no body at all, as a DELETE often is, still names JSON, is counted, and goes with an empty body.
     const w = codeWorld();
-    expect(await answerOf(await get(w, "/api/items/1", { method: "DELETE", headers: JSON_HEADERS }))).toEqual([503, CODE_OWN, "writes_not_available\n"]);
+    expect((await get(w, "/api/items/1", { method: "DELETE", headers: JSON_HEADERS })).status).toBe(200);
+    expect([w.counted, await w.sent[0].request.text()]).toEqual([["k3v9q2"], ""]);
+  });
+
+  it("refuses a write over the budget with 429 and when to come back, readable by the origin null, and never asks the app", async () => {
+    for (const [retryAfterMs, seconds] of [[1n, "1"], [999n, "1"], [1_000n, "1"], [1_001n, "2"], [599_990n, "600"]] as const) {
+      const w = codeWorld();
+      w.budget = { ok: false, refusal: { code: "write_budget_spent", retryAfterMs } };
+      const answer = await get(w, "/api/items", { method: "POST", body: "{}", headers: JSON_HEADERS });
+      expect(await answerOf(answer), String(retryAfterMs)).toEqual([429, { ...CODE_OWN, "retry-after": seconds, "access-control-expose-headers": "retry-after" }, "write_budget_spent\n"]);
+      expect([w.counted, w.order, w.sent], String(retryAfterMs)).toEqual([["k3v9q2"], ["count"], []]);
+    }
+  });
+
+  it("refuses a write as unknown, 503, when the budget can't be read, and never asks the app", async () => {
+    const w = codeWorld();
+    w.budget = { ok: false, refusal: { code: "write_budget_unknown" } };
+    for (const method of WRITE_METHODS) {
+      expect(await answerOf(await get(w, "/api/items", { method, body: "{}", headers: JSON_HEADERS })), method).toEqual([503, CODE_OWN, "write_budget_unknown\n"]);
+    }
+    expect([w.counted.length, w.sent]).toEqual([4, []]);
+    // A counter that throws, though the real one never does, is this Worker's own error, and the app isn't asked.
+    w.deps.writes = {
+      admit: async () => {
+        throw new Error("counter down");
+      },
+    };
+    expect(await answerOf(await get(w, "/api/items", { method: "POST", body: "{}", headers: JSON_HEADERS }))).toEqual([502, CODE_OWN, "error\n"]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("counts no write this Worker refuses itself, and no read or preflight", async () => {
+    const w = codeWorld();
+    const requests: [string, RequestInit][] = [
+      ["/", {}],
+      ["/", { method: "HEAD" }],
+      ["/", { method: "OPTIONS", headers: { "access-control-request-method": "POST" } }],
+      ["/", { method: "OPTIONS", headers: { "access-control-request-method": "TRACE" } }],
+      ["/", { method: "POST", body: bodyOf(MAX_WRITE_BODY_BYTES + 1), headers: JSON_HEADERS }],
+      ["/", { method: "POST", body: bodyOf(MAX_WRITE_BODY_BYTES + 1), headers: { ...JSON_HEADERS, "content-length": "10" } }],
+      ["/", { method: "POST", headers: { ...JSON_HEADERS, "content-length": String(MAX_WRITE_BODY_BYTES + 1) } }],
+      ["/", { method: "POST", headers: { ...JSON_HEADERS, "content-length": "1e3" } }],
+      ["/", { method: "PUT", body: "{}", headers: { "content-type": "text/plain" } }],
+      ["/", { method: "PROPFIND", headers: JSON_HEADERS }],
+      ["/sw.js", { method: "POST", headers: { ...JSON_HEADERS, "service-worker": "script" } }],
+      ["/ws", { method: "POST", headers: { ...JSON_HEADERS, upgrade: "websocket" } }],
+    ];
+    const statuses = [];
+    for (const [path, init] of requests) statuses.push((await get(w, path, init)).status);
+    expect(statuses).toEqual([503, 503, 503, 403, 413, 413, 413, 400, 415, 405, 403, 403]);
+    expect([w.counted, w.sent]).toEqual([[], []]);
+    // Nor on a host that isn't confirmed to have code: no entry, a static host, plain HTTP, and the stop.
+    w.kv.delete(HOST);
+    expect((await get(w, "/", { method: "POST", body: "{}", headers: JSON_HEADERS })).status).toBe(405);
+    w.kv.set(HOST, SCRIPT);
+    expect((await get(w, "/", { method: "POST", body: "{}", headers: JSON_HEADERS })).status).toBe(405);
+    w.kv.set(HOST, `${CODE_MARK}${SCRIPT}`);
+    expect((await handle(new Request(`http://${HOST}/`, { method: "POST", body: "{}", headers: JSON_HEADERS }), w.deps)).status).toBe(405);
+    w.kv.set(STOP_KEY, "stopped");
+    w.deps.stop.read = null;
+    expect((await get(w, "/", { method: "POST", body: "{}", headers: JSON_HEADERS })).status).toBe(405);
+    expect([w.counted, w.sent]).toEqual([[], []]);
+  });
+
+  it("counts by the app's label, so a new release keeps the count and a custom hostname shares its app's", async () => {
+    const w = codeWorld();
+    const write = { method: "POST", body: "{}", headers: JSON_HEADERS };
+    expect((await get(w, "/", write)).status).toBe(200);
+    // The same app's next release: another script under the same label.
+    const next = "k3v9q2.rel_ffffffffffffffffffffffffffffffff";
+    w.apps.set(next, () => new Response("{}", { headers: { "content-type": "application/json" } }));
+    w.kv.set(HOST, `${CODE_MARK}${next}`);
+    expect((await get(w, "/", write)).status).toBe(200);
+    // The app's custom hostname, whose entry names the same script.
+    const custom = "app.example.org";
+    w.kv.set(custom, `${CODE_MARK}${next}@${custom}`);
+    expect((await get(w, "/", write, custom)).status).toBe(200);
+    expect(w.counted).toEqual(["k3v9q2", "k3v9q2", "k3v9q2"]);
+    expect(w.sent.map((sent) => sent.script)).toEqual([SCRIPT, next, next]);
+  });
+
+  it("counts a write the app then fails, and answers the app's errors as its own, readable by the origin null", async () => {
+    const write = { method: "POST", body: "{}", headers: JSON_HEADERS };
+    const cases: [string, ((request: Request) => Response | Promise<Response>) | null, number, string][] = [
+      ["missing", null, 404, "not_found\n"],
+      [
+        "throws",
+        () => {
+          throw new Error("boom");
+        },
+        502,
+        "app_error\n",
+      ],
+      ["redirects", () => new Response(null, { status: 303, headers: { location: "/done" } }), 502, "app_answer_unservable\n"],
+      ["partial", () => new Response("x", { status: 206 }), 502, "app_answer_unservable\n"],
+      ["encoded", () => new Response("x", { headers: { "content-encoding": "gzip" } }), 502, "app_answer_unservable\n"],
+    ];
+    for (const [name, app, status, body] of cases) {
+      const w = codeWorld();
+      if (app === null) w.apps.delete(SCRIPT);
+      else w.apps.set(SCRIPT, app);
+      const answer = await get(w, "/api/items", write);
+      expect([answer.status, await answer.text(), answer.headers.get("access-control-allow-origin"), answer.headers.get("cache-control")], name).toEqual([status, body, "null", "no-store"]);
+      expect([w.counted, w.order], name).toEqual([["k3v9q2"], ["count", "dispatch"]]);
+    }
+    // The app's own refusal is passed on as the app's, with only the headers that pass, and is still counted.
+    const w = codeWorld();
+    w.apps.set(SCRIPT, () => new Response('{"error":"no"}', { status: 422, headers: { "content-type": "application/json", "set-cookie": "a=b", "access-control-allow-origin": "*", "cache-control": "max-age=999" } }));
+    expect(await answerOf(await get(w, "/api/items", write))).toEqual([422, { ...CODE_APP, "content-type": "application/json" }, '{"error":"no"}']);
+    expect(w.counted).toEqual(["k3v9q2"]);
+    // An answer that can't carry a body gets none.
+    w.apps.set(SCRIPT, () => new Response(null, { status: 204 }));
+    expect(await answerOf(await get(w, "/api/items", write))).toEqual([204, CODE_APP, ""]);
   });
 
   it("refuses a body one byte over the cap, declared or counted, and a length that understates the body", async () => {
@@ -822,7 +975,7 @@ describe("a static host, under the same rules", () => {
         w.deps.codeApps = codeApps;
         const answer = await get(w, "/api/items", { method, body: bodyOf(bytes), headers: { ...JSON_HEADERS, "content-length": String(bytes) } });
         expect(await answerOf(answer), `${method} ${bytes} ${codeApps}`).toEqual([405, STATIC_405, "method_not_allowed\n"]);
-        expect(w.sent).toEqual([]);
+        expect([w.sent, w.counted]).toEqual([[], []]);
         if (!codeApps) expect(w.reads).toEqual([]);
         }
       }

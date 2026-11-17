@@ -22,9 +22,18 @@
   "preview_urls": false,
   // The content domain: an app's default host is `<label>.<this>`. A placeholder under `.invalid`, which is no
   // domain anyone can hold. The real one comes with the deploy-time configuration.
-  "vars": { "CONTENT_DOMAIN": "content-domain.invalid" },
-  // Its only two bindings: the serve entries, to read, and the namespace that holds each release's script. Nothing
-  // to the gateway, the API, D1 or R2, and no secret.
+  //
+  // The write cap's two settings (stage 1, S6): at most this many writes for each app in each window of this many
+  // milliseconds, the owner's figures of 2026-11-16, 300 writes per 10 minutes. Decimal strings. The code holds no
+  // default for either: missing or malformed, every write to an app with code is refused.
+  "vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000" },
+  // Its bindings: the serve entries, to read, the namespace that holds each release's script, and its own write
+  // counter. Nothing to the gateway, the API, D1 or R2, and no secret.
   "kv_namespaces": [{ "binding": "SERVE", "id": "00000000000000000000000000000000" }],
-  "dispatch_namespaces": [{ "binding": "APPS", "namespace": "placeholder-no-such-namespace" }]
+  "dispatch_namespaces": [{ "binding": "APPS", "namespace": "placeholder-no-such-namespace" }],
+  // The write counter (stage 1, S6): one object for each app, this Worker's own class (no `script_name`), SQLite-backed,
+  // made by the one migration below. Declaring it deploys nothing, and the guards above still hold. Its deploy on the
+  // second account is the owner's, from the deploy-time configuration.
+  "durable_objects": { "bindings": [{ "name": "WRITE_COUNTER", "class_name": "WriteCounter" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WriteCounter"] }]
 }

@@ -57,7 +57,9 @@ describe("the package can't be deployed by accident", () => {
       expect(config.account_id, path).toBe(PLACEHOLDER_ACCOUNT);
       expect(/^[A-Za-z0-9_-]+$/.test(config.account_id), path).toBe(false);
       expect([config.workers_dev, config.preview_urls], path).toEqual([false, false]);
-      for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "durable_objects", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, `${path} ${key}`).not.toHaveProperty(key);
+      for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, `${path} ${key}`).not.toHaveProperty(key);
+      // The write counter's class is the default configuration's alone; the browser run has no Durable Object.
+      if (path !== "wrangler.jsonc") for (const key of ["durable_objects", "migrations"]) expect(config, `${path} ${key}`).not.toHaveProperty(key);
       expect(read(path).replace(/^\s*\/\/.*$/gm, ""), path).not.toMatch(/podster\.dev|podster\.site|workers\.dev|custom_domain|zone_name|pattern/);
     }
     // The browser run's: its name says what it is, it has no binding and no variable at all, and its entry is the
@@ -115,11 +117,16 @@ describe("the package can't be deployed by accident", () => {
 
   it("aims at no account, has no route and no environment, and switches both public addresses off", () => {
     const config = JSON.parse(read("wrangler.jsonc").replace(/^\s*\/\/.*$/gm, ""));
-    expect(Object.keys(config).sort()).toEqual(["account_id", "compatibility_date", "dispatch_namespaces", "kv_namespaces", "main", "name", "preview_urls", "vars", "workers_dev"]);
-    // Its one variable is the content domain, a placeholder under `.invalid` that nobody can hold.
-    expect(config.vars).toEqual({ CONTENT_DOMAIN: "content-domain.invalid" });
+    expect(Object.keys(config).sort()).toEqual(["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "vars", "workers_dev"]);
+    // Its variables: the content domain, a placeholder under `.invalid` that nobody can hold, and the write cap's two
+    // settings, the owner's figures of 2026-11-16, as decimal strings. The code holds no default for either.
+    expect(config.vars).toEqual({ CONTENT_DOMAIN: "content-domain.invalid", WRITE_BUDGET_WRITES: "300", WRITE_BUDGET_WINDOW_MS: "600000" });
     expect([config.workers_dev, config.preview_urls]).toEqual([false, false]);
-    for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "durable_objects", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, key).not.toHaveProperty(key);
+    for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, key).not.toHaveProperty(key);
+    // The write counter: one class, this Worker's own (no `script_name`, so it binds no other Worker's class), made
+    // by the one migration, as a SQLite-backed class. Declaring it deploys nothing: the guards above still hold.
+    expect(config.durable_objects).toEqual({ bindings: [{ name: "WRITE_COUNTER", class_name: "WriteCounter" }] });
+    expect(config.migrations).toEqual([{ tag: "v1", new_sqlite_classes: ["WriteCounter"] }]);
     // The placeholder is unchanged, isn't empty, and holds characters outside the ones wrangler takes for an
     // account's ID (`/^[A-Za-z0-9_-]+$/` in the versions below), so wrangler refuses it before any call scoped to an account.
     expect(config.account_id).toBe(PLACEHOLDER_ACCOUNT);
@@ -177,19 +184,40 @@ describe("the package can't be deployed by accident", () => {
   });
 });
 
-describe("the Worker reaches nothing but its two bindings", () => {
+describe("the Worker reaches nothing but its three bindings", () => {
   const sources = readdirSync(new URL("src/", root)).map((name) => [name, read(`src/${name}`)] as const);
 
-  it("reads one namespace, asks one dispatch namespace, and names no other binding, host or secret", () => {
-    expect(sources.map(([name]) => name).sort()).toEqual(["handle.ts", "index.ts", "names.ts", "requests.ts"]);
+  it("reads one namespace, asks one dispatch namespace and its own write counter, and names no other binding, host or secret", () => {
+    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "index.ts", "names.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
-    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE"]);
-    // Nothing is logged for a request (ADR 0010's "Logs").
+    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
+    // Nothing is logged for a request (ADR 0010's "Logs"), the counter's included.
     expect(all).not.toMatch(/\bconsole\b/);
-    // No write to the namespace, no outbound request of its own, and no storage, cache or timer.
-    for (const word of [".put(", ".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "DurableObject", "setTimeout", "setInterval", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
-    // The one `fetch` call is the dispatch namespace's own.
-    expect(all.match(/\.fetch\(/g)).toHaveLength(1);
+    // No write to the namespace, no outbound request of its own, and no cache or timer.
+    for (const word of [".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "setTimeout", "setInterval", "setAlarm", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
+    // The only storage written is the counter's own object's, in the counter, and only by its one key.
+    for (const [name, text] of sources) {
+      if (name === "counter.ts") continue;
+      for (const word of [".put(", "storage.", "DurableObjectState"]) expect(text, `${name} ${word}`).not.toContain(word);
+    }
+    const counter = read("src/counter.ts");
+    expect(counter.match(/\.put\(/g)).toHaveLength(1);
+    expect(counter).toContain("await storage.put(COUNT_KEY, ");
+    // Durable Objects are named in two files only: the counter's class, and the entry that binds its namespace.
+    expect(sources.filter(([, text]) => text.includes("DurableObject")).map(([name]) => name).sort()).toEqual(["counter.ts", "index.ts"]);
+    // Two `fetch` calls: the dispatch namespace's own, in the handler, and the write counter's object, in the counter.
+    expect(all.match(/\.fetch\(/g)).toHaveLength(2);
+    expect(read("src/handle.ts").match(/\.fetch\(/g)).toHaveLength(1);
+    expect(counter.match(/\.fetch\(/g)).toHaveLength(1);
+  });
+
+  it("exports the counter's class from the Worker's entry, under the name the configuration declares", async () => {
+    const entry = await import("../src/index");
+    const counter = await import("../src/counter");
+    expect(entry.WriteCounter).toBe(counter.WriteCounter);
+    expect(Object.keys(entry).sort()).toEqual(["WriteCounter", "default"]);
+    // The counter is reached by the handler's one write path, through the binding, and by nothing else.
+    expect(read("src/index.ts").match(/env\.WRITE_COUNTER/g)).toHaveLength(1);
   });
 
   it("keeps the code-apps switch off, as a constant that nothing configures, and every script static", () => {

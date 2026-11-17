@@ -60,7 +60,15 @@ mkdir -p ~/.config/podster && chmod 700 ~/.config/podster
   }
   ```
 
-The script builds wrangler's configuration from that file and from `apps/content/wrangler.jsonc`, which supplies only the Worker's name, entry point and compatibility date. That configuration is written to a temporary folder, used, and deleted. Its route is `*.<content domain>/*` on that zone; both public addresses are off.
+The script builds wrangler's configuration from that file and from `apps/content/wrangler.jsonc`. That configuration is written to a temporary folder, used, and deleted. Its route is `*.<content domain>/*` on that zone; both public addresses are off.
+
+The committed file supplies only:
+
+- the Worker's name, entry point and compatibility date;
+- **the write counter** (M6 stage 1, S6): the binding `WRITE_COUNTER` to this Worker's own class `WriteCounter`, and the one migration, `v1`, which makes it a SQLite-backed class;
+- **the write cap's two settings,** `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS`, the owner's 300 writes per 600,000 ms.
+
+Each of these is taken only in exactly that shape: another binding, another class, a binding to another Worker's class, another migration, or a setting that isn't a decimal string (the window at least 1) is refused before anything changes. So the first deploy makes the counter's class on the second account, and the report run prints the cap it would deploy. Without the counter and its cap, every write to an app with code would be refused `503 write_budget_unknown`; while the code-apps switch is off, nothing writes at all.
 
 ## The token
 
@@ -75,7 +83,7 @@ The script builds wrangler's configuration from that file and from `apps/content
 
 | Scope | Permission | Why |
 | --- | --- | --- |
-| The second account only | Workers Scripts: Edit | Upload the Worker, and read the dispatch namespace |
+| The second account only | Workers Scripts: Edit | Upload the Worker, and read the dispatch namespace. *Proposed:* also the write counter's migration, since a Durable Object class is made by the Worker's own upload; the report run can't show this, only the first deploy can |
 | The second account only | Workers KV Storage: Read | The script's check that the KV namespace exists. The deploy itself only binds it by ID |
 | The content domain's zone only | Workers Routes: Edit | The route `*.<content domain>/*` |
 | The content domain's zone only | Zone: Read | The script's check that the zone is active on the account |

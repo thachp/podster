@@ -149,6 +149,11 @@ It refuses, before changing anything, unless:
     and ci.yml's run on main for that commit finished as success
   - apps/content has no .wrangler/deploy/config.json and no .env file of any name, and its pinned
     wrangler is 4.157.0
+  - apps/content/wrangler.jsonc names the Worker podster-content and holds the write counter in
+    exactly the committed shape: the binding WRITE_COUNTER to this Worker's own class WriteCounter,
+    the one migration v1 making it a SQLite-backed class, and WRITE_BUDGET_WRITES and
+    WRITE_BUDGET_WINDOW_MS as decimal strings (the window at least 1). The deploy carries those four
+    and nothing else from that file beyond the name, entry point and compatibility date.
   - Cloudflare's API says, read with the token, each answer in exactly the shape expected:
       the token is active
       the token can't read API tokens, its own included (a token that can is more than a deploy needs)
@@ -449,28 +454,46 @@ shaped '(.result | type) == "object" and (.result.id | ascii_downcase) == $k' --
 echo "ok   the KV namespace exists"
 
 # --- what would be deployed ---
-# The committed file gives the Worker's name, entry point and compatibility date, and nothing else.
+# The committed file gives the Worker's name, entry point and compatibility date, the write counter (its binding and its
+# migration) and the write cap's two settings (M6 stage 1, S6), and nothing else. Each of those is taken only in the
+# exact shape S6 committed: anything else refuses, so a deploy from here never makes another class, binds another
+# object or runs with a cap the content Worker would read as none.
 committed=$(node --input-type=module -e '
 import { readFileSync } from "node:fs";
 import { parseJsonc } from "./e2e/jsonc.mjs";
 const c = parseJsonc(readFileSync("apps/content/wrangler.jsonc", "utf8"));
-process.stdout.write(JSON.stringify({ name: c.name, main: c.main, compatibility_date: c.compatibility_date }));
+process.stdout.write(JSON.stringify({ name: c.name, main: c.main, compatibility_date: c.compatibility_date,
+  durable_objects: c.durable_objects ?? null, migrations: c.migrations ?? null,
+  writes: c.vars?.WRITE_BUDGET_WRITES ?? null, window_ms: c.vars?.WRITE_BUDGET_WINDOW_MS ?? null }));
 ') || refuse "couldn't read apps/content/wrangler.jsonc"
 [ "$(jq -r .name <<< "$committed")" = podster-content ] || refuse "apps/content/wrangler.jsonc doesn't name the Worker podster-content"
+jq -e '.durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]}' <<< "$committed" > /dev/null \
+  || refuse "apps/content/wrangler.jsonc's durable_objects isn't exactly the write counter, WRITE_COUNTER of this Worker's own class WriteCounter"
+jq -e '.migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}]' <<< "$committed" > /dev/null \
+  || refuse "apps/content/wrangler.jsonc's migrations aren't exactly v1, making WriteCounter a SQLite-backed class"
+# A decimal count, as the content Worker reads it: no sign, no leading zero, at most 15 digits. The window is at least 1.
+jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,14})$"))
+  and (.window_ms | type == "string" and test("^[1-9][0-9]{0,14}$"))' <<< "$committed" > /dev/null \
+  || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings, the window at least 1"
+writes=$(jq -r .writes <<< "$committed")
+window_ms=$(jq -r .window_ms <<< "$committed")
 route="*.$domain/*"
 jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< "$committed")" --arg account "$account" \
   --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" '{
     name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
     workers_dev: false, preview_urls: false,
     routes: [{ pattern: $route, zone_name: $domain }],
-    vars: { CONTENT_DOMAIN: $domain },
+    vars: { CONTENT_DOMAIN: $domain, WRITE_BUDGET_WRITES: $c.writes, WRITE_BUDGET_WINDOW_MS: $c.window_ms },
     kv_namespaces: [{ binding: "SERVE", id: $kv }],
-    dispatch_namespaces: [{ binding: "APPS", namespace: $namespace }]
+    dispatch_namespaces: [{ binding: "APPS", namespace: $namespace }],
+    durable_objects: $c.durable_objects,
+    migrations: $c.migrations
   }' > "$work/wrangler.json"
 
 echo
 echo "would deploy podster-content at $here, origin/main's tip with ci.yml green, to the configuration's account,"
-echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace."
+echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace,"
+echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
 echo "No other route, no workers.dev address and no preview address."
 
 if [ "$deploy" != true ]; then

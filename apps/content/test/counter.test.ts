@@ -217,7 +217,7 @@ describe("the content Worker's side of the counter", () => {
   });
 
   it("refuses as unknown, and never throws, when the Worker was deployed without the counter's binding", async () => {
-    // As a deploy from `scripts/deploy-content` is today: no binding, and no settings either.
+    // As a deploy from `scripts/deploy-content` was before it carried the counter: no binding, and no settings either.
     const missing = undefined as unknown as CounterNamespace;
     expect(await writeCounter(missing, capFromSettings(undefined, undefined)).admit("k3v9q2")).toEqual(UNKNOWN);
     // The settings set, and the binding still missing.

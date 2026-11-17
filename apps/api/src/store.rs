@@ -413,6 +413,9 @@ INSERT OR IGNORE INTO app_label_approval (label, approved_at) SELECT label, min(
 CREATE TABLE IF NOT EXISTS serve_retired (host TEXT PRIMARY KEY REFERENCES serve_state (host), retired_at INTEGER NOT NULL CHECK (typeof(retired_at) = 'integer')) WITHOUT ROWID;
 DROP INDEX IF EXISTS serve_state_default;
 CREATE UNIQUE INDEX IF NOT EXISTS serve_state_default_serving ON serve_state (kind) WHERE kind = 'default' AND script_name IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS serve_state_one_default BEFORE INSERT ON serve_state
+  WHEN NEW.kind = 'default' AND EXISTS (SELECT 1 FROM serve_state WHERE kind = 'default' AND host NOT IN (SELECT host FROM serve_retired))
+  BEGIN SELECT RAISE(ABORT, 'one default host'); END;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

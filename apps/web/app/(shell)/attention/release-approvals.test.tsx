@@ -104,6 +104,7 @@ describe("release approvals in Needs attention", () => {
     expect(routerCalls.refresh).toBe(0);
     expect(explainApprovalRefusal("invalid_transition", 409)).toMatch(/isn't waiting for approval any more\. .*Nothing changed/);
     expect(explainApprovalRefusal("release_address_pending", 503)).toMatch(/Nothing changed\. Try again/);
+    expect(explainApprovalRefusal("release_label_taken", 409)).toMatch(/operators have been told\. Nothing changed/);
   });
 
   it("says when it couldn't check every room, and never calls a partial list empty", () => {

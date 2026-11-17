@@ -489,6 +489,22 @@ describe("the labels' upkeep", () => {
     expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: T }]);
   });
 
+  it("leaves a label unmarked, to be tried again, when D1 doesn't answer: only another room's row marks it refused", async () => {
+    const r = await room();
+    const create = (BINDINGS.TEST_D1_SCHEMA as string).split(";").map((x) => x.trim()).filter((x) => /^(CREATE TABLE\s+app_label_index|ALTER TABLE\s+app_label_index)\b/i.test(x));
+    const kept = (await BINDINGS.DB.prepare("SELECT * FROM app_label_index").all()).results;
+    await BINDINGS.DB.prepare("DROP TABLE app_label_index").run();
+    try {
+      await switchedOn(() => alarmPass(stub(r.room)));
+    } finally {
+      for (const statement of create) await BINDINGS.DB.prepare(statement).run();
+      for (const row of kept as any[]) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at, approved_at) VALUES (?, ?, ?, ?)").bind(row.label, row.workspace_id, row.created_at, row.approved_at).run();
+    }
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
+    await switchedOn(() => alarmPass(stub(r.room)));
+    expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: T }]);
+  });
+
   it("marks a label another room holds refused, tells operators, and an approval then refuses for good", async () => {
     const other = await room();
     await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, 'ws_ra_someone_else', 1)").bind(other.label).run();

@@ -470,7 +470,7 @@ describe("an operator's suspension of an app", () => {
     expect(1 + hosts + failing + queued).toBeLessThanOrEqual(taken);
     expect(sources["workspace/takedown.rs"]).toContain("1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64");
     expect(sources["reconcile.rs"]).toContain(".take(ROOM_FINDINGS_TAKEN)");
-    // A room has two hosts at most, so the hosts' share is never short: one default host, by the room's own index,
+    // A room has two live hosts at most, so the hosts' share is never short: one default host, by the room's own schema,
     // and one custom hostname, since a room has one open request for one. Each is refused by the room's own schema.
     const a = await app({ plain: true });
     expect(refuses(() => { throw new Error("placeholder"); })).toBe(true);

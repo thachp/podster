@@ -28,6 +28,8 @@ export function explainApprovalRefusal(code: string, status = 400): string {
       return "Only the workroom's owner and admins can approve or decline a release, as people. Nothing changed.";
     case "invalid_transition":
       return "This release isn't waiting for approval any more. Reload to see where it stands. Nothing changed.";
+    case "release_label_taken":
+      return "This app's address can't be used, and Podster's operators have been told. Nothing changed.";
     case "release_address_pending":
       return "Podster is still setting up this app's address. Nothing changed. Try again in a minute.";
     default:

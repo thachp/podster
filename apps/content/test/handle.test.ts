@@ -864,9 +864,24 @@ describe("a host whose release carries code", () => {
     w.apps.set(SCRIPT, () => new Response('{"error":"no"}', { status: 422, headers: { "content-type": "application/json", "set-cookie": "a=b", "access-control-allow-origin": "*", "cache-control": "max-age=999" } }));
     expect(await answerOf(await get(w, "/api/items", write))).toEqual([422, { ...CODE_APP, "content-type": "application/json" }, '{"error":"no"}']);
     expect(w.counted).toEqual(["k3v9q2"]);
-    // An answer that can't carry a body gets none.
-    w.apps.set(SCRIPT, () => new Response(null, { status: 204 }));
-    expect(await answerOf(await get(w, "/api/items", write))).toEqual([204, CODE_APP, ""]);
+    // An answer that can't carry a body gets none, and no length the app gave for the body it dropped.
+    for (const status of [204, 205]) {
+      w.apps.set(SCRIPT, () => rawAnswer(status, "dropped", { "content-length": "7", "content-type": "application/json", etag: '"e"' }));
+      expect(await answerOf(await get(w, "/api/items", write)), String(status)).toEqual([status, { ...CODE_APP, "content-type": "application/json", etag: '"e"' }, ""]);
+    }
+  });
+
+  it("sends a write on with no condition: the visitor's If-None-Match and If-Modified-Since stay behind", async () => {
+    const w = codeWorld();
+    const conditions = { "if-none-match": '"abc"', "if-modified-since": "Wed, 11 Nov 2026 10:00:00 GMT" };
+    for (const method of WRITE_METHODS) {
+      expect((await get(w, "/api/items", { method, body: "{}", headers: { ...JSON_HEADERS, accept: "application/json", ...conditions } })).status, method).toBe(200);
+    }
+    for (const sent of w.sent) expect(Object.keys(Object.fromEntries(sent.request.headers.entries())).filter((name) => name !== "content-length").sort(), sent.request.method).toEqual(["accept", "content-type"]);
+    // A read keeps them, as it always has.
+    w.kv.set(HOST, SCRIPT);
+    await get(w, "/", { headers: conditions });
+    expect(Object.keys(Object.fromEntries(w.sent.at(-1)!.request.headers.entries())).sort()).toEqual(["if-modified-since", "if-none-match"]);
   });
 
   it("refuses a body one byte over the cap, declared or counted, and a length that understates the body", async () => {

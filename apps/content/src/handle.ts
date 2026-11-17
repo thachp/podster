@@ -305,13 +305,15 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
     if (answer === "error") return asCode(502, "app_error");
     // A write's answer is the app's, but never a redirect, a part, or a body that isn't the plain bytes.
     if (answer.status < 200 || answer.status === 206 || (answer.status >= 300 && answer.status < 400) || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return asCode(502, "app_answer_unservable");
+    // A status that can't carry a body gets none, and no length for the body that was dropped.
+    const bodiless = [204, 205].includes(answer.status);
     const headers = new Headers();
     for (const name of PASSED_RESPONSE_HEADERS) {
       const value = answer.headers.get(name);
-      if (value !== null) headers.set(name, value);
+      if (value !== null && !(bodiless && name === "content-length")) headers.set(name, value);
     }
     fixedHeaders(headers, site, true, CODE_ALLOW_ORIGIN);
-    return new Response([204, 205].includes(answer.status) ? null : answer.body, { status: answer.status, headers });
+    return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   }
   // A read. Serving one is not built: the switch is pinned to `false` by type here, so turning it on fails to compile
   // until this line is replaced by the code that serves an app with code.

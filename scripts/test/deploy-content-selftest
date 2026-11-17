@@ -263,6 +263,11 @@ fresh() {
   cp "$scripts/deploy-content" "$tmp/seed/scripts/"
   cp "$scripts/../e2e/jsonc.mjs" "$tmp/seed/e2e/"
   cp "$scripts/../apps/content/wrangler.jsonc" "$tmp/seed/apps/content/"
+  # A case may commit the content Worker's file changed: SEED_EDIT is one sed expression applied to it. The case
+  # checks the edit took, so a refusal never passes because the expression matched nothing.
+  if [ -n "${SEED_EDIT:-}" ]; then
+    sed -e "$SEED_EDIT" "$scripts/../apps/content/wrangler.jsonc" > "$tmp/seed/apps/content/wrangler.jsonc"
+  fi
   echo '{}' > "$tmp/seed/apps/content/package.json"
   echo 'export default {};' > "$tmp/seed/apps/content/src/index.ts"
   printf 'node_modules/\n.wrangler/\n.env*\n' > "$tmp/seed/.gitignore"
@@ -644,6 +649,38 @@ check "  every API call was a GET, -q first, the token on stdin, nothing of the 
 check "  it read all seven things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 7 ]"
 check "  no deploy, no probe, the token nowhere" unchanged
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
+check "  it says it would deploy the write counter, with the cap from the committed file" said "^and its write counter \\(migration v1, the class WriteCounter\\) with a cap of 300 writes per 600000 ms for each app\\.$"
+
+# --- the write counter and its cap, from the committed file in S6's exact shape only ---
+committed_refused() { # committed_refused TITLE SED-EXPRESSION PATTERN-THE-EDIT-LEAVES REASON
+  SEED_EDIT=$2 fresh
+  check "$1: the edit was committed" quiet grep -q -F -- "$3" "$work/apps/content/wrangler.jsonc"
+  dc 1 "${files[@]}" || true
+  check "  refused, nothing deployed" refused ".*$4"
+}
+committed_refused "a cap of writes that isn't a decimal" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "3e2"/' '"3e2"' "WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings"
+committed_refused "a cap of writes missing" 's/"WRITE_BUDGET_WRITES": "300", //' '"vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WINDOW_MS"' "WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings"
+committed_refused "a window of 0" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "0"/' '"WRITE_BUDGET_WINDOW_MS": "0"' "the window 1 to 9223372036854775807"
+# The bounds are the content Worker's own (apps/content/src/budget.ts, capFromSettings): past them it reads no cap.
+committed_refused "writes one past u32's maximum" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "4294967296"/' '"4294967296"' "writes 0 to 4294967295"
+committed_refused "writes of fifteen digits" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "100000000000000"/' '"100000000000000"' "writes 0 to 4294967295"
+committed_refused "writes with a leading zero" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "0300"/' '"0300"' "must be decimal strings"
+committed_refused "a window one past i64's maximum" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "9223372036854775808"/' '"9223372036854775808"' "the window 1 to 9223372036854775807"
+committed_refused "a window of twenty digits" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "10000000000000000000"/' '"10000000000000000000"' "the window 1 to 9223372036854775807"
+# Each bound itself is taken, and reported as the cap it would deploy.
+SEED_EDIT='s/"WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WRITES": "4294967295", "WRITE_BUDGET_WINDOW_MS": "9223372036854775807"/' fresh
+check "both caps at their bounds: the edit was committed" quiet grep -q -F '"WRITE_BUDGET_WRITES": "4294967295", "WRITE_BUDGET_WINDOW_MS": "9223372036854775807"' "$work/apps/content/wrangler.jsonc"
+dc 0 "${files[@]}" || true
+check "  taken: exit 0, with that cap reported" bash -c "[ $LAST -eq 0 ] && grep -q -F 'with a cap of 4294967295 writes per 9223372036854775807 ms for each app.' '$tmp/out'"
+SEED_EDIT='s/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "0"/' fresh
+dc 0 "${files[@]}" || true
+check "a cap of 0 writes is taken, as the content Worker takes it (every write refused)" bash -c "[ $LAST -eq 0 ] && grep -q -F 'with a cap of 0 writes per 600000 ms' '$tmp/out'"
+committed_refused "a window that is a number, not a string" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": 600000/' '"WRITE_BUDGET_WINDOW_MS": 600000' "must be decimal strings"
+committed_refused "the counter bound to another Worker's class" 's/"class_name": "WriteCounter" }/"class_name": "WriteCounter", "script_name": "elsewhere" }/' '"script_name": "elsewhere"' "durable_objects isn't exactly the write counter"
+committed_refused "a second object bound" 's/"class_name": "WriteCounter" }\]/"class_name": "WriteCounter" }, { "name": "OTHER", "class_name": "Other" }]/' '"name": "OTHER"' "durable_objects isn't exactly the write counter"
+committed_refused "another migration" 's/"tag": "v1"/"tag": "v2"/' '"tag": "v2"' "migrations aren't exactly v1"
+committed_refused "a migration that deletes the class" 's/"new_sqlite_classes": \["WriteCounter"\] }/"new_sqlite_classes": ["WriteCounter"] }, { "tag": "v2", "deleted_classes": ["WriteCounter"] }/' '"deleted_classes"' "migrations aren't exactly v1"
+committed_refused "the counter's migration as a key-value class" 's/"new_sqlite_classes"/"new_classes"/' '"new_classes"' "migrations aren't exactly v1"
 
 # --- --deploy needs a person ---
 fresh; dc 1 "${files[@]}" --deploy < /dev/null || true
@@ -660,8 +697,8 @@ check "--deploy at a terminal, with the domain typed: exit 0, and the success li
 check "  wrangler ran once: the token, nothing of the caller's (CLOUDFLARE_ACCOUNT_ID, proxies, a canary), a private home, its own empty folder, an empty .env file" \
   called "^wrangler deploy auth=ok canary=absent account_env=absent proxy=absent function=absent home_private=yes cwd=own-empty-folder env_file=empty ci=true$"
 check "  exactly one deploy" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
-check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces" \
-  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '.name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
+check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
+  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
 check "  four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
   bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 5 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 5 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
 check "  it says what it can't show: a host two labels deep" said "^NOT SHOWN a host two labels deep"

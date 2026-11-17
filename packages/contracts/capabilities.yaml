@@ -84,6 +84,8 @@ person_only:
   # release's fields with step 7, and nothing that deploys.
   - getReleaseConfig
   - setReleaseConfig
+  # M6 step 10(b): the room's releases awaiting approval, for a person's Needs attention. Person-only, as approving is.
+  - listReleaseApprovals
   - approveRelease
   - declineRelease
   - getAppHostname

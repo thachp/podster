@@ -8,6 +8,7 @@ import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, 
 import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fake-github-release.ts";
 import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
 import { FAKE_HOSTNAMES, fakeHostnames } from "./test/fake-hostnames.ts";
+import { FAKE_STORES, fakeStores } from "./test/fake-stores.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
@@ -88,6 +89,10 @@ async function fakeHook(request: Request) {
   // ever reaches Cloudflare's API.
   const hostnames = await fakeHostnames(request);
   if (hostnames) return hostnames;
+  // D1, the rooms' app stores (M6 stage 1): a stand-in, asked before the content provider's, so nothing ever reaches
+  // Cloudflare's API.
+  const stores = await fakeStores(request);
+  if (stores) return stores;
   // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
   const content = await fakeContent(request);
   if (content) return content;
@@ -214,6 +219,9 @@ export default defineConfig({
           CONTENT_DOMAIN: FAKE_CONTENT.domain,
           CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
           CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
+          // The app stores' own credential (M6 stage 1), on the content provider's account, pointing at D1's stand-in.
+          // A test value: no environment binds this name, and the real token is the owner's to make.
+          CONTENT_STORE_TOKEN: FAKE_STORES.token,
           TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
           // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in, and a few of the Public
           // Suffix List's rules, in the list's own format. Test values: no environment binds either name.

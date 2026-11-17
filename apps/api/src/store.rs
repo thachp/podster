@@ -426,6 +426,21 @@ CREATE TABLE IF NOT EXISTS release_requester (release_id TEXT PRIMARY KEY REFERE
   linked_since INTEGER CHECK (linked_since IS NULL OR typeof(linked_since) = 'integer'),
   generation INTEGER CHECK (generation IS NULL OR (typeof(generation) = 'integer' AND generation >= 0)),
   CHECK ((org_id IS NULL) = (linked_since IS NULL) AND (linked_since IS NULL) = (generation IS NULL))) WITHOUT ROWID;
+", "
+CREATE TABLE IF NOT EXISTS app_store (label TEXT PRIMARY KEY REFERENCES app_label (label),
+  kind TEXT NOT NULL CHECK (kind = 'd1'),
+  store_name TEXT NOT NULL UNIQUE CHECK (length(store_name) = 46 AND substr(store_name, 1, 14) = 'podster-store-' AND substr(store_name, 15) NOT GLOB '*[^0-9a-f]*'),
+  store_id TEXT UNIQUE CHECK (store_id IS NULL OR (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*' AND length(replace(store_id, '-', '')) = 32
+    AND substr(store_id, 9, 1) = '-' AND substr(store_id, 14, 1) = '-' AND substr(store_id, 19, 1) = '-' AND substr(store_id, 24, 1) = '-')),
+  recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer'),
+  create_sent_at INTEGER CHECK (create_sent_at IS NULL OR typeof(create_sent_at) = 'integer'),
+  made_at INTEGER CHECK (made_at IS NULL OR typeof(made_at) = 'integer'),
+  delete_owed_at INTEGER CHECK (delete_owed_at IS NULL OR typeof(delete_owed_at) = 'integer'),
+  delete_cause TEXT CHECK (delete_cause IS NULL OR (length(delete_cause) BETWEEN 1 AND 64 AND delete_cause NOT GLOB '*[^a-z_]*')),
+  gone_at INTEGER CHECK (gone_at IS NULL OR typeof(gone_at) = 'integer'),
+  updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
+  CHECK ((store_id IS NULL) = (made_at IS NULL)), CHECK (made_at IS NULL OR create_sent_at IS NOT NULL),
+  CHECK ((delete_owed_at IS NULL) = (delete_cause IS NULL)), CHECK (gone_at IS NULL OR delete_owed_at IS NOT NULL)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

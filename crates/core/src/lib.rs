@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod a2a;
 pub mod app_code;
 pub mod app_requests;
+pub mod app_store;
 pub mod asset_links;
 pub mod baseline;
 pub mod expected_outputs;

@@ -164,6 +164,8 @@ const upload = (room: string, release = REL): Promise<Answer> =>
 const brief = (answer: Answer) => [answer.status, answer.body.state, answer.body.uploaded, answer.body.waiting ?? null, answer.body.reason ?? null];
 const at = (room: string, now: number) => inRoom(room, (sql) => void sql.exec("UPDATE test_release_clock SET now = ?", now));
 const record = (room: string) => inRoom(room, (sql) => sql.exec("SELECT label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at FROM app_store").toArray() as any[]);
+/** The record's first counted list without its name (S4's schema step), which S2 kept in `updated_at`. */
+const firstGone = (room: string) => inRoom(room, (sql) => sql.exec("SELECT first_gone_at FROM app_store").one().first_gone_at as number | null);
 const failure = (room: string, release = REL) => inRoom(room, (sql) => sql.exec("SELECT state, failure_code FROM release WHERE id = ?", release).one());
 /** Another release of the same label, uploading under its own script. */
 const another = (r: Room) => inRoom(r.room, (sql) => sql.exec(
@@ -303,8 +305,13 @@ export function appStoreMakeCases() {
       // A second within ten minutes of the first counts for nothing.
       expect(await step(T + 20 * MINUTE - 1)).toEqual(["store_unsettled", T + 20 * MINUTE]);
       expect((await creates()).length).toBe(1);
-      // The first counted list is noted as the record's last change.
+      // The first counted list is noted in the record's own column (S4's schema step), and as its last change.
       expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T, create_sent_at: T, made_at: null, updated_at: T + 10 * MINUTE }]);
+      expect(await firstGone(r.room)).toBe(T + 10 * MINUTE);
+      // Only that column counts: a later change to `updated_at` alone, as S2 read it, moves nothing.
+      await inRoom(r.room, (sql) => sql.exec("UPDATE app_store SET updated_at = ?", T + 19 * MINUTE));
+      expect(await step(T + 20 * MINUTE - 1)).toEqual(["store_unsettled", T + 20 * MINUTE]);
+      expect((await creates()).length).toBe(1);
       // The second: the create made nothing, so it is created again at once, under the same name, recorded first
       // again, and the upload goes on.
       await at(r.room, T + 20 * MINUTE);
@@ -312,6 +319,7 @@ export function appStoreMakeCases() {
       const [row] = await record(r.room);
       expect(row).toEqual({ label: r.label, kind: "d1", store_name: name, store_id: row.store_id, recorded_at: T, create_sent_at: T + 20 * MINUTE, made_at: T + 20 * MINUTE, updated_at: T + 20 * MINUTE });
       expect(row.store_id).toMatch(UUID);
+      expect(await firstGone(r.room)).toBeNull();
       expect((await creates()).map((call) => call.key)).toEqual([name, name]);
       expect((await storeState()).databases).toEqual([{ uuid: row.store_id, name }]);
     });
@@ -611,6 +619,35 @@ export function appCodeUploadCases() {
         expect(seen.written, code).toBeNull();
         expect(await scriptKind(r.room), code).toEqual([]);
       }
+    });
+
+    it("counts a release bound to its store as reaching it from the write check on, and never lets it go live once the store is owed a deletion", async () => {
+      // S4's fix round, ruling B: the binding is fixed in the transaction just before the script's write.
+      await github("/seed", repository(codeApp(true)));
+      const r = await uploading();
+      const id = "0123abcd-4567-89ef-0123-456789abcdef";
+      await madeRecord(r, id);
+      // Nothing else of the label serves: its host is confirmed down, so only this release can reach the store.
+      await inRoom(r.room, (sql) => {
+        sql.exec("UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = 6");
+        sql.exec("UPDATE serve_apply SET applied_version = 6, applied_script = NULL");
+      });
+      const gate = await providerGate(r.script, "script");
+      const uploading_ = upload(r.room);
+      await gate.arrived();
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT release_id, store_id FROM release_store_binding").toArray())).toEqual([{ release_id: REL, store_id: id }]);
+      // Between the write check and the upload's record, the owner asks: refused, and nothing is owed.
+      const asked = await switchedOn(() => api(OWNER, "POST", `/v1/workspaces/${r.room}/apps/${r.label}/delete-data`, { confirm: r.label }));
+      expect([asked.status, asked.body.error.code]).toEqual([409, "app_still_served"]);
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT delete_owed_at FROM app_store").one().delete_owed_at)).toBeNull();
+      // Owed anyway meanwhile (as an operator's would): the upload is recorded, and the release never goes live.
+      await inRoom(r.room, (sql) => sql.exec("UPDATE app_store SET delete_owed_at = ?, delete_cause = 'operator_takedown'", T));
+      await gate.release();
+      expect(brief(await uploading_)).toEqual([200, "uploading", true, null, null]);
+      const live = await switchedOn(() => stub(r.room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: REL }) }).then((res: Response) => res.json() as Promise<any>));
+      expect(live.state).toBe("failed");
+      expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "store_delete_owed" });
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name)).toBeNull();
     });
 
     it("fails a code release that fails core's checks by the problem's code, and never uploads it as static files", async () => {

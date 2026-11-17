@@ -488,6 +488,38 @@ pub(crate) async fn room_action(
     .await
 }
 
+/// An operator's action of another name than suspending or lifting, asked of one room on one of its internal paths,
+/// recorded the same way: deleting an app's data (`delete_data`, S4 of the store plan).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn room_action_named(
+    env: &Env,
+    operator: &str,
+    workspace: &str,
+    path: &str,
+    request: Value,
+    subject_kind: &str,
+    subject: &str,
+    action: &str,
+    reason: Reason,
+) -> R<std::result::Result<Value, Response>> {
+    let stub = env
+        .durable_object("WORKSPACE")?
+        .id_from_name(workspace)?
+        .get_stub()?;
+    recorded_action(
+        env,
+        operator,
+        stub,
+        path,
+        request,
+        subject_kind,
+        subject,
+        action,
+        reason,
+    )
+    .await
+}
+
 /// The same, asked of any one object: a room, a hostname's claim object, or this module's own.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn object_action(
@@ -502,6 +534,33 @@ pub(crate) async fn object_action(
     reason: Reason,
 ) -> R<std::result::Result<Value, Response>> {
     let action = if suspended { "suspend" } else { "lift" };
+    recorded_action(
+        env,
+        operator,
+        stub,
+        path,
+        request,
+        subject_kind,
+        subject,
+        action,
+        reason,
+    )
+    .await
+}
+
+/// One operator's action, asked of one object: intent first, then the object's answer, then how it ended.
+#[allow(clippy::too_many_arguments)]
+async fn recorded_action(
+    env: &Env,
+    operator: &str,
+    stub: Stub,
+    path: &str,
+    request: Value,
+    subject_kind: &str,
+    subject: &str,
+    action: &str,
+    reason: Reason,
+) -> R<std::result::Result<Value, Response>> {
     let seq = begin(env, operator, subject_kind, subject, action, reason).await?;
     let answered = forward(
         stub,

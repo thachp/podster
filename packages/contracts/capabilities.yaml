@@ -100,9 +100,12 @@ person_only:
   - getAppHostname
   - requestAppHostname
   - removeAppHostname
+  # S4 of the store plan: deleting an app's data, the room's owner's as a person, and an operator's.
+  - deleteAppData
   - createAppReport
   - suspendApp
   - liftAppSuspension
+  - deleteAppDataAsOperator
   - suspendAppHost
   - liftAppHostSuspension
   - stopContentDomain

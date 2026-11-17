@@ -107,6 +107,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 const AGENT_RELEASE = { capability: "deploy_release", operation: "requestRelease" };
 const releaseOperations = {
   getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
+  deleteAppData: "ws,label", deleteAppDataAsOperator: "label",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
   getReleaseDelegation: "org", setReleaseDelegation: "org",
 };
@@ -126,7 +127,8 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 10(b) built the room's list of releases awaiting approval, which the room itself answers.
     // Step 6 built a person's request for a release, which the room itself answers.
     // Step 6's 6f built approving and declining one, and 6h asking to roll back, which the room itself answers.
-    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
+    // S4 of the store plan built deleting an app's data, the owner's (which the room itself answers) and an operator's.
+    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "deleteAppData", "deleteAppDataAsOperator"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
     // and a provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a
@@ -155,6 +157,7 @@ const core = coreSets(root);
 const releaseEnums = {
   "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStatusStates.join(),
   "AppHostnameRequest.state": core.hostnameRequestStates.join(),
+  "AppDataDeletion.data": core.dataStates.join(), "AppDataDeletion.cause": [...core.deleteCauses, null].join(),
 };
 const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
 const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses };
@@ -204,6 +207,11 @@ if (core.maxLabelLen + 1 + core.idLen !== core.maxScriptNameLen) problems.push("
 for (const [at, expected] of Object.entries(releaseEnums)) {
   const [schema, field] = at.split(".");
   if (api.components.schemas[schema]?.properties?.[field]?.enum?.join() !== expected) problems.push(`${at}: must be exactly ${expected}`);
+}
+// The owner's words for an app's data deleted (2026-11-17) are core's one constant, and each command that deletes says
+// them exactly, so a reader of the contract is told what a person is told.
+for (const id of ["deleteAppData", "deleteAppDataAsOperator"]) {
+  if (!operations.get(id)?.op.summary?.includes(core.dataDeletedNotice)) problems.push(`${id}: its summary must carry the owner's words exactly: ${core.dataDeletedNotice}`);
 }
 if (api.components.schemas.ReleaseConfig?.properties?.environments?.items?.enum?.join() !== core.environment || api.components.schemas.ReleaseConfig?.properties?.environments?.maxItems !== 1) problems.push("ReleaseConfig.environments: must be exactly one, production");
 // A release's ID is the repository's ID form, and an app's label is at most 26 lower-case letters and digits, so a script's

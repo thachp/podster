@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmQuiet, manualAlarms } from "./alarm";
+import { appStoreDeleteCases } from "./app-store-delete.cases";
 import { appCodeUploadCases, appStoreMakeCases } from "./app-store-make.cases";
 
 // M6 stage 1, the first PR of the store plan: the room's record of its app's store, and the client that makes, reads,
@@ -257,6 +258,11 @@ describe("the room's record of its store", () => {
       ["gone with no deletion owed", { gone_at: 5 }],
       ["a time that isn't an integer", { recorded_at: 1.5 }],
       ["a time made that isn't an integer", { store_id: ID, create_sent_at: 2, made_at: "soon" }],
+      // Step 53's columns.
+      ["a deletion due while none is owed", { delete_next_at: 5 }],
+      ["a deletion due once gone", { delete_owed_at: 4, delete_cause: "owner_deleted", gone_at: 5, delete_next_at: 6 }],
+      ["a first read of gone that isn't an integer", { first_gone_at: 1.5 }],
+      ["tries counted below none", { delete_attempts: -1 }],
     ];
     for (const [why, values] of refused) {
       const error = await inRoom(r.id, (sql) => {
@@ -284,20 +290,67 @@ describe("the room's record of its store", () => {
   it("is added to a room made before it, and its step runs again safely", async () => {
     const r = await room();
     const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
-    // A room as it was before step 51: no table, two steps behind (step 52, the record of a script's kind, is after it
-    // and runs again safely too).
+    // A room as it was before step 51: no table, three steps behind (steps 52, the record of a script's kind, and 53,
+    // the record's rebuild, are after it and run again safely too).
     await inRoom(r.id, (sql) => {
       sql.exec("DROP TABLE app_store");
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     await inRoom(r.id, (sql) => insert(sql, { store_id: ID, create_sent_at: 2, made_at: 3 }));
     // The step again, over a table that is there with a row in it: the row is kept.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 3"));
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT label, store_id FROM app_store").toArray())).toEqual([{ label: "todo", store_id: ID }]);
+  });
+
+  // Room schema step 53 (S4 of the store plan): the record gains `first_gone_at`, which S2 kept in `updated_at` while a
+  // create was outstanding, and the deletion job's wait. SQLite can't add a column only if it is missing, so the step
+  // rebuilds the table whole.
+  it("is rebuilt with the first read of gone and the deletion's wait by step 53, on a room made before it, and the step runs again safely", async () => {
+    const r = await room();
+    const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
+    const NAMES = ["0", "1", "2", "3"].map((d) => NAME.replace(/f$/, d));
+    const IDS = ["0", "1"].map((d) => ID.replace(/f$/, d));
+    // A room as it was before step 53: the record as step 51 made it, and four rows of it.
+    await inRoom(r.id, (sql) => {
+      for (const label of ["l1", "l2", "l3"]) sql.exec("INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, NULL, 1, 1)", label);
+      sql.exec("DROP TABLE app_store");
+      sql.exec(`CREATE TABLE app_store (label TEXT PRIMARY KEY REFERENCES app_label (label), kind TEXT NOT NULL CHECK (kind = 'd1'), store_name TEXT NOT NULL UNIQUE,
+        store_id TEXT UNIQUE, recorded_at INTEGER NOT NULL, create_sent_at INTEGER, made_at INTEGER, delete_owed_at INTEGER, delete_cause TEXT, gone_at INTEGER,
+        updated_at INTEGER NOT NULL) WITHOUT ROWID`);
+      const old = (label: string, name: string, values: Record<string, unknown>) => {
+        const row = { label, kind: "d1", store_name: name, store_id: null, recorded_at: 1, create_sent_at: null, made_at: null, delete_owed_at: null, delete_cause: null, gone_at: null, updated_at: 1, ...values };
+        sql.exec(`INSERT INTO app_store (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
+      };
+      // A create outstanding whose first counted list S2 noted in `updated_at`, ten minutes after the create.
+      old("todo", NAMES[0], { create_sent_at: 1_000, updated_at: 601_000 });
+      // A create outstanding with no list counted yet: `updated_at` a millisecond short of ten minutes after it.
+      old("l1", NAMES[1], { create_sent_at: 1_000, updated_at: 600_999 });
+      // A store owed a deletion, and one gone.
+      old("l2", NAMES[2], { store_id: IDS[0], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "operator_takedown", updated_at: 3 });
+      old("l3", NAMES[3], { store_id: IDS[1], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "owner_deleted", gone_at: 4, updated_at: 4 });
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect(await visit(r)).toBe(200);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
+    const read = () => inRoom(r.id, (sql) => sql.exec("SELECT label, store_id, create_sent_at, updated_at, first_gone_at, delete_next_at, delete_attempts, gone_at FROM app_store ORDER BY label").toArray());
+    const rebuilt = [
+      { label: "l1", store_id: null, create_sent_at: 1_000, updated_at: 600_999, first_gone_at: null, delete_next_at: null, delete_attempts: 0, gone_at: null },
+      { label: "l2", store_id: IDS[0], create_sent_at: 1, updated_at: 3, first_gone_at: null, delete_next_at: 3, delete_attempts: 0, gone_at: null },
+      { label: "l3", store_id: IDS[1], create_sent_at: 1, updated_at: 4, first_gone_at: null, delete_next_at: null, delete_attempts: 0, gone_at: 4 },
+      { label: "todo", store_id: null, create_sent_at: 1_000, updated_at: 601_000, first_gone_at: 601_000, delete_next_at: null, delete_attempts: 0, gone_at: null },
+    ];
+    expect(await read()).toEqual(rebuilt);
+    // Every check the table had still holds after the rebuild.
+    const refused = await inRoom(r.id, (sql) => { try { sql.exec("UPDATE app_store SET gone_at = 9 WHERE label = 'todo'"); return null; } catch (e) { return String(e); } });
+    expect(String(refused)).toMatch(/constraint/i);
+    // The step again, over the rebuilt table: every row kept, the notes as they were.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
+    expect(await visit(r)).toBe(200);
+    expect(await read()).toEqual(rebuilt);
   });
 });
 
@@ -325,7 +378,8 @@ describe("the room's record of a script's kind", () => {
       sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, 2, 10, 5)", UPLOADED, `todo.${UPLOADED}`);
       sql.exec("INSERT INTO release_uncertain (release_id, script_name, files, bytes, since, last_code) VALUES (?, ?, 2, 10, 6, 'x')", UNCERTAIN, `todo.${UNCERTAIN}`);
       sql.exec("DROP TABLE release_script_kind");
-      sql.exec("UPDATE schema_version SET version = version - 1");
+      // Two steps behind: step 53, after it, runs again safely too.
+      sql.exec("UPDATE schema_version SET version = version - 2");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
@@ -338,7 +392,7 @@ describe("the room's record of a script's kind", () => {
     // The step again, over a record that holds code for another script: nothing is changed or added twice.
     await inRoom(r.id, (sql) => {
       sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 7)", OTHER, `todo.${OTHER}`);
-      sql.exec("UPDATE schema_version SET version = version - 1");
+      sql.exec("UPDATE schema_version SET version = version - 2");
     });
     expect(await visit(r)).toBe(200);
     expect(await kinds()).toEqual([...backfilled, { release_id: OTHER, script_name: `todo.${OTHER}`, kind: "code", recorded_at: 7 }]);
@@ -368,3 +422,4 @@ describe("the room's record of a script's kind", () => {
 
 appStoreMakeCases();
 appCodeUploadCases();
+appStoreDeleteCases();

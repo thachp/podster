@@ -49,11 +49,12 @@ type Op = "create" | "read" | "delete" | "list";
  * - `badEntry`: a list page holds one entry whose `uuid` isn't a UUID.
  * - `shortPage`: a list page holds one entry fewer than it should.
  * - `huge` on the list: every page full, of a total far longer than any list the client reads.
+ * - `noEffect`: a delete answers 200 with `"success": true` and deletes nothing, so only a read tells (S4).
  */
 type FaultKind =
   | "lost" | "created201" | "noSuccess" | "successText" | "otherName" | "upperId" | "notJson" | "huge" | "redirect" | "refused"
   | "notFoundOtherCode" | "notFoundTwoCodes" | "notFoundSuccessMissing" | "codeText" | "otherId"
-  | "noInfo" | "totalDrift" | "badEntry" | "shortPage";
+  | "noInfo" | "totalDrift" | "badEntry" | "shortPage" | "noEffect";
 type Fault = { op: Op; kind: FaultKind; times: number };
 
 type Account = { databases: { uuid: string; name: string }[]; calls: { op: Op; token: "store" | "other"; key: string }[]; faults: Fault[] };
@@ -162,6 +163,7 @@ export async function fakeStores(request: Request): Promise<Response | undefined
     return answered(fault, databases[at]);
   }
   if (op === "delete") {
+    if (fault === "noEffect") return json(envelope(null));
     if (at < 0) return notFound();
     databases.splice(at, 1);
     if (fault === "lost") return new Response("<html>bad gateway</html>", { status: 502 });

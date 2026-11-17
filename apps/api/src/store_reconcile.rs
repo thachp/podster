@@ -294,7 +294,16 @@ async fn one_label(
     {
         claim(sql, at, name)?;
     }
-    match check_record(&record, store["create_sent_at"].as_i64(), list) {
+    let check = check_record(&record, store["create_sent_at"].as_i64(), list);
+    // A name told as reappeared is no longer so once its record is anything else: made, owed a deletion, or its create
+    // sent again (the deep re-review of PR #423, a low item). Taken away here, before the record's own step.
+    if let (Some(name), false) = (
+        record.name,
+        matches!(check, RecordCheck::Reappeared | RecordCheck::Unknown),
+    ) {
+        untell(sql, STORE_NAME_REAPPEARED, name)?;
+    }
+    match check {
         RecordCheck::Fine => {
             if record.id.is_some() {
                 seen_there(sql, label, record.name)?;

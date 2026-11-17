@@ -76,7 +76,16 @@ pub fn check_record(
                 RecordCheck::ReadById
             }
         }
-        Err(NoBinding::DeleteOwed) => RecordCheck::Fine,
+        // Owed a deletion, or gone: S4's. A name with no ID the list shows is settled all the same, whatever its create
+        // says, so a database that landed after the deletion's own lists is recorded and deleted (S4's fix round, E).
+        Err(NoBinding::DeleteOwed) => match (
+            record.id,
+            list.iter()
+                .find(|(_, name)| Some(name.as_str()) == record.name),
+        ) {
+            (None, Some((id, _))) => RecordCheck::Settle(id.clone()),
+            _ => RecordCheck::Fine,
+        },
         Err(NoBinding::NotMade) => match list
             .iter()
             .find(|(_, name)| Some(name.as_str()) == record.name)

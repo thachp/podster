@@ -447,6 +447,47 @@ CREATE TABLE IF NOT EXISTS release_script_kind (release_id TEXT PRIMARY KEY REFE
   CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
 INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT release_id, script_name, 'static', uploaded_at FROM release_upload;
 INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT release_id, script_name, 'static', since FROM release_uncertain;
+",
+// Step 53 (S4 of the store plan): the record of an app's store gains `first_gone_at`, the first counted read of gone,
+// which S2 kept in `updated_at` while a create was outstanding, and the deletion job's own wait (`delete_next_at`,
+// `delete_attempts`). SQLite can't add a column only if it is missing, so the table is rebuilt whole, forward-only,
+// with every check it had. Run again over a rebuilt table it is rebuilt again, every row kept: a create outstanding
+// gets its note back from `updated_at`, which every write of the note also sets, and a deletion's note of gone is
+// dropped, which only makes the job read gone twice again (later, never sooner). `600000` is
+// `podster_core::app_store::GONE_SPAN_MS`, ten minutes. The copy is a plain `INSERT`, so a row the new checks refuse
+// aborts the step rather than being dropped. `release_store_binding` records each release whose script was bound to
+// its label's store, written in the transaction just before the script is: a release so bound is counted as able to
+// reach the store until it ends, and can't go live once the store is owed a deletion.
+"
+CREATE TABLE IF NOT EXISTS app_store_next (label TEXT PRIMARY KEY REFERENCES app_label (label),
+  kind TEXT NOT NULL CHECK (kind = 'd1'),
+  store_name TEXT NOT NULL UNIQUE CHECK (length(store_name) = 46 AND substr(store_name, 1, 14) = 'podster-store-' AND substr(store_name, 15) NOT GLOB '*[^0-9a-f]*'),
+  store_id TEXT UNIQUE CHECK (store_id IS NULL OR (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*' AND length(replace(store_id, '-', '')) = 32
+    AND substr(store_id, 9, 1) = '-' AND substr(store_id, 14, 1) = '-' AND substr(store_id, 19, 1) = '-' AND substr(store_id, 24, 1) = '-')),
+  recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer'),
+  create_sent_at INTEGER CHECK (create_sent_at IS NULL OR typeof(create_sent_at) = 'integer'),
+  made_at INTEGER CHECK (made_at IS NULL OR typeof(made_at) = 'integer'),
+  delete_owed_at INTEGER CHECK (delete_owed_at IS NULL OR typeof(delete_owed_at) = 'integer'),
+  delete_cause TEXT CHECK (delete_cause IS NULL OR (length(delete_cause) BETWEEN 1 AND 64 AND delete_cause NOT GLOB '*[^a-z_]*')),
+  gone_at INTEGER CHECK (gone_at IS NULL OR typeof(gone_at) = 'integer'),
+  updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
+  first_gone_at INTEGER CHECK (first_gone_at IS NULL OR typeof(first_gone_at) = 'integer'),
+  delete_next_at INTEGER CHECK (delete_next_at IS NULL OR typeof(delete_next_at) = 'integer'),
+  delete_attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(delete_attempts) = 'integer' AND delete_attempts >= 0),
+  CHECK ((store_id IS NULL) = (made_at IS NULL)), CHECK (made_at IS NULL OR create_sent_at IS NOT NULL),
+  CHECK ((delete_owed_at IS NULL) = (delete_cause IS NULL)), CHECK (gone_at IS NULL OR delete_owed_at IS NOT NULL),
+  CHECK (delete_next_at IS NULL OR (delete_owed_at IS NOT NULL AND gone_at IS NULL))) WITHOUT ROWID;
+INSERT INTO app_store_next (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, delete_owed_at, delete_cause, gone_at, updated_at, first_gone_at, delete_next_at)
+  SELECT label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, delete_owed_at, delete_cause, gone_at, updated_at,
+    CASE WHEN store_id IS NULL AND create_sent_at IS NOT NULL AND updated_at >= create_sent_at + 600000 THEN updated_at END,
+    CASE WHEN delete_owed_at IS NOT NULL AND gone_at IS NULL THEN delete_owed_at END
+  FROM app_store;
+DROP TABLE app_store;
+ALTER TABLE app_store_next RENAME TO app_store;
+CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  label TEXT NOT NULL REFERENCES app_label (label),
+  store_id TEXT NOT NULL CHECK (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*'),
+  recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

@@ -57,7 +57,7 @@ function Commit({ sha }: { sha: string | null }) {
  * The Release panel's pull request and merge stage, read-only. No merge control here yet: merging is M5 step 7b. Nothing
  * from the pull request's content is shown, because the API keeps none of it.
  */
-export function TaskChangePanel({ change, mergeControl }: { change: PullRequestChange; mergeControl?: ReactNode }) {
+export function TaskChangePanel({ change, mergeControl, deployment }: { change: PullRequestChange; mergeControl?: ReactNode; deployment?: ReactNode }) {
   const pr = change.pr_state ? `${PR_STATES[change.pr_state] ?? change.pr_state}${change.pr_draft ? " · Draft" : ""}` : "Not read yet";
   return (
     <section className="space-y-2">
@@ -108,6 +108,7 @@ export function TaskChangePanel({ change, mergeControl }: { change: PullRequestC
           ) : null}
         </dd>
       </dl>
+      {deployment}
       {change.commit_changed ? (
         <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
           Commit changed: the pull request&apos;s head moved off the reviewed commit{change.commit_changed_at ? <> <Timestamp at={change.commit_changed_at} /></> : null}. The approval stands for the commit it named, and the way on is a follow-up task.

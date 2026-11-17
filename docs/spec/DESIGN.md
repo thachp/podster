@@ -95,7 +95,9 @@ Checks, merge and deployment always show separately and never collapse into one 
 | --- | --- |
 | Checks | Not started · Running · Passed · Failed |
 | Merge | Not requested · Waiting for review · Merging · Merged · Merge failed · Commit changed |
-| Deployment | Off · Waiting for merge · Waiting for approval · Deploying · Live · Deployment failed |
+| Deployment | Off · Waiting for merge · Waiting for approval · Deploying · Live · Deployment failed. **Proposed (2026-11-16, M6 step 10(b), for the owner to review):** also Unavailable · Declined · Replaced · Unpublished · Not live · Not shown to you · Couldn't check |
+
+**Proposed (2026-11-16):** *Unavailable*, release isn't available on this Podster deployment, so nothing is published. *Declined*, a person declined the release, so nothing was uploaded. *Replaced*, a later release is served in its place. *Unpublished*, the app was taken down. *Not live*, the release was once confirmed served but isn't served now. *Not shown to you*, the viewer's access shows the merge and not the release. *Couldn't check*, the release couldn't be read or its answer didn't match the task's merged commit, which is never shown as Off or Live. Only *Live* says an app is served, and only while Podster says this commit is served.
 
 Show a compound result when needed, such as **Approved · Merge failed** or **Merged · Deployment failed**. Show the commit and time observed with every external state. If provider data is stale, say **Last updated 12 min ago**.
 

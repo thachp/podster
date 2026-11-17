@@ -12,6 +12,7 @@ import { crossRoomTarget, parseCrossRoomTarget, type Names } from "../w/[id]/tas
 import { TaskSheet } from "../w/[id]/tasks/task-sheet";
 import { acknowledgeUpTo, describeEvent, type InboxEvent } from "./attention-model";
 import type { Attention } from "./load-attention";
+import { ReleaseApprovals } from "./release-approvals";
 
 export function AttentionScreen({ attention, me, names, orgNames }: { attention: Attention; me: string; names: Names; orgNames?: Names }) {
   return (
@@ -21,6 +22,7 @@ export function AttentionScreen({ attention, me, names, orgNames }: { attention:
         <p className="text-muted-foreground">Decisions waiting on you across workrooms, and what's happened since you last looked.</p>
       </div>
       <Reviews attention={attention} />
+      <ReleaseApprovals approvals={attention.approvals} me={me} names={names} taskTitles={attention.taskTitles} />
       <Updates attention={attention} me={me} names={names} />
       {/* These are real items in the design, and this says so rather than letting an empty screen mean there are none. */}
       <p className="text-xs text-muted-foreground">Role invitations and wake or connection problems on your agents don't show here yet. Check the Agents page for those.</p>

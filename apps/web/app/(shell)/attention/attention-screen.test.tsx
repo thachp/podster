@@ -18,6 +18,7 @@ const attention = (over: Partial<Attention> = {}): Attention => ({
   uncheckedRooms: 0,
   roomNames: { ws_1: "Billing" },
   taskTitles: { tsk_1: "Design the API" },
+  approvals: { state: "unavailable" },
   ...over,
 });
 

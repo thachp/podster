@@ -43,9 +43,10 @@ use super::release_recheck::release_now;
 use super::*;
 use crate::app_stores::StoreProvider;
 use podster_core::app_store::{
-    make_step, settle, settles_first, store_name, CreateAnswer, MakeStep, Settle, StoreRecord,
-    STORE_CREATE_INCOMPLETE, STORE_CREATE_OWED, STORE_CREATE_REFUSED, STORE_CREATE_UNANSWERED,
-    STORE_LIST_UNKNOWN, STORE_PROVIDER_MISSING, STORE_SETTLED, STORE_SLOT_NEEDED, STORE_UNSETTLED,
+    make_step, script_binding, settle, settles_first, store_name, Binding, CreateAnswer, MakeStep,
+    NoBinding, Settle, StoreRecord, STORE_CREATE_INCOMPLETE, STORE_CREATE_OWED,
+    STORE_CREATE_REFUSED, STORE_CREATE_UNANSWERED, STORE_LIST_UNKNOWN, STORE_PROVIDER_MISSING,
+    STORE_SETTLED, STORE_SLOT_NEEDED, STORE_UNSETTLED,
 };
 
 /// The room's record of one label's store, as its row holds it.
@@ -125,6 +126,24 @@ pub(super) fn settles_first_for(sql: &SqlStorage, release_id: &str) -> R<bool> {
     Ok(kept(sql, &label)?.is_some_and(|kept| {
         settles_first(Some(&kept.record()), kept.create_sent_at, last.as_deref())
     }))
+}
+
+/// **Rule 3(a), at the upload (S3):** what the script of a release of `label` is bound to, read from the room's own
+/// record of its store and nothing else (`podster_core::app_store::script_binding`). A release that asks for no store
+/// is bound to nothing; one that asks is bound to its made store, or fails by why the record binds nothing. Read in the
+/// transaction just before the script is written, so the binding is the record's as it is then. Logged by its code.
+pub(super) fn script_binding_for(
+    sql: &SqlStorage,
+    release_id: &str,
+    label: &str,
+    wants_store: bool,
+) -> R<Result<Option<Binding>, NoBinding>> {
+    let kept = kept(sql, label)?;
+    let bound = script_binding(wants_store, kept.as_ref().map(Kept::record).as_ref());
+    if let Err(why) = bound {
+        log(sql, release_id, why.code());
+    }
+    Ok(bound)
 }
 
 /// Whether the lease the step holds took an upload slot: the room's upload attempt recorded at the lease's own time.

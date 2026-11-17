@@ -149,10 +149,10 @@ pub(crate) fn on_domain(domain: &str, host: &str) -> bool {
 /// What a read of a serve entry found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Entry {
-    /// The host's entry names this script, with no mark: a static release's, the only kind written today.
+    /// The host's entry names this script, with no mark: a static release's.
     Present(String),
-    /// The host's entry names this script, marked as carrying code (`podster_core::serve_entry`, M6 stage 1). Nothing
-    /// writes one yet, so an applier that wrote a static entry reads this back as differing.
+    /// The host's entry names this script, marked as carrying code (`podster_core::serve_entry`, M6 stage 1). The
+    /// applier writes one only for a script the room recorded as carrying code, and reads either back by its kind.
     Code(String),
     /// The provider said, in so many words, that the host has no entry.
     Absent,
@@ -160,6 +160,18 @@ pub(crate) enum Entry {
     Foreign,
     /// Anything else: no answer, an error, or an answer that isn't one of the three above. Never read as absent.
     Unknown,
+}
+
+impl Entry {
+    /// The kind and the script an entry names, for `podster_core::serve_entry::entry_is` to compare with what the room
+    /// wants. `None` for an entry that names no script of Podster's.
+    pub(crate) fn named(&self) -> Option<(HostKind, &str)> {
+        match self {
+            Entry::Present(script) => Some((HostKind::Static, script)),
+            Entry::Code(script) => Some((HostKind::Code, script)),
+            Entry::Absent | Entry::Foreign | Entry::Unknown => None,
+        }
+    }
 }
 
 fn hex32(value: &str) -> bool {
@@ -540,15 +552,11 @@ impl Provider {
         custom_entry_value_kind(kind, host, script)
     }
 
-    /// Writes a host's serve entry, naming one script, as a static release's: with no mark, exactly as every entry has
-    /// been written. Nothing tells the applier yet that a release carries code.
-    pub(crate) async fn write_entry(&self, host: &str, script: &str) -> bool {
-        self.write_entry_as(host, script, HostKind::Static).await
-    }
-
-    /// Writes a host's serve entry, naming one script of `kind`, in the form [`Provider::entry_value`] gives. `true`
-    /// only when the provider said it was written. Only a test build's route calls it with anything but static.
-    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
+    /// Writes a host's serve entry, naming one script of `kind`, in the form [`Provider::entry_value`] gives: marked
+    /// when it carries code, and exactly as every static entry has always been written when it doesn't. `true` only
+    /// when the provider said it was written. **The applier is its only caller** (`workspace::takedown`), with the
+    /// kind the room recorded for the script before it wrote it; and a test build's route. A test reads every source
+    /// for any other.
     pub(crate) async fn write_entry_as(&self, host: &str, script: &str, kind: HostKind) -> bool {
         let Some(value) = self.entry_value(host, script, kind) else {
             return false;
@@ -605,8 +613,8 @@ impl Provider {
     }
 }
 
-/// Test builds only: one write or read of a serve entry by the provider, against the stand-in, since nothing tells the
-/// applier yet that a release carries code (M6 stage 1). The answers are the stand-in's.
+/// Test builds only: one write or read of a serve entry by the provider, against the stand-in, of either kind, so the
+/// provider's own forms are shown apart from the applier (M6 stage 1). The answers are the stand-in's.
 #[cfg(feature = "failpoints")]
 pub(crate) async fn test_route(env: &Env, body: Value) -> Result<Response> {
     let Some(provider) = Provider::from_env(env) else {

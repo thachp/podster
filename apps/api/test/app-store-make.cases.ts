@@ -142,6 +142,8 @@ async function uploading(opts: { open?: boolean; driver?: boolean } = {}): Promi
     release(PREV, "served");
     release(REL, "uploading");
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, `${label}.${PREV}`);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, `${label}.${PREV}`);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     sql.exec("CREATE TABLE test_release_upload_provider (x INTEGER)");
@@ -211,11 +213,17 @@ export function appStoreMakeCases() {
     });
 
     it("makes none for a release whose manifest asks for none, or doesn't say so whole, or that has no manifest", async () => {
-      for (const files of [app(false), app('"true"'), STATIC]) {
+      // *Since S3 (S2's question 2):* a manifest not read whole fails the release by its problem's code, rather than
+      // uploading it as static files; it still makes no store.
+      for (const [files, ending] of [
+        [app(false), [200, "uploading", true, null, null]],
+        [app('"true"'), [200, "failed", false, null, "release_manifest_value"]],
+        [STATIC, [200, "uploading", true, null, null]],
+      ] as const) {
         await github("/reset", {});
         await github("/seed", repository(files));
         const r = await uploading();
-        expect(brief(await upload(r.room)), JSON.stringify(files)).toEqual([200, "uploading", true, null, null]);
+        expect(brief(await upload(r.room)), JSON.stringify(files)).toEqual(ending);
         expect(await record(r.room)).toEqual([]);
       }
       expect((await storeState()).calls).toEqual([]);
@@ -456,6 +464,242 @@ export function appStoreMakeCases() {
       const logs = source.match(/console_(log|error|warn)!\([^;]*;/g) ?? [];
       expect(logs.length).toBe(1);
       expect(logs[0]).toContain('"release: the app\'s store: room={} release={} code={}"');
+    });
+  });
+}
+
+// --- S3 of the store plan: uploading a release's code, with its one binding ------------------------------------------
+//
+// A whole code release uploads its static files as files, its modules as the script's parts and its manifest as
+// neither, with metadata Podster writes whole: the fixed assets configuration, `bindings` exactly none or the one
+// store, `STORE`, whose ID comes only from the room's record of its store (rule 3(a)), core's compatibility date, no
+// flag, and `main_module`. The room records the script's kind before it is written. These run here, beside S2's cases,
+// since a release that asks for its store has it made against D1's stand-in, which this file's spec owns.
+
+type Written = {
+  files: Record<string, { hash: string; size: number; type: string; base64: string }>;
+  metadata: any;
+  metadataText: string;
+  modules: Record<string, { filename: string; type: string; text: string }>;
+  contentType: string;
+  times: number;
+};
+type ProviderState = { calls: { op: string; status: number; query?: string; parts?: string[] }[]; written: Written | null };
+const providerState = async (script: string) => (await (await fetch(`https://content-fake.example.com/upload-state?script=${script}`)).json()) as ProviderState;
+/** The record of the uploading release's script's kind (the fixture records the release it serves, `PREV`, static). */
+const scriptKind = (room: string) => inRoom(room, (sql) => sql.exec("SELECT release_id, script_name, kind, recorded_at FROM release_script_kind WHERE release_id = ?", REL).toArray() as any[]);
+const uploadRow = (room: string) => inRoom(room, (sql) => sql.exec("SELECT files, bytes FROM release_upload WHERE release_id = ?", REL).toArray() as any[]);
+const ASSETS = '{"html_handling":"auto-trailing-slash","not_found_handling":"none"}';
+/** The metadata of a script with code, exactly: `bindings` as given, the entry module last. */
+const codeMetadata = (token: string, bindings: string, main = "index.js") =>
+  `{"assets":{"config":${ASSETS},"jwt":"${token}"},"bindings":${bindings},"compatibility_date":"2026-11-01","compatibility_flags":[],"main_module":"${main}"}`;
+const storeBinding = (id: string) => `[{"type":"d1","name":"STORE","id":"${id}"}]`;
+const MODULE_TYPE = "application/javascript+module";
+/** A release with code: a page, a manifest, an entry module and one it imports. */
+const codeApp = (store: boolean, main = "index.js") => ({
+  "index.html": "<p>todo</p>\n",
+  "podster-app.json": `{"main":"${main}","store":${store}}`,
+  "worker/index.js": 'import { list } from "./lib/list.mjs";\nexport default { fetch() { return new Response(list()); } };\n',
+  "worker/lib/list.mjs": 'export const list = () => "[]";\n',
+});
+/** A made store, recorded by hand: the room's record is all the upload binds from. */
+const madeRecord = (r: Room, id: string, extra = "") => inRoom(r.room, (sql) => sql.exec(
+  `INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at${extra ? ", delete_owed_at, delete_cause" : ""})
+     VALUES (?, 'd1', ?, ?, ?, ?, ?, ?${extra ? ", ?, ?" : ""})`,
+  ...[r.label, `podster-store-${crypto.randomUUID().replace(/-/g, "")}`, id, T - MINUTE, T - MINUTE, T - MINUTE, T - MINUTE, ...(extra ? [T - 1, extra] : [])]));
+/** Statements the room runs after the files are sent and before it is asked again, just before the script's write. */
+const beforeCheck = (room: string, ...statements: string[]) => inRoom(room, (sql) => {
+  sql.exec("CREATE TABLE test_release_upload_before_check (statement TEXT)");
+  for (const statement of statements) sql.exec("INSERT INTO test_release_upload_before_check (statement) VALUES (?)", statement);
+});
+
+export function appCodeUploadCases() {
+  describe("the release job uploads a release's code with exactly its one binding (S3)", () => {
+    beforeAll(async () => {
+      key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
+    });
+    beforeEach(async () => {
+      await stores("/reset");
+      await github("/reset", {});
+      await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
+      await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    });
+    afterEach(async () => { for (const room of made.splice(0)) await alarmQuiet(stub(room)); });
+
+    it("uploads the modules as the script and binds exactly STORE, by the ID the room recorded for the store it made", async () => {
+      const files = codeApp(true);
+      await github("/seed", repository(files));
+      const r = await uploading();
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      const [store] = await record(r.room);
+      expect(store.store_id).toMatch(UUID);
+      const seen = await providerState(r.script);
+      const written = seen.written!;
+      // The metadata, byte for byte: the one binding, its ID the record's, and nothing from the release's files.
+      expect(written.metadataText).toBe(codeMetadata(written.metadata.assets.jwt, storeBinding(store.store_id)));
+      expect(written.metadata.bindings).toEqual([{ type: "d1", name: "STORE", id: store.store_id }]);
+      // The modules, each as its own part, by its name under `worker/`, typed as a module, with its own bytes.
+      expect(written.modules).toEqual({
+        "index.js": { filename: "index.js", type: MODULE_TYPE, text: files["worker/index.js"] },
+        "lib/list.mjs": { filename: "lib/list.mjs", type: MODULE_TYPE, text: files["worker/lib/list.mjs"] },
+      });
+      expect(seen.calls.find((call) => call.op === "script")!.parts).toEqual(["metadata", "index.js", "lib/list.mjs"]);
+      expect(seen.calls.find((call) => call.op === "script")!.query).toBe("?excludeScript=true&bindings_inherit=strict");
+      // A boundary drawn for this write, not the static upload's fixed one.
+      expect(written.contentType).toMatch(/^multipart\/form-data; boundary=podster-script-[0-9a-f]{32}$/);
+      // Served as files: the page and the job's marker. Never a module, and never the manifest.
+      expect(Object.keys(written.files).sort()).toEqual(["/.well-known/podster-release.json", "/index.html"]);
+      // The room recorded the script's kind before it wrote it, and the upload counts what it sent.
+      expect(await scriptKind(r.room)).toEqual([{ release_id: REL, script_name: r.script, kind: "code", recorded_at: T }]);
+      const marker = `{"release_id":"${REL}","commit":"${COMMIT}"}\n`;
+      const sent = files["index.html"].length + files["worker/index.js"].length + files["worker/lib/list.mjs"].length + marker.length;
+      expect(await uploadRow(r.room)).toEqual([{ files: 4, bytes: sent }]);
+    });
+
+    it("binds only from the record: a store recorded by hand is the one bound, and D1 is asked nothing", async () => {
+      await github("/seed", repository(codeApp(true)));
+      const r = await uploading();
+      const id = "0123abcd-4567-89ef-0123-456789abcdef";
+      await madeRecord(r, id);
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      const written = (await providerState(r.script)).written!;
+      expect(written.metadataText).toBe(codeMetadata(written.metadata.assets.jwt, storeBinding(id)));
+      expect((await storeState()).calls).toEqual([]);
+    });
+
+    it("binds nothing for a code release that asks for no store, though its label has one", async () => {
+      await github("/seed", repository(codeApp(false)));
+      const r = await uploading();
+      await madeRecord(r, "0123abcd-4567-89ef-0123-456789abcdef");
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      const written = (await providerState(r.script)).written!;
+      expect(written.metadataText).toBe(codeMetadata(written.metadata.assets.jwt, "[]"));
+      expect(Object.keys(written.modules)).toEqual(["index.js", "lib/list.mjs"]);
+      expect((await scriptKind(r.room)).map((row) => row.kind)).toEqual(["code"]);
+      expect((await storeState()).calls).toEqual([]);
+    });
+
+    it("writes a static release exactly as before, recording its kind as static", async () => {
+      await github("/seed", repository(STATIC));
+      const r = await uploading();
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      const seen = await providerState(r.script);
+      expect(seen.written!.metadataText).toBe(`{"assets":{"config":${ASSETS},"jwt":"${seen.written!.metadata.assets.jwt}"},"compatibility_date":"2026-11-01","compatibility_flags":[]}`);
+      expect(seen.written!.modules).toEqual({});
+      expect(seen.written!.contentType).toBe("multipart/form-data; boundary=podster-release-upload");
+      expect((await scriptKind(r.room)).map((row) => row.kind)).toEqual(["static"]);
+    });
+
+    it("fails a code release whose record binds nothing by that code, read just before the write, and writes no script", async () => {
+      for (const [statement, code] of [
+        ["UPDATE app_store SET delete_owed_at = 1, delete_cause = 'operator_takedown'", "store_delete_owed"],
+        ["DELETE FROM app_store", "store_none"],
+        ["UPDATE app_store SET store_id = NULL, made_at = NULL", "store_not_made"],
+      ] as const) {
+        await github("/reset", {});
+        await github("/seed", repository(codeApp(true)));
+        const r = await uploading();
+        await madeRecord(r, "0123abcd-4567-89ef-0123-456789abcdef");
+        // The record changes after the files are sent: the binding is the record's as it is at the write. (A record
+        // core would call malformed can't be written past the table's own checks; core's tests show that refusal.)
+        await beforeCheck(r.room, statement);
+        const answer = await upload(r.room);
+        expect([answer.status, answer.body.state, answer.body.uploaded], code).toEqual([200, "failed", false]);
+        expect(await failure(r.room), code).toEqual({ state: "failed", failure_code: code });
+        const seen = await providerState(r.script);
+        expect(seen.calls.map((call) => call.op), code).not.toContain("script");
+        expect(seen.written, code).toBeNull();
+        expect(await scriptKind(r.room), code).toEqual([]);
+      }
+    });
+
+    it("fails a code release that fails core's checks by the problem's code, and never uploads it as static files", async () => {
+      const page = { "index.html": "<p>x</p>\n" };
+      for (const [files, code] of [
+        [{ ...codeApp(true), "worker/extra.ts": "export {};\n" }, "release_module_kind"],
+        [codeApp(true, "other.js"), "release_main_not_a_module"],
+        [{ ...page, "podster-app.json": '{"main":"index.js","store":true,"d1_databases":[]}', "worker/index.js": "export default {};\n" }, "release_manifest_config"],
+        [{ ...page, "podster-app.json": '{"main":"a b.js","store":false}', "worker/a b.js": "export default {};\n" }, "release_module_name"],
+        [{ ...page, "worker/index.js": "export default {};\n" }, "release_manifest_missing"],
+        [{ ...codeApp(false), "wrangler.toml": "name = 'x'\n" }, "release_config_file"],
+      ] as const) {
+        await github("/reset", {});
+        await github("/seed", repository(files as Record<string, string>));
+        const r = await uploading();
+        const answer = await upload(r.room);
+        expect([answer.status, answer.body.state, answer.body.uploaded], code).toEqual([200, "failed", false]);
+        expect(await failure(r.room), code).toEqual({ state: "failed", failure_code: code });
+        // Nothing was sent to the provider: no session, no file and no script.
+        expect(await uploadCalls(r.script), code).toEqual([]);
+        expect(await record(r.room), code).toEqual([]);
+      }
+      expect((await storeState()).calls).toEqual([]);
+    });
+
+    it("fails a release whose script's kind was recorded otherwise, and writes nothing over it", async () => {
+      await github("/seed", repository(codeApp(false)));
+      const r = await uploading();
+      await inRoom(r.room, (sql) => sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'static', 1)", REL, r.script));
+      const answer = await upload(r.room);
+      expect([answer.status, answer.body.state]).toEqual([200, "failed"]);
+      expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "release_script_kind_changed" });
+      expect((await providerState(r.script)).written).toBeNull();
+      expect(await scriptKind(r.room)).toEqual([{ release_id: REL, script_name: r.script, kind: "static", recorded_at: 1 }]);
+    });
+
+    it("lets no file but the release commit's own write the record of a script's kind, and it is written before the script", () => {
+      const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+      const writes = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+release_script_kind\b/i;
+      const writers = Object.entries(sources).filter(([path, source]) => path !== "store.rs" && writes.test(source)).map(([path]) => path);
+      expect(writers).toEqual(["workspace/release_commit.rs"]);
+      // The upload records the kind and reads the binding in the transaction that rechecks, before the write.
+      const upload = sources["workspace/release_upload.rs"];
+      const checked = upload.search(/self\s*\.write_check\(/);
+      expect(checked).toBeGreaterThan(0);
+      expect(checked).toBeLessThan(upload.search(/\.write_script\(/));
+      // The binding comes from the room's record alone: nothing in the upload names a store's ID or a binding's type.
+      expect(upload).not.toMatch(/"d1"|store_id|"STORE"/);
+    });
+
+    it("leaves every script the serve state names with a record of its kind, through the real upload and commit", async () => {
+      const unrecorded = (room: string) => inRoom(room, (sql) => sql.exec(
+        "SELECT s FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL AND s NOT IN (SELECT script_name FROM release_script_kind)").toArray());
+      const commitLive = (room: string) => switchedOn(() => stub(room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: REL }) }).then(async (r: Response) => ({ status: r.status, body: (await r.json()) as any })));
+      for (const [files, kind] of [[codeApp(true), "code"], [STATIC, "static"]] as const) {
+        await github("/reset", {});
+        await github("/seed", repository(files));
+        const r = await uploading();
+        expect(brief(await upload(r.room)), kind).toEqual([200, "uploading", true, null, null]);
+        const live = await commitLive(r.room);
+        expect([live.status, live.body.state], kind).toEqual([200, "live"]);
+        expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name), kind).toBe(r.script);
+        expect(await unrecorded(r.room), kind).toEqual([]);
+        expect((await scriptKind(r.room)).find((row) => row.script_name === r.script)?.kind, kind).toBe(kind);
+      }
+    });
+
+    it("lets nothing but the upload's one path write a script, and that path records its kind first (a tripwire, not a proof)", () => {
+      const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+      // The provider's script write is named in two files: where it is defined, and the upload's one call.
+      const named = Object.entries(sources).filter(([, source]) => /\bwrite_script\s*\(/.test(source)).map(([path]) => path).sort();
+      expect(named).toEqual(["content_provider/upload.rs", "workspace/release_upload.rs"]);
+      expect(sources["content_provider/upload.rs"].match(/\bfn write_script\s*\(/g)).toHaveLength(1);
+      expect(sources["content_provider/upload.rs"].match(/\bwrite_script\s*\(/g)).toHaveLength(1);
+      const upload = sources["workspace/release_upload.rs"];
+      expect(upload.match(/\.write_script\s*\(/g)).toHaveLength(1);
+      // That call is in `upload_of`, after its `write_check`, which records the kind and reads the binding.
+      const body = upload.slice(upload.search(/async fn upload_of\(/));
+      const checked = body.search(/self\s*\.write_check\(/);
+      expect(checked).toBeGreaterThan(0);
+      expect(checked).toBeLessThan(body.search(/\.write_script\s*\(/));
+      // **Under another name:** a script is written by a `PUT` to its URL in the dispatch namespace. Only the provider's
+      // two files build such a URL, and the one function that sends a `PUT` to it is `write_script`.
+      const builders = Object.entries(sources).filter(([, source]) => source.includes("/workers/dispatch/namespaces/")).map(([path]) => path).sort();
+      expect(builders).toEqual(["content_provider.rs"]);
+      const functions = (source: string) => source.split(/\n\s*(?:pub(?:\([a-z]+\))? )?(?:async )?fn /).slice(1).map((text) => ({ name: text.slice(0, text.indexOf("(")), text }));
+      const puts = ["content_provider.rs", "content_provider/upload.rs"].flatMap((path) =>
+        functions(sources[path]).filter((fn) => /Method::Put/.test(fn.text) && /script_url\(|dispatch\/namespaces/.test(fn.text)).map((fn) => `${path}#${fn.name}`));
+      expect(puts).toEqual(["content_provider/upload.rs#write_script"]);
     });
   });
 }

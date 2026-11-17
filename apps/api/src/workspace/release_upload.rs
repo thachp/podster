@@ -1,9 +1,15 @@
 //! Reading a release's files and uploading them as its own script (M6 step 5; ADR 0010's "The release job", steps 1
-//! to 4). **Static files only:** no Worker code and no binding is ever uploaded here. *Since S2 of the store plan
-//! (2026-11-17):* a release whose manifest asks for its app's store has the store made after the first pass of its
-//! read and before anything is sent to the provider; and a release whose own last step waited on its store settles
-//! its label's create outstanding before anything is read (`release_store`). A release that asks for no store is
-//! never held by one. Nothing binds the store yet: that is S3's.
+//! to 4). *Since S2 of the store plan (2026-11-17):* a release whose manifest asks for its app's store has the store
+//! made after the first pass of its read and before anything is sent to the provider; and a release whose own last
+//! step waited on its store settles its label's create outstanding before anything is read (`release_store`). A
+//! release that asks for no store is never held by one.
+//!
+//! *Since S3 (2026-11-17):* **a release that carries code** (`podster_core::app_code::upload_form`) uploads its static
+//! files as files, its modules as the script's parts (fetched a second time before the token is revoked, and held for
+//! the write), and its manifest as neither; one that carries code and fails core's checks fails by the problem's code
+//! and nothing is sent. Its script is bound to exactly what the room's record of its store gives (rule 3(a)), read in
+//! the transaction of step 5, which also records the script's kind before it is written (`write_check`). A static
+//! release is uploaded exactly as before.
 //!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
@@ -18,7 +24,8 @@
 //!    sent. **No file is held between the two fetches,** so a release is never in memory whole.
 //! 4. **The read's token is revoked,** whatever came of it, before the script is written.
 //! 5. **The room again,** in its transaction: the whole recheck once more, on outside facts read afresh and the
-//!    room's rows and epoch now. If it doesn't hold, nothing is written.
+//!    room's rows and epoch now. If it doesn't hold, nothing is written. If it does, the same transaction reads the
+//!    store's binding from the room's record and records the script's kind (S3).
 //! 6. **The script is written,** from the provider's completion token, which it gives only once it holds every file
 //!    the manifest names. So a script is never part of a release.
 //! 7. **The room records the upload,** or, if the release ended while the script was being written, owes the script
@@ -46,17 +53,23 @@
 //!
 //! Logs carry the room's and the release's IDs and codes. No token, path or file name is logged.
 use super::release_commit::{
-    record_uploaded, upload_answer, upload_failed, upload_ready, UploadReady,
+    record_script_kind, record_uploaded, upload_answer, upload_failed, upload_ready, UploadReady,
+    SCRIPT_KIND_CHANGED,
 };
 use super::release_recheck::{release_now, state_of, Reads};
 use super::release_store::StoreOutcome;
 use super::*;
+use crate::content_provider::upload::ScriptCode;
 use crate::content_provider::upload::{BucketBody, ManifestFile, Sent};
 use crate::content_provider::Provider;
 use crate::github::release_read::{
     hash_of, reserve, Attempt, ReadFailure, ReadFile, ReadPlan, ReleaseApp, ReleaseReader,
 };
-use podster_core::app_code::{asks_for_store, MANIFEST_PATH, MAX_MANIFEST_BYTES};
+use podster_core::app_code::{
+    upload_form, CodeProblem, UploadForm, MANIFEST_PATH, MAX_MANIFEST_BYTES,
+};
+use podster_core::app_requests::HostKind;
+use podster_core::app_store::Binding;
 use podster_core::release::{
     fetch_batches, file_reads, upload_requests, ReleaseState, FETCH_PASSES, TREE_READS,
 };
@@ -83,6 +96,9 @@ enum Stop {
     Lease,
     /// The app's store said the upload doesn't go on (`release_store`).
     Store(StoreOutcome),
+    /// The release carries code and fails core's checks (`podster_core::app_code::upload_form`): it fails by the
+    /// problem's code, and is never uploaded as static files.
+    Code(&'static str),
     /// The room couldn't be read or written.
     Room(ApiError),
 }
@@ -93,11 +109,28 @@ impl From<ReadFailure> for Stop {
     }
 }
 
-/// Everything the provider holds for one release, ready to be written as its script.
+/// Everything the provider holds for one release, ready to be written as its script, with the modules of one that
+/// carries code.
 struct Complete {
     token: String,
     files: i64,
     bytes: i64,
+    code: Option<CodeParts>,
+}
+
+/// A release's code, held from its second fetch to the script's write: at most `MAX_MODULES_BYTES` of modules.
+struct CodeParts {
+    main: String,
+    modules: Vec<(String, Vec<u8>)>,
+    wants_store: bool,
+}
+
+/// What the room said just before the script's write.
+enum WriteReady {
+    /// Write it, bound to this, or to nothing.
+    Go(Option<Binding>),
+    /// The command ends with this answer: the recheck ended the release, it is no longer uploading, or it failed here.
+    Answer(Value),
 }
 
 /// Every file of the plan fetched in batches, in order, each checked against the tree as it arrives. `take` is given
@@ -130,9 +163,10 @@ struct FirstPass {
 }
 
 impl FirstPass {
-    /// Whether the release asks for its app's store (`podster_core::app_code::asks_for_store`), from the tree and the
-    /// manifest's bytes as fetched and checked.
-    fn asks_for_store(&self) -> bool {
+    /// How the release is uploaded, or why it fails (`podster_core::app_code::upload_form`), from the tree and the
+    /// manifest's bytes as fetched and checked. A release that carries code and fails core's checks fails by the
+    /// problem's code (S2's question 2).
+    fn form(&self) -> Result<UploadForm, CodeProblem> {
         let plan = ReleasePlan {
             files: self
                 .plan
@@ -146,7 +180,15 @@ impl FirstPass {
                 .collect(),
             total_bytes: self.plan.total_bytes,
         };
-        asks_for_store(&plan, self.manifest.as_deref())
+        upload_form(&plan, self.manifest.as_deref())
+    }
+}
+
+/// Whether a release's script carries code, and whether it asks for its store.
+fn kind_of(form: &UploadForm) -> (HostKind, bool) {
+    match form {
+        UploadForm::Static => (HostKind::Static, false),
+        UploadForm::Code(release) => (HostKind::Code, release.wants_store),
     }
 }
 
@@ -209,22 +251,34 @@ async fn send_files(
     script: &str,
     commit_sha: &str,
     first: FirstPass,
+    form: &UploadForm,
     go_on: &dyn Fn() -> bool,
 ) -> std::result::Result<Complete, Stop> {
     let check = || if go_on() { Ok(()) } else { Err(Stop::Lease) };
     let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
     let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
     let FirstPass { plan, hashes, .. } = first;
+    // Which of the plan's files are served as files: every one of a static release; only the static files of one that
+    // carries code, so a module or the manifest is never a file anyone is served.
+    let served = |path: &str| match form {
+        UploadForm::Static => true,
+        UploadForm::Code(release) => release.static_files.iter().any(|file| file.path == path),
+    };
     let mut manifest: Vec<ManifestFile> = plan
         .files
         .iter()
         .zip(&hashes)
+        .filter(|(file, _)| served(&file.path))
         .map(|(file, hash)| ManifestFile {
             path: format!("/{}", file.path),
             hash: hash.clone(),
             size: file.size,
         })
         .collect();
+    let served_bytes = manifest
+        .iter()
+        .map(|file| file.size)
+        .fold(0_u64, u64::saturating_add);
     manifest.push(ManifestFile {
         path: format!("/{MARKER_PATH}"),
         hash: marker_hash.clone(),
@@ -305,11 +359,62 @@ async fn send_files(
             _ => return Err(Stop::Provider),
         }
     }
+    let token = completion.ok_or(Stop::Provider)?;
+    // A release that carries code: its modules, fetched a second time before the read's token is revoked, each
+    // checked against the tree again and hashing as it did in the first pass, and held for the script's write.
+    let code = match form {
+        UploadForm::Static => None,
+        UploadForm::Code(release) => {
+            check()?;
+            let mut places = Vec::with_capacity(release.modules.len());
+            for module in &release.modules {
+                let place = plan
+                    .files
+                    .iter()
+                    .position(|file| file.path == module.file.path)
+                    .ok_or(Stop::Provider)?;
+                places.push(place);
+            }
+            let files: Vec<&ReadFile> = places
+                .iter()
+                .map(|place| plan.files.get(*place).ok_or(Stop::Provider))
+                .collect::<std::result::Result<_, Stop>>()?;
+            let mut modules: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
+            fetch_each(reader, &files, |at, hash, bytes| {
+                let (Some(module), Some(place)) = (release.modules.get(at), places.get(at)) else {
+                    return Err(Stop::Provider);
+                };
+                if hashes.get(*place) != Some(&hash) {
+                    return Err(Stop::Read(ReadFailure::Mismatch(FetchMismatch::Sha)));
+                }
+                modules.push((module.name.clone(), bytes));
+                Ok(())
+            })
+            .await?;
+            Some(CodeParts {
+                main: release.main.clone(),
+                modules,
+                wants_store: release.wants_store,
+            })
+        }
+    };
+    let module_bytes = code.as_ref().map_or(0_u64, |code| {
+        code.modules
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .fold(0, u64::saturating_add)
+    });
+    let module_count = code.as_ref().map_or(0, |code| code.modules.len());
     Ok(Complete {
-        token: completion.ok_or(Stop::Provider)?,
-        files: i64::try_from(manifest.len()).unwrap_or(i64::MAX),
-        bytes: i64::try_from(plan.total_bytes.saturating_add(marker.len() as u64))
-            .unwrap_or(i64::MAX),
+        token,
+        files: i64::try_from(manifest.len().saturating_add(module_count)).unwrap_or(i64::MAX),
+        bytes: i64::try_from(
+            served_bytes
+                .saturating_add(module_bytes)
+                .saturating_add(marker.len() as u64),
+        )
+        .unwrap_or(i64::MAX),
+        code,
     })
 }
 
@@ -400,6 +505,46 @@ impl Workspace {
         .await?;
         let ready = found.borrow_mut().take();
         ready.ok_or_else(|| ApiError::internal("an upload check that answered nothing"))
+    }
+
+    /// **The room's transaction just before the script is written** (step 5): the whole recheck again, on outside facts
+    /// read afresh; and, if it holds, in the same transaction, **the binding, from the room's own record of its store
+    /// and nothing else** (rule 3(a); `release_store::script_binding_for`), and **the record of the script's kind**
+    /// (`release_commit::record_script_kind`), so no script with code is ever written that the room doesn't know as
+    /// code. A release that asks for its store and whose record binds nothing fails by that code, and nothing is
+    /// written.
+    async fn write_check(
+        &self,
+        release_id: &str,
+        label: &str,
+        script: &str,
+        reads: Reads,
+        form: (HostKind, bool),
+    ) -> R<WriteReady> {
+        let found: Rc<RefCell<Option<WriteReady>>> = Rc::new(RefCell::new(None));
+        let slot = found.clone();
+        let (id, label, script) = (release_id.to_owned(), label.to_owned(), script.to_owned());
+        let (kind, wants_store) = form;
+        self.release_transaction(move |sql| {
+            let now = release_now(sql);
+            let ready = match upload_ready(sql, &id, &reads, true, now)? {
+                UploadReady::Answer(answer) => WriteReady::Answer(answer),
+                UploadReady::Go { .. } => {
+                    match release_store::script_binding_for(sql, &id, &label, wants_store)? {
+                        Err(why) => WriteReady::Answer(upload_failed(sql, &id, why.code(), now)?),
+                        Ok(_) if !record_script_kind(sql, &id, &script, kind, now)? => {
+                            WriteReady::Answer(upload_failed(sql, &id, SCRIPT_KIND_CHANGED, now)?)
+                        }
+                        Ok(binding) => WriteReady::Go(binding),
+                    }
+                }
+            };
+            *slot.borrow_mut() = Some(ready);
+            Ok(Value::Null)
+        })
+        .await?;
+        let ready = found.borrow_mut().take();
+        ready.ok_or_else(|| ApiError::internal("a write check that answered nothing"))
     }
 
     /// Whether the step may go on after the reservation: its lease still holds. Test builds only: a test changes the
@@ -535,27 +680,33 @@ impl Workspace {
                     .await
                     {
                         Err(stop) => Err(stop),
-                        // The app's store, for a release that asks for one, before anything is sent to the
-                        // provider.
-                        Ok(first) => match self
-                            .store_before_upload(&release_id, &label, first.asks_for_store(), lease)
-                            .await
-                        {
-                            Err(error) => Err(Stop::Room(error)),
-                            Ok(StoreOutcome::Go) => {
-                                send_files(
-                                    &provider,
-                                    &reader,
-                                    &attempt,
-                                    &release_id,
-                                    &script,
-                                    &commit_sha,
-                                    first,
-                                    &go_on,
-                                )
+                        // What is uploaded, from the tree and the manifest: a release that carries code and fails
+                        // core's checks fails by the problem's code, and nothing is sent.
+                        Ok(first) => match first.form() {
+                            Err(problem) => Err(Stop::Code(problem.code())),
+                            // The app's store, for a release that asks for one, before anything is sent to the
+                            // provider.
+                            Ok(form) => match self
+                                .store_before_upload(&release_id, &label, kind_of(&form).1, lease)
                                 .await
-                            }
-                            Ok(outcome) => Err(Stop::Store(outcome)),
+                            {
+                                Err(error) => Err(Stop::Room(error)),
+                                Ok(StoreOutcome::Go) => {
+                                    send_files(
+                                        &provider,
+                                        &reader,
+                                        &attempt,
+                                        &release_id,
+                                        &script,
+                                        &commit_sha,
+                                        first,
+                                        &form,
+                                        &go_on,
+                                    )
+                                    .await
+                                }
+                                Ok(outcome) => Err(Stop::Store(outcome)),
+                            },
                         },
                     };
                     // Every way out of the read ends here: the token is revoked before anything else is done.
@@ -588,6 +739,12 @@ impl Workspace {
                 return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None)
             }
             Err(Stop::Store(outcome)) => return self.store_answer(&release_id, outcome).await,
+            Err(Stop::Code(code)) => {
+                let id = release_id.clone();
+                return self
+                    .release_transaction(move |sql| upload_failed(sql, &id, code, release_now(sql)))
+                    .await;
+            }
             Err(Stop::Room(error)) => return Err(error),
         };
         #[cfg(feature = "failpoints")]
@@ -600,17 +757,44 @@ impl Workspace {
             return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
         }
         let reads = self.release_reads(&release_id).await?;
-        if let UploadReady::Answer(answer) = self.upload_check(&release_id, reads, true).await? {
-            return Ok(answer);
-        }
+        let form = match &complete.code {
+            None => (HostKind::Static, false),
+            Some(code) => (HostKind::Code, code.wants_store),
+        };
+        let binding = match self
+            .write_check(&release_id, &label, &script, reads, form)
+            .await?
+        {
+            WriteReady::Answer(answer) => return Ok(answer),
+            WriteReady::Go(binding) => binding,
+        };
         #[cfg(feature = "failpoints")]
         self.test_between_reads().await?;
         if !go_on() {
             return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
         }
+        // A part boundary drawn for this write alone: a module's bytes are agent content.
+        let boundary = match &complete.code {
+            None => String::new(),
+            Some(_) => {
+                let drawn = super::hostname::random_32()?;
+                let hex: String = drawn
+                    .iter()
+                    .take(16)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                format!("podster-script-{hex}")
+            }
+        };
+        let code = complete.code.as_ref().map(|code| ScriptCode {
+            main: &code.main,
+            modules: &code.modules,
+            binding: binding.as_ref(),
+            boundary: &boundary,
+        });
         let written = script_write_outcome(
             provider
-                .write_script(&script, &complete.token, &attempt)
+                .write_script(&script, &complete.token, code.as_ref(), &attempt)
                 .await,
         );
         let id = release_id.clone();

@@ -270,3 +270,55 @@ fn a_custom_hosts_entry_reads_its_kind_by_the_mark_and_every_earlier_vector_read
         );
     }
 }
+
+#[test]
+fn a_kind_is_named_static_or_code_and_nothing_else() {
+    use podster_core::app_requests::HostKind;
+    use podster_core::serve_entry::{kind_name, kind_named};
+    for kind in [HostKind::Static, HostKind::Code] {
+        assert_eq!(kind_named(kind_name(kind)), Some(kind));
+    }
+    assert_eq!(kind_name(HostKind::Static), "static");
+    assert_eq!(kind_name(HostKind::Code), "code");
+    for other in ["", "Code", "STATIC", "code:", " code", "static ", "default"] {
+        assert_eq!(kind_named(other), None, "{other:?}");
+    }
+}
+
+#[test]
+fn a_scripts_recorded_kind_is_static_only_when_recorded_static() {
+    use podster_core::app_requests::HostKind;
+    use podster_core::serve_entry::recorded_kind;
+    // Never recorded: code, the fail-closed side (the architect's reversal of 2026-11-17).
+    assert_eq!(recorded_kind(None), HostKind::Code);
+    assert_eq!(recorded_kind(Some("static")), HostKind::Static);
+    assert_eq!(recorded_kind(Some("code")), HostKind::Code);
+    // A record of any other kind is read as code, the stricter side, never as static files.
+    for other in ["", "Static", "STATIC", "static ", "none", "code:"] {
+        assert_eq!(recorded_kind(Some(other)), HostKind::Code, "{other:?}");
+    }
+}
+
+#[test]
+fn an_entry_read_back_matches_only_the_same_script_of_the_same_kind() {
+    use podster_core::app_requests::HostKind;
+    use podster_core::serve_entry::entry_is;
+    let script = "k3v9q2.rel_0123456789abcdef0123456789abcdef";
+    let other = "k3v9q2.rel_fedcba9876543210fedcba9876543210";
+    for kind in [HostKind::Static, HostKind::Code] {
+        assert!(entry_is(Some((kind, script)), Some((kind, script))));
+        assert!(!entry_is(Some((kind, script)), Some((kind, other))));
+        assert!(!entry_is(Some((kind, script)), None));
+        assert!(!entry_is(None, Some((kind, script))));
+    }
+    // A kind that differs is as wrong as a script that differs, both ways.
+    assert!(!entry_is(
+        Some((HostKind::Code, script)),
+        Some((HostKind::Static, script))
+    ));
+    assert!(!entry_is(
+        Some((HostKind::Static, script)),
+        Some((HostKind::Code, script))
+    ));
+    assert!(!entry_is(None, None));
+}

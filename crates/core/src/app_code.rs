@@ -1,5 +1,6 @@
 //! What a release that carries code may hold (ADR 0010's proposed revision, stage 1, decided by the owner on
-//! 2026-11-13 as decision 220). Pure, with no I/O, and not wired into the release job or the content Worker yet.
+//! 2026-11-13 as decision 220). Pure, with no I/O. *Since S3 of the store plan (2026-11-17)* the release job's upload
+//! decides what it sends by [`upload_form`].
 //!
 //! A release carries code when the release directory holds the manifest ([`MANIFEST_PATH`]) at its root, or anything
 //! under the modules directory ([`MODULES_DIRECTORY`]). Then:
@@ -45,8 +46,12 @@ pub const MODULE_EXTENSIONS: [&str; 2] = [".js", ".mjs"];
 /// The type every module is uploaded with, from Cloudflare's multipart upload metadata documentation.
 pub const MODULE_UPLOAD_TYPE: &str = "application/javascript+module";
 /// The one name the app's store is bound under, the same in every app. **Proposed:** the revision says "one fixed
-/// binding name" and names none. The store's kind waits for the spike.
+/// binding name" and names none. The store is D1 (the architect's ruling of 2026-11-16).
 pub const STORE_BINDING_NAME: &str = "STORE";
+/// The compatibility date every release's script is written with, a static one's and one with code alike: **one
+/// constant, moved only by a PR** (S3 of the store plan, question 1). Nothing in a release's files sets it. It is the
+/// one spike A's uploads carried.
+pub const COMPATIBILITY_DATE: &str = "2026-11-01";
 /// The manifest's fields, and the only ones. Each must be present.
 pub const MANIFEST_FIELDS: [&str; 2] = ["main", "store"];
 /// Files refused anywhere in a release that carries code, compared case-folded: each is Wrangler's configuration, and
@@ -112,6 +117,10 @@ pub enum CodeProblem {
     ModuleKind(String),
     /// `release_module_too_large`
     ModuleTooLarge(String),
+    /// `release_module_name`: a module whose name, its path under the modules directory, holds anything but ASCII
+    /// letters, digits, `.`, `_`, `-` and `/`. Its name goes into the upload's part headers and, for the entry module,
+    /// the metadata, so nothing that would need quoting or escaping there is taken (S3 of the store plan).
+    ModuleName(String),
     /// `release_too_many_modules`
     TooManyModules(usize),
     /// `release_modules_too_large`
@@ -137,6 +146,7 @@ impl CodeProblem {
             CodeProblem::ModulesDirectoryName(_) => "release_modules_directory_name",
             CodeProblem::ModuleKind(_) => "release_module_kind",
             CodeProblem::ModuleTooLarge(_) => "release_module_too_large",
+            CodeProblem::ModuleName(_) => "release_module_name",
             CodeProblem::TooManyModules(_) => "release_too_many_modules",
             CodeProblem::ModulesTooLarge(_) => "release_modules_too_large",
             CodeProblem::ConfigFile(_) => "release_config_file",
@@ -187,6 +197,16 @@ fn under_modules_directory(path: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_prefix('/'))
 }
 
+/// Whether a module's name may go into the upload as it is: ASCII letters, digits, `.`, `_`, `-` and `/`, and nothing
+/// else. A path the release tree allows may hold a quote, a space or a letter outside ASCII; such a module is refused
+/// ([`CodeProblem::ModuleName`]) rather than quoted, so the name sent is exactly the name in the tree.
+pub fn module_name_form(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+}
+
 fn is_config_file(path: &str) -> bool {
     let folded = fold(path);
     let name = folded.rsplit('/').next().unwrap_or(&folded);
@@ -230,6 +250,9 @@ pub fn split_release(plan: &ReleasePlan) -> Result<ReleaseShape, Vec<CodeProblem
             }
             if file.size > MAX_MODULE_BYTES {
                 problems.push(CodeProblem::ModuleTooLarge(file.path.clone()));
+            }
+            if !module_name_form(name) {
+                problems.push(CodeProblem::ModuleName(file.path.clone()));
             }
             modules.push(Module {
                 name: name.to_owned(),
@@ -492,4 +515,36 @@ pub fn asks_for_store(plan: &ReleasePlan, manifest: Option<&[u8]>) -> bool {
         return false;
     };
     check_code_release(&layout, bytes).is_ok_and(|release| release.wants_store)
+}
+
+/// How a release is uploaded (S3 of the store plan), from its tree and its manifest's bytes as fetched and checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UploadForm {
+    /// No manifest and no modules: every file is a static file, uploaded as before stage 1.
+    Static,
+    /// A whole code release: its static files as files, its modules as the script, and its manifest neither.
+    Code(CodeRelease),
+}
+
+/// **What the upload sends, or why the release fails.** A tree with no manifest and no modules is [`UploadForm::Static`].
+/// A tree that carries code is uploaded as code only when [`split_release`] and [`check_code_release`] both hold, and
+/// otherwise **fails by its first problem's code** (S2's question 2): it is never uploaded as static files, so a module
+/// or a manifest is never served as a file. `manifest` is the manifest's bytes as fetched; none, for a tree that
+/// carries code, is [`CodeProblem::ManifestUnreadable`].
+pub fn upload_form(plan: &ReleasePlan, manifest: Option<&[u8]>) -> Result<UploadForm, CodeProblem> {
+    let first = |problems: Vec<CodeProblem>| {
+        problems
+            .into_iter()
+            .next()
+            .unwrap_or(CodeProblem::ManifestUnreadable)
+    };
+    let layout = match split_release(plan) {
+        Ok(ReleaseShape::Static) => return Ok(UploadForm::Static),
+        Ok(ReleaseShape::Code(layout)) => layout,
+        Err(problems) => return Err(first(problems)),
+    };
+    let bytes = manifest.ok_or(CodeProblem::ManifestUnreadable)?;
+    check_code_release(&layout, bytes)
+        .map(UploadForm::Code)
+        .map_err(first)
 }

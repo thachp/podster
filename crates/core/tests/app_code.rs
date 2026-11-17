@@ -478,3 +478,144 @@ fn a_release_asks_for_its_store_only_through_a_whole_manifest_that_says_so() {
         Some(GOOD)
     ));
 }
+
+#[test]
+fn a_modules_name_is_plain_ascii_or_the_module_is_refused() {
+    // Each of these goes into the upload as it is: a part's name and, for the entry module, the metadata's.
+    for name in ["index.js", "lib/a-b_c.1.mjs", "A/B/C.js", "x..js"] {
+        assert!(module_name_form(name), "{name}");
+        let path = format!("worker/{name}");
+        assert!(
+            split_release(&plan(app(vec![f(&path, 1)]))).is_ok(),
+            "{path}"
+        );
+    }
+    // One character away, each would need quoting or escaping in a header or JSON, and is refused by its own code.
+    for name in [
+        "a\".js", "a b.js", "a;b.js", "é.js", "a\\b.js", "a'.js", "a=b.js", "a%b.js", "a+b.js",
+    ] {
+        assert!(!module_name_form(name), "{name:?}");
+        let path = format!("worker/{name}");
+        let problems = split_err(app(vec![f(&path, 1)]));
+        assert_eq!(
+            problems,
+            [CodeProblem::ModuleName(path.clone())],
+            "{path:?}"
+        );
+        assert_eq!(
+            problems.first().map(CodeProblem::code),
+            Some("release_module_name")
+        );
+    }
+    assert!(!module_name_form(""));
+}
+
+#[test]
+fn the_compatibility_date_is_one_fixed_constant() {
+    assert_eq!(COMPATIBILITY_DATE, "2026-11-01");
+    // It is a date's form, so it goes into the metadata as it is.
+    let b = COMPATIBILITY_DATE.as_bytes();
+    assert_eq!(b.len(), 10);
+    assert!(b.iter().enumerate().all(|(at, c)| if at == 4 || at == 7 {
+        *c == b'-'
+    } else {
+        c.is_ascii_digit()
+    }));
+}
+
+#[test]
+fn a_static_tree_uploads_as_static_files_whatever_manifest_bytes_are_given() {
+    let files = vec![f("index.html", 10), f("app.js", 10), f("wrangler.toml", 10)];
+    assert_eq!(
+        upload_form(&plan(files.clone()), None),
+        Ok(UploadForm::Static)
+    );
+    assert_eq!(
+        upload_form(&plan(files), Some(GOOD)),
+        Ok(UploadForm::Static)
+    );
+}
+
+#[test]
+fn a_whole_code_release_uploads_as_code_with_its_static_files_apart() {
+    let form = upload_form(&plan(app(vec![f("worker/lib/a.mjs", 5)])), Some(GOOD));
+    let Ok(UploadForm::Code(release)) = form else {
+        panic!("expected code, got {form:?}");
+    };
+    assert_eq!(release.main, "index.js");
+    assert!(release.wants_store);
+    assert_eq!(
+        release
+            .modules
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["index.js", "lib/a.mjs"]
+    );
+    // Neither the manifest nor a module is ever a static file.
+    assert_eq!(
+        release
+            .static_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["app.js", "index.html"]
+    );
+    let no_store = upload_form(
+        &plan(app(vec![])),
+        Some(br#"{"main":"index.js","store":false}"#),
+    );
+    assert!(matches!(
+        no_store,
+        Ok(UploadForm::Code(CodeRelease {
+            wants_store: false,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn a_code_release_that_fails_cores_checks_fails_by_its_first_problems_code_and_is_never_static() {
+    // The tree's problems, first by the order found.
+    assert_eq!(
+        upload_form(
+            &plan(app(vec![f("worker/a.ts", 1), f("wrangler.toml", 1)])),
+            Some(GOOD)
+        )
+        .map_err(|p| p.code()),
+        Err("release_module_kind")
+    );
+    assert_eq!(
+        upload_form(&plan(vec![f("worker/index.js", 1)]), Some(GOOD)).map_err(|p| p.code()),
+        Err("release_manifest_missing")
+    );
+    // The manifest's problems.
+    for (bytes, code) in [
+        (
+            &br#"{"main":"other.js","store":true}"#[..],
+            "release_main_not_a_module",
+        ),
+        (
+            br#"{"main":"index.js","store":"true"}"#,
+            "release_manifest_value",
+        ),
+        (
+            br#"{"main":"index.js","store":true,"bindings":[]}"#,
+            "release_manifest_config",
+        ),
+        (br#"{"main":"index.js"}"#, "release_manifest_field_missing"),
+        (b"not json", "release_manifest_unreadable"),
+    ] {
+        assert_eq!(
+            upload_form(&plan(app(vec![])), Some(bytes)).map_err(|p| p.code()),
+            Err(code),
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    // A code tree whose manifest's bytes weren't kept can't be read.
+    assert_eq!(
+        upload_form(&plan(app(vec![])), None).map_err(|p| p.code()),
+        Err("release_manifest_unreadable")
+    );
+}

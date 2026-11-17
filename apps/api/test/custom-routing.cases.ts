@@ -93,6 +93,8 @@ async function room(org: string): Promise<Room> {
          VALUES (?, ?, 'served', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 1, ?, 1, 1, 1)`,
       PREV, SHA, label, script, PREV, owner.id, owner.id);
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, script);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, script);
   });
   await content("/seed", { scripts: [script], entries: { [host]: script } });
@@ -196,6 +198,21 @@ export function customRoutingCases() {
         expect((await held()).entries[r.host]).toBe(r.script);
       });
 
+      it("writes a custom host's entry marked when the room recorded its script as code, counted only when read back so (S3)", async () => {
+        const { r, name } = await routed("org_cr_kind");
+        await inRoom(r.room, (sql) => sql.exec("INSERT OR REPLACE INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 1)", r.script.slice(r.script.indexOf(".") + 1), r.script));
+        await reapply(r, name);
+        // Read back as the same script, unmarked: it differs, and isn't applied.
+        await content("/fault", { op: "entry.get", times: 1, flip: true });
+        await pass(r);
+        expect(await applyRow(r, name)).toMatchObject({ applied_version: null, last_code: "read_back_differs" });
+        // The control: read back as written.
+        await applyDue(r);
+        await pass(r);
+        expect((await held()).entries[name]).toBe(`code:${r.script}@${name}`);
+        expect(await applyRow(r, name)).toMatchObject({ applied_version: 2, applied_script: r.script, last_code: null });
+      });
+
       it("caps the status read at one every six hours once routed, where it was hourly (D5)", async () => {
         const { r, name } = await routed("org_cr_cap");
         const reads = async () => (await cloudflareCalls(name)).filter((call) => call === "read").length;
@@ -243,6 +260,7 @@ export function customRoutingCases() {
                VALUES (?, ?, 'live', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 2, ?, 2, 2, 2)`, NEXT, SHA, r.label, next, NEXT, r.owner.id, r.owner.id);
           sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", NEXT, next);
           sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = script_name, version = version + 1", NEXT, next);
+          sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
         });
         await pass(r);
         // Not served yet: an ordinary commit's flight keeps the release last served on the custom host, nothing new is
@@ -273,6 +291,7 @@ export function customRoutingCases() {
                VALUES (?, ?, 'live', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 2, ?, 2, 2, 2)`, NEXT, SHA, c.r.label, next, NEXT, c.r.owner.id, c.r.owner.id);
           sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", NEXT, next);
           sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = script_name, version = version + 1", NEXT, next);
+          sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
         });
         return next;
       };
@@ -326,6 +345,36 @@ export function customRoutingCases() {
         expect(await applyRow(c.r, c.name)).toMatchObject({ attempts: 1, last_code: "release_not_served_taken_down" });
       });
 
+      it("takes a stale entry down whether or not its script's kind can be read, and keeps the release last served only when it can (review of #418)", async () => {
+        const unreadable = (c: Awaited<ReturnType<typeof routed>>, script: string) => inRoom(c.r.room, (sql) => {
+          sql.exec("CREATE TABLE IF NOT EXISTS test_script_kind_unreadable (script_name TEXT)");
+          sql.exec("INSERT INTO test_script_kind_unreadable (script_name) VALUES (?)", script);
+        });
+        // An earlier release's entry, which no rule keeps, whose kind can't be read: down, as any stale entry.
+        const c = await routed("org_cr_kind_stale");
+        await jobLater(c);
+        await commitNext(c);
+        const older = `${c.r.label}.rel_${"5c".repeat(16)}`;
+        await unreadable(c, older);
+        await content("/seed", { entries: { [c.name]: `${older}@${c.name}` } });
+        await pass(c.r);
+        expect((await held()).entries[c.name]).toBeUndefined();
+        expect(await applyRow(c.r, c.name)).toMatchObject({ last_code: "release_not_served_taken_down" });
+        // The release last served, which the rule keeps while the new one waits: kept while its kind reads static.
+        const d = await routed("org_cr_kind_kept");
+        await jobLater(d);
+        await commitNext(d);
+        await pass(d.r);
+        expect((await held()).entries[d.name]).toBe(`${d.r.script}@${d.name}`);
+        expect(await applyRow(d.r, d.name)).toMatchObject({ last_code: "release_not_served" });
+        // Its kind can't be read: it is taken down rather than kept on a guess.
+        await unreadable(d, d.r.script);
+        await applyDue(d.r);
+        await pass(d.r);
+        expect((await held()).entries[d.name]).toBeUndefined();
+        expect(await applyRow(d.r, d.name)).toMatchObject({ last_code: "release_not_served_taken_down" });
+      });
+
       it("S2a: takes down what a rollback rolls away from while the rollback waits for its marker", async () => {
         const c = await routed("org_cr_s2a_rollback");
         await jobLater(c);
@@ -343,6 +392,7 @@ export function customRoutingCases() {
           release(ROLL, "live", older, OLD);
           sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", ROLL, older);
           sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = ?, version = version + 1", OLD, older, c.r.script);
+          sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
         });
         await pass(c.r);
         // The release being rolled away from isn't left serving on the custom host.

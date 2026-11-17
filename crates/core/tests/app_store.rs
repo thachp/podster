@@ -1044,3 +1044,73 @@ fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes
         Settle::Found(ID.to_owned())
     );
 }
+
+#[test]
+fn rule_3a_at_the_upload_binds_a_release_that_asks_only_from_the_record() {
+    let n = name();
+    let bound = Binding {
+        kind: StoreKind::D1,
+        id: ID.to_string(),
+    };
+    // Asks, and the record is made: exactly its binding.
+    assert_eq!(script_binding(true, Some(&made(&n))), Ok(Some(bound)));
+    // Asks, and the record binds nothing: the release fails by that refusal's code.
+    assert_eq!(script_binding(true, None), Err(NoBinding::NoStore));
+    let asked = StoreRecord {
+        id: None,
+        made_at: None,
+        ..made(&n)
+    };
+    assert_eq!(script_binding(true, Some(&asked)), Err(NoBinding::NotMade));
+    let owed = StoreRecord {
+        delete_owed_at: Some(20),
+        ..made(&n)
+    };
+    assert_eq!(
+        script_binding(true, Some(&owed)),
+        Err(NoBinding::DeleteOwed)
+    );
+    let malformed = StoreRecord {
+        kind: Some("kv"),
+        ..made(&n)
+    };
+    assert_eq!(
+        script_binding(true, Some(&malformed)),
+        Err(NoBinding::Malformed)
+    );
+    // Asks for none: bound to nothing, whatever the record holds, a made store among it.
+    for record in [None, Some(made(&n)), Some(owed), Some(malformed)] {
+        assert_eq!(
+            script_binding(false, record.as_ref()),
+            Ok(None),
+            "{record:?}"
+        );
+    }
+}
+
+#[test]
+fn the_bindings_are_exactly_none_or_the_one_store_under_its_fixed_name() {
+    assert_eq!(D1_BINDING_TYPE, "d1");
+    assert_eq!(bindings_json(None).as_deref(), Some("[]"));
+    let bound = Binding {
+        kind: StoreKind::D1,
+        id: ID.to_string(),
+    };
+    assert_eq!(
+        bindings_json(Some(&bound)).as_deref(),
+        Some(r#"[{"type":"d1","name":"STORE","id":"0123abcd-4567-89ef-0123-456789abcdef"}]"#)
+    );
+    // An ID not of its kind's form never goes into the bytes.
+    for bad in [
+        ID.to_uppercase(),
+        format!("{ID}x"),
+        String::new(),
+        r#"0123abcd-4567-89ef-0123-456789abcde""#.to_string(),
+    ] {
+        let wrong = Binding {
+            kind: StoreKind::D1,
+            id: bad.clone(),
+        };
+        assert_eq!(bindings_json(Some(&wrong)), None, "{bad:?}");
+    }
+}

@@ -104,6 +104,8 @@ async function room(org: string, opts: { state?: string } = {}): Promise<Room> {
     release(PREV, "served", true);
     release(REL, state, state !== "queued");
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, prev);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, prev);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     // The upload itself is `release-upload.spec.ts`'s. Here a release's upload is on record from the moment it is

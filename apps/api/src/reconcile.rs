@@ -30,7 +30,9 @@ use crate::content_stop;
 use crate::error::ApiError;
 use crate::forward;
 use crate::store::{exec, int, rows, text};
+use podster_core::app_requests::HostKind;
 use podster_core::release::{reconcile_script, RoomClaim, ScriptReconcile};
+use podster_core::serve_entry::kind_name;
 use serde_json::{json, Value};
 use worker::*;
 
@@ -535,8 +537,10 @@ async fn entry(
     let found = match provider.read_entry(host).await {
         // Gone since it was listed: nothing to ask about.
         Entry::Absent => return Ok(()),
-        // Marked as carrying code or not, the script names its app and so its room, which is asked about it.
-        Entry::Present(script) | Entry::Code(script) => Some(script),
+        // Marked as carrying code or not, the script names its app and so its room, which is asked about it, with the
+        // kind it was read as: the room compares kind as well as script (S3 of the store plan).
+        Entry::Present(script) => Some((script, HostKind::Static)),
+        Entry::Code(script) => Some((script, HostKind::Code)),
         // There, and not a script's name Rust made: something else wrote it. Operators are told, by the host, and
         // the room is asked as for one that differs from anything it could want.
         Entry::Foreign => {
@@ -554,7 +558,13 @@ async fn entry(
     let Some(answer) = ask_room(
         env,
         &room,
-        json!({ "kind": "entry", "host": host, "found": found, "claim": claim }),
+        json!({
+            "kind": "entry",
+            "host": host,
+            "found": found.as_ref().map(|(script, _)| script),
+            "found_kind": found.map(|(_, kind)| kind_name(kind)),
+            "claim": claim,
+        }),
     )
     .await
     else {

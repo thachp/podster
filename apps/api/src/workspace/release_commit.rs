@@ -65,6 +65,7 @@ use super::release_recheck::{
     answer, job_owns, judge, release_now, release_row, standing_unknown, state_of, Reads, Verdict,
 };
 use super::*;
+use podster_core::app_requests::HostKind;
 use podster_core::release::{
     commit_live, next_state, script_owner, set_back, upload_expired, CommitLiveRefusal,
     RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState, UploadFailure,
@@ -72,6 +73,7 @@ use podster_core::release::{
 use podster_core::release_uncertain::{
     commit_waits_on_uncertain, WriteOutcome, COMMIT_WAITS_UNCERTAIN,
 };
+use podster_core::serve_entry::{kind_name, kind_named, recorded_kind};
 
 /// The room's path for starting a release's upload. Nothing outside the Worker reaches it.
 pub(crate) const INTERNAL_RELEASE_START_UPLOAD: &str = "/internal/release-start-upload";
@@ -630,6 +632,74 @@ pub(super) fn uploaded(sql: &SqlStorage, release_id: &str, script: &str) -> R<bo
         vec![release_id.into(), script.into()],
     )?
     .is_empty())
+}
+
+/// The release fails by this when its script's kind, recorded by an earlier attempt, differs from this attempt's. Both
+/// read the same commit, so it can't happen unless something else wrote the record; nothing is written over it.
+pub(super) const SCRIPT_KIND_CHANGED: &str = "release_script_kind_changed";
+
+/// **The room's record of whether a release's script carries code** (`release_script_kind`, room schema step 52; S3 of
+/// the store plan), written before the script is: in the transaction that runs the whole recheck again just before
+/// the write (`release_upload`). So no script with code exists that the room doesn't know as code, and the applier
+/// writes its serve entry with the mark. Once recorded it never changes. `true` when the record holds `kind`, whether
+/// written now or by an earlier attempt; `false` when it holds the other. **Only this function writes the table,** but
+/// for the step that made it (a test reads every source for it).
+pub(super) fn record_script_kind(
+    sql: &SqlStorage,
+    release_id: &str,
+    script: &str,
+    kind: HostKind,
+    now: i64,
+) -> R<bool> {
+    exec(
+        sql,
+        "INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+        vec![
+            release_id.into(),
+            script.into(),
+            kind_name(kind).into(),
+            now.into(),
+        ],
+    )?;
+    Ok(rows(
+        sql,
+        "SELECT kind FROM release_script_kind WHERE release_id = ? AND script_name = ?",
+        vec![release_id.into(), script.into()],
+    )?
+    .first()
+    .and_then(|row| row["kind"].as_str().and_then(kind_named))
+        == Some(kind))
+}
+
+/// The kind of a script, from the room's record of it, as core reads that record
+/// (`podster_core::serve_entry::recorded_kind`): static only when recorded static; anything else, no record among it,
+/// is code, whose entry the content Worker holds to the stricter rules (the fail-closed side, ruled 2026-11-17). A read
+/// that fails is an error, and nothing is written on it.
+pub(super) fn script_kind(sql: &SqlStorage, script: &str) -> R<HostKind> {
+    // Test builds only: a script a test names in `test_script_kind_unreadable` can't have its kind read.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_script_kind_unreadable'",
+        vec![],
+    )?
+    .is_empty()
+        && !rows(
+            sql,
+            "SELECT 1 AS x FROM test_script_kind_unreadable WHERE script_name = ?",
+            vec![script.into()],
+        )?
+        .is_empty()
+    {
+        return Err(ApiError::internal("test: a script's kind that can't be read"));
+    }
+    let found = rows(
+        sql,
+        "SELECT kind FROM release_script_kind WHERE script_name = ?",
+        vec![script.into()],
+    )?;
+    let recorded = found.first().map(|row| row["kind"].as_str().unwrap_or(""));
+    Ok(recorded_kind(recorded))
 }
 
 /// What the room says of a release before anything is read for it or written under its name.

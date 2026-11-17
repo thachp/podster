@@ -162,6 +162,8 @@ async function withApp(id: string, opts: { up?: boolean } = {}) {
     release(served, "served", true);
     release(queued, "queued", false);
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", `${label}.apps.example`, label, served, script);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
   });
   return { label, served, queued, script };
 }

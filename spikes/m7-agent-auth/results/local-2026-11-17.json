@@ -1,0 +1,255 @@
+{
+  "kind": "local",
+  "at": "2026-11-17T21:16:36.246Z",
+  "versions": {
+    "node": "v25.8.1",
+    "sdk": "0.6.2",
+    "plugin": "0.6.2"
+  },
+  "failed": 0,
+  "steps": [
+    {
+      "step": "1a approval is device authorization, shown to the person by the machine",
+      "expected": "method device_authorization; link is /claim",
+      "actual": {
+        "method": "device_authorization",
+        "link_path": "/claim",
+        "code_in_link_query": true
+      },
+      "pass": true
+    },
+    {
+      "step": "1b the person's claim succeeds",
+      "expected": "200 with a Podster agent ID",
+      "actual": {
+        "page": 200,
+        "status": 200,
+        "agent": "agt_28c7ca712aeb9b54cde4337710d133bb"
+      },
+      "pass": true
+    },
+    {
+      "step": "1c the SDK's approval wait ends active without a browser",
+      "expected": "status active with grants",
+      "actual": {
+        "event": "connected",
+        "agent_id": "wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS",
+        "status": "active",
+        "grants": [
+          "get_identity:active",
+          "read_inbox:active"
+        ]
+      },
+      "pass": true
+    },
+    {
+      "step": "1d read_inbox from the first process",
+      "expected": "ok",
+      "actual": {
+        "event": "read_inbox",
+        "ok": true,
+        "keys": [
+          "acked_seq",
+          "dropped",
+          "events",
+          "unread"
+        ]
+      },
+      "pass": true
+    },
+    {
+      "step": "2a reconnect by stored key in a new process",
+      "expected": "get_identity is agt_28c7ca712aeb9b54cde4337710d133bb, read_inbox ok",
+      "actual": {
+        "event": "reconnected",
+        "agent_id": "wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS",
+        "podster_agent": "agt_28c7ca712aeb9b54cde4337710d133bb",
+        "inbox_keys": [
+          "acked_seq",
+          "dropped",
+          "events",
+          "unread"
+        ],
+        "file_mode": "600"
+      },
+      "pass": true
+    },
+    {
+      "step": "2b the key file is owner-only",
+      "expected": "600",
+      "actual": "600",
+      "pass": true
+    },
+    {
+      "step": "2c /agent/status with the host key",
+      "expected": "active",
+      "actual": {
+        "event": "status",
+        "agent_id": "wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS",
+        "status": "active",
+        "file_mode": "600"
+      },
+      "pass": true
+    },
+    {
+      "step": "3a another key with the same agent ID",
+      "expected": "refused",
+      "actual": {
+        "event": "error",
+        "command": "inbox",
+        "error": {
+          "name": "AgentAuthSDKError",
+          "code": "invalid_jwt",
+          "status": 401,
+          "message": "JWT is invalid, expired, or signature failed"
+        }
+      },
+      "pass": true
+    },
+    {
+      "step": "4a SDK rotateAgentKey",
+      "expected": "refused: /agent/rotate-key is private",
+      "actual": {
+        "event": "error",
+        "command": "rotate",
+        "error": {
+          "name": "AgentAuthSDKError",
+          "code": {
+            "code": "not_found",
+            "message": "not_found"
+          },
+          "status": 404,
+          "message": "Unknown error"
+        }
+      },
+      "pass": true
+    },
+    {
+      "step": "4b the original key still works after the refused rotation",
+      "expected": "reconnected",
+      "actual": {
+        "event": "reconnected",
+        "agent_id": "wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS",
+        "podster_agent": "agt_28c7ca712aeb9b54cde4337710d133bb",
+        "inbox_keys": [
+          "acked_seq",
+          "dropped",
+          "events",
+          "unread"
+        ],
+        "file_mode": "600"
+      },
+      "pass": true
+    },
+    {
+      "step": "4c SDK disconnectAgent",
+      "expected": "returns, deletes the local copy, but the server keeps the agent (/agent/revoke is private)",
+      "actual": {
+        "sdk": {
+          "event": "sdk_disconnect_returned",
+          "local_connection_left": false
+        },
+        "original_after": "reconnected"
+      },
+      "pass": true
+    },
+    {
+      "step": "5a the owner's disconnect in Podster",
+      "expected": "200",
+      "actual": 200,
+      "pass": true
+    },
+    {
+      "step": "5b reconnect by key after a disconnect",
+      "expected": "refused",
+      "actual": {
+        "event": "error",
+        "command": "inbox",
+        "error": {
+          "name": "AgentAuthSDKError",
+          "code": "agent_revoked",
+          "status": 403,
+          "message": "Agent has been revoked"
+        }
+      },
+      "pass": true
+    },
+    {
+      "step": "5c /agent/status after a disconnect",
+      "expected": "revoked or refused",
+      "actual": {
+        "event": "status",
+        "agent_id": "wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS",
+        "status": "revoked",
+        "file_mode": "600"
+      },
+      "pass": true
+    },
+    {
+      "step": "6a the old key after Podster's reconnect",
+      "expected": "still refused",
+      "actual": {
+        "reconnect": 200,
+        "runner": {
+          "event": "error",
+          "command": "inbox",
+          "error": {
+            "name": "AgentAuthSDKError",
+            "code": "capability_not_granted",
+            "status": 0,
+            "message": "Capability \"get_identity\" is not granted to agent wY8ol5XvZJB5Br3uUbon8pBDn0uwOCeS."
+          }
+        }
+      },
+      "pass": true
+    },
+    {
+      "step": "6b a new key claimed onto the same agent",
+      "expected": "200, get_identity is agt_28c7ca712aeb9b54cde4337710d133bb",
+      "actual": {
+        "claim": {
+          "status": 200,
+          "body": {
+            "agent_id": "agt_28c7ca712aeb9b54cde4337710d133bb",
+            "org_id": "org_80f3224316b340329b3e28d7cdcf600a"
+          }
+        },
+        "connect": {
+          "event": "read_inbox",
+          "ok": true,
+          "keys": [
+            "acked_seq",
+            "dropped",
+            "events",
+            "unread"
+          ]
+        },
+        "inbox": {
+          "event": "reconnected",
+          "agent_id": "GKH5Rc1TQO8rXDpzG4FRSymPI7oJqFU8",
+          "podster_agent": "agt_28c7ca712aeb9b54cde4337710d133bb",
+          "inbox_keys": [
+            "acked_seq",
+            "dropped",
+            "events",
+            "unread"
+          ],
+          "file_mode": "600"
+        }
+      },
+      "pass": true
+    },
+    {
+      "step": "7 nothing secret in logs or Runner output",
+      "expected": "all false",
+      "actual": {
+        "private_key_in_logs": false,
+        "private_key_in_runner_output": false,
+        "jwt_in_logs": false,
+        "approval_code_in_logs": false,
+        "approval_code_in_claim_url_logged": false
+      },
+      "pass": true
+    }
+  ]
+}

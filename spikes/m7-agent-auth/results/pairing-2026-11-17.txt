@@ -1,0 +1,40 @@
+
+ RUN  v4.1.12 spikes/m7-agent-auth
+
+private routes {"/host/create":404,"/host/enroll":404,"/agent/rotate-key":404,"/host/rotate-key":404,"/agent/revoke":404,"/agent/approve-capability":404,"/agent/claim":404}
+
+advertised endpoints ["register","capabilities","describe_capability","execute","status"] issuer https://gateway.test/api/auth
+
+ ✓ pairing.spec.ts > today's gateway > keeps the plugin's enrollment, rotation and revoke routes private
+ ✓ pairing.spec.ts > today's gateway > doesn't advertise them in discovery
+host after the first claim {"status":"active","owned":1,"defaultCapabilities":"[]"} second agent on the same host {"status":"still_pending_after_2s"}
+
+ ✓ pairing.spec.ts > today's claim, with a host that already has a claimed agent > records what a second agent on the same host key gets
+enrollment {"status":"pending_enrollment","token_length":43,"ttl_seconds":3600,"caps":["get_identity","read_inbox"]}
+
+ ✓ pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > starts in Podster: a signed-in person gets a one-time token, and nothing is active yet
+enrolled {"hostId":"9PIsGs1zCgre6gR1VqGxsgJnE4l7vPWJ","name":"spike-runner","default_capabilities":["get_identity","read_inbox"],"status":"active"}
+
+stdout | pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > binds the device's public key, and an agent registered on that host is active at once, but Podster refuses it as unclaimed
+agent on the enrolled host {"status":"active","grants":["get_identity:active","read_inbox:active"]}
+
+read_inbox before any Podster link {"code":"unknown_error","status":403,"message":"agent_unclaimed"}
+
+claim of an enrolled agent, wrong code, same person 200 {"agent_id":"agt_3237f7462f54468d3945e5078fbec649","org_id":"org_c4aa193ace914e13b4a5bdd7c9b85651"}
+
+stranger's claim of an enrolled agent 403
+
+ ✓ pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > binds the device's public key, and an agent registered on that host is active at once, but Podster refuses it as unclaimed
+enroll with a key the caller doesn't hold 200
+
+ ✓ pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > takes any public key with the token: enrollment has no proof of possession
+refusals {"again":{"status":401},"expired":{"status":401},"guessed":{"status":401}}
+
+ ✓ pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > refuses a used token and an expired one
+second enrollment of the same host key {"status":"active","hostId":"3s1aAmP5Mv9NAj9ApKTrygxrYtwdXVCe"}
+
+ ✓ pairing.spec.ts > the plugin's own enrollment, called as a gateway route would > would also bind a key the device already enrolled elsewhere for the same person, without a new token check of possession
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+

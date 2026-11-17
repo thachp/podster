@@ -2,7 +2,7 @@
 //! ADR 0010's "Authority, approval and triggers"). This is the first half of "a `deploy_release` command, then a
 //! person's approval": it records a release `awaiting_approval` and nothing else. **Nothing is read from a repository,
 //! uploaded or served by it,** and the release job never takes up a release a person hasn't approved
-//! (`release_recheck::job_owns`). Approving and declining are the next PR's.
+//! (`release_recheck::job_owns`). Approving and declining are `release_approval`'s.
 //!
 //! **Who** is `podster_policy::release::authorize_release_request`: a person in the room, not there through a public
 //! claim, holding a live `deploy` grant on the room's repository from someone who still holds release authority, and

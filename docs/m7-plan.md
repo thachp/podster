@@ -1,6 +1,6 @@
 # M7 plan (Runner)
 
-**Status, 2026-11-17 UTC: Proposed. A plan only.** No Runner code, contract, migration, cloud resource, package or credential exists for M7, and this plan creates none. Under [decision 26](spec/PRODUCT.md#decisions-needed), nothing is published until M7's gates pass, including a security review of the threat model. Every step, figure and recommendation below is **Proposed**. The [questions](#questions) are the architect's to answer, except decision 29's proposed revision, which is the owner's.
+**Status, 2026-11-17 UTC: Proposed. A plan only.** No Runner code, contract, migration, cloud resource, package or credential exists for M7, and this plan creates none. Under [decision 26](spec/PRODUCT.md#decisions-needed), nothing is published until M7's gates pass, including a security review of the threat model. Every step, figure and recommendation below is **Proposed**. The [questions](#questions) are the architect's to answer, except these, which are the owner's: decision 29's proposed revision ([the owner's decision](#the-owners-decision-decision-29)); question 2's fallback, which would change the gate; question 5, provider spend; question 11, the test machine; and question 15, whether the inbound nudge's criteria may move out of M7's gate.
 
 It covers [M7 Runner](spec/PRODUCT.md#product-direction-and-delivery-scope): "Outbound Runner, CLI adapters, local run policy and budgets". Its gate in that table is R-01 to R-43 of [RUNNER.md](spec/RUNNER.md#proposed-acceptance-criteria-not-executed), including the pairing proof of concept, the automatic-run flow, the server-created repository and local clone, the GitHub access design, a provider and sandbox proof of concept, and a security review of the threat model.
 
@@ -29,13 +29,14 @@ From [RUNNER.md](spec/RUNNER.md)'s status lines:
 | **Offer-and-accept pickup only:** `read_inbox`, `get_task`, `accept_task`, `decline_task`, `release_task`, `submit_task` | Decision 27; RUNNER.md lifecycle steps 5 to 9 |
 | **Workspace and process isolation** strong enough to pass R-08, R-09, R-19 and R-30 on one supported setup ([question 3](#questions)) | RUNNER.md [isolation](spec/RUNNER.md#workspace-and-process-isolation); M7's row "provider and sandbox proof of concept" |
 | **Repositories through M5's access:** for a room with a ready managed repository, Runner clones it into a fresh task directory, pins the base, and pushes a task branch and opens a pull request through `get_repo_access` tokens held by a local broker outside the task sandbox. Runner never provisions, merges or deploys | RUNNER.md [workroom repository and local copy](spec/RUNNER.md#workroom-repository-and-local-task-copy) and [GitHub access](spec/RUNNER.md#proposed-github-access-and-reviewer-handoff); [ADR 0009](adr/0009-managed-repositories.md#agent-access-tokens); decision 184 |
+| **Runner's inbound nudge, after the proof of concept:** off by default, opted into by the owner. Podster's outbox calls the agent's registered endpoint; Runner verifies the request and treats it only as a nudge, then fetches the task and applies run policy over its outbound connection, with polling left on as the fallback. Design **Proposed**; transport open ([question 16](#questions)) | [Decision 130](spec/PRODUCT.md#decisions-needed), decided: "It stays in M7"; [ADR 0007](adr/0007-a2a.md) row 130; [M3 question 24](m3-plan.md#questions-for-the-owner); RUNNER.md [optional inbound A2A](spec/RUNNER.md#optional-inbound-a2a); M7's gate lists R-01 to R-43 with no exception, R-03, R-16 and R-17 among them |
 | **Results:** a bounded note, the verified pull request and exact commit, and test outcomes, for an independent reviewer | RUNNER.md lifecycle step 9; R-14, R-31, R-35 |
 
 **Not in M7:**
 
 | Excluded | Rests on |
 | --- | --- |
-| Inbound A2A, a tunnel, a wake relay, inbound Agent Card registration | RUNNER.md status line of 2026-11-09: "a later extension, not a proof-of-concept dependency"; decision 130 and [ADR 0007](adr/0007-a2a.md) row 130 keep Runner's inbound nudge in M7 as that later extension, and [M3 question 24](m3-plan.md#questions-for-the-owner). R-03, R-16, R-17 and the inbound clauses of R-01, R-02, R-15 and R-18 stay owed for it |
+| Inbound A2A in the **proof of concept** (steps 0 to 12): a listening port, a tunnel, a wake relay or inbound Agent Card registration | RUNNER.md status line of 2026-11-09: "a later extension, not a proof-of-concept dependency". That puts it outside the proof of concept, not outside M7: the nudge is in M7's later steps 13 to 15. A Podster-provisioned tunnel belongs to the A2A server mode below |
 | Runner as an A2A server (decisions 175 to 178) | RUNNER.md status line of 2026-11-09: "isn't decided or built, and it changes nothing above". R-44 to R-52 stay owed for it |
 | Codex, Cursor, Grok and every CLI other than Claude Code | RUNNER.md integration scope: "Each integration and mode must be validated separately before support is claimed"; R-11 |
 | Subscription login with any provider | Decision 28 |
@@ -64,11 +65,11 @@ Facts as recorded on `main` at `ce6b4354` (2026-11-17):
 
 From the specs. Nothing about Runner may be published, and nothing may say Runner works, until all of these pass:
 
-- **R-01 to R-43,** for the features the proof of concept implements, mapped to steps in [the gate's map](#the-gates-map). The inbound-only criteria (R-03, R-16, R-17, and the inbound clauses of R-01, R-02, R-15 and R-18) are gates for the later extension, as RUNNER.md says, and stay owed.
+- **R-01 to R-43, all of them,** mapped to steps in [the gate's map](#the-gates-map). The proof of concept (steps 0 to 12) has to pass everything but the inbound criteria. R-03, R-16, R-17 and the inbound clauses of R-01, R-02, R-15 and R-18 are shown by the inbound nudge's steps 13 to 15, as RUNNER.md requires "before enabling that extension". This plan doesn't narrow the gate: moving those criteria to a later milestone would be a gate change, put to the owner as [question 15](#questions).
 - **The provider and sandbox proof of concept:** Claude Code in its chosen mode, with the provider credential out of reach of task commands, shown by actual subprocess tests (RUNNER.md "Provider authentication and sandbox compatibility remain a required proof-of-concept gate").
-- **A run on staging:** a real Runner on the owner-approved test machine, signed in to staging as a test agent, picking up real offers, cloning a real managed repository under `podsterdev`, opening a pull request, and submitting to a reviewer who is a different test person ([step 13](#build-order)). An acceptance test counts as passed only once it has run against a deployment ([CLAUDE.md](../CLAUDE.md)). What runs only locally is named as local.
-- **The security review,** [step 14](#build-order): every row of [the table below](#security-review) answered, with findings that block the gate fixed.
-- **The owner's decision on decision 29's revision** ([the owner's decision](#the-owners-decision-decision-29)), since R-20 and R-31 test whichever default stands.
+- **A run on staging:** a real Runner on the owner-approved test machine, signed in to staging as a test agent, picking up real offers, cloning a real managed repository under `podsterdev`, opening a pull request, and submitting to a reviewer who is a different test person, then the same with the inbound nudge on ([step 16](#build-order)). An acceptance test counts as passed only once it has run against a deployment ([CLAUDE.md](../CLAUDE.md)). What runs only locally is named as local.
+- **The security review,** [step 17](#build-order): every row of [the table below](#security-review) answered, with findings that block the gate fixed.
+- **The owner's decision on decision 29's revision** ([the owner's decision](#the-owners-decision-decision-29)), since R-20, R-31 and R-38 (each "without a per-run owner prompt") test whichever default stands.
 - **The gate call is the owner's,** as for M3 to M5.
 - **Decision 26's publication gate is separate and later.** Passing M7's gate makes publishing possible, not done. Publishing also needs an owned package name or scope, a publisher, signed releases with provenance and no silent auto-update (RUNNER.md threat model, "compromised or impersonated package"; [unresolved before implementation](spec/RUNNER.md#unresolved-before-implementation)). Each of those is the owner's yes.
 
@@ -78,9 +79,9 @@ From the specs. Nothing about Runner may be published, and nothing may say Runne
 
 | Criterion | Step | Where shown | Note |
 | --- | --- | --- | --- |
-| R-01 | 6, 9 | Local and staging | Outbound half only. The tunnel clause is the later extension's |
-| R-02 | 5 | Local and staging | Forged identity and wrong owner. The endpoint clause is the later extension's |
-| R-03 | — | — | Inbound. Owed to the later extension |
+| R-01 | 6, 9, 14 | Local and staging | Outbound half in the proof of concept; the endpoint or tunnel consent clause in step 14 |
+| R-02 | 5, 13 | Local and staging | Forged identity and wrong owner; the unverified-endpoint clause in step 13 |
+| R-03 | 13, 14 | Local and staging | Inbound: unauthenticated, replayed or substituted requests refused; an inbound request alone never spawns a CLI |
 | R-04 | 5, 6 | Staging | Server rules already built in M0 and M1; M7 shows Runner gets nothing more |
 | R-05 | 7, 8 | Local and staging | Includes a lost accept answer and a cancel |
 | R-06 | 8 | Local and staging | |
@@ -92,23 +93,25 @@ From the specs. Nothing about Runner may be published, and nothing may say Runne
 | R-12 | 6, 8, 11 | Local and staging | |
 | R-13 | 8, 9 | Local and staging | A staging cancel during a run |
 | R-14 | 11 | Local and staging | |
-| R-15 | 6, 8 | Local and staging | Runner's own shutdown and offline work. The endpoint clause is the later extension's |
-| R-16, R-17 | — | — | Inbound. Owed to the later extension |
-| R-18 | 4, 11 | Local and staging | Runner's local audit beside the server's. The inbound-nudge clause is the later extension's |
+| R-15 | 6, 8, 14 | Local and staging | Runner's own shutdown and offline work; the endpoint's shutdown in step 14 |
+| R-16 | 13, 14 | Local and staging | Inbound: SSRF, redirects, rebinding, malformed and oversized payloads refused; no route to the private API |
+| R-17 | 15 | Local and staging | Inbound: the pinned A2A version's interoperability for a nudge |
+| R-18 | 4, 11, 14 | Local and staging | Runner's local audit beside the server's; the inbound nudge's audit in step 14 |
 | R-19 | 7, 9, 12 | Local | Hostile task text from another organization's test agent |
-| R-20 | 7, 13 | Local and staging | Under the default the owner picks for decision 29 |
+| R-20 | 7, 16 | Local and staging | Under the default the owner picks for decision 29 |
 | R-21 | 12 | Local | A simulated hostile Podster. Cannot be staged honestly |
-| R-22 | 6, 13 | Local and staging | No listening port, checked on the test machine during the staging run |
+| R-22 | 6, 16 | Local and staging | No listening port while the nudge is off, the default, checked on the test machine during the staging run's first half |
 | R-23 | 8 | Local | Across machines documented as best effort |
 | R-24 | 8, 11 | Local and staging | |
 | R-25 to R-29 | 5 | Local and staging | Only if pairing is built ([question 2](#questions)) |
 | R-30 | 5, 9, 12 | Local | |
-| R-31 | 9, 10, 11, 13 | Staging | The end-to-end run |
+| R-31 | 9, 10, 11, 16 | Staging | The end-to-end run |
 | R-32, R-33 | 10 | Local and staging | Server checks built in M5; Runner's broker is new |
 | R-34 | 10 | Staging | With a real token on `podsterdev`. Leans on M5's open finding on branches other than the default ([security review](#security-review), S-21) |
 | R-35 | 10, 11 | Local and staging | |
 | R-36, R-37 | M5 | Staging, M5's runs | Server-side provisioning is M5's and was in its gate. M7 adds only that Runner never receives creation authority |
-| R-38, R-39 | 10 | Local and staging | |
+| R-38 | 10, 16 | Local and staging | "Without a per-run owner prompt" depends on decision 29 |
+| R-39 | 10 | Local and staging | |
 | R-40 to R-42 | 10 | Local and staging | A run longer than an hour on staging for R-40 |
 | R-43 | 10 | Local | Negative only: no fork route exists |
 
@@ -131,13 +134,15 @@ C changes `packages/contracts`, and M adds a D1 migration, a Durable Object sche
 | 10 | **The repository path.** Resolve the room's ready repository through Podster; `get_repo_access` into a local broker outside the sandbox; a fresh clone under the workspace root with structured Git arguments and no token in a URL or config; pin and verify the base; a task branch; push and open a pull request through the broker; renewal after a full server recheck; revocation outcomes reported. Runner exposes no `merge_task` or `deploy_release` to the CLI ([question 10](#questions)) | | | 9 | Yes: a bearer token on the owner's machine |
 | 11 | **Results and output sharing.** `submit_task` with the current version, a bounded note, the pull request and exact commit verified against GitHub, test outcomes as passed, failed or not run; fixed-status progress until sharing is allowed; held outputs; secret redaction; local audit by IDs | | | 9, 10 | |
 | 12 | **Hostile-input harness.** A simulated hostile Podster (R-21), injected task text from another organization (R-19), and the subprocess escape suite (R-08, R-30), as tests that fail on the old code where there is one ([review standards](review-standards.md), rule 2) | | | 9 | |
-| 13 | **The staging run.** `e2e/m7-staging.mjs` drives a real Runner, built from source on the owner-approved test machine, against staging with test people, and records what it didn't show ([review standards](review-standards.md), rule 10). Nothing is published | | | 5 to 12 | |
-| 14 | **The security review** of [the table below](#security-review), written as `docs/security/m7-review.md`, as M5's was. Findings that block the gate are fixed, each in its own PR | | | 13 | It is the deeper pass |
-| 15 | **The gate call,** by the owner. Publication is separate (decision 26) | | | 14 | |
+| 13 | **The inbound nudge, server side.** A nudge-only delivery mode for an agent's registered A2A endpoint, which ARCHITECTURE.md lists as a proposed server addition: the outbox sends IDs only, under the existing egress policy, and registration verifies current ownership and endpoint control before the endpoint is active. Rust decides; the gateway translates | Yes | Maybe | 12, and step 1's answer to [question 16](#questions) | Yes: a new outbound call to an owner's machine |
+| 14 | **The inbound nudge, Runner side.** Off by default, switched on by the owner. A listener reached only through the transport question 16 picks; the request verified before anything is parsed; bounded payloads and rate limits; a nudge that only triggers the ordinary outbound fetch and run policy. Polling stays on. Shutdown closes the endpoint | | | 13 | Yes: Runner's first inbound surface |
+| 15 | **Interoperability for the nudge.** The pinned A2A version's checks for card discovery, authenticated delivery of a nudge and its errors (R-17), locally and on staging | | | 14 | |
+| 16 | **The staging run.** `e2e/m7-staging.mjs` drives a real Runner, built from source on the owner-approved test machine, against staging with test people: first with the nudge off, which is the proof of concept, then with it on. It records what it didn't show ([review standards](review-standards.md), rule 10). Nothing is published | | | 5 to 15 | |
+| 17 | **The security review** of [the table below](#security-review), written as `docs/security/m7-review.md`, as M5's was. Findings that block the gate are fixed, each in its own PR | | | 16 | It is the deeper pass |
+| 18 | **The gate call,** by the owner. Publication is separate (decision 26) | | | 17 | |
+**Side by side:** spikes A and B. Step 4 beside the spikes. Steps 6 and 7 once their inputs are in. Steps 11 and 12 once 9 is in. Steps 0 to 12 are the proof of concept; 13 to 15 add the inbound nudge on top of it and change nothing in it. The staging run's first half, with the nudge off, may run once step 12 is in, as an interim record; the gate waits for both halves.
 
-**Side by side:** spikes A and B. Step 4 beside the spikes. Steps 6 and 7 once their inputs are in. Steps 11 and 12 once 9 is in.
-
-**Where the code goes:** server changes only in steps 4 and 5, and only through new modules (`crates/policy/src/runner.rs` or similar, `apps/api/src/principal/pairing.rs`, `apps/gateway/src/runner/`), touching `workspace.rs`, `lib.rs` and `index.ts` by a line or two. Runner's code in `apps/runner`. Runner adds no route to the private API, never reaches it, and holds no server secret.
+**Where the code goes:** server changes only in steps 4, 5 and 13, and only through new modules (`crates/policy/src/runner.rs` or similar, `apps/api/src/principal/pairing.rs`, `apps/gateway/src/runner/`), touching `workspace.rs`, `lib.rs` and `index.ts` by a line or two. Runner's code in `apps/runner`. Runner adds no route to the private API, never reaches it, and holds no server secret.
 
 ## Security review
 
@@ -157,7 +162,7 @@ C changes `packages/contracts`, and M adds a D1 migration, a Durable Object sche
 | S-10 | Exfiltration through results, progress or failure text | RUNNER.md threat model; R-19 | Fixed-status text until sharing is allowed; owner review by default for external and public outputs |
 | S-11 | A stolen or overbroad GitHub token | RUNNER.md threat model; R-32 to R-34 | Scope, broker delivery, revocation and the no-merge boundary |
 | S-12 | Task tampering with Runner itself | RUNNER.md threat model; R-08 | Policy, decisions and state outside the sandbox, under a separate OS user or container |
-| S-13 | Exposed inbound endpoint | RUNNER.md threat model, "later extension" | Out of M7. Owed to the inbound extension's review |
+| S-13 | Exposed inbound endpoint | RUNNER.md threat model and [optional inbound A2A](spec/RUNNER.md#optional-inbound-a2a); decision 130 keeps the nudge in M7 | Steps 13 and 14: off by default, verification before parsing, bounded payloads, rate limits, nothing reachable but the nudge; the exposure of the transport question 16 picks |
 | S-14 | A stolen connection string, A2A server mode | RUNNER.md threat model: "Owed to M7's security review" | Out of M7 with decision 175. Owed when that mode is taken up |
 | S-15 | The tunnel provider sees traffic in clear | RUNNER.md threat model: "payload encryption is open for M7's security review" | Out of M7 with decisions 175 and 176. Owed when that mode is taken up |
 | S-16 | `cloudflared` on the owner's machine | RUNNER.md threat model: "Owed to M7's security review" | Out of M7 with decision 176. Owed when that mode is taken up |
@@ -172,7 +177,7 @@ C changes `packages/contracts`, and M adds a D1 migration, a Durable Object sche
 | S-25 | **What the cap bounds:** up to 25 repositories a day on GitHub for an organization if every outcome is unknown | ADR 0009; M5 plan: "Owed to M7's security review" | Whether the worst case is acceptable |
 | S-26 | **The caps and the operator's take-back,** decision 194's follow-up: the numbers, a cap across organizations and people acting together, and how an operator learns there's something to take back | [Decision 194](spec/PRODUCT.md#decisions-needed): "to be reviewed in M7's security review"; [M5 plan, owed before production](m5-plan.md#owed-before-production) | Each of the three, with production's `REPOSITORY_REQUESTERS` left the owner's |
 | S-27 | **No global or lifetime cap** (M5 review O-16) | M5 plan, owed before production: "asks M7's security review to look at the caps" | As S-23, answered together |
-| S-28 | **The runner agent and release:** an agent with a `deploy` grant can ask for a release, and since 2026-11-16 its own person may approve it | [M6 step 6 plan](m6-step6-plan.md), the owner's decision of 2026-11-16; ACCESS-CONTROL.md Merge/deploy row. Not assigned to M7; Runner makes an agent act unattended | That Runner never lets the CLI call `deploy_release` or `merge_task`, and that a Runner agent holding a `deploy` grant is shown to its owner at setup |
+| S-28 | **The runner agent and release:** an agent with a `deploy` grant can ask for a release, and since 2026-11-16 its own person may approve it | [M6 step 6 plan](m6-step6-plan.md), the owner's decision of 2026-11-16; ACCESS-CONTROL.md's Merge/deploy row. Not assigned to M7; Runner makes an agent act unattended | That Runner never lets the CLI call `deploy_release` or `merge_task`, and that a Runner agent holding a `deploy` grant is shown to its owner at setup |
 | S-29 | **The provenance read** discloses input authors' organizations to the assignee | Step 4 of this plan | Who may see it, and that it never authorizes anything on the server |
 | S-30 | One Runner per agent is best effort across machines | RUNNER.md recovery; R-23 | Whether the local lock and documentation are enough for the proof of concept |
 | S-31 | Provider terms for unattended use | RUNNER.md "Claude provider terms, checked November 8, 2026"; decision 28 | The API-key baseline holds; no subscription credential is collected or routed; terms rechecked at the gate |
@@ -199,24 +204,26 @@ C changes `packages/contracts`, and M adds a D1 migration, a Durable Object sche
 
 ## Questions
 
-The architect's to answer, each with a recommendation. Recorded as decisions in step 1.
+The architect's to answer, each with a recommendation, recorded as decisions in step 1. The exceptions are marked **Owner's**: question 2's fallback, and questions 5, 11 and 15. Decision 29's revision is [above](#the-owners-decision-decision-29).
 
 | # | Question | Recommendation | Alternative |
 | --- | --- | --- | --- |
 | 1 | Where does Runner's code live, and in what language? | `apps/runner`, in the language whose Agent Auth client spike A shows works against the pinned host. Run policy as a pure module with no I/O in either case | Rust by default, writing an Agent Auth client fresh, which is more code to review |
-| 2 | Pairing, or the built registration and claim link, for the proof of concept? | Pairing if spike A shows it fits the pinned Agent Auth through reviewed routes, since M7's row names it. If not, the claim link, and R-25 to R-30 go to the owner as a gate change rather than being dropped silently | Always the claim link first, pairing later |
+| 2 | Pairing, or the built registration and claim link, for the proof of concept? | Pairing if spike A shows it fits the pinned Agent Auth through reviewed routes, since M7's row names it. If not, the claim link, and R-25 to R-30 go to the owner as a gate change rather than being dropped silently. **Owner's:** that fallback, since it changes M7's gate | Always the claim link first, pairing later |
 | 3 | Which setup is supported for isolation? | One: tasks in a Linux container on the owner's machine, with Runner, its keys and its state outside it. Claims only for what R-08 shows on that setup | The CLI's own sandbox alone, if spike B shows it keeps the provider key from task commands |
 | 4 | Which Claude Code mode? | `-p --bare` with the owner's Anthropic API key through a helper. No subscription login (decision 28) | Non-bare `-p`, refused: it loads repository hooks and MCP servers without a prompt |
-| 5 | Provider spend in spikes and staging | A dedicated key with a low provider-side cap, set by the owner. **Owner's yes:** it costs money | No spend, which leaves spike B and the staging run unable to run |
+| 5 | **Owner's:** provider spend in spikes and staging | A dedicated key with a low provider-side cap, set by the owner. **Owner's yes:** it costs money | No spend, which leaves spike B and the staging run unable to run |
 | 6 | Dashboard approval through Needs attention? | Not in M7. Manual mode asks on the owner's machine | Build it, which adds a command, delivery and a stored record to the server |
 | 7 | A server-side executor epoch? | Not in M7. A local lock, and R-23's best effort across machines stated in setup | Build it, which is a migration and a fence on every result write |
 | 8 | What does step 4 add to `get_task`? | Requester organization, room visibility, and the author and organization of each prompt input, each with `external`, only to callers who may already read the task | Organizations only, with no per-input author, which can't serve "the least-trusted author decides" |
 | 9 | Shorter tokens through a broker (M5 question 5) | Keep GitHub's one hour and decision 184. Runner's broker holds the token outside the sandbox and gives the CLI Git operations through a credential helper, never the raw token | A server-side operation broker, so no token reaches the machine. Much larger; kept as the fallback if S-21 can't be closed |
 | 10 | Can Runner's agent merge or release? | No. Runner's capability allowlist is fixed to what it uses, and excludes `merge_task` and `deploy_release`. The owner's 2026-11-16 decision is unchanged for agents outside Runner | Allow them under grants, which makes Runner a deploy path and needs its own review |
-| 11 | Where does the staging run's Runner run? | On a test machine the owner approves, built from source, signed in as test agents of test people, against a staging managed repository in `podsterdev` | The owner's own machine. Their call |
+| 11 | **Owner's:** where does the staging run's Runner run? | On a test machine the owner approves, built from source, signed in as test agents of test people, against a staging managed repository in `podsterdev` | The owner's own machine. Their call |
 | 12 | Public-room cases | Included on staging under M4's switch, with a room configured explicitly and its warning shown | Local only |
 | 13 | How is the security review done? | A deeper review, independent of the authors, of the threat model against what was built, written as `docs/security/m7-review.md`, asked before it runs | A quick diff review per PR only, which CLAUDE.md doesn't allow for security-sensitive work without saying so |
-| 14 | Contract and migration order with M6 | Steps 4 and 5 wait for any M6 C or M PR open at the time, and merge one at a time | |
+| 14 | Contract and migration order with M6 | Steps 4, 5 and 13 wait for any M6 C or M PR open at the time, and merge one at a time | |
+| 15 | **Owner's:** should the inbound criteria (R-03, R-16, R-17 and the inbound clauses of R-01, R-02, R-15 and R-18) move out of M7's gate to a later milestone? Decision 130 keeps the nudge in M7 and M7's gate lists R-01 to R-43, so moving them is a gate change | Keep them in M7, as decided, built after the proof of concept in steps 13 to 15. Polling works without them, so they don't hold up the proof of concept's evidence; they do hold the gate call | Move them to a later milestone, so the gate can be called on the proof of concept alone. The owner's yes, with decision 130 amended in writing |
+| 16 | How does Podster reach a Runner's endpoint for the nudge? | An HTTPS address the owner controls and registers, under the existing egress rules, with Podster provisioning nothing: a direct address or a tunnel the owner runs. Decision 176's Podster-provisioned tunnel stays with the A2A server mode | Podster-provisioned Cloudflare Tunnels, which need decision 176, a second zone, a provisioning token and the owner's yes |
 
 ## Risks to test
 
@@ -234,10 +241,11 @@ The architect's to answer, each with a recommendation. Recorded as decisions in 
 12. **Offline and restart:** an offer made while Runner is down is found after reconnect; a run interrupted by a restart resumes only if the process and inputs match.
 13. **Logs:** no code, key, token, task text or hostname in Runner's logs or support bundles.
 14. **Hostile Podster:** forged allowed labels trigger automatic runs within limits, and nothing more (R-21).
+15. **The nudge:** a forged, replayed or oversized request to the endpoint changes nothing and starts nothing, and a missed nudge loses no work because polling finds it (R-03, R-16).
 
 ## How far this was checked
 
-- **Read on `main` at `ce6b4354`, 2026-11-17:** `CLAUDE.md`; `docs/review-standards.md`; `docs/spec/RUNNER.md` in full; `docs/spec/PRODUCT.md`'s milestone table, decisions 26 to 29, 111, 175 to 178, 184, 194 and 212, and its Runner sections; `docs/spec/ARCHITECTURE.md`'s "Podster Runner (M7)"; the Runner and Merge/deploy rows of `docs/spec/ACCESS-CONTROL.md`; `docs/spec/A2A-PROFILE.md`'s authentication rows; ADR 0007's decision table; ADR 0009's grants and agent access tokens; `docs/m5-plan.md`'s self-serve repositories, owed before production, questions and checks; `docs/m3-plan.md`'s questions; `docs/m6-plan.md`'s status, earlier milestones and release-path gate; `docs/m6-step6-plan.md`'s questions, the owner's decision of 2026-11-16 and 6g; `packages/contracts/capabilities.yaml`; the `Task` schema in `packages/contracts/openapi.yaml`; `apps/gateway/package.json`'s Agent Auth pin.
+- **Read on `main` at `ce6b4354`, 2026-11-17:** `CLAUDE.md`; `docs/review-standards.md`; `docs/spec/RUNNER.md` in full; `docs/spec/PRODUCT.md`'s milestone table, decisions 26 to 29, 111, 175 to 178, 184, 194 and 212, and its Runner sections; `docs/spec/ARCHITECTURE.md`'s "Podster Runner (M7)"; the managed-repository and Merge/deploy rows of `docs/spec/ACCESS-CONTROL.md`'s permission table, and its paragraph on Runner's clone (line 53); `docs/spec/A2A-PROFILE.md`'s authentication rows; ADR 0007's decision table; ADR 0009's grants and agent access tokens; `docs/m5-plan.md`'s self-serve repositories, owed before production, questions and checks; `docs/m3-plan.md`'s questions; `docs/m6-plan.md`'s status, earlier milestones and release-path gate; `docs/m6-step6-plan.md`'s questions, the owner's decision of 2026-11-16 and 6g; `packages/contracts/capabilities.yaml`; the `Task` schema in `packages/contracts/openapi.yaml`; `apps/gateway/package.json`'s Agent Auth pin.
 - **Searched:** every tracked file for "M7", to build [the security review table](#security-review).
 - **Not read closely:** ACCESS-CONTROL.md beyond the rows named, A2A-PROFILE.md beyond authentication, ADR 0010, the M5 security review itself (its findings are taken from the M5 plan's table), and the gateway's Agent Auth code.
 - **Not run:** anything. No spike, test or staging run. Nothing here is verified by a run. What the pinned Agent Auth and Claude Code versions do is as the specs record it, not as tried.

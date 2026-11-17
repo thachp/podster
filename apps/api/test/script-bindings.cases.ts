@@ -94,7 +94,7 @@ export function scriptBindingsCases(h: Helpers) {
         // The same question again: foreign, and nothing more done.
         const epoch = (await h.configRow(a.room)).release_epoch;
         expect((await ask(a.room, a.served, code === "bindings_oversized" ? { bindings: null, bindings_oversized: true } : { bindings: list })).bindings)
-          .toEqual({ verdict: "foreign", foreign: code, suspended: false, held: false });
+          .toEqual({ verdict: "foreign", foreign: code, suspended: false, held: false, suspended_since: expect.any(Number) });
         // A second pass changes nothing, uses none of the ceiling, and tells again.
         await h.fake("/seed", { scripts: [a.served], bindings: { [a.served]: list } });
         expect(await h.reconcile("scripts")).toMatchObject({ code: "ok", changed: 0 });
@@ -208,60 +208,102 @@ export function scriptBindingsCases(h: Helpers) {
       expect(await suspended()).toBe(7);
     });
 
+    /** A binding core reads as foreign whatever the room's record says, so its script is asked with a slot at once. */
+    const kv = () => ({ type: "kv_namespace", name: "KV", namespace_id: "ab".repeat(16) });
     /**
-     * Two apps whose served scripts each hold another store, with a ceiling of one (no room counted as having an app).
-     * `first` is the app whose script the pass asks about first.
+     * Two apps whose served scripts hold `first`'s and `second`'s lists (a KV binding by default), with a ceiling of one
+     * (no room counted as having an app). `first` is the app whose script the pass asks about first.
      */
-    async function twoForeign() {
+    async function two(lists: { first?: unknown[]; second?: unknown[] } = {}) {
       await fresh();
       const apps = [await h.app({ plain: true }), await h.app({ plain: true })];
       for (const a of apps) await recordStore(a.room, a.label, crypto.randomUUID());
-      await h.fake("/reset", {});
-      await h.fake("/seed", { scripts: apps.map((a) => a.served), bindings: Object.fromEntries(apps.map((a) => [a.served, [storeBinding(OTHER_ID)]])) });
       const [first, second] = [...apps].sort((x, y) => (x.served < y.served ? -1 : 1));
+      await h.fake("/reset", {});
+      await h.fake("/seed", { scripts: apps.map((a) => a.served), bindings: { [first.served]: lists.first ?? [kv()], [second.served]: lists.second ?? [kv()] } });
       return { first, second };
     }
     const slots = () => h.inModeration((sql) => sql.exec("SELECT count(*) AS n FROM binding_suspension").one().n);
+    const kept = () => h.inModeration((sql) => sql.exec("SELECT script FROM binding_slot_kept").toArray().map((row: any) => row.script));
+    const suspendedPair = async (x: App, y: App) => [(await labelRow(x)).suspended, (await labelRow(y)).suspended];
 
     it("never lets two passes at once suspend past the ceiling: the slot is taken when the room is asked", async () => {
-      const { first, second } = await twoForeign();
+      const { first, second } = await two();
       // While the first app's room is answering, a second pass runs to its end: the two overlap, in this order.
       await h.inRoom(first.room, (sql) => sql.exec("CREATE TABLE test_reenter_scripts_pass (x INTEGER)"));
       await h.reconcile("scripts");
       expect(await h.inRoom(first.room, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name = 'test_reenter_scripts_pass'").toArray())).toEqual([]);
-      expect([(await labelRow(first)).suspended, (await labelRow(second)).suspended]).toEqual([1, 0]);
+      expect(await suspendedPair(first, second)).toEqual([1, 0]);
       expect(await slots()).toBe(1);
       expect(await lines("script_binding_held")).toEqual([`script_binding_held ${second.served} ceiling_reached`]);
     });
 
-    it("counts a suspension whose answer was lost: the slot stays taken for the hour", async () => {
-      const { first, second } = await twoForeign();
+    it("counts a suspension whose answer was lost: the slot stays taken for the hour, and the room's next answer keeps it", async () => {
+      const { first, second } = await two();
       await h.inRoom(first.room, (sql) => sql.exec("CREATE TABLE test_takedown_answer_lost (x INTEGER)"));
       expect(await h.reconcile("scripts")).toMatchObject({ unanswered: 1 });
       // The room suspended before its answer was lost; the pass counted the slot all the same, so the second waits.
-      expect([(await labelRow(first)).suspended, (await labelRow(second)).suspended]).toEqual([1, 0]);
+      expect(await suspendedPair(first, second)).toEqual([1, 0]);
       expect(await slots()).toBe(1);
+      expect(await kept()).toEqual([first.served]);
       expect(await lines("script_binding_held")).toEqual([`script_binding_held ${second.served} ceiling_reached`]);
+      // The room answers again, reporting its app suspended since the slot was taken: the slot stays, so does the hold.
+      expect(await h.reconcile("scripts")).toMatchObject({ unanswered: 0, changed: 0 });
+      expect(await kept()).toEqual([]);
+      expect(await slots()).toBe(1);
+      expect(await suspendedPair(first, second)).toEqual([1, 0]);
       // The control: an hour on, the slot no longer counts, and the second comes down.
       await h.inModeration((sql) => sql.exec("UPDATE binding_suspension SET at = at - 3600000"));
       expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
       expect((await labelRow(second)).suspended).toBe(1);
     });
 
+    it("frees a slot kept for a lost answer once the room answers that nothing was suspended since", async () => {
+      const { first, second } = await two();
+      // The check fails, so nothing is suspended, and the answer is lost: the slot is kept, and the second is held.
+      await h.inRoom(first.room, (sql) => { sql.exec("CREATE TABLE test_bindings_check_fails (x INTEGER)"); sql.exec("CREATE TABLE test_takedown_answer_lost (x INTEGER)"); });
+      await h.reconcile("scripts");
+      expect(await suspendedPair(first, second)).toEqual([0, 0]);
+      expect(await kept()).toEqual([first.served]);
+      expect(await lines("script_binding_held")).toEqual([`script_binding_held ${second.served} ceiling_reached`]);
+      // The room answers again, clean now and suspended at no time: the slot is freed before the second is asked.
+      await h.inRoom(first.room, (sql) => sql.exec("DROP TABLE test_bindings_check_fails"));
+      await h.fake("/seed", { bindings: { [first.served]: [] } });
+      expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
+      expect(await kept()).toEqual([]);
+      expect(await suspendedPair(first, second)).toEqual([0, 1]);
+      expect(await slots()).toBe(1);
+    });
+
+    it("takes no slot for an ordinary app, so its lost answer holds nothing", async () => {
+      // The first holds only its own store, which only its room's record can judge: asked without a slot.
+      const { first, second } = await two({ first: [storeBinding(OWN_ID)] });
+      await h.inRoom(first.room, (sql) => sql.exec("UPDATE app_store SET store_id = ? WHERE label = ?", OWN_ID, first.label));
+      await h.inRoom(first.room, (sql) => sql.exec("CREATE TABLE test_takedown_answer_lost (x INTEGER)"));
+      expect(await h.reconcile("scripts")).toMatchObject({ unanswered: 1, changed: 1 });
+      expect(await kept()).toEqual([]);
+      expect(await suspendedPair(first, second)).toEqual([0, 1]);
+      expect(await slots()).toBe(1);
+    });
+
+    it("asks a script whose foreign store only the room's record shows again with a slot, once the room holds it for want of one", async () => {
+      const { first, second } = await two({ first: [storeBinding(OTHER_ID)], second: [storeBinding(OTHER_ID)] });
+      expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
+      expect(await suspendedPair(first, second)).toEqual([1, 0]);
+      expect(await slots()).toBe(1);
+      expect(await lines("script_binding_held")).toEqual([`script_binding_held ${second.served} ceiling_reached`]);
+    });
+
     it("gives the slot back for a room that answered without suspending", async () => {
-      const a = await bound([storeBinding(OWN_ID)]);
-      expect(await h.reconcile("scripts")).toMatchObject({ changed: 0 });
-      expect(await slots()).toBe(0);
-      // Asked with a slot and already suspended: given back too.
-      const b = await bound([storeBinding(OTHER_ID)]);
+      // Asked with a slot and already suspended: given back.
+      const b = await bound([kv()]);
       expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
       expect(await slots()).toBe(1);
-      await h.fake("/seed", { scripts: [b.served], bindings: { [b.served]: [storeBinding(OTHER_ID)] } });
+      await h.fake("/seed", { scripts: [b.served], bindings: { [b.served]: [kv()] } });
       await h.inModeration((sql) => sql.exec("UPDATE binding_suspension SET at = at - 3600000"));
       expect(await h.reconcile("scripts")).toMatchObject({ changed: 0 });
-      // The hour's old slot is pruned by the pass, and no new one was kept.
+      // The hour's old slot is pruned by the pass, and the new one taken for the question was given back.
       expect(await slots()).toBe(0);
-      void a;
     });
 
     it("suspends the room's app for a script left under a retired label, and the room deletes that script; a lift before it is gone is undone", async () => {

@@ -185,10 +185,12 @@ fn log(sql: &SqlStorage, release_id: &str, code: &str) {
 ///
 /// **With `settle: { name, id }`** the pass read a whole list that shows this record's name under that ID, while the
 /// record holds no ID. The room records it made, here, in this module, the only writer of `app_store`: only while the
-/// record still has exactly that name, no ID and no deletion owed, and only for an ID of D1's form that no other record
-/// of this room holds. A create outstanding that the release job is settling meanwhile finds it made and goes on; a
-/// create that settling had cleared (`create_sent_at` null) is the one D1 now lists, so it is taken as sent when the
-/// name was recorded. Nothing is logged: the answer is the pass's, which logs codes and counts.
+/// record still has exactly that name, no ID, a create outstanding and no deletion owed, and only for an ID of D1's form
+/// that no record of this room holds yet, so `settled` is true only when this answer recorded it (the review of PR
+/// #423, 5). A create outstanding that the release job is settling meanwhile finds it made and goes on. **A create
+/// that settling had cleared** (`create_sent_at` null) is never adopted here (the review of PR #423, 4): the reconcile
+/// tells operators instead, and the next release that asks meets D1's name taken and settles it by the list. Nothing is
+/// logged: the answer is the pass's, which logs codes and counts.
 pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let Some(label) = body["label"].as_str() else {
         return Err(ApiError::invalid_argument());
@@ -219,10 +221,11 @@ pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Valu
         {
             exec(
                 sql,
-                "UPDATE app_store SET store_id = ?, made_at = ?, create_sent_at = coalesce(create_sent_at, recorded_at), updated_at = ?
-                   WHERE label = ? AND store_name = ? AND store_id IS NULL AND delete_owed_at IS NULL AND gone_at IS NULL",
+                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?
+                   WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL AND delete_owed_at IS NULL AND gone_at IS NULL",
                 vec![id.into(), now.into(), now.into(), label.into(), name.into()],
             )?;
+            // Only an ID no record held before this write was recorded by it: `taken` above was read just before.
             settled = kept(sql, label)?.is_some_and(|kept| kept.id.as_deref() == Some(id));
         }
     }

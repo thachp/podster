@@ -14,9 +14,23 @@ pub const STORE_ORPHAN: &str = "store_orphan";
 /// The finding for a room's record of a made store that D1 says is gone, read so twice at least ten minutes apart, by
 /// the store's name.
 pub const STORE_MADE_GONE: &str = "store_made_gone";
-/// The finding for a room's record of a name with no ID that the list showed, which the room then recorded made, by
-/// the store's name.
+/// The finding for a room's record of a name with no ID, its create outstanding, that the list showed, which the room
+/// then recorded made, by the store's name.
 pub const STORE_ID_SETTLED: &str = "store_id_settled";
+/// The finding for a room's record of a name whose create settling had cleared, as having made nothing, that the list
+/// shows after all, by the store's name. The record is left alone (the coordinator's ruling on PR #423's review, 4).
+pub const STORE_NAME_REAPPEARED: &str = "store_name_reappeared";
+/// The finding for each label whose room didn't answer in a walk that wasn't whole, from the
+/// [`UNWHOLE_WALKS_TOLD`]th such walk in a row, by the label: orphans can't be told while walks miss rooms.
+pub const STORE_WALK_UNWHOLE: &str = "store_walk_unwhole";
+
+/// **Proposed.** Walks in a row that some room didn't answer before operators are told which labels it was.
+pub const UNWHOLE_WALKS_TOLD: i64 = 3;
+
+/// Whether `walks` walks in a row that weren't whole are told.
+pub fn unwhole_told(walks: i64) -> bool {
+    walks >= UNWHOLE_WALKS_TOLD
+}
 /// The finding for a pass whose list of D1's databases wasn't whole, so nothing about stores was decided: once for the
 /// pass, by the subject `d1`.
 pub const STORE_LIST_UNREAD: &str = "store_list_unread";
@@ -35,14 +49,22 @@ pub enum RecordCheck {
     Fine,
     /// A made store the list doesn't show by its ID and name: read it by its ID, and only D1's own not-found says gone.
     ReadById,
-    /// A name with no ID that the list shows: the room records this ID, through the release job's write path.
+    /// A name with no ID, its create outstanding, that the list shows: the room records this ID, through the release
+    /// job's write path.
     Settle(String),
+    /// A name with no ID whose create settling had cleared, that the list shows after all: operators are told, and the
+    /// record is left alone. The next release that asks for the store meets D1's name taken and settles it by the list.
+    Reappeared,
     /// The record isn't of the room's form. Nothing is decided.
     Unknown,
 }
 
-/// One room's record against a whole list (`(id, name)` as D1 listed them).
-pub fn check_record(record: &StoreRecord<'_>, list: &[(String, String)]) -> RecordCheck {
+/// One room's record against a whole list (`(id, name)` as D1 listed them), with when its create was last sent.
+pub fn check_record(
+    record: &StoreRecord<'_>,
+    create_sent_at: Option<i64>,
+    list: &[(String, String)],
+) -> RecordCheck {
     match binding(Some(record)) {
         Ok(made) => {
             let listed = list
@@ -59,7 +81,8 @@ pub fn check_record(record: &StoreRecord<'_>, list: &[(String, String)]) -> Reco
             .iter()
             .find(|(_, name)| Some(name.as_str()) == record.name)
         {
-            Some((id, _)) => RecordCheck::Settle(id.clone()),
+            Some((id, _)) if create_sent_at.is_some() => RecordCheck::Settle(id.clone()),
+            Some(_) => RecordCheck::Reappeared,
             None => RecordCheck::Fine,
         },
         Err(NoBinding::Malformed | NoBinding::NoStore) => RecordCheck::Unknown,
@@ -87,18 +110,19 @@ pub fn gone_step(first_gone_at: Option<i64>, now: i64) -> GoneStep {
     }
 }
 
-/// Whether a Podster-named store on the list is an orphan, at the end of a walk of every room's labels: it was first
-/// listed (and listed on every whole list since) **before the walk began** (`first_listed_at < walk_started_at`), no room
-/// recorded its name during the walk, and every room the walk asked answered (`walk_whole`).
+/// Whether a Podster-named store on the list is an orphan, at the end of walk `walk` over every room's labels: it was
+/// first listed (and listed on every whole list since) **in an earlier walk** (`first_listed_walk < walk`), no room
+/// recorded its name during this walk, and every room this walk asked answered (`walk_whole`). Counted by walks, never by
+/// the clock (the coordinator's ruling on PR #423's review, 7).
 ///
 /// A room records a store's name before it sends the create, and a room's records are never removed, so a store listed
-/// before the walk began was recorded before it too, and a walk that reached every label would have seen it. One listed
-/// only once the walk had begun may belong to a room the walk asked before the room recorded it, so it waits for the next.
+/// during an earlier walk was recorded before this one began, and a walk that reached every label would have seen it.
+/// One first listed during this walk may belong to a room the walk asked before the room recorded it: it waits a walk.
 pub fn is_orphan(
-    first_listed_at: i64,
+    first_listed_walk: i64,
     claimed_in_walk: bool,
-    walk_started_at: i64,
+    walk: i64,
     walk_whole: bool,
 ) -> bool {
-    walk_whole && !claimed_in_walk && first_listed_at < walk_started_at
+    walk_whole && !claimed_in_walk && first_listed_walk < walk
 }

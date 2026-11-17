@@ -1665,6 +1665,31 @@ impl Workspace {
             {
                 return Err(ApiError::internal("test: the store question failed"));
             }
+            // Test builds only: while this question's pass waits on this answer, a test runs as many more passes as
+            // `test_reenter_store_pass` holds, one after another, so store passes overlap in a known order.
+            #[cfg(feature = "failpoints")]
+            if let Some(row) = rows(
+                &sql,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_reenter_store_pass'",
+                vec![],
+            )?
+            .first()
+            .and_then(|_| {
+                rows(&sql, "SELECT passes FROM test_reenter_store_pass", vec![])
+                    .ok()
+                    .and_then(|found| found.into_iter().next())
+            }) {
+                exec(&sql, "DROP TABLE test_reenter_store_pass", vec![])?;
+                for _ in 0..int(&row["passes"]) {
+                    let _ = crate::moderation::call(
+                        &self.env,
+                        crate::reconcile::SCRIPTS_PATH,
+                        Method::Post,
+                        None,
+                    )
+                    .await;
+                }
+            }
             let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
             let (slot, store) = (out.clone(), sql.clone());
             transaction_sync(&self.state, move || {
@@ -1702,6 +1727,23 @@ impl Workspace {
         } else {
             None
         };
+        // With the verdict, the latest time any of the room's labels was suspended, or null if none is: the reconcile
+        // frees a slot of the ceiling it kept for a lost answer only when no suspension at or after the slot's time is
+        // reported (the review of PR #423, 2). Unreadable, it is left out, and the slot stays.
+        let bindings = bindings.map(|mut judged| {
+            let since = rows(
+                &sql,
+                "SELECT max(suspended_at) AS since FROM app_label",
+                vec![],
+            )
+            .ok()
+            .and_then(|found| found.into_iter().next())
+            .map(|row| row["since"].clone());
+            if let (Some(since), Value::Object(fields)) = (since, &mut judged) {
+                fields.insert("suspended_since".into(), since);
+            }
+            judged
+        });
         // Test builds only, after the bindings' check has committed: a test runs a second scripts pass while this
         // question's pass waits on this answer (two passes overlapping, deterministically), or loses this answer, to
         // show the ceiling counts a suspension from when it was asked (the deep review of PR #420, items a and b).

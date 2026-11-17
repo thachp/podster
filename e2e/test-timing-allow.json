@@ -250,19 +250,6 @@
    "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
   },
   {
-   "file": "apps/api/test/repo-access.spec.ts",
-   "rule": "sleep",
-   "where": "the review's findings (M5 step 6) > wakes at a grant's expiry when it's sooner than its token's, and revokes the token then (M1)",
-   "category": "A",
-   "owed": false,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    712
-   ],
-   "code": "if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));",
-   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
-  },
-  {
    "file": "apps/api/test/task-change.spec.ts",
    "rule": "sleep",
    "where": "function minting",

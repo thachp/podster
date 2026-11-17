@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 6: `get_repo_access`, an agent's short-lived token for the room's repository, against the fake GitHub. Links
@@ -717,17 +717,14 @@ describe("the review's findings (M5 step 6)", () => {
     const got = await access(AGENT, r.id, r.task);
     expect(got.status, got.text).toBe(200);
     expect(got.body.expires_at).toBeGreaterThan(expires);
-    // The alarm was set before the token was answered, for the grant's expiry, not the token's.
-    // The runtime runs alarms as they come due, and one may be running, so read it once none is.
-    let alarmAt: number | null = null;
-    for (let n = 0; n < 40 && alarmAt === null; n++) {
-      alarmAt = await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm());
-      if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));
-    }
-    expect(alarmAt).not.toBeNull();
-    // The room sets its alarm for the moment itself, so it's never past the grant's expiry, and the token's is an hour on.
-    expect(alarmAt!).toBeLessThanOrEqual(expires);
+    // The answer left the room an alarm. The write's own follow-up work leaves it due at once, so the runtime's firing
+    // may already have taken it, which in this room runs nothing and is recorded: `nextAlarm` reads either. A bare
+    // `getAlarm()` reads null once that firing has run, and nothing sets it again until a pass.
+    expect(await nextAlarm(stub(r.id))).not.toBeNull();
+    // Once the due work is done, the room's next wake is the grant's expiry, not the token's, which is an hour on.
+    await alarmPass(stub(r.id));
     expect(got.body.expires_at - expires).toBeGreaterThan(30 * 60_000);
+    expect(await nextAlarm(stub(r.id))).toBe(expires);
     // The agent never asks again. When the grant lapses, the alarm takes the token back.
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, grant));
     await alarm(r.id);

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# CI's check, right after `npm ci`, that workerd's platform binary was installed.
+#
+# workerd ships its binary in one optional dependency per platform (@cloudflare/workerd-linux-64 on CI's runners). The
+# lockfiles list it with its integrity hash, yet on PR #420 `npm ci` skipped it without failing, and the api and gateway
+# jobs then failed deep in their tests with "The package "@cloudflare/workerd-linux-64" could not be found". This makes
+# that failure explicit and early: if the package is missing it runs `npm ci` once more, checks again, and fails naming
+# the package if it is still absent. One retry, no loop.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/ci-workerd-installed <package-dir>
+
+Checks that <package-dir> (e.g. apps/api), after `npm ci`, has workerd and this platform's
+@cloudflare/workerd-<platform> package with its binary. If the platform package is missing, it
+runs `npm ci` once more in <package-dir> and checks again. Exits 0 when the binary is there,
+1 when it is still missing after the retry or workerd itself isn't installed, 2 on bad usage.
+EOF
+}
+
+if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
+  usage
+  exit 0
+fi
+if [ "$#" -ne 1 ] || [ ! -f "$1/package.json" ]; then
+  usage >&2
+  exit 2
+fi
+dir="$1"
+
+# Prints the platform package's name. Exits 0 if it resolves from workerd's own folder with its binary, as workerd
+# itself looks it up; 3 if workerd isn't installed; 4 if the platform package or its binary is missing.
+check() {
+  (cd "$dir" && node -e '
+    const { existsSync } = require("node:fs");
+    const { dirname, join } = require("node:path");
+    const os = { linux: "linux", darwin: "darwin", win32: "windows" }[process.platform] ?? process.platform;
+    const arch = { x64: "64", arm64: "arm64" }[process.arch] ?? process.arch;
+    const name = `@cloudflare/workerd-${os}-${arch}`;
+    console.log(name);
+    let workerd;
+    try { workerd = dirname(require.resolve("workerd/package.json")); } catch { process.exit(3); }
+    let platform;
+    try { platform = dirname(require.resolve(`${name}/package.json`, { paths: [workerd] })); } catch { process.exit(4); }
+    const bin = join(platform, "bin", process.platform === "win32" ? "workerd.exe" : "workerd");
+    process.exit(existsSync(bin) ? 0 : 4);
+  ')
+}
+
+status=0
+name="$(check)" || status=$?
+if [ "$status" -eq 3 ]; then
+  echo "ci-workerd-installed: workerd isn't installed in $dir; this check is only for packages that use it" >&2
+  exit 1
+fi
+if [ "$status" -eq 0 ]; then
+  echo "ci-workerd-installed: $name is installed in $dir"
+  exit 0
+fi
+
+echo "::warning::ci-workerd-installed: npm ci left out $name in $dir; running npm ci once more"
+(cd "$dir" && npm ci)
+
+status=0
+name="$(check)" || status=$?
+if [ "$status" -eq 0 ]; then
+  echo "ci-workerd-installed: $name is installed in $dir after the second npm ci"
+  exit 0
+fi
+echo "::error::ci-workerd-installed: $name is still missing in $dir after a second npm ci; workerd can't start without it" >&2
+exit 1

@@ -441,6 +441,12 @@ CREATE TABLE IF NOT EXISTS app_store (label TEXT PRIMARY KEY REFERENCES app_labe
   updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
   CHECK ((store_id IS NULL) = (made_at IS NULL)), CHECK (made_at IS NULL OR create_sent_at IS NOT NULL),
   CHECK ((delete_owed_at IS NULL) = (delete_cause IS NULL)), CHECK (gone_at IS NULL OR delete_owed_at IS NOT NULL)) WITHOUT ROWID;
+", "
+CREATE TABLE IF NOT EXISTS release_script_kind (release_id TEXT PRIMARY KEY REFERENCES release (id), script_name TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK (kind IN ('static', 'code')), recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer'),
+  CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
+INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT release_id, script_name, 'static', uploaded_at FROM release_upload;
+INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT release_id, script_name, 'static', since FROM release_uncertain;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

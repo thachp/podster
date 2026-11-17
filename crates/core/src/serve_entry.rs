@@ -57,6 +57,47 @@ pub fn custom_entry_value_kind(kind: HostKind, host: &str, script: &str) -> Opti
     custom_entry_value(host, script).map(|value| marked(kind, value))
 }
 
+/// A script's kind as the room's record of it holds it (`release_script_kind`, S3 of the store plan).
+pub fn kind_name(kind: HostKind) -> &'static str {
+    match kind {
+        HostKind::Static => "static",
+        HostKind::Code => "code",
+    }
+}
+
+/// The kind a record names, or `None` for anything else, a case twin included.
+pub fn kind_named(name: &str) -> Option<HostKind> {
+    match name {
+        "static" => Some(HostKind::Static),
+        "code" => Some(HostKind::Code),
+        _ => None,
+    }
+}
+
+/// **A script's kind, from the room's record of it** (`None` when the room holds no record). The room records a
+/// script's kind before it writes the script, and every script written before the record existed was static, so a
+/// script with no record was never written with code: it is static, as is one recorded static. **Anything else is
+/// code,** a record that names a kind this rule doesn't know among it: a code entry is held to the stricter rules, and
+/// refused outright while code apps are off, so an unreadable record never serves a script as static files.
+pub fn recorded_kind(record: Option<&str>) -> HostKind {
+    match record {
+        None | Some("static") => HostKind::Static,
+        Some(_) => HostKind::Code,
+    }
+}
+
+/// **Whether an entry read back is exactly what the room wants** (S3 of the store plan; PR #415's open question 1):
+/// the same script **and** the same kind. A kind that differs is as wrong as a script that differs, so a static entry
+/// for a script with code, or a marked one for a static script, never matches. Either side unknown matches nothing.
+pub fn entry_is(wanted: Option<(HostKind, &str)>, found: Option<(HostKind, &str)>) -> bool {
+    match (wanted, found) {
+        (Some((want_kind, want_script)), Some((found_kind, found_script))) => {
+            want_kind == found_kind && want_script == found_script
+        }
+        _ => false,
+    }
+}
+
 /// The kind and the script a custom hostname's entry names, read for exactly `host`: `None` for any value
 /// [`custom_entry_value_kind`] wouldn't write for that host.
 pub fn custom_entry_script_kind<'a>(host: &str, value: &'a str) -> Option<(HostKind, &'a str)> {

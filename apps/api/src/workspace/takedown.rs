@@ -41,12 +41,14 @@
 use super::*;
 use crate::content_provider::{Entry, Provider};
 use crate::content_stop::{self, Stop};
+use podster_core::app_requests::HostKind;
 use podster_core::hostname_requests::{CustomRoute, HostnameRequestState};
 use podster_core::release::{
     clear_host, next_state, reconcile_script, script_gone, script_owner, unpublish, upload_expired,
     CommitMark, DesiredServe, InFlight, ReleaseEvent, ReleaseState, RoomClaim, ScriptAnswer,
     ScriptOwner, ScriptReconcile, ServeState, UnpublishTrigger, IN_FLIGHT_EXEMPTION_MS,
 };
+use podster_core::serve_entry::{entry_is, kind_named};
 
 /// The Worker's call, for a verified operator. Nothing outside the Worker reaches it.
 pub(crate) const INTERNAL_APP_SUSPENSION: &str = "/internal/app-suspension";
@@ -742,7 +744,7 @@ pub(super) fn entry_confirmed_absent(sql: &SqlStorage, host: &str) -> R<bool> {
 fn check_entry(
     sql: &SqlStorage,
     host: &str,
-    found: Option<&str>,
+    found: Option<(HostKind, &str)>,
     claim: &Value,
     now: i64,
 ) -> R<(bool, bool)> {
@@ -782,12 +784,20 @@ fn check_entry(
         return Ok((true, false));
     }
     // The entry is there, since the pass listed it. It matches only when the room wants a script for this host and
-    // the entry was read as exactly that script. A host that wants nothing never matches an entry that exists, and a
-    // value that couldn't be read, or isn't a script's name Rust made, never equals anything.
-    let matches = match (found, row["script_name"].as_str()) {
-        (Some(found), Some(wanted)) => found == wanted,
-        _ => false,
+    // the entry was read as exactly that script, **of exactly the kind the room recorded for it** (S3 of the store
+    // plan): a static entry for a script with code, or a marked one for a static script, differs as another script
+    // does, and the applier writes it again. A host that wants nothing never matches an entry that exists, and a value
+    // that couldn't be read, isn't a script's name Rust made, or whose kind wasn't said, never equals anything.
+    let wanted = match row["script_name"].as_str() {
+        Some(script) => Some((release_commit::script_kind(sql, script)?, script.to_owned())),
+        None => None,
     };
+    let matches = entry_is(
+        wanted
+            .as_ref()
+            .map(|(kind, script)| (*kind, script.as_str())),
+        found,
+    );
     let matches = matches && (!custom || claim_live_for(sql, host, claim)?);
     if is_applied && matches {
         return Ok((true, false));
@@ -915,7 +925,10 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             body["host"]
                 .as_str()
                 .ok_or_else(ApiError::invalid_argument)?,
-            body["found"].as_str(),
+            body["found"]
+                .as_str()
+                .zip(body["found_kind"].as_str().and_then(kind_named))
+                .map(|(script, kind)| (kind, script)),
             &body["claim"],
             now,
         )?,
@@ -994,6 +1007,9 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
 
 struct Wanted {
     script: Option<String>,
+    /// The script's kind, from the room's record of it, written before the script was (`release_commit::script_kind`).
+    /// Static when the room wants no script.
+    kind: HostKind,
     version: i64,
     custom: bool,
     /// Whether the room's app is held, and the hold's generation (step 6). A pass is stale if either the version or
@@ -1004,14 +1020,23 @@ struct Wanted {
 
 fn wanted(sql: &SqlStorage, host: &str) -> R<Option<Wanted>> {
     let (held, hold_generation) = super::releasers::hold_state(sql)?;
-    Ok(rows(
+    let Some(row) = rows(
         sql,
         "SELECT script_name, version, kind FROM serve_state WHERE host = ?",
         vec![host.into()],
     )?
-    .first()
-    .map(|row| Wanted {
-        script: text(&row["script_name"]),
+    .into_iter()
+    .next() else {
+        return Ok(None);
+    };
+    let script = text(&row["script_name"]);
+    let kind = match &script {
+        Some(script) => release_commit::script_kind(sql, script)?,
+        None => HostKind::Static,
+    };
+    Ok(Some(Wanted {
+        script,
+        kind,
         version: int(&row["version"]),
         custom: row["kind"].as_str() != Some("default"),
         held,
@@ -1182,7 +1207,7 @@ async fn apply_host(
             // A custom hostname's entry (step 8c): only while every check of routing holds, the hostname's object
             // asked last. What was read and fails takes the entry down and refuses the host at this version.
             Some(script) if want.custom => {
-                match custom_write(sql, env, provider, host, script).await? {
+                match custom_write(sql, env, provider, host, script, want.kind).await? {
                     Ok(()) => Ok(()),
                     Err(CustomFail::Retry(code)) => Err(code),
                     Err(CustomFail::Refuse(code)) => {
@@ -1217,12 +1242,18 @@ async fn apply_host(
             Some(script) => match content_stop::read_from(env).await {
                 Stop::Stopped => Err("content_domain_stopped"),
                 Stop::Unreadable => Err("stop_unreadable"),
+                // The entry is written in the kind the room recorded for the script (S3 of the store plan), and read
+                // back as exactly that script of exactly that kind: one of the other kind differs, as one naming another
+                // script does, and is written again.
                 Stop::Clear => {
-                    let written = provider.write_entry(host, script).await;
-                    match provider.read_entry(host).await {
-                        Entry::Present(found) if written && &found == script => Ok(()),
-                        _ if !written => Err("write_not_confirmed"),
-                        _ => Err("read_back_differs"),
+                    let written = provider.write_entry_as(host, script, want.kind).await;
+                    let found = provider.read_entry(host).await;
+                    if written && entry_is(Some((want.kind, script)), found.named()) {
+                        Ok(())
+                    } else if !written {
+                        Err("write_not_confirmed")
+                    } else {
+                        Err("read_back_differs")
                     }
                 }
             },
@@ -1298,6 +1329,7 @@ async fn custom_write(
     provider: &Provider,
     host: &str,
     script: &str,
+    kind: HostKind,
 ) -> R<Result<(), CustomFail>> {
     let own = match script_owner(script) {
         ScriptOwner::Podster { label, .. } => own_label(sql, label)?,
@@ -1341,12 +1373,17 @@ async fn custom_write(
         Stop::Unreadable => return Ok(Err(CustomFail::Retry("stop_unreadable"))),
         Stop::Clear => {}
     }
-    let written = provider.write_entry(host, script).await;
-    Ok(match provider.read_entry(host).await {
-        Entry::Present(found) if written && found == script => Ok(()),
-        _ if !written => Err(CustomFail::Retry("write_not_confirmed")),
-        _ => Err(CustomFail::Retry("read_back_differs")),
-    })
+    let written = provider.write_entry_as(host, script, kind).await;
+    let found = provider.read_entry(host).await;
+    Ok(
+        if written && entry_is(Some((kind, script)), found.named()) {
+            Ok(())
+        } else if !written {
+            Err(CustomFail::Retry("write_not_confirmed"))
+        } else {
+            Err(CustomFail::Retry("read_back_differs"))
+        },
+    )
 }
 
 /// **While a custom host waits for the release it wants to be served** (the review of PR #404, S2, and its security
@@ -1367,16 +1404,20 @@ async fn stale_taken_down(
         Some(flight) => super::release_rollback::target_of(sql, &flight.release_id)?.is_some(),
         None => false,
     };
-    match provider.read_entry(host).await {
-        Entry::Absent => return Ok(CustomFail::Retry("release_not_served")),
-        Entry::Present(found)
-            if state.as_ref().is_some_and(|state| {
-                podster_core::release::waiting_entry_keeps(state, wanted, &found, rollback)
-            }) =>
-        {
-            return Ok(CustomFail::Retry("release_not_served"))
+    let entry = provider.read_entry(host).await;
+    if entry == Entry::Absent {
+        return Ok(CustomFail::Retry("release_not_served"));
+    }
+    // Kept only while it names a script the rule keeps, in the kind the room recorded for that script: an entry of the
+    // other kind is taken down, as one naming any other script is.
+    if let Some((kind, found)) = entry.named() {
+        let recorded = super::release_commit::script_kind(sql, found)?;
+        let keeps = state.as_ref().is_some_and(|state| {
+            podster_core::release::waiting_entry_keeps(state, wanted, found, rollback)
+        });
+        if keeps && entry_is(Some((recorded, found)), Some((kind, found))) {
+            return Ok(CustomFail::Retry("release_not_served"));
         }
-        _ => {}
     }
     let (_, absent) = remove_entry(provider, host).await;
     Ok(CustomFail::Retry(if absent {

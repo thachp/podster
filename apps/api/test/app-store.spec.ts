@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmQuiet, manualAlarms } from "./alarm";
-import { appStoreMakeCases } from "./app-store-make.cases";
+import { appCodeUploadCases, appStoreMakeCases } from "./app-store-make.cases";
 
 // M6 stage 1, the first PR of the store plan: the room's record of its app's store, and the client that makes, reads,
 // deletes and lists stores with its own D1 credential. The client is reached here through the test-only route
@@ -284,20 +284,87 @@ describe("the room's record of its store", () => {
   it("is added to a room made before it, and its step runs again safely", async () => {
     const r = await room();
     const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
-    // A room as it was before step 51: no table, one step behind.
+    // A room as it was before step 51: no table, two steps behind (step 52, the record of a script's kind, is after it
+    // and runs again safely too).
     await inRoom(r.id, (sql) => {
       sql.exec("DROP TABLE app_store");
-      sql.exec("UPDATE schema_version SET version = version - 1");
+      sql.exec("UPDATE schema_version SET version = version - 2");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     await inRoom(r.id, (sql) => insert(sql, { store_id: ID, create_sent_at: 2, made_at: 3 }));
     // The step again, over a table that is there with a row in it: the row is kept.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT label, store_id FROM app_store").toArray())).toEqual([{ label: "todo", store_id: ID }]);
   });
 });
 
+// The room's record of whether a release's script carries code (room schema step 52, S3 of the store plan): written
+// before the script is, and read by the applier and the reconcile to compare an entry's kind as well as its script.
+describe("the room's record of a script's kind", () => {
+  afterEach(async () => {
+    for (const id of made.splice(0)) await alarmQuiet(stub(id));
+  });
+  const release = (sql: any, id: string) => sql.exec(
+    "INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, updated_at) VALUES (?, ?, 'uploading', 'todo', 1, 0, ?, ?, 'per_x', 1, 1)",
+    id, "a5".repeat(20), `todo.${id}`, id);
+  const UPLOADED = `rel_${"7a".repeat(16)}`;
+  const UNCERTAIN = `rel_${"7b".repeat(16)}`;
+  const OTHER = `rel_${"7c".repeat(16)}`;
+
+  it("is added to a room made before it, as static for every script written before it, and its step runs again safely", async () => {
+    const r = await room();
+    const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
+    // A room as it was before step 52: two scripts written, one recorded, one uncertain, and no record of kinds.
+    await inRoom(r.id, (sql) => {
+      release(sql, UPLOADED);
+      release(sql, UNCERTAIN);
+      release(sql, OTHER);
+      sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, 2, 10, 5)", UPLOADED, `todo.${UPLOADED}`);
+      sql.exec("INSERT INTO release_uncertain (release_id, script_name, files, bytes, since, last_code) VALUES (?, ?, 2, 10, 6, 'x')", UNCERTAIN, `todo.${UNCERTAIN}`);
+      sql.exec("DROP TABLE release_script_kind");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect(await visit(r)).toBe(200);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
+    const kinds = () => inRoom(r.id, (sql) => sql.exec("SELECT release_id, script_name, kind, recorded_at FROM release_script_kind ORDER BY recorded_at").toArray());
+    const backfilled = [
+      { release_id: UPLOADED, script_name: `todo.${UPLOADED}`, kind: "static", recorded_at: 5 },
+      { release_id: UNCERTAIN, script_name: `todo.${UNCERTAIN}`, kind: "static", recorded_at: 6 },
+    ];
+    expect(await kinds()).toEqual(backfilled);
+    // The step again, over a record that holds code for another script: nothing is changed or added twice.
+    await inRoom(r.id, (sql) => {
+      sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 7)", OTHER, `todo.${OTHER}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect(await visit(r)).toBe(200);
+    expect(await kinds()).toEqual([...backfilled, { release_id: OTHER, script_name: `todo.${OTHER}`, kind: "code", recorded_at: 7 }]);
+  });
+
+  it("holds a release's own script, of a kind that is static or code, once", async () => {
+    const r = await room();
+    const refused = await inRoom(r.id, (sql) => {
+      release(sql, UPLOADED);
+      release(sql, OTHER);
+      const errors: string[] = [];
+      const insert = (...values: unknown[]) => {
+        try { sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, ?, ?)", ...values); errors.push("taken"); } catch (e) { errors.push(String(e).match(/UNIQUE/i) ? "unique" : String(e).match(/constraint|FOREIGN KEY/i) ? "refused" : String(e)); }
+      };
+      insert(UPLOADED, `todo.${UPLOADED}`, "Code", 1);
+      insert(UPLOADED, `todo.${UPLOADED}`, "", 1);
+      insert(UPLOADED, `todo.${OTHER}`, "code", 1);
+      insert(UPLOADED, `todo.${UPLOADED}`, "code", 1.5);
+      insert(`rel_${"7d".repeat(16)}`, `todo.rel_${"7d".repeat(16)}`, "code", 1);
+      insert(UPLOADED, `todo.${UPLOADED}`, "code", 1);
+      insert(UPLOADED, `todo.${UPLOADED}`, "static", 2);
+      return errors;
+    });
+    expect(refused).toEqual(["refused", "refused", "refused", "refused", "refused", "taken", "unique"]);
+  });
+});
+
 appStoreMakeCases();
+appCodeUploadCases();

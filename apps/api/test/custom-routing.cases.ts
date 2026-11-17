@@ -196,6 +196,21 @@ export function customRoutingCases() {
         expect((await held()).entries[r.host]).toBe(r.script);
       });
 
+      it("writes a custom host's entry marked when the room recorded its script as code, counted only when read back so (S3)", async () => {
+        const { r, name } = await routed("org_cr_kind");
+        await inRoom(r.room, (sql) => sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 1)", r.script.slice(r.script.indexOf(".") + 1), r.script));
+        await reapply(r, name);
+        // Read back as the same script, unmarked: it differs, and isn't applied.
+        await content("/fault", { op: "entry.get", times: 1, flip: true });
+        await pass(r);
+        expect(await applyRow(r, name)).toMatchObject({ applied_version: null, last_code: "read_back_differs" });
+        // The control: read back as written.
+        await applyDue(r);
+        await pass(r);
+        expect((await held()).entries[name]).toBe(`code:${r.script}@${name}`);
+        expect(await applyRow(r, name)).toMatchObject({ applied_version: 2, applied_script: r.script, last_code: null });
+      });
+
       it("caps the status read at one every six hours once routed, where it was hourly (D5)", async () => {
         const { r, name } = await routed("org_cr_cap");
         const reads = async () => (await cloudflareCalls(name)).filter((call) => call === "read").length;

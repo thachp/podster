@@ -10,9 +10,11 @@
 //! 2. **The files,** one call for each bucket, with the session token and no other: each file a part named by its
 //!    hash, as base64, with the type it is served with. `202` while buckets remain, then `201` with the completion
 //!    token.
-//! 3. **The script,** with the scripts token: one `metadata` part naming the completion token, and no module, no
-//!    binding and no store. **A release is static files only.** The script exists from this call on, and nothing
-//!    serves it: no serve entry names it until the room has committed the release live.
+//! 3. **The script,** with the scripts token: one `metadata` part naming the completion token; for a static release
+//!    nothing more, no module, no binding and no store. *Since S3 of the store plan:* a release that carries code adds
+//!    `bindings` (exactly none or its one store, `STORE`, from the room's record) and `main_module` to the metadata,
+//!    and its modules as parts ([`script_body`]). The script exists from this call on, and nothing serves it: no serve
+//!    entry names it until the room has committed the release live.
 //!
 //! **Nothing partial is ever a script.** The provider gives the completion token only once it holds every file the
 //!   manifest names, and the script is written from that token alone.
@@ -47,9 +49,10 @@ const UPLOAD_TIMEOUT_MS: u64 = 30_000;
 const MAX_UPLOAD_ANSWER_BYTES: usize = 1024 * 1024;
 /// A token the provider gave, as it goes back in a header or a body: printable ASCII, and no longer than this.
 const MAX_TOKEN_BYTES: usize = 256 * 1024;
-/// The compatibility date every release's script is written with. Nothing of a release runs, so it decides nothing
-/// but how the platform serves files, and it is the one spike A's uploads carried.
-const COMPATIBILITY_DATE: &str = "2026-11-01";
+/// The compatibility date every release's script is written with, static or with code: core's one constant, moved only
+/// by a PR (S3 of the store plan, question 1). Nothing in a release's files sets it, and no compatibility flag is ever
+/// written.
+const COMPATIBILITY_DATE: &str = podster_core::app_code::COMPATIBILITY_DATE;
 /// How every release's files are served, written out in every script: **explicit and fixed** (the architect's
 /// ruling of 2026-11-14, as amended that day), so that a change in the provider's defaults can't change how an app is
 /// served. Never an empty object, and never anything from a repository.
@@ -209,6 +212,93 @@ async fn send_told(
     Ok(answer)
 }
 
+/// What a release that carries code adds to its script's write (S3 of the store plan): its modules, its entry module,
+/// and its bindings, **each Podster's own**. Nothing here comes from a release's files but the modules' names and
+/// bytes, which core has checked (`podster_core::app_code`); the bindings come only from the room's record of its
+/// store (`podster_core::app_store::script_binding`, rule 3(a)).
+pub(crate) struct ScriptCode<'a> {
+    /// The entry module's name, one of `modules`.
+    pub(crate) main: &'a str,
+    /// Every module, by its name, with its bytes as fetched and checked against the tree.
+    pub(crate) modules: &'a [(String, Vec<u8>)],
+    /// The store's binding, or none: `podster_core::app_store::bindings_json` writes it.
+    pub(crate) binding: Option<&'a podster_core::app_store::Binding>,
+    /// What separates the parts: drawn at random for each write, since a module's bytes are agent content and may hold
+    /// any fixed text.
+    pub(crate) boundary: &'a str,
+}
+
+/// The script's body and the boundary that separates its parts, written out byte by byte so what is sent is exactly
+/// these bytes whatever a library orders or adds. The completion token is the only part of a static script's that
+/// isn't a constant, and it goes in as a JSON string.
+///
+/// **A static release** (`code` is none) is exactly what it has always been: one `metadata` part, with the fixed
+/// assets configuration, the compatibility date and no flag, and no module, no binding and no store.
+///
+/// **A release that carries code** adds, in the metadata, `bindings` (exactly none or the one store, by core), and
+/// `main_module`; and after it, each module as its own part, named by its name, typed as a JavaScript module. Nothing
+/// else: no migration, no compatibility flag, no other binding, no placement, no limit. `None`, and nothing is sent,
+/// unless every module's name is of core's form, the entry module is one of them, the binding's ID is of its form, and
+/// the boundary holds no character a header can't and appears in no module and not in the metadata.
+pub(crate) fn script_body(
+    completion_token: &str,
+    code: Option<&ScriptCode<'_>>,
+) -> Option<(String, Vec<u8>)> {
+    use podster_core::app_code::{module_name_form, MODULE_UPLOAD_TYPE};
+    let token = Value::from(completion_token).to_string();
+    let assets = format!("\"assets\":{{\"config\":{ASSETS_CONFIG},\"jwt\":{token}}}");
+    let Some(code) = code else {
+        let metadata = format!(
+            "{{{assets},\"compatibility_date\":\"{COMPATIBILITY_DATE}\",\"compatibility_flags\":[]}}"
+        );
+        let body = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{BOUNDARY}--\r\n"
+        );
+        return Some((BOUNDARY.to_owned(), body.into_bytes()));
+    };
+    let boundary = code.boundary;
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
+    if !(16..=70).contains(&boundary.len()) || !boundary.bytes().all(plain) {
+        return None;
+    }
+    if code.modules.is_empty()
+        || !code.modules.iter().all(|(name, _)| module_name_form(name))
+        || !code.modules.iter().any(|(name, _)| name == code.main)
+    {
+        return None;
+    }
+    let bindings = podster_core::app_store::bindings_json(code.binding)?;
+    let main = Value::from(code.main).to_string();
+    let metadata = format!(
+        "{{{assets},\"bindings\":{bindings},\"compatibility_date\":\"{COMPATIBILITY_DATE}\",\"compatibility_flags\":[],\"main_module\":{main}}}"
+    );
+    let marker = format!("--{boundary}");
+    let holds = |bytes: &[u8]| {
+        bytes
+            .windows(marker.len())
+            .any(|window| window == marker.as_bytes())
+    };
+    if holds(metadata.as_bytes()) || code.modules.iter().any(|(_, bytes)| holds(bytes)) {
+        return None;
+    }
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n"
+    )
+    .into_bytes();
+    for (name, bytes) in code.modules {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}\"\r\nContent-Type: {MODULE_UPLOAD_TYPE}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Some((boundary.to_owned(), body))
+}
+
 impl Provider {
     /// Opens an upload session for a script, with its manifest. `None` unless the provider answered with exactly a
     /// session: a token, and buckets naming only the manifest's own hashes, each once.
@@ -308,14 +398,16 @@ impl Provider {
         }
     }
 
-    /// Writes the script from a completion token: static files, and nothing else. Answers what came back, for core's
-    /// `script_write_outcome` to judge: the script may exist after this whatever it answers, unless nothing was sent.
-    /// **Nothing was sent** only when the name or the token isn't of its form, or the attempt's deadline had passed
-    /// before the call: anything that goes wrong after that is no answer, and the release becomes `uncertain`.
+    /// Writes the script from a completion token: its static files, and, for a release that carries code, its modules
+    /// and its one binding (`code`). Answers what came back, for core's `script_write_outcome` to judge: the script may
+    /// exist after this whatever it answers, unless nothing was sent. **Nothing was sent** only when the name, the
+    /// token or the code isn't of its form, or the attempt's deadline had passed before the call: anything that goes
+    /// wrong after that is no answer, and the release becomes `uncertain`.
     pub(crate) async fn write_script(
         &self,
         script: &str,
         completion_token: &str,
+        code: Option<&ScriptCode<'_>>,
         attempt: &Attempt,
     ) -> ScriptWriteAnswer {
         let Some(url) = self.script_url(script) else {
@@ -324,21 +416,14 @@ impl Provider {
         if !token_form(completion_token) {
             return ScriptWriteAnswer::NotSent;
         }
-        // Written out field by field, so what is sent is exactly these bytes whatever a library orders or adds. The
-        // token is the only part that isn't a constant, and it goes in as a JSON string.
-        let token = Value::from(completion_token).to_string();
-        let metadata = format!(
-            "{{\"assets\":{{\"config\":{ASSETS_CONFIG},\"jwt\":{token}}},\"compatibility_date\":\"{COMPATIBILITY_DATE}\",\"compatibility_flags\":[]}}"
-        );
-        let body = format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{BOUNDARY}--\r\n"
-        )
-        .into_bytes();
+        let Some((boundary, body)) = script_body(completion_token, code) else {
+            return ScriptWriteAnswer::NotSent;
+        };
         let answer = send_told(
             Method::Put,
             format!("{url}?excludeScript=true&bindings_inherit=strict"),
             &self.scripts_token,
-            &format!("multipart/form-data; boundary={BOUNDARY}"),
+            &format!("multipart/form-data; boundary={boundary}"),
             body,
             attempt,
         )

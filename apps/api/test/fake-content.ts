@@ -35,7 +35,7 @@ type Op = "script.get" | "script.delete" | "script.list" | "entry.put" | "entry.
  * `stale` answers a read with the opposite of what is held; `delayMs` alone answers properly, late, so a test can
  * change the room while the call is out.
  */
-type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; delayMs?: number };
+type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; flip?: boolean; delayMs?: number };
 
 let scripts = new Set<string>();
 let entries = new Map<string, string>();
@@ -84,7 +84,7 @@ async function takeFault(op: Op) {
   fault.times -= 1;
   if (fault.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
   // A delay alone isn't a failure: the call is then answered as it would have been.
-  return fault.lost || fault.stale || fault.status ? fault : undefined;
+  return fault.lost || fault.stale || fault.flip || fault.status ? fault : undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -127,7 +127,13 @@ type Upload = {
    */
   gates: Gate[];
   /** The script as last written: every path with what is served there, and the metadata it was written with. */
-  written?: { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; metadataText: string; times: number };
+  written?: {
+    files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; metadataText: string;
+    /** The script's modules, a release with code's: by part name. Empty for a static release's. */
+    modules: Record<string, { filename: string; type: string; text: string }>;
+    contentType: string;
+    times: number;
+  };
   /** Hashes asked for in one bucket. */
   bucketSize: number;
   /** Statements a test wants run when the first bucket arrives: `{ room, statement }` is read by the test, not run here. */
@@ -236,9 +242,18 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     const complete = completions.get(metadata?.assets?.jwt);
     // Only a completion token for this very script, with every file its manifest names held.
     if (!complete || complete.script !== name || !Object.values(complete.manifest).every((file) => held.held.has(file.hash))) return done(400, failure(400, 10400, "the token doesn't complete this script"));
+    // A release's code (S3 of the store plan): every part but the metadata is a module, kept with the name, the file
+    // name and the type it came with. An entry module the parts don't hold is refused, as the platform would.
+    const modules: Record<string, { filename: string; type: string; text: string }> = {};
+    for (const [partName, value] of form.entries()) {
+      if (partName === "metadata") continue;
+      if (typeof value === "string") return done(400, failure(400, 10021, "a module must be a file part"));
+      modules[partName] = { filename: (value as File).name, type: value.type, text: await value.text() };
+    }
+    if (metadata?.main_module !== undefined && !(metadata.main_module in modules)) return done(400, failure(400, 10021, "no such entry module"));
     const files: Record<string, { hash: string; size: number; type: string; base64: string }> = {};
     for (const [path, file] of Object.entries(complete.manifest)) files[path] = { ...file, ...held.held.get(file.hash)! };
-    held.written = { files, metadata, metadataText, times: (held.written?.times ?? 0) + 1 };
+    held.written = { files, metadata, metadataText, modules, contentType: request.headers.get("content-type") ?? "", times: (held.written?.times ?? 0) + 1 };
     if (fault?.lost) return done(502, failure(502, 10001, "the answer was lost"));
     if (fault?.shape === "html") return done(200, html());
     if (fault?.shape === "not_success") return done(200, json({ success: false, errors: [], messages: [], result: { id: name } }));
@@ -424,7 +439,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer(op, host, failure(403, 10000, "Authentication error"));
     await passGate(op);
     const fault = await takeFault(op);
-    if (fault && !fault.lost && !fault.stale) return answer(op, host, failure(fault.status ?? 500, 10001, "fault"));
+    if (fault && !fault.lost && !fault.stale && !fault.flip) return answer(op, host, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "entry.put") {
       entries.set(host, await request.text());
       if (fault?.lost) return answer(op, host, failure(fault.status ?? 502, 10001, "the answer was lost"));
@@ -438,6 +453,8 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     // A stale read: whatever the key held is answered as missing, or the other way round, as a cache that lags would.
     const value = entries.get(host);
     if (fault?.stale) return answer(op, host, value === undefined ? new Response("stale.rel_" + "0".repeat(32), { status: 200 }) : failure(404, 10009, "key not found"));
+    // A read that names the same script with its kind the other way round: the code mark taken off, or put on.
+    if (fault?.flip && value !== undefined) return answer(op, host, new Response(value.startsWith("code:") ? value.slice("code:".length) : `code:${value}`, { status: 200 }));
     return answer(op, host, value === undefined ? failure(404, 10009, "key not found") : new Response(value, { status: 200 }));
   }
   // Any other path on the provider's API: a wrong account, a wrong namespace, or a call nothing should make.

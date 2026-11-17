@@ -168,6 +168,46 @@ pub fn binding(record: Option<&StoreRecord<'_>>) -> Result<Binding, NoBinding> {
     })
 }
 
+/// The type Cloudflare's upload metadata names a D1 binding by, as the store spike bound one (`spikes/m6-store`).
+pub const D1_BINDING_TYPE: &str = "d1";
+
+/// **Rule 3(a), at the upload (S3 of the store plan).** What an app's script is bound to, given whether its release's
+/// manifest asks for its store (`crate::app_code::CodeRelease::wants_store`) and the room's record of its label's
+/// store. A release that asks for none is bound to nothing, whatever the record holds: a store kept from an earlier
+/// release stays unbound (S2's question 3). A release that asks is bound exactly to what [`binding`] gives from the
+/// record, or fails by that refusal's code: nothing in a release's files can name a store.
+pub fn script_binding(
+    wants_store: bool,
+    record: Option<&StoreRecord<'_>>,
+) -> Result<Option<Binding>, NoBinding> {
+    if !wants_store {
+        return Ok(None);
+    }
+    binding(record).map(Some)
+}
+
+/// The upload metadata's `bindings`, written out: `[]` for a script bound to nothing, and otherwise exactly one
+/// binding, `{"type":"d1","name":"STORE","id":…}`, under the one fixed name every app's store has
+/// (`crate::app_code::STORE_BINDING_NAME`). **Nothing else is ever a binding:** no outbound Worker (named on the
+/// dispatch, not the script), no secret, variable, service or Durable Object. `None` when the binding's ID isn't of its
+/// kind's form, so nothing that isn't an ID goes into the bytes.
+pub fn bindings_json(binding: Option<&Binding>) -> Option<String> {
+    let Some(binding) = binding else {
+        return Some("[]".to_owned());
+    };
+    if !store_id_form(binding.kind, &binding.id) {
+        return None;
+    }
+    let kind = match binding.kind {
+        StoreKind::D1 => D1_BINDING_TYPE,
+    };
+    Some(format!(
+        r#"[{{"type":"{kind}","name":"{}","id":"{}"}}]"#,
+        crate::app_code::STORE_BINDING_NAME,
+        binding.id
+    ))
+}
+
 /// What the provider's envelope said, as the client read it from the body. `success` is `None` unless the field is a
 /// boolean; `errors` is `None` unless the field is an array whose every entry has an integer `code`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

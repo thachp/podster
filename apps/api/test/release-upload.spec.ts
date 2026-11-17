@@ -708,14 +708,22 @@ describe("the upload's own boundaries", () => {
     expect([(await githubState()).calls, (await provider(h.script)).calls]).toEqual([[], []]);
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
-    // The script's metadata is three fixed fields: no module, no binding, no store, and nothing from a repository.
+    // The script's metadata: a static release's is the fixed assets object and two fixed fields; one with code adds only
+    // `bindings` (core's, exactly none or the one store) and `main_module` (S3 of the store plan). No other
+    // configuration, and nothing from a repository but a module's name.
     const source = sources["content_provider/upload.rs"];
-    const metadata = source.slice(source.indexOf("let metadata = format!("), source.indexOf(");", source.indexOf("let metadata = format!(")));
-    expect(metadata.match(/"[a-z_]+\\":/g)).toEqual(['"assets\\":', '"config\\":', '"jwt\\":', '"compatibility_date\\":', '"compatibility_flags\\":']);
+    const fields = (text: string) => text.match(/"[a-z_]+\\":/g);
+    const assets = source.slice(source.indexOf("let assets = format!("), source.indexOf(");", source.indexOf("let assets = format!(")));
+    expect(fields(assets)).toEqual(['"assets\\":', '"config\\":', '"jwt\\":']);
+    const metadatas = [...source.matchAll(/let metadata = format!\(([^;]*)\);/g)].map((match) => fields(match[1]));
+    expect(metadatas).toEqual([
+      ['"compatibility_date\\":', '"compatibility_flags\\":'],
+      ['"bindings\\":', '"compatibility_date\\":', '"compatibility_flags\\":', '"main_module\\":'],
+    ]);
     // The assets configuration is one constant, with two fields and nothing a repository could reach.
     expect(source.match(/const ASSETS_CONFIG: &str =\s*r#"([^#]+)"#;/)?.[1]).toBe('{"html_handling":"auto-trailing-slash","not_found_handling":"none"}');
     expect(source.match(/ASSETS_CONFIG/g)).toHaveLength(3);
-    for (const word of ["main_module", "bindings\"", "durable_objects", "kv_namespaces", "d1_databases", "migrations"]) expect(source, word).not.toContain(word);
+    for (const word of ["durable_objects", "kv_namespaces", "d1_databases", "migrations", "compatibility_flags\\\":[\"", "tail_consumers"]) expect(source, word).not.toContain(word);
     // The test-only switches are compiled only into test builds.
     for (const name of ["test_release_upload_provider", "test_release_upload_before_check", "test_release_upload_clock"]) {
       const lines = sources["workspace/release_upload.rs"].split("\n");

@@ -2,10 +2,15 @@ import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 // M6 stage 1: the serve entry's mark that the script it names carries code (`podster_core::serve_entry`). The
-// provider writes the mark only when told a release carries code, and nothing tells it that yet: every entry the
-// applier writes is exactly as before (`takedown.spec.ts` holds a written entry to the fixture). Here the provider's
+// provider writes the mark only when told a release carries code: since S3 of the store plan, the applier tells it so
+// for a script the room recorded as code before writing it, and a static entry is exactly as before (`takedown.spec.ts`
+// holds a written entry to the fixture, and shows the applier's kinds). Here the provider's
 // write and read are reached through the test-only route `/test/serve-entry`, against the content provider's stand-in
 // (`fake-content.ts`), and held to the fixture that core and the content Worker are tested against.
+//
+// *Since S3:* these cases are registered inside `takedown.spec.ts` (`serveEntryCases`), as `custom-routing.cases.ts`'s
+// are. Both reset and seed the stand-in's serve entries, which live in the test runner, so as two spec files run side by
+// side one read the other's reset (an entry seeded here read `absent`). In one file they run in turn.
 
 const BINDINGS = env as any;
 const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string };
@@ -34,9 +39,10 @@ const labelOf = (script: string) => script.slice(0, script.indexOf("."));
 const defaultHost = (script: string) => `${labelOf(script)}.${FAKE.domain}`;
 const CUSTOM = FIXTURE.custom_entry_host;
 
-beforeEach(async () => { await fake("/reset"); });
-
+export function serveEntryCases() {
 describe("the provider's serve entry", () => {
+  beforeEach(async () => { await fake("/reset"); });
+
   it("writes a static entry exactly as before, and marks one only when told its release carries code", async () => {
     for (const script of FIXTURE.valid_script_names) {
       const host = defaultHost(script);
@@ -87,13 +93,34 @@ describe("the provider's serve entry", () => {
     }
   });
 
-  it("is told a release carries code by nothing but this route: the provider's one marked write is reached from nowhere else", () => {
-    const source: string = BINDINGS.TEST_CONTENT_PROVIDER_SOURCE;
-    // Every write the applier makes goes through `write_entry`, which writes static; only `write_entry_as` takes a
-    // kind, and it is named three times: where it is defined, in `write_entry`, and in this route, a test build's.
-    expect(source).toContain("self.write_entry_as(host, script, HostKind::Static).await");
-    expect(source.split("write_entry_as(").length - 1).toBe(3);
-    const route = source.indexOf("provider.write_entry_as(");
-    expect(source.lastIndexOf('#[cfg(feature = "failpoints")]', route)).toBeGreaterThan(source.lastIndexOf("\n}\n", route));
+  it("is written with a kind by the applier alone, with the kind the room recorded for the script, and by this route", () => {
+    // *Widened by S3 of the store plan:* the applier now writes code entries, so the guard reads every source of the
+    // API, not only the provider's.
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    // The files that name the provider's one write of an entry: where it is defined, with this test-only route, and the
+    // applier. No other file of the API writes an entry at all, marked or not.
+    const callers = Object.entries(sources).filter(([, source]) => source.includes("write_entry_as(")).map(([path]) => path).sort();
+    expect(callers).toEqual(["content_provider.rs", "workspace/takedown.rs"]);
+    // No call anywhere but this route names the code kind itself: the applier's kind is the room's record's.
+    const route = /provider\.write_entry_as\(host, script, kind\)/;
+    for (const [path, source] of Object.entries(sources)) {
+      const calls = [...source.matchAll(/write_entry_as\(([^)]*)\)/g)].map((match) => match[1]);
+      expect(calls.filter((args) => /\bCode\b/.test(args)), path).toEqual([]);
+    }
+    // In the provider, beside its definition, only this route calls it, in test builds alone.
+    const provider = sources["content_provider.rs"];
+    expect(provider.split("write_entry_as(").length - 1).toBe(2);
+    const at = provider.search(route);
+    expect(at).toBeGreaterThan(0);
+    expect(provider.lastIndexOf('#[cfg(feature = "failpoints")]', at)).toBeGreaterThan(provider.lastIndexOf("\n}\n", at));
+    // The applier writes each entry with the kind the room recorded for its script, and with nothing else.
+    const applier = sources["workspace/takedown.rs"];
+    const applied = [...applier.matchAll(/write_entry_as\(([^)]*)\)/g)].map((match) => match[1].replace(/\s+/g, " ").trim());
+    expect(applied).toEqual(["host, script, want.kind", "host, script, kind"]);
+    expect(applier).toContain("Some(script) => release_commit::script_kind(sql, script)?,");
+    expect(applier).toContain("custom_write(sql, env, provider, host, script, want.kind)");
+    // No attribute keeps the write alive in a build where nothing calls it.
+    expect(provider).not.toMatch(/dead_code[^\n]*\n\s*pub\(crate\) async fn write_entry_as/);
   });
 });
+}

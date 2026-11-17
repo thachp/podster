@@ -5,6 +5,7 @@ import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, nextAlarm, runAlarm, runtimeAlarms } from "./alarm";
 import { customRoutingCases } from "./custom-routing.cases";
+import { serveEntryCases } from "./serve-entry.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
 // room unpublishes in one transaction, its applier removes the serve entries, and its delete job removes the scripts
@@ -1261,6 +1262,53 @@ describe("the room's applier and its delete job", () => {
     expect(state.calls.filter((call) => call.status === 403 || call.name.startsWith("unexpected"))).toEqual([]);
     expect(new Set(state.calls.map((call) => call.op))).toEqual(new Set(["entry.delete", "entry.get", "script.delete", "script.get"]));
   });
+
+  // S3 of the store plan: the room records whether a script carries code before it writes it, and the applier writes
+  // the entry in that kind, reads it back by kind as well as by script, and the reconcile compares both.
+  it("write a script the room recorded as code with the mark, and count it applied only when read back of that kind", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    await inRoom(a.room, (sql) => {
+      sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 1)", rel(2), a.served);
+      sql.exec("DELETE FROM serve_apply");
+    });
+    // Read back as the same script with the other kind: it differs, and isn't applied.
+    await fault({ op: "entry.get", times: 1, flip: true });
+    await pass(a.room);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, last_code: "read_back_differs" });
+    expect((await held()).entries[a.host]).toBe(`code:${a.served}`);
+    // The control: read back as written, it is applied, in the marked form.
+    await due(a.room);
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(`code:${a.served}`);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+    // The reconcile reads the same script unmarked: it differs by kind, the room forgets it applied the host, and its
+    // applier writes it marked again.
+    await fake("/seed", { entries: { [a.host]: a.served } });
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(`code:${a.served}`);
+    // As it should be: nothing changes.
+    expect(await reconcile("entries")).toMatchObject({ changed: 0 });
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("write a static script's entry unmarked, as before, and put back one that says it carries code", async () => {
+    for (const recorded of [null, "static"]) {
+      await fresh();
+      await fake("/reset", {});
+      const a = await app({ plain: true });
+      if (recorded) await inRoom(a.room, (sql) => sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, ?, 1)", rel(2), a.served, recorded));
+      // The entry names the right script, marked as carrying code, which the room never recorded it as.
+      await fake("/seed", { entries: { [a.host]: `code:${a.served}` } });
+      expect(await reconcile("entries"), String(recorded)).toMatchObject({ changed: 1 });
+      await pass(a.room);
+      expect((await held()).entries[a.host], String(recorded)).toBe(a.served);
+      expect((await applyRows(a.room))[0], String(recorded)).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+      expect(await reconcile("entries"), String(recorded)).toMatchObject({ changed: 0 });
+      await alarmQuiet(stub(a.room));
+    }
+  });
 });
 
 describe("what step 4(a) adds to the room and the Worker", () => {
@@ -2478,3 +2526,5 @@ describe("the two reconciles", () => {
 
 // M6 step 8c's cases: here, so they never run beside this file's resets of the content provider's stand-in.
 customRoutingCases();
+// The provider's serve-entry route (M6 stage 1, #415 and S3): here for the same reason.
+serveEntryCases();

@@ -16,6 +16,12 @@
 // assumption,** from Cloudflare's documented KV list: `result` an array of `{ name }`, and `result_info.cursor` for
 // the next page, empty at the end. A test can make the scripts' list claim there is more than it holds.
 //
+// **A script's bindings** (rule 3(b), S5 of the store plan) answer at `…/scripts/<name>/bindings`, with the scripts
+// token only, as the store spike read them: `result` an array of bindings, `[]` for a script nothing was seeded for,
+// and `404` with code 10007 for a script that isn't there. The spike kept only each entry's `type` and `name`; the
+// rest of an entry (a D1 binding's `id`, a KV binding's `namespace_id`, a Durable Object's `class_name`) is the
+// upload metadata's shape, assumed. A test seeds a script's list as it wants it read, malformed included.
+//
 // A test scripts how it misbehaves through `content-fake.example.com`, and reads back what it holds and every call it
 // saw. Calls are recorded by kind and name, never with a token.
 
@@ -29,7 +35,7 @@ export const FAKE_CONTENT = {
   routingToken: "test-routing-token-0000000000",
 };
 
-type Op = "script.get" | "script.delete" | "script.list" | "entry.put" | "entry.get" | "entry.delete" | "entry.list";
+type Op = "script.get" | "script.delete" | "script.list" | "script.bindings" | "entry.put" | "entry.get" | "entry.delete" | "entry.list";
 /**
  * How one kind of call misbehaves, for its next `times` calls. `lost` does the work and then answers nothing useful;
  * `stale` answers a read with the opposite of what is held; `delayMs` alone answers properly, late, so a test can
@@ -38,6 +44,8 @@ type Op = "script.get" | "script.delete" | "script.list" | "entry.put" | "entry.
 type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; flip?: boolean; delayMs?: number };
 
 let scripts = new Set<string>();
+/** What a script's bindings read answers as its `result`, by script; anything a test seeds, as it is. */
+let bindings = new Map<string, unknown>();
 let entries = new Map<string, string>();
 let calls: { op: Op; name: string; status: number }[] = [];
 let faults: Fault[] = [];
@@ -341,6 +349,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   if (url.hostname === "content-fake.example.com") {
     if (url.pathname === "/reset") {
       scripts = new Set();
+      bindings = new Map();
       entries = new Map();
       calls = [];
       faults = [];
@@ -351,7 +360,8 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
-      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean };
+      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean; bindings?: Record<string, unknown> };
+      for (const [name, list] of Object.entries(body.bindings ?? {})) bindings.set(name, list);
       if (body.keysNoInfo !== undefined) keysNoInfo = body.keysNoInfo;
       if (body.scriptsUnlisted !== undefined) scriptsUnlisted = body.scriptsUnlisted;
       for (const name of body.scripts ?? []) scripts.add(name);
@@ -383,6 +393,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   const bearer = request.headers.get("authorization");
   const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)$`));
   const entry = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/storage/kv/namespaces/${FAKE_CONTENT.kvNamespace}/values/([^/]+)$`));
+  const bound = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)/bindings$`));
   const answer = (op: Op, name: string, response: Response) => {
     calls.push({ op, name, status: response.status });
     return response;
@@ -410,6 +421,19 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     const page = rest.slice(0, limit);
     if (keysNoInfo) return answer("entry.list", cursor ?? "", json(envelope(page.map((name) => ({ name })))));
     return answer("entry.list", cursor ?? "", json({ ...envelope(page.map((name) => ({ name }))), result_info: { count: page.length, cursor: rest.length > page.length ? `after:${page[page.length - 1]}` : "" } }));
+  }
+
+  if (bound && request.method === "GET") {
+    const name = decodeURIComponent(bound[1]);
+    // The scripts token only, as every call on a script.
+    if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.bindings", name, failure(403, 10000, "Authentication error"));
+    await passGate("script.bindings");
+    // A status fault only, taken with no delay: this read has no use for a late answer.
+    const fault = faults.find((f) => f.op === "script.bindings" && f.times > 0);
+    if (fault) fault.times -= 1;
+    if (fault?.status) return answer("script.bindings", name, failure(fault.status, 10001, "fault"));
+    if (!scripts.has(name)) return answer("script.bindings", name, failure(404, 10007, "This Worker does not exist on your account."));
+    return answer("script.bindings", name, json(envelope(bindings.has(name) ? bindings.get(name) : [])));
   }
 
   if (script) {

@@ -1686,7 +1686,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 | **Contract: the serve entry's mark that a script has code** (*built, 2026-11-17: the prefix `code:` before either form, `podster_core::serve_entry`; nothing writes it yet*) | The fixture and its three readers, alone in its turn, as stage 1's build order already lists it | Ready to go before S3 or with it; *recommended* before, so S3 is code only |
 | **S3. Uploading a Worker's script and modules, with its binding (rule 3(a))** (*built, [below](#what-s3-built-uploading-a-releases-code-with-its-one-binding)*) | The release job's upload grows from static files to a script: the modules under `site/worker/`, `main_module` from the manifest, a compatibility date Podster fixes, the fixed assets configuration, and **bindings exactly one, `{"type":"d1","name":"STORE","id":…}`, whose ID comes only from `podster_core::app_store::binding` over the room's record.** A record that binds nothing fails the release by that code (`store_none`, `store_not_made`, `store_delete_owed`, `store_record_malformed`); nothing in a release's files can name a store. The metadata is checked byte for byte, as the static upload's is | 1. **The compatibility date.** *Recommended:* one constant in core, moved only by a PR. 2. **The marker served before the script** is from the documentation and must be seen in a spike before the gate opens: *recommended* as a gate item, not a blocker for building. 3. **The outbound Worker** is named on the dispatch, not on the script, so it is the content Worker's, not this PR's |
 | **S4. Deleting an app's data: the operator's command, the room owner's, and the store's own deletion** | Two routes, a contract change alone in its turn: an operator's, beside the app's suspension, and the room owner's. Each marks the row owed (`delete_owed_at`, its cause) in the command's transaction; the app serves nothing before the store goes (the operator's suspends it; the owner's needs the app unpublished or suspended). A job like the script-delete job deletes, then counts the store gone only on reads of D1's own not-found; label retired and room deleted owe the same. The row is kept, `gone_at` set | 1. **D1 can undelete a database for 7 days** (Cloudflare's changelog, 2026-10-23). *Recommended:* the commands' answer and the operator's screen say the data is gone from the app and recoverable only by the account's holder for 7 days; **the wording is the owner's**. 2. **One read of not-found, or two ten minutes apart?** *Recommended:* two, as a custom hostname's is, since the spike saw D1's not-found once per database and a deletion is not undone by Podster. 3. **Who may ask, in the room?** *Recommended:* the room's owner alone, as the revision says, confirmed by name |
-| **S5. The reconcile of stores, and rule 3(b)'s check of bindings** | The `Moderation` object's hourly reconcile, with a schema step there: lists every D1 database and reports each `podster-store-…` that no room's record claims, as an operator finding, deleting nothing; and reads each app script's bindings, and **any binding but its room's own store, the outbound Worker and the fixed ones is an operator finding and suspends the app** (nothing served, label kept), the gate's item. The rooms tell the object their store's ID as the labels' upkeep tells it of labels | 1. **Which token reads the bindings.** *Recommended:* the scripts token, which reads scripts already, for the bindings; and the store token for the D1 list, which the API Worker already holds for S2 and S4, so no read token with D1 Read, which can run a `SELECT` on apps' data, is added. Whether the reconcile using it fits the ruling's "held only by what makes and deletes them" (item 2) is the architect's to rule; it is the same Worker. Owed to the security review either way. 2. **A binding read straight after an upload lags** (the spike: two of twelve reads answered 404, one an empty list). *Recommended:* only a read that shows a binding, and a wrong one, is a finding; a 404 or an empty list is no answer and is read again next hour |
+| **S5. The reconcile of stores, and rule 3(b)'s check of bindings** (*split in two, 2026-11-17: rule 3(b) built first, [below](#what-s5s-first-pr-built-rule-3bs-check-of-bindings); the reconcile of stores, with its `Moderation` schema step, is the next PR*) | The `Moderation` object's hourly reconcile, with a schema step there: lists every D1 database and reports each `podster-store-…` that no room's record claims, as an operator finding, deleting nothing; and reads each app script's bindings, and **any binding but its room's own store, the outbound Worker and the fixed ones is an operator finding and suspends the app** (nothing served, label kept), the gate's item. The rooms tell the object their store's ID as the labels' upkeep tells it of labels | 1. **Which token reads the bindings.** *Recommended:* the scripts token, which reads scripts already, for the bindings; and the store token for the D1 list, which the API Worker already holds for S2 and S4, so no read token with D1 Read, which can run a `SELECT` on apps' data, is added. Whether the reconcile using it fits the ruling's "held only by what makes and deletes them" (item 2) is the architect's to rule; it is the same Worker. Owed to the security review either way. 2. **A binding read straight after an upload lags** (the spike: two of twelve reads answered 404, one an empty list). *Recommended:* only a read that shows a binding, and a wrong one, is a finding; a 404 or an empty list is no answer and is read again next hour |
 | **S6. The write counter, and its wiring in the content Worker** | A per-app Durable Object class in `apps/content`, on the second account, keyed by the app's label, counting fixed windows as `podster_core::write_budget` does (the TypeScript mirrors it and is tested against core's cases); the cap from two settings, 300 writes per 600,000 ms as the owner set it, with no default, so an unset cap refuses every write; a count that can't be read refuses (503). Counted before the dispatch, so a write the app fails still counts. The class's deploy on the second account is the owner's | 1. **Keyed by label or by script.** *Recommended:* label, so a new release doesn't reset the count. 2. **Does a write the content Worker refuses count?** *Recommended:* no; only one sent on to the app |
 
 **Owed outside these PRs:** the second account's repeat of the spike with a D1-Edit-only token before S2 is relied on (the ruling, item 7); the read of a database that is there and the list's `result_info`, which no spike recorded and S1 reads as Cloudflare's usual envelope; and the security review of the manifest, the store and the write budget.
@@ -1769,6 +1769,90 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 3. **A stored count that isn't one the object wrote** (only a bug could write one) refuses every write to that app until something overwrites it, by review standard 3. *Recommended:* keep that, and if it is ever seen, let an operator delete the object's key, which is a tool that doesn't exist yet.
 
 **Not covered, owed:** no real Durable Object ran (the storage is a stand-in, and the input and output gates the counter relies on are Cloudflare's documented behaviour, untested here); the extra time for each write, measured at 41 to 67 ms median by the store spike, isn't measured here; no staging run, and none is possible until the owner deploys the class on the second account.
+
+##### What S5's first PR built: rule 3(b)'s check of bindings
+
+**Built, 2026-11-17, in the hourly scripts pass. That pass runs only while a content provider is configured, and no environment configures one.** `RELEASE_PATH_COMPLETE` is untouched. There is no room schema step. **The `Moderation` object has a schema step:** two tables, `binding_suspension` and `binding_unread`, created with `CREATE TABLE IF NOT EXISTS`, forward-only and safe to run again. **There is a contract change:** finding codes are added to `listTakedownFindings`'s documented list, so this PR is also the one contracts PR in flight.
+
+S5 was split in two. Rule 3(b) is a gate item, so it went first. The reconcile of stores is the next PR. *Revised the same day in the fix round on PR #420's two reviews (the coordinator's rulings 1 to 10).*
+
+- **The rule is core's,** `podster_core::app_bindings::check`, and it is pure.
+  - A script may hold nothing, or exactly `{"type":"d1","name":"STORE","id":…}` whose ID is the one the room recorded for the script's label (`own_store`).
+  - A record owed a deletion, or gone, still names its store. A create outstanding with no ID names none.
+  - **The ruling's "fixed ones" are none.**
+  - Everything else is foreign, under one of these codes. A script with several is reported under the most telling.
+    - `write_counter`: the content Worker's `WriteCounter` class, on any entry. A core test reads that name from `apps/content/src/counter.ts`.
+    - `serve_entries`: the serve entries' KV namespace.
+    - `store_foreign`: any other D1 database.
+    - `store_unrecorded`: a store bound while none is recorded.
+    - `store_own_twice`: the app's own store bound a second time under another name (ruling 10).
+    - `durable_object`, `kv_namespace`, `store_twice`, `other_binding`.
+    - `bindings_oversized`: a `200` read longer than `MAX_BINDINGS_BYTES`, 256 KiB, so padding can't hide a binding (ruling 1).
+- **Every readable entry is judged before unknown is said** (ruling 2).
+  - An entry read as foreign anywhere in the list decides it.
+  - An entry that can't be judged makes the script unknown only when nothing foreign was read. That covers an entry that isn't an object, has no `type`, or is a store binding with no name or an ID not in D1's form.
+  - So does a room record not in the room's form, for store bindings under `STORE`.
+- **Unknown decides nothing:**
+  - Reads that count as unknown: no answer, a `404` while the read lags an upload, or a non-array.
+  - The pass tells `script_bindings_unread` once, with how many of the scripts **this pass reached**.
+  - A script that stays unknown three passes in a row (`UNREAD_PASSES_TOLD`, Proposed) is told by name, as `script_bindings_keep_unread`, with how many. Any judged verdict forgets the count (ruling 3).
+- **The read** is `GET …/scripts/<name>/bindings` with the **scripts token** (S5's question 1). It goes with the reconcile's existing question about that script, along with the serve entries' namespace ID.
+- **The ceiling** is ruling 4, Proposed: `podster_core::app_bindings::suspension_permit`.
+  - It is the repository unpublish's: at most 5 apps in a rolling hour, or 10% of the rooms with apps if fewer, never below one.
+  - The `Moderation` object decides before it asks, from `binding_suspension`, and sizes the ceiling once per pass from the lookup table.
+  - Past the ceiling, or with the rooms uncounted, the room suspends nothing. It answers `held`, and operators are told `script_binding_held` with `ceiling_reached` or `ceiling_unread`, beside the foreign finding.
+  - An app already suspended uses none of the ceiling.
+- **The room decides,** from its current record (`workspace/script_bindings.rs`), **first, in a transaction of its own** (review standard 4).
+  - Foreign, within the ceiling: `takedown::set` on the script's label, exactly an operator's suspension. It is made by Podster with reason `other`. The label is kept, the app is unpublished (`app_suspended`), and nothing is served.
+  - **Any of the room's labels, current or retired, counts** (ruling 5): a script left under a retired label suspends the room's app, recorded on that label, the one the finding names.
+  - A failure of the check itself is logged by its code and answered `unknown`, and the rest of the question still runs (ruling 6).
+  - A failure of a later step still answers with the verdict and the failure named. So the foreign finding reaches operators in this same pass, the reconcile counts the script's step as failed, and the room tries to set its alarm.
+- **What the suspension does to the app's scripts** (ruling 5's trace) is what any operator's suspension does.
+  - The unpublish queues every script the room's state named (served, kept, in flight) for deletion.
+  - The same question about the offending script queues it too, since nothing claims it.
+  - The current release's script is therefore deleted. **A false suspension is still recoverable:** the label and the app's store, and with them its data, are kept, and after a lift a new release uploads the script again from the repository. Keeping the old script would restore nothing, because a lift restores no serve state and the unpublish clears the kept script a rollback would use. The fix round was ruled to keep it, and didn't. Its question 4 below.
+  - **Runbook, for an operator clearing a binding suspension:**
+    1. Read the finding's script name.
+    2. Wait until the room's delete job has taken that script away. Its `script_delete_queued` finding reads `gone`, or the script is gone from the namespace's list.
+    3. Lift the label the finding names.
+  - **A lift while that script is still there is undone at the next hourly pass, which reads it again.**
+- **Operators are told** by `script_binding_foreign`, by the script's name, with the code in `detail`.
+  - It and `script_binding_held` and `script_bindings_keep_unread` each have 1,000 rows of their own.
+  - While it is kept, `open_for` answers that script open, so a rollback never switches back to it.
+- **Logs** carry the code alone: two lines in the room, checked by a test that reads the source. Subjects are the script's name, as every script finding already is (review standard 5). No store name or ID appears in a finding, a log or an answer.
+- **Tests:**
+  - Core: 16 tests, in `crates/core/tests/app_bindings.rs`.
+  - API: `apps/api/test/script-bindings.cases.ts`, run from `takedown.spec.ts` with its helpers (ruling 9), against `fake-content.ts`'s `…/bindings` route. It covers:
+    - each foreign code, with the second pass's exact `changed: 0` and the room's own answer `suspended: false` (ruling 8);
+    - a list judged before unknown;
+    - the three-pass streak;
+    - a seven-room misread against the ceiling, an hour on;
+    - a retired label's leftover script, a lift undone, then the lift standing once the script is gone;
+    - a later step's failure, with the suspension and its finding kept;
+    - the check's own failure, with the rest of the question run.
+
+  *Mutation-checked, each put back after:*
+  - First push: core 19 mutants, API 6.
+  - Fix round, core 10 mutants:
+    - oversized read as unknown;
+    - an unreadable entry deciding first;
+    - the class needing a type;
+    - own-twice read as another store;
+    - the streak told a pass early or late;
+    - uncounted rooms allowing;
+    - the ceiling off by one, ignoring its window, or absent.
+  - Fix round, API 9 mutants: listed in the PR.
+
+  Each failed its tests.
+
+**Open questions, each with the recommendation:**
+
+1. **What the bindings read answers for real** is assumed past `type` and `name`. If it lists a binding the upload didn't write, every app reads foreign, and the ceiling then bounds the damage to 5 in an hour. *Recommended:* a gate item for the second account's spike repeat: read a real static script's and a real code script's bindings, and pin the stand-in to what is seen.
+2. **The ceiling's figures** are the repository unpublish's, Proposed. *Recommended:* keep them one figure for both until staging says otherwise.
+3. **The suspension's reason is `other`.** *Recommended:* keep it; the finding's code says why.
+4. **Keeping the current release's script after a binding suspension** (ruling 5) wasn't built. Nothing could serve from it: a lift restores no serve state, and the unpublish clears `kept_previous`. Keeping it would also need a room schema step for a record of what to keep. *Recommended:* the architect confirms recovery by lift and a new release, as for every operator suspension. If a restore on lift is wanted, it is its own ruling and PR.
+
+**Not covered, owed:** no real bindings read; no staging run; the rooms' count unreadable (`ceiling_unread`) is shown in core only. A script whose label finds no room is told as `script_without_room`, and its bindings aren't read.
 
 #### Step 8: the build plan
 
@@ -1916,7 +2000,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **the reconcile's cron entry, in every environment that has `RELEASES` and a provider,** or neither of those on there before it. Until it runs, a room the organization's list doesn't name keeps serving after a take until a release command of its own ([the worst case](#what-step-5s-first-pr-built), under decision 218's PR C);
 - **every environment that has a provider sets `RELEASES` explicitly,** to exactly `true` or exactly `false`. Unset or malformed, the setting is undecided: nothing is released, nothing is taken down, and operators are told by every reconcile pass ([`docs/staging.md`](staging.md#switching-release-off-for-the-deployment));
 - **the operators' page for apps' reports** (step 10, [owed since step 9](#what-step-9-built));
-- **the reconcile's check of each app script's bindings (stage 1):** it reads each app script's bindings and reports any binding other than its room's own store, the outbound Worker and the fixed ones as an operator finding, and takes the app down. **Taking it down here means what an operator's suspension of the app does:** nothing is served, the app's label is kept, and the operator finding is raised for review; it is not an unpublish, which retires the label (the architect's ruling of 2026-11-16 on review). **This is a new trigger beside ADR 0010's unpublish list, for the owner to review.** Required because Workers Scripts Edit alone can bind any store in its account (the architect's ruling on the store, 2026-11-16, rule 3(b), for the owner to review: [the ruling](#store-spike-results-2026-11-16)).
+- **the reconcile's check of each app script's bindings (stage 1):** *built 2026-11-17 ([S5's first PR](#what-s5s-first-pr-built-rule-3bs-check-of-bindings)); still owed before it is relied on: a read of a real script's bindings, static and with its store, on the second account.* It reads each app script's bindings and reports any binding other than its room's own store, the outbound Worker and the fixed ones as an operator finding, and takes the app down. **Taking it down here means what an operator's suspension of the app does:** nothing is served, the app's label is kept, and the operator finding is raised for review; it is not an unpublish, which retires the label (the architect's ruling of 2026-11-16 on review). **This is a new trigger beside ADR 0010's unpublish list, for the owner to review.** Required because Workers Scripts Edit alone can bind any store in its account (the architect's ruling on the store, 2026-11-16, rule 3(b), for the owner to review: [the ruling](#store-spike-results-2026-11-16)).
 - **before code is turned on, an app's outbound `connect()` (stage 1, from the review of PR #418, 2026-11-17):** whether a socket a module opens with `connect()` from `cloudflare:sockets` goes through the dispatch's outbound Worker, or past it. The outbound Worker refuses every `fetch`; if sockets bypass it, an app can reach the network. To be tried in the second account's spike repeat, beside the test at the deployment that an app's `fetch` and socket both fail.
 - **before code is turned on, the script write's query with modules (stage 1, from the review of PR #418):** S3 keeps wrangler's `?excludeScript=true&bindings_inherit=strict` for a script with modules, as spike A saw it sent for static files only. Whether the call needs it, and what `excludeScript` does when a script is sent, is to be tried in the second account's spike repeat.
 

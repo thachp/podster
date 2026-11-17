@@ -95,7 +95,19 @@ fn escaped(value: &str) -> String {
     }
     out
 }
-/// A configured provider. Its fields never leave this module, except the content domain's name.
+/// The longest answer a script's bindings read may give: Podster writes at most one binding, so a list anywhere near
+/// this is not one it wrote. Longer, from a `200`, is [`Bindings::Oversized`].
+pub(crate) const MAX_BINDINGS_BYTES: usize = 256 * 1024;
+
+/// What a script's bindings read gave (rule 3(b)).
+pub(crate) enum Bindings {
+    List(Vec<Value>),
+    Oversized,
+    Unread,
+}
+
+/// A configured provider. Its fields never leave this module, except the content domain's name and, for rule 3(b)'s
+/// check in a room, the serve entries' namespace ID.
 pub(crate) struct Provider {
     account: String,
     namespace: String,
@@ -248,6 +260,28 @@ async fn call_bounded(
     body: Option<String>,
     max: usize,
 ) -> Option<Answer> {
+    match call_sized(method, url, bearer, body, max).await? {
+        Sized::Within(answer) => Some(answer),
+        Sized::Longer(_) => None,
+    }
+}
+
+/// An answer that came, told apart by whether its body fit the bound.
+enum Sized {
+    Within(Answer),
+    /// The status of an answer whose body was longer than the bound. Nothing of the body is kept.
+    Longer(u16),
+}
+
+/// The call itself: `None` when there was no answer at all (unreachable, timed out), and otherwise whether the body
+/// fit `max`. A redirect is never followed.
+async fn call_sized(
+    method: Method,
+    url: String,
+    bearer: &str,
+    body: Option<String>,
+    max: usize,
+) -> Option<Sized> {
     let controller = AbortController::default();
     let signal = controller.signal();
     let bearer = bearer.to_owned();
@@ -270,11 +304,14 @@ async fn call_bounded(
             .await?;
         let status = response.status_code();
         let body = crate::github::bounded_body(&mut response, max).await?;
-        Ok::<_, Error>(body.map(|body| Answer { status, body }))
+        Ok::<_, Error>(match body {
+            Some(body) => Sized::Within(Answer { status, body }),
+            None => Sized::Longer(status),
+        })
     };
     let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
     let answer = match select(Box::pin(attempt), timeout).await {
-        Either::Left((Ok(answer), _)) => answer,
+        Either::Left((Ok(answer), _)) => Some(answer),
         Either::Left((Err(_), _)) | Either::Right(_) => None,
     };
     controller.abort();
@@ -520,6 +557,46 @@ impl Provider {
             )),
             _ => None,
         }
+    }
+
+    /// A script's bindings, with the scripts token (rule 3(b), S5 of the store plan): the entries of the list as the
+    /// provider gave them; [`Bindings::Oversized`] for a `200` whose body is longer than [`MAX_BINDINGS_BYTES`], which
+    /// no list Podster writes comes near, so padding can't hide a binding (the review of PR #420); and
+    /// [`Bindings::Unread`] when there was no answer, or one that isn't a `200` with `"success": true` and an array.
+    /// The store spike read this path with a read token and saw `{ type, name }` in each entry; a `404` (10007) or an
+    /// empty list straight after an upload is the read lagging, which the room judges as core says. What each entry
+    /// means is `podster_core::app_bindings`'s, in the room.
+    pub(crate) async fn read_bindings(&self, name: &str) -> Bindings {
+        let Some(url) = self.script_url(name).map(|url| format!("{url}/bindings")) else {
+            return Bindings::Unread;
+        };
+        let answer = match call_sized(
+            Method::Get,
+            url,
+            &self.scripts_token,
+            None,
+            MAX_BINDINGS_BYTES,
+        )
+        .await
+        {
+            Some(Sized::Within(answer)) => answer,
+            Some(Sized::Longer(200)) => return Bindings::Oversized,
+            Some(Sized::Longer(_)) | None => return Bindings::Unread,
+        };
+        let body = answer.json();
+        if answer.status != 200 || body["success"] != true {
+            return Bindings::Unread;
+        }
+        body["result"]
+            .as_array()
+            .cloned()
+            .map_or(Bindings::Unread, Bindings::List)
+    }
+
+    /// The ID of the KV namespace that holds the serve entries, for rule 3(b) to tell a binding to it from any other.
+    /// It goes only to a room's check, never into a log or an answer.
+    pub(crate) fn serve_entries_namespace(&self) -> &str {
+        &self.kv_namespace
     }
 
     /// Deletes a script. `None` when there was no answer: the delete may or may not have happened.

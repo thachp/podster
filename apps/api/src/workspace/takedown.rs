@@ -1651,6 +1651,78 @@ impl Workspace {
         self.migrate_if_needed()?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        // Rule 3(b), first and in a transaction of its own (S5 of the store plan): a script whose bindings the reconcile
+        // read is judged against the room's record of its store, and a binding it may not hold suspends the app
+        // before anything slower runs (review standard 4). Only a script question that carries a read asks it. **A
+        // failure here is logged by its code and answered `unknown`, and everything after it still runs** (the review
+        // of PR #420): nothing committed, so nothing is decided, and the reconcile asks again next hour.
+        let bindings = if body["kind"] == "script" && body.get("bindings").is_some() {
+            let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+            let (slot, store, asked) = (out.clone(), sql.clone(), body.clone());
+            let judged = transaction_sync(&self.state, move || {
+                *slot.borrow_mut() = script_bindings::check_script(&store, &asked, now_ms())?;
+                Ok(())
+            });
+            match judged {
+                Ok(()) => out.borrow_mut().take(),
+                Err(error) => {
+                    console_error!(
+                        "takedown: a script's bindings couldn't be judged: code={}",
+                        error.code().unwrap_or("internal_error")
+                    );
+                    Some(
+                        json!({ "verdict": "unknown", "foreign": null, "suspended": false, "held": false }),
+                    )
+                }
+            }
+        } else {
+            None
+        };
+        match self.takedown_rest(&sql, body).await {
+            Ok(mut answer) => {
+                if let (Some(judged), Value::Object(fields)) = (bindings, &mut answer) {
+                    fields.insert("bindings".into(), judged);
+                }
+                Ok(answer)
+            }
+            Err(error) => {
+                let Some(judged) = bindings else {
+                    return Err(error);
+                };
+                // The bindings' verdict has committed, a suspension with it. It is answered all the same, so operators
+                // are told this pass, with the failure named, which the reconcile counts against the script. The
+                // alarm is set for the applier, whose work a suspension made due; if that fails too, the next pass
+                // sets it.
+                let code = error.code().unwrap_or("internal_error");
+                console_error!("takedown: a step after the bindings' check failed: code={code}");
+                if let Err(armed) = self.arm(false, false).await {
+                    console_error!(
+                        "takedown: the alarm wasn't set after a failed check: code={}",
+                        armed.code().unwrap_or("internal_error")
+                    );
+                }
+                Ok(
+                    json!({ "known": true, "changed": false, "findings": [], "bindings": judged, "failed": code }),
+                )
+            }
+        }
+    }
+
+    /// Everything the reconcile's question does after rule 3(b)'s check: the switch, the bookkeeping, the question
+    /// itself and the alarm.
+    async fn takedown_rest(&self, sql: &SqlStorage, body: Value) -> R<Value> {
+        // Test builds only: a test makes every step after the bindings' check fail, to show that check's outcome still
+        // stands and reaches operators.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_takedown_check_fails'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Err(ApiError::internal("test: the takedown check failed after the bindings' check"));
+        }
         // Whatever was asked, the walk's wake included: the room reads its organization's release switch and applies
         // it (decision 218's backstop, `release_switch`), so a room no notice reached comes down here. A read that
         // fails changes nothing, and the question is answered all the same.
@@ -1670,7 +1742,7 @@ impl Workspace {
         // Whether an unpublish is owed for the repository's link: the room's alarm, which `arm` sets while one is, asks
         // the deployment's ceiling, and the walk takes `false` from a room it holds as the cause cleared there
         // (`crate::repo_ceiling`). One that couldn't be read is left out of the answer, so it can never release a hold.
-        let owed = super::repo_unpublish::owed(&sql).map(|owed| owed.is_some());
+        let owed = super::repo_unpublish::owed(sql).map(|owed| owed.is_some());
         self.arm(false, false).await?;
         let mut answer = out
             .borrow_mut()

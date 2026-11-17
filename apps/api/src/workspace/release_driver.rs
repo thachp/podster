@@ -115,8 +115,9 @@ pub(super) fn enabled(sql: &SqlStorage, from_alarm: bool) -> bool {
 
 /// Test builds only: a test changes the room at a named point of a step, by leaving statements for the room to run
 /// there, in `test_release_at (point, statement)`: `reserved` (an upload's tree reads reserved, before GitHub's token
-/// is asked for), `opened` (the token minted, before the trees are read) and `staged` (a commit staged, before its
-/// outside reads). Each runs once. A statement that fails is logged by its code, and the step goes on.
+/// is asked for), `opened` (the token minted, before the trees are read), `staged` (a commit staged, before its
+/// outside reads), `store_first` (an upload's recheck held, before its store's settle-first reads the record) and
+/// `store_listed` (a store's list read, before anything of it is written). Each runs once. A statement that fails is logged by its code, and the step goes on.
 #[cfg(feature = "failpoints")]
 pub(super) fn test_at(sql: &SqlStorage, point: &str) {
     let found = rows(
@@ -458,8 +459,9 @@ fn lease(
         set_job(sql, &head.id, None, Some(ATTEMPTS_EXHAUSTED), now)?;
         return Ok(answer("gave_up", Some(ATTEMPTS_EXHAUSTED), None));
     }
-    // A settling read reads nothing from GitHub, so it takes no upload slot.
-    if step == DriveStep::Upload && !settling {
+    // A settling read reads nothing from GitHub, so it takes no upload slot; nor does settling the app's store's create
+    // outstanding, which the upload step does first and alone (`release_store`).
+    if step == DriveStep::Upload && !settling && !release_store::settles_first_for(sql, &head.id)? {
         exec(
             sql,
             "DELETE FROM release_upload_attempt WHERE at < ?",

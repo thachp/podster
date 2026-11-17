@@ -9,9 +9,10 @@
 //! are never the one that makes and deletes stores. **Whether a token with D1 Edit alone can do all four calls is owed
 //! to the second account's repeat of the spike** (item 7).
 //!
-//! **Nothing is configured anywhere, and nothing calls this yet** but a test-only route: the room's record of its store
-//! is the first thing built on it. [`StoreProvider::from_env`] answers `None` unless both settings are bound and
-//! well-formed, and no environment binds `CONTENT_STORE_TOKEN`.
+//! **Nothing is configured anywhere.** The release job makes a store through [`StoreProvider::create`] and settles a
+//! lost create through [`StoreProvider::list`] (`workspace/release_store.rs`, S2 of the store plan); the read and the
+//! delete wait for S4 and are reached only by a test-only route. [`StoreProvider::from_env`] answers `None` unless both
+//! settings are bound and well-formed, and no environment binds `CONTENT_STORE_TOKEN`.
 //!
 //! **What was seen and what is assumed.** The store spike (`spikes/m6-store`) saw a create (`POST`, `{"name": …}`,
 //! answered `200` with `result.uuid` and `result.name`), the list (`GET`, `page` and `per_page=100`, entries with
@@ -20,8 +21,9 @@
 //! envelope and are read strictly, so a wrong assumption leaves a caller retrying, which shows, and never lets it
 //! record a store made or gone that isn't.
 //!
-//! - **A create** counts only as `podster_core::app_store::created` allows. Anything else, no answer among them, may or
-//!   may not have made it, and only the list settles that, by the name the room chose.
+//! - **A create** counts only as `podster_core::app_store::created` allows, and is refused only as
+//!   `podster_core::app_store::create_answer` allows. Anything else, no answer among them, may or may not have made
+//!   it, and only the list settles that, by the name the room chose.
 //! - **A read** is present or gone only as `podster_core::app_store::read` allows.
 //! - **A delete's answer is never trusted:** only a read says gone.
 //! - **The list** is every page, as `podster_core::app_store::ListRead` allows, or no list.
@@ -30,15 +32,11 @@
 //! own record, and an ID from Cloudflare's own answer, each checked against its form before it goes into a path or a
 //! body. Logs carry nothing from this module: no name, no ID, no account and no token.
 
-// Nothing calls this module but the test-only route, which reads the settings by name, until the release job makes a
-// store (S2 of the plan). Remove this with that PR.
-#![allow(dead_code)]
-
 use crate::{setting, Setting};
 use futures_util::future::{select, Either};
 use podster_core::app_store::{
-    created, d1_id_form, is_store_name, read, Described, Envelope, ListPage, ListRead, ListStep,
-    StoreRead, LIST_PAGE, MAX_LIST_PAGES,
+    create_answer, d1_id_form, is_store_name, read, CreateAnswer, Described, Envelope, ListPage,
+    ListRead, ListStep, StoreRead, LIST_PAGE, MAX_LIST_PAGES,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -186,27 +184,34 @@ impl StoreProvider {
         format!("{API}/accounts/{}/d1/database", self.account)
     }
 
-    /// Makes a database of this name, which must be a store's name. Its ID when Cloudflare said, in so many words, that
-    /// it made exactly this one; `None` for anything else, which [`StoreProvider::list`] settles by the name.
-    pub(crate) async fn create(&self, name: &str) -> Option<String> {
+    /// Makes a database of this name, which must be a store's name: made, with its ID, when Cloudflare said in so many
+    /// words that it made exactly this one; refused when it said in so many words that it didn't; anything else, no
+    /// answer among them, is unknown, which [`StoreProvider::list`] settles by the name. A name not of a store's form is
+    /// never sent, and is unknown.
+    pub(crate) async fn create(&self, name: &str) -> CreateAnswer {
         if !is_store_name(name) {
-            return None;
+            return CreateAnswer::Unknown;
         }
-        let (status, answer) = call(
+        let Some((status, answer)) = call(
             Method::Post,
             self.base(),
             &self.token,
             Some(json!({ "name": name })),
         )
-        .await?;
-        created(
+        .await
+        else {
+            return CreateAnswer::Unknown;
+        };
+        create_answer(
             &envelope(status, &answer),
             &described(&answer["result"]),
             name,
         )
     }
 
-    /// Reads the database with this ID, which the room recorded under this name.
+    /// Reads the database with this ID, which the room recorded under this name. Only the test-only route reads one
+    /// until S4 deletes stores.
+    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
     pub(crate) async fn read(&self, id: &str, name: &str) -> StoreRead {
         if !d1_id_form(id) || !is_store_name(name) {
             return StoreRead::Unknown;
@@ -229,7 +234,9 @@ impl StoreProvider {
         )
     }
 
-    /// Deletes the database with this ID. Its answer isn't trusted: only a read says gone.
+    /// Deletes the database with this ID. Its answer isn't trusted: only a read says gone. Only the test-only route
+    /// deletes one until S4.
+    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
     pub(crate) async fn delete(&self, id: &str) {
         if !d1_id_form(id) {
             return;
@@ -305,7 +312,10 @@ pub(crate) async fn test_route(env: &Env, body: Value) -> Result<Response> {
     let name = body["name"].as_str().unwrap_or_default();
     let id = body["id"].as_str().unwrap_or_default();
     let answer = match body["op"].as_str() {
-        Some("create") => json!({ "id": provider.create(name).await }),
+        Some("create") => json!({ "id": match provider.create(name).await {
+            CreateAnswer::Made(id) => Some(id),
+            CreateAnswer::Refused | CreateAnswer::Unknown => None,
+        } }),
         Some("read") => json!({ "read": match provider.read(id, name).await {
             StoreRead::Present => "present",
             StoreRead::Gone => "gone",

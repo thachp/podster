@@ -1,5 +1,9 @@
 //! Reading a release's files and uploading them as its own script (M6 step 5; ADR 0010's "The release job", steps 1
-//! to 4). **Static files only:** no Worker code, no binding and no store is ever uploaded here.
+//! to 4). **Static files only:** no Worker code and no binding is ever uploaded here. *Since S2 of the store plan
+//! (2026-11-17):* a release whose manifest asks for its app's store has the store made after the first pass of its
+//! read and before anything is sent to the provider; and a release whose own last step waited on its store settles
+//! its label's create outstanding before anything is read (`release_store`). A release that asks for no store is
+//! never held by one. Nothing binds the store yet: that is S3's.
 //!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
@@ -45,17 +49,19 @@ use super::release_commit::{
     record_uploaded, upload_answer, upload_failed, upload_ready, UploadReady,
 };
 use super::release_recheck::{release_now, state_of, Reads};
+use super::release_store::StoreOutcome;
 use super::*;
 use crate::content_provider::upload::{BucketBody, ManifestFile, Sent};
 use crate::content_provider::Provider;
 use crate::github::release_read::{
-    hash_of, reserve, Attempt, ReadFailure, ReadFile, ReleaseApp, ReleaseReader,
+    hash_of, reserve, Attempt, ReadFailure, ReadFile, ReadPlan, ReleaseApp, ReleaseReader,
 };
+use podster_core::app_code::{asks_for_store, MANIFEST_PATH, MAX_MANIFEST_BYTES};
 use podster_core::release::{
     fetch_batches, file_reads, upload_requests, ReleaseState, FETCH_PASSES, TREE_READS,
 };
 use podster_core::release_tree::{
-    marker_body, FetchMismatch, ReadProblem, MARKER_PATH, MARKER_TYPE,
+    marker_body, FetchMismatch, PlannedFile, ReadProblem, ReleasePlan, MARKER_PATH, MARKER_TYPE,
 };
 use podster_core::release_uncertain::{script_write_outcome, WriteOutcome};
 
@@ -75,6 +81,10 @@ enum Stop {
     Provider,
     /// The driver's lease on the step ran out: nothing more is asked of anyone.
     Lease,
+    /// The app's store said the upload doesn't go on (`release_store`).
+    Store(StoreOutcome),
+    /// The room couldn't be read or written.
+    Room(ApiError),
 }
 
 impl From<ReadFailure> for Stop {
@@ -112,23 +122,47 @@ async fn fetch_each(
     Ok(())
 }
 
-/// Steps 2 and 3: the read, the session and the buckets. The reader is the caller's to close. `go_on` is asked before
-/// each thing asked of the read budget or the provider; once it says no, nothing more is (the driver's lease).
-#[allow(clippy::too_many_arguments)]
-async fn send_files(
+/// The first pass's yield: the plan, every file's hash, and the app's manifest's bytes if the release has one.
+struct FirstPass {
+    plan: ReadPlan,
+    hashes: Vec<String>,
+    manifest: Option<Vec<u8>>,
+}
+
+impl FirstPass {
+    /// Whether the release asks for its app's store (`podster_core::app_code::asks_for_store`), from the tree and the
+    /// manifest's bytes as fetched and checked.
+    fn asks_for_store(&self) -> bool {
+        let plan = ReleasePlan {
+            files: self
+                .plan
+                .files
+                .iter()
+                .map(|file| PlannedFile {
+                    path: file.path.clone(),
+                    size: file.size,
+                    sha: file.sha.clone(),
+                })
+                .collect(),
+            total_bytes: self.plan.total_bytes,
+        };
+        asks_for_store(&plan, self.manifest.as_deref())
+    }
+}
+
+/// Step 2: the read, and the first pass, which hashes every file and keeps only the manifest's bytes (at most
+/// `MAX_MANIFEST_BYTES`). The reader is the caller's to close. `go_on` is asked before each thing asked of the read
+/// budget; once it says no, nothing more is (the driver's lease).
+async fn read_files(
     env: &Env,
-    provider: &Provider,
     reader: &ReleaseReader<'_>,
     attempt: &Attempt,
     release_id: &str,
     owner: &str,
-    script: &str,
     commit_sha: &str,
     go_on: &dyn Fn() -> bool,
-) -> std::result::Result<Complete, Stop> {
+) -> std::result::Result<FirstPass, Stop> {
     let check = || if go_on() { Ok(()) } else { Err(Stop::Lease) };
-    let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
-    let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
     // The token's mint took time: no tree is read once the step's lease has run out.
     check()?;
     let plan = reader.plan(commit_sha).await?;
@@ -141,14 +175,46 @@ async fn send_files(
         attempt,
     )
     .await?;
-    // The first pass: every file's hash, from its own bytes. The bytes are dropped as each is hashed.
+    // The first pass: every file's hash, from its own bytes. The bytes are dropped as each is hashed, but the
+    // manifest's, which say whether the app asks for its store.
     let all: Vec<&ReadFile> = plan.files.iter().collect();
     let mut hashes: Vec<String> = Vec::with_capacity(all.len());
-    fetch_each(reader, &all, |_, hash, _| {
+    let mut manifest = None;
+    fetch_each(reader, &all, |place, hash, bytes| {
+        let is_manifest = all
+            .get(place)
+            .is_some_and(|file| file.path == MANIFEST_PATH);
+        if is_manifest && bytes.len() as u64 <= MAX_MANIFEST_BYTES {
+            manifest = Some(bytes);
+        }
         hashes.push(hash);
         Ok(())
     })
     .await?;
+    Ok(FirstPass {
+        plan,
+        hashes,
+        manifest,
+    })
+}
+
+/// Step 3: the session and the buckets, after the first pass. The reader is the caller's to close. `go_on` is asked
+/// before each thing asked of the provider; once it says no, nothing more is (the driver's lease).
+#[allow(clippy::too_many_arguments)]
+async fn send_files(
+    provider: &Provider,
+    reader: &ReleaseReader<'_>,
+    attempt: &Attempt,
+    release_id: &str,
+    script: &str,
+    commit_sha: &str,
+    first: FirstPass,
+    go_on: &dyn Fn() -> bool,
+) -> std::result::Result<Complete, Stop> {
+    let check = || if go_on() { Ok(()) } else { Err(Stop::Lease) };
+    let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
+    let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
+    let FirstPass { plan, hashes, .. } = first;
     let mut manifest: Vec<ManifestFile> = plan
         .files
         .iter()
@@ -373,6 +439,23 @@ impl Workspace {
         Ok(out)
     }
 
+    /// What the app's store step said, as the upload's answer: a wait, or the release failed by its code, or the
+    /// recheck's own answer.
+    async fn store_answer(&self, release_id: &str, outcome: StoreOutcome) -> R<Value> {
+        match outcome {
+            StoreOutcome::Answer(answer) => Ok(answer),
+            StoreOutcome::Wait(code, retry_at) => self.upload_waiting(release_id, code, retry_at),
+            StoreOutcome::Fail(code) => {
+                let id = release_id.to_owned();
+                self.release_transaction(move |sql| upload_failed(sql, &id, code, release_now(sql)))
+                    .await
+            }
+            StoreOutcome::Go => Err(ApiError::internal(
+                "a store step that goes on, answered as if it stopped",
+            )),
+        }
+    }
+
     /// `{ release_id }`: reads one release's files and uploads them as its script (M6 step 5).
     /// Answers `{ release_id, state, rechecked, reason, uploaded }`, with `waiting` and a code when nothing was
     /// decided and the command is to be asked again. See the module's note for the order.
@@ -412,6 +495,12 @@ impl Workspace {
                     commit_sha,
                 } => (script, repo_id, commit_sha),
             };
+        // The app's store first, for a release whose last step waited on it: its label's create outstanding is settled
+        // by the list, and nothing is read from GitHub in this step (`release_store`).
+        let label = text(&release["label"]).unwrap_or_default();
+        if let Some(outcome) = self.store_settle_first(&release_id, &label, lease).await? {
+            return self.store_answer(&release_id, outcome).await;
+        }
         let Some(provider) = self.upload_provider() else {
             return self.upload_waiting(&release_id, NO_PROVIDER, None);
         };
@@ -434,18 +523,41 @@ impl Workspace {
                 Ok(reader) => {
                     #[cfg(feature = "failpoints")]
                     release_driver::test_at(&sql, "opened");
-                    let sent = send_files(
+                    let sent = match read_files(
                         &self.env,
-                        &provider,
                         &reader,
                         &attempt,
                         &release_id,
                         &owner,
-                        &script,
                         &commit_sha,
                         &go_on,
                     )
-                    .await;
+                    .await
+                    {
+                        Err(stop) => Err(stop),
+                        // The app's store, for a release that asks for one, before anything is sent to the
+                        // provider.
+                        Ok(first) => match self
+                            .store_before_upload(&release_id, &label, first.asks_for_store(), lease)
+                            .await
+                        {
+                            Err(error) => Err(Stop::Room(error)),
+                            Ok(StoreOutcome::Go) => {
+                                send_files(
+                                    &provider,
+                                    &reader,
+                                    &attempt,
+                                    &release_id,
+                                    &script,
+                                    &commit_sha,
+                                    first,
+                                    &go_on,
+                                )
+                                .await
+                            }
+                            Ok(outcome) => Err(Stop::Store(outcome)),
+                        },
+                    };
                     // Every way out of the read ends here: the token is revoked before anything else is done.
                     reader.close().await;
                     sent
@@ -475,6 +587,8 @@ impl Workspace {
             Err(Stop::Lease) => {
                 return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None)
             }
+            Err(Stop::Store(outcome)) => return self.store_answer(&release_id, outcome).await,
+            Err(Stop::Room(error)) => return Err(error),
         };
         #[cfg(feature = "failpoints")]
         self.test_before_check()?;

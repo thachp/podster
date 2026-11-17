@@ -482,3 +482,14 @@ pub fn check_code_release(
         static_files: layout.static_files.clone(),
     })
 }
+
+/// Whether a release asks for its app's store (S2 of the store plan): only a release that carries code, checked whole
+/// by [`split_release`] and [`check_code_release`] over `manifest`, the manifest's bytes as fetched, whose manifest says
+/// `"store": true`. Anything else asks for none, a manifest or tree that can't be read whole among them, so no store is
+/// ever made on a guess. Whether such a release then fails is the upload's, not this rule's.
+pub fn asks_for_store(plan: &ReleasePlan, manifest: Option<&[u8]>) -> bool {
+    let (Ok(ReleaseShape::Code(layout)), Some(bytes)) = (split_release(plan), manifest) else {
+        return false;
+    };
+    check_code_release(&layout, bytes).is_ok_and(|release| release.wants_store)
+}

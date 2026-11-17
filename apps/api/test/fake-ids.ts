@@ -17,6 +17,7 @@ const FIXED = 1_000;
 
 /** Each spec file's block, and its label tag: two lowercase letters, so one label prefix is never the start of another. */
 export const FAKE_ID_BLOCKS = {
+  "app-store": { block: 13, tag: "as" },
   "merge-task": { block: 1, tag: "mt" },
   "provisioning": { block: 2, tag: "pv" },
   "release-driver": { block: 3, tag: "rd" },

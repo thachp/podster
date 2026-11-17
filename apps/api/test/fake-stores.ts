@@ -33,6 +33,7 @@ type Op = "create" | "read" | "delete" | "list";
  * - `notJson`: does the work and answers 200 with a body that isn't JSON.
  * - `huge`: does the work and answers with a body longer than any the client reads.
  * - `redirect`: does nothing and answers 302 to an answer that would count, if followed.
+ * - `refused`: a create does nothing and answers 403 with code 10000, as a token without D1's permission is told.
  * - `notFoundOtherCode`: a read answers 404 with code 7403.
  * - `notFoundTwoCodes`: a read answers 404 with codes 7404 and 1000.
  * - `notFoundSuccessMissing`: a read answers 404 with code 7404 and no `success`.
@@ -45,7 +46,7 @@ type Op = "create" | "read" | "delete" | "list";
  * - `huge` on the list: every page full, of a total far longer than any list the client reads.
  */
 type FaultKind =
-  | "lost" | "created201" | "noSuccess" | "successText" | "otherName" | "upperId" | "notJson" | "huge" | "redirect"
+  | "lost" | "created201" | "noSuccess" | "successText" | "otherName" | "upperId" | "notJson" | "huge" | "redirect" | "refused"
   | "notFoundOtherCode" | "notFoundTwoCodes" | "notFoundSuccessMissing" | "codeText" | "otherId"
   | "noInfo" | "totalDrift" | "badEntry" | "shortPage";
 type Fault = { op: Op; kind: FaultKind; times: number };
@@ -114,6 +115,7 @@ export async function fakeStores(request: Request): Promise<Response | undefined
     return new Response(null, { status: 302, headers: { location: `https://stores-fake.example.com/echo?${echo}` } });
   }
   if (op === "create" && rest === "") {
+    if (fault === "refused") return failure(403, [10000]);
     const body = (await request.json()) as Record<string, unknown>;
     if (Object.keys(body).length !== 1 || typeof body.name !== "string") return failure(400, [7400]);
     if (databases.some((db) => db.name === body.name)) return failure(400, [7502]);

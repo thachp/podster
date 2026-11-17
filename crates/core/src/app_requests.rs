@@ -40,15 +40,10 @@ pub const CODE_METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DEL
 pub const WRITE_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 /// The visitor's headers sent on to an app with every request, as today.
 pub const READ_HEADERS: [&str; 3] = ["accept", "if-none-match", "if-modified-since"];
-/// The visitor's headers sent on to an app with a write: those of a read, and the body's type and length. `Cookie`,
+/// The visitor's headers sent on to an app with a write: `Accept`, and the body's type and length. A read's two
+/// conditions don't pass: a conditional write could only ever be answered `304`, which isn't served. `Cookie`,
 /// `Authorization` and every other header never pass.
-pub const WRITE_HEADERS: [&str; 5] = [
-    "accept",
-    "if-none-match",
-    "if-modified-since",
-    "content-type",
-    "content-length",
-];
+pub const WRITE_HEADERS: [&str; 3] = ["accept", "content-type", "content-length"];
 /// The only media type a write may carry.
 pub const JSON_TYPE: &str = "application/json";
 /// The `Access-Control-Allow-Origin` of every answer for a host with code, the preflight's among them: the origin a

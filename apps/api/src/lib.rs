@@ -4,6 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 
 mod a2a_out;
+mod app_stores;
 mod content_provider;
 mod content_stop;
 mod custom_hostnames;
@@ -352,6 +353,12 @@ async fn route(
             a2a_out::Outcome::Retry(delay) => json!({ "retry": delay }),
         };
         return Ok(Response::from_json(&json!({ "outcome": outcome }))?);
+    }
+
+    // Test builds only: the store client's four calls, against the stand-in, since nothing calls it yet (M6 stage 1).
+    #[cfg(feature = "failpoints")]
+    if path == "/test/app-store" && req.method() == Method::Post {
+        return Ok(app_stores::test_route(&env, req.json().await?).await?);
     }
 
     #[cfg(feature = "failpoints")]

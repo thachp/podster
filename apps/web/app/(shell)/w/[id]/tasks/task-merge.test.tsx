@@ -8,6 +8,7 @@ import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-chan
 import { explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal } from "./task-merge";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
+import { MERGE_RELEASES_NOTHING } from "./release-stage";
 
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
 
@@ -71,6 +72,9 @@ describe("merging from the task Sheet", () => {
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByRole("heading")).toHaveTextContent("Merge reviewed commit a1b2c3d4e5f6?");
     expect(dialog).toHaveTextContent("into the repository's default branch, main");
+    // M6: the confirmation says that merging releases nothing.
+    expect(dialog).toHaveTextContent(MERGE_RELEASES_NOTHING);
+    expect(button).toHaveAccessibleDescription(new RegExp(MERGE_RELEASES_NOTHING.replace(/[.:]/g, "\\$&")));
     expect(calls.filter((call) => call.method === "POST")).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
     await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));

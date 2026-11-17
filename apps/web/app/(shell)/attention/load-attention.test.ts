@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Task } from "../w/[id]/tasks/task-model";
 import { acknowledgeUpTo, describeEvent, type InboxEvent } from "./attention-model";
-import { loadAttention, MAX_ROOMS, MAX_TITLE_READS } from "./load-attention";
+import { loadAttention, MAX_APPROVAL_ROOMS, MAX_ROOMS, MAX_TITLE_READS } from "./load-attention";
 
 const task = (id: string, over: Partial<Task> = {}) => ({ id, title: `Title ${id}`, status: "submitted", reviewer: "per_me", submission_no: 1, ...over });
 const ok = (data: unknown) => ({ ok: true as const, data });
@@ -143,5 +143,85 @@ describe("inbox wording", () => {
     expect(describeEvent(event(), "per_me", { agt_a: "Architect" })).toBe("Architect submitted work for review");
     expect(describeEvent(event({ actor_id: "per_me", type: "task.canceled" }), "per_me", {})).toBe("You canceled a task");
     expect(describeEvent(event({ type: "task.future", actor_id: null }), "per_me", {})).toBe("Someone made a change");
+  });
+});
+
+describe("release approvals (M6 step 10(b))", () => {
+  const SHA = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+  const approval = (id: string, at: number, over: Record<string, unknown> = {}) => ({ id: `rel_${id.padStart(32, "0")}`, task_id: "tsk_1", commit_sha: SHA, state: "awaiting_approval", requested_by: "per_r", requested_at: at, ...over });
+  const room = (id: string, role: string) => ({ workspace_id: id, workspace_name: `Room ${id}`, role });
+  const rooms = (...list: { workspace_id: string; workspace_name: string; role: string }[]) => ok({ workspaces: list });
+  const approvalsOf = (asked: string[]) => asked.filter((path) => path.endsWith("/release-approvals"));
+  const off = { ok: false as const, status: 404, code: "not_found" };
+
+  it("is unavailable after one read while release is off for the deployment, asking no other room", async () => {
+    const { query, asked } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/release-approvals": off,
+      "/api/v1/workspaces/ws_2/release-approvals": off,
+      "/api/v1/workspaces/ws_1/tasks": page([]),
+      "/api/v1/workspaces/ws_2/tasks": page([]),
+      "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "admin")),
+    });
+    const result = await loadAttention(query, "per_me");
+    expect(result.approvals).toEqual({ state: "unavailable" });
+    expect(approvalsOf(asked)).toHaveLength(1);
+  });
+
+  it("asks only rooms the person owns or administers, and lists what awaits, newest first", async () => {
+    const { query, asked } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/release-approvals": ok({ releases: [approval("1", 10)], more: false }),
+      "/api/v1/workspaces/ws_2/release-approvals": ok({ releases: [approval("2", 20, { task_id: null })], more: true }),
+      "/api/v1/workspaces/ws_3/release-approvals": ok({ releases: [approval("3", 30)], more: false }),
+      "/api/v1/workspaces/ws_1/tasks": page([]),
+      "/api/v1/workspaces/ws_2/tasks": page([]),
+      "/api/v1/workspaces/ws_3/tasks": page([]),
+      "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "admin"), room("ws_3", "member")),
+    });
+    const result = await loadAttention(query, "per_me");
+    expect(approvalsOf(asked).sort()).toEqual(["/api/v1/workspaces/ws_1/release-approvals", "/api/v1/workspaces/ws_2/release-approvals"]);
+    expect(result.approvals).toEqual({
+      state: "read",
+      items: [
+        { workspace: "ws_2", workspaceName: "Room ws_2", release: approval("2", 20, { task_id: null }) },
+        { workspace: "ws_1", workspaceName: "Room ws_1", release: approval("1", 10) },
+      ],
+      failedRooms: 0,
+      fullRooms: 1,
+      uncheckedRooms: 0,
+    });
+  });
+
+  it("counts a room that fails or answers in another shape as unchecked, never as nothing awaiting", async () => {
+    const { query } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/release-approvals": ok({ releases: [approval("1", 10)], more: false }),
+      "/api/v1/workspaces/ws_2/release-approvals": fail(500),
+      "/api/v1/workspaces/ws_3/release-approvals": ok({ releases: [approval("3", 30, { state: "queued" })], more: false }),
+      "/api/v1/workspaces/ws_4/release-approvals": ok({ releases: "none" }),
+      // A room whose role changed since the listing: it's simply gone, not a failure.
+      "/api/v1/workspaces/ws_5/release-approvals": { ok: false as const, status: 403, code: "not_allowed" },
+      "/api/v1/workspaces/ws_": page([]),
+      "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "owner"), room("ws_3", "owner"), room("ws_4", "owner"), room("ws_5", "admin")),
+    });
+    const result = await loadAttention(query, "per_me");
+    expect(result.approvals).toMatchObject({ state: "read", failedRooms: 3, items: [{ workspace: "ws_1" }] });
+  });
+
+  it("asks nothing when the person owns and administers no room, and fails when the listing does", async () => {
+    const none = stub({ "/api/v1/inbox": ok(emptyInbox), "/api/v1/workspaces/ws_1/tasks": page([]), "/api/v1/workspaces": rooms(room("ws_1", "member")) });
+    expect((await loadAttention(none.query, "per_me")).approvals).toEqual({ state: "none" });
+    expect(approvalsOf(none.asked)).toEqual([]);
+    const failed = stub({ "/api/v1/inbox": ok(emptyInbox), "/api/v1/workspaces": fail(500) });
+    expect((await loadAttention(failed.query, "per_me")).approvals).toEqual({ state: "failed" });
+  });
+
+  it("asks at most MAX_APPROVAL_ROOMS rooms and says how many it didn't", async () => {
+    const list = Array.from({ length: MAX_APPROVAL_ROOMS + 2 }, (_, n) => room(`ws_${n}`, "owner"));
+    const { query, asked } = stub({ "/api/v1/inbox": ok(emptyInbox), "/api/v1/workspaces/ws_": ok({ releases: [], more: false, tasks: [], next_cursor: null }), "/api/v1/workspaces": ok({ workspaces: list }) });
+    const result = await loadAttention(query, "per_me");
+    expect(approvalsOf(asked)).toHaveLength(MAX_APPROVAL_ROOMS);
+    expect(result.approvals).toMatchObject({ state: "read", items: [], uncheckedRooms: 2 });
   });
 });

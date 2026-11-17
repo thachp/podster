@@ -9,6 +9,7 @@ import type { SheetApi } from "@/components/sheet/target-sheet";
 import type { RepoGrant, RoomRepository } from "../settings/repository-model";
 import type { LoadedTask } from "./task-sheet";
 import type { PullRequestChange } from "./task-change";
+import { MERGE_RELEASES_NOTHING } from "./release-stage";
 
 /** Every refusal `mergeTask` lists in the contract, and the ones its checks share with other commands, as sentences. */
 export function explainMergeRefusal(code: string, status = 400): string {
@@ -205,7 +206,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   return (
     <div className="space-y-2">
       <p id="merge-what" className="text-sm text-muted-foreground">
-        Merging asks Podster to merge reviewed commit {commit} into {target}. Approval alone never merges.
+        Merging asks Podster to merge reviewed commit {commit} into {target}. Approval alone never merges. {MERGE_RELEASES_NOTHING}
       </p>
       <AlertDialog open={open} onOpenChange={(next) => !saving && setOpen(next)}>
         <AlertDialogTrigger asChild>
@@ -217,7 +218,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
           <AlertDialogHeader>
             <AlertDialogTitle className="break-words">Merge reviewed commit {commit}?</AlertDialogTitle>
             <AlertDialogDescription className="break-words">
-              Podster merges exactly commit <code className="font-mono">{commit}</code>, the one approved in submission {data.task.approved_submission_no}, into {target}, as a merge commit. If the pull request has changed since review, nothing is merged. The repository is public, so the merge is public as soon as it lands.
+              Podster merges exactly commit <code className="font-mono">{commit}</code>, the one approved in submission {data.task.approved_submission_no}, into {target}, as a merge commit. If the pull request has changed since review, nothing is merged. The repository is public, so the merge is public as soon as it lands. {MERGE_RELEASES_NOTHING}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

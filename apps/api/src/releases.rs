@@ -69,8 +69,8 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
 
 /// Whether an M6 route is built in the room that it names, and so goes to that room like any other room route: the room's
 /// release configuration, read and set (step 6), its custom hostname, read, asked for and removed (step 8), and its
-/// releases awaiting approval, read (step 10(b)), and asking for a release (step 6). The room answers each only while
-/// release is switched on.
+/// releases awaiting approval, read (step 10(b)), and asking for a release, approving and declining one (step 6). The
+/// room answers each only while release is switched on.
 pub(crate) fn room_route(parts: &[&str]) -> bool {
     matches!(
         parts,
@@ -79,7 +79,7 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
             "workspaces",
             _,
             "release-config" | "app-hostname" | "release-approvals" | "releases"
-        ]
+        ] | ["v1", "workspaces", _, "releases", _, "approve" | "decline"]
     )
 }
 
@@ -256,7 +256,7 @@ async fn content_stop(
 /// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
 /// domain and its lifting; and the operator's read of what the reconciles found. Built (step 9): a person's report that
 /// names an app by its address. Built (decision 218, PR B): an organization's release switch, read and set. Built (step 6), and answered by the room
-/// itself, not here ([`room_route`]): the room's release configuration, read and set, (step 10(b)) its releases awaiting approval, and (step 6) a person's request for a release. Everything else answers `release_not_available`, and so does a host's route while no
+/// itself, not here ([`room_route`]): the room's release configuration, read and set, (step 10(b)) its releases awaiting approval, and (step 6) a person's request for a release, and approving and declining one. Everything else answers `release_not_available`, and so does a host's route while no
 /// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,

@@ -1263,7 +1263,7 @@ fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bo
     )?;
     let host = rows(
         sql,
-        "SELECT label, script_name FROM serve_state WHERE kind = 'default'",
+        "SELECT label, script_name FROM serve_state WHERE kind = 'default' AND host NOT IN (SELECT host FROM serve_retired)",
         vec![],
     )?;
     let host = host.first();

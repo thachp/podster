@@ -140,7 +140,8 @@ pub(super) fn load(sql: &SqlStorage) -> R<Option<Loaded>> {
     };
     let found = rows(
         sql,
-        "SELECT host, script_name, version, closed, flight_version, flight_before FROM serve_state ORDER BY (kind = 'default') DESC, host",
+        "SELECT host, script_name, version, closed, flight_version, flight_before FROM serve_state
+           WHERE host NOT IN (SELECT host FROM serve_retired) ORDER BY (kind = 'default') DESC, host",
         vec![],
     )?;
     let mut hosts = Vec::with_capacity(found.len());

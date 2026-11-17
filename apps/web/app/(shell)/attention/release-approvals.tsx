@@ -18,17 +18,27 @@ export const APPROVALS_UNAVAILABLE = "Release isn't available on this Podster de
 
 /** What an approval or a decline answered, in words. Each refusal changes nothing, and says so. */
 export function explainApprovalRefusal(code: string, status = 400): string {
-  if (status >= 500 && code !== "standing_unknown") return "We can't tell whether this was recorded. Reload to see where the release stands.";
+  // A 503 the room answers on purpose writes nothing; any other 5xx may have been recorded.
+  if (status >= 500 && code !== "standing_unknown" && code !== "release_address_pending") return "We can't tell whether this was recorded. Reload to see where the release stands.";
   switch (code) {
     case "release_not_available":
       return "Approving and declining releases isn't available on this Podster deployment yet. Nothing changed.";
     case "not_allowed":
     case "not_a_participant":
       return "Only the workroom's owner and admins can approve or decline a release, as people. Nothing changed.";
+    case "invalid_transition":
+      return "This release isn't waiting for approval any more. Reload to see where it stands. Nothing changed.";
+    case "release_label_taken":
+      return "This app's address can't be used, and Podster's operators have been told. Nothing changed.";
+    case "release_address_pending":
+      return "Podster is still setting up this app's address. Nothing changed. Try again in a minute.";
     default:
       return explainReleaseRefusal(code, status);
   }
 }
+
+/** What an approval answered when its recheck found the release can't go ahead: it ended, and nothing is published. */
+export const APPROVAL_ENDED = "Podster checked this release again and it can't go ahead, so it has ended. Nothing was published.";
 
 const shortSha = (sha: string) => sha.slice(0, 12);
 
@@ -93,10 +103,13 @@ function ApprovalRow({ item, me, names, taskTitle }: { item: ApprovalItem; me: s
     setSaving(true);
     setProblem(null);
     try {
-      const result = await clientCommand(`/api/v1/workspaces/${encodeURIComponent(workspace)}/releases/${encodeURIComponent(release.id)}/${verb}`, undefined, { idempotencyKey: keys.current[verb] });
+      const result = await clientCommand<{ state?: string }>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/releases/${encodeURIComponent(release.id)}/${verb}`, undefined, { idempotencyKey: keys.current[verb] });
       if (result.ok) {
         setOpen(null);
-        router.refresh();
+        // An approval whose recheck failed ends the release. It is said here, and the list isn't refreshed, which
+        // would take the row and what it says away.
+        if (result.data?.state === "failed") setProblem(APPROVAL_ENDED);
+        else router.refresh();
       } else {
         setOpen(null);
         setProblem(explainApprovalRefusal(result.code, result.status));

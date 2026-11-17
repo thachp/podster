@@ -470,7 +470,7 @@ describe("an operator's suspension of an app", () => {
     expect(1 + hosts + failing + queued).toBeLessThanOrEqual(taken);
     expect(sources["workspace/takedown.rs"]).toContain("1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64");
     expect(sources["reconcile.rs"]).toContain(".take(ROOM_FINDINGS_TAKEN)");
-    // A room has two hosts at most, so the hosts' share is never short: one default host, by the room's own index,
+    // A room has two live hosts at most, so the hosts' share is never short: one default host, by the room's own schema,
     // and one custom hostname, since a room has one open request for one. Each is refused by the room's own schema.
     const a = await app({ plain: true });
     expect(refuses(() => { throw new Error("placeholder"); })).toBe(true);
@@ -2342,6 +2342,8 @@ describe("the two reconciles", () => {
       expect(await failing()).toEqual([`entry ${a.host} 3`, `script ${a.kept} 1`, `script ${a.served} 1`].sort());
     } finally {
       await BINDINGS.DB.prepare(create[0]).run();
+      // And every later step of it (6f: `approved_at`).
+      for (const step of (BINDINGS.TEST_D1_SCHEMA as string).split(";").map((x) => x.trim()).filter((x) => /^ALTER TABLE\s+app_label_index\b/i.test(x))) await BINDINGS.DB.prepare(step).run();
     }
     await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(a.label, a.room).run();
     // With the table back, the key that was skipped is placed and its room asked.

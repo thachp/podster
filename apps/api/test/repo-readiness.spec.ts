@@ -108,9 +108,9 @@ async function resetCeiling() {
   });
   await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label LIKE ?").bind(`${COUNTED}%`).run();
 }
-/** `n` rooms with apps in the lookup table, which makes the ceiling the smaller of 5 and 10% of them, rounded up. */
+/** `n` rooms with apps in the lookup table, each with a label an approval held for (6f), which makes the ceiling the smaller of 5 and 10% of them, rounded up. */
 async function roomsWithApps(n: number) {
-  for (let i = 0; i < n; i++) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(`${COUNTED}${i}`, `ws_${COUNTED}_${i}`).run();
+  for (let i = 0; i < n; i++) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at, approved_at) VALUES (?, ?, 1, 1)").bind(`${COUNTED}${i}`, `ws_${COUNTED}_${i}`).run();
 }
 /** The ceiling's state: grants, held rooms, whether it's tripped, and its findings, each held or stalled room by its ID. */
 const ceiling = () => inModeration((sql) => ({

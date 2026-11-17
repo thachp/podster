@@ -130,6 +130,11 @@ impl Reads {
 }
 
 impl Reads {
+    /// What the approver's own `Principal` said, as it was asked.
+    pub(super) fn approver(&self) -> &Asked {
+        &self.approver
+    }
+
     /// How long ago the first of these was asked, at `now`.
     pub(super) fn age(&self, now: i64) -> i64 {
         now.saturating_sub(self.read_at)
@@ -224,7 +229,9 @@ struct People {
     giver: Option<String>,
 }
 
-fn people(sql: &SqlStorage, release: &str, now: i64) -> R<Option<People>> {
+/// `approver`, when given, is who the approver is taken to be instead of the row's: a person approving now, before the
+/// row names them (`release_approval`).
+fn people(sql: &SqlStorage, release: &str, approver: Option<&str>, now: i64) -> R<Option<People>> {
     let found = rows(
         sql,
         "SELECT requested_by, approved_by FROM release WHERE id = ?",
@@ -236,7 +243,9 @@ fn people(sql: &SqlStorage, release: &str, now: i64) -> R<Option<People>> {
     let requester = text(&row["requested_by"]).unwrap_or_default();
     let giver = deploy_grant(sql, &requester, now)?.map(|grant| grant.delegated_by);
     Ok(Some(People {
-        approver: text(&row["approved_by"]),
+        approver: approver
+            .map(str::to_owned)
+            .or_else(|| text(&row["approved_by"])),
         requester,
         giver,
     }))
@@ -346,13 +355,19 @@ pub(super) fn settled(
 /// release go on, so a failure core then finds can only come from a fact that was read: it stands, whatever else is
 /// unknown. If core finds none, the remembered unknown makes the pass undecided. An unknown about a person is only
 /// remembered when it matters: someone who fails on the room's own rows fails, whatever their `Principal` would say.
-fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gathered, bool)> {
+fn gather(
+    sql: &SqlStorage,
+    release: &Value,
+    reads: &Reads,
+    approver: Option<&str>,
+    now: i64,
+) -> R<(Gathered, bool)> {
     let id = release["id"].as_str().unwrap_or_default();
     let People {
         approver,
         requester,
         giver,
-    } = people(sql, id, now)?.ok_or_else(ApiError::not_found)?;
+    } = people(sql, id, approver, now)?.ok_or_else(ApiError::not_found)?;
     let mut unknown = false;
     let mut or_assume = |fact: Option<bool>, assumed: bool| {
         fact.unwrap_or_else(|| {
@@ -561,7 +576,20 @@ pub(super) fn job_owns(state: ReleaseState) -> bool {
 
 /// Every fact, and core's recheck of them, inside the room's transaction.
 pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Verdict> {
-    let (facts, unknown) = gather(sql, release, reads, now)?;
+    judge_as(sql, release, reads, None, now)
+}
+
+/// [`judge`], with `approver` taken as the release's approver instead of the row's: a person approving a release that
+/// is still awaiting approval, whose row names no approver yet (`release_approval`). Their own record must have been
+/// read for them ([`Workspace::release_reads_as`]), or what was read says nothing of them and the verdict is unknown.
+pub(super) fn judge_as(
+    sql: &SqlStorage,
+    release: &Value,
+    reads: &Reads,
+    approver: Option<&str>,
+    now: i64,
+) -> R<Verdict> {
+    let (facts, unknown) = gather(sql, release, reads, approver, now)?;
     let commit = facts.commit.as_ref().map(|c| CommitRecord {
         sha: &c.0,
         provider_repo_id: c.1,
@@ -658,6 +686,16 @@ impl Workspace {
     /// couldn't be read is `None`, and the rest are still read:** one object that is down never hides what another
     /// said.
     pub(super) async fn release_reads(&self, release_id: &str) -> R<Reads> {
+        self.release_reads_as(release_id, None).await
+    }
+
+    /// [`Workspace::release_reads`], asking about `approver` as the release's approver instead of whoever its row names:
+    /// a person approving it now (`release_approval`). Every fact is read afresh, none taken from the request.
+    pub(super) async fn release_reads_as(
+        &self,
+        release_id: &str,
+        approver: Option<&str>,
+    ) -> R<Reads> {
         let sql = self.state.storage().sql();
         // Test builds only: a room a test gave `test_release_reads_seen` counts each round of outside reads, so a test
         // can show that none was made.
@@ -676,7 +714,8 @@ impl Workspace {
             )?;
         }
         let read_at = release_now(&sql);
-        let people = people(&sql, release_id, read_at)?.ok_or_else(ApiError::not_found)?;
+        let people =
+            people(&sql, release_id, approver, read_at)?.ok_or_else(ApiError::not_found)?;
         let org = room_owner_org(&sql)?;
         // The delegation is held for a provider, and the room's linked repository says which. With none linked there
         // is no provider to name: nothing is asked, and the room's own rows fail the release for having no repository.

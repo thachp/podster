@@ -150,11 +150,16 @@ describe("M6's routes, none of them built", () => {
           // Step 10(b) built the room's list of releases awaiting approval, which the room answers the same way: the
           // owner reads an empty one.
           listReleaseApprovals: [404, "workspace_not_found"],
+          // Step 6's 6f built approving and declining a release, which the room answers the same way.
+          approveRelease: [404, "workspace_not_found"], declineRelease: [404, "workspace_not_found"],
         };
         const ownerWant: Record<string, [number, string | undefined]> = {
           ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"],
           getAppHostname: [200, undefined], requestAppHostname: [400, "invalid_argument"], removeAppHostname: [200, undefined],
           listReleaseApprovals: [200, undefined],
+          // The owner may decide. This room has a provider, so approving meets the gate on the release path; declining
+          // passes no gate, and finds no such release.
+          approveRelease: [409, "release_not_available"], declineRelease: [404, "not_found"],
         };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);

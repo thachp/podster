@@ -2,7 +2,7 @@
 //! ADR 0010's "Authority, approval and triggers"). This is the first half of "a `deploy_release` command, then a
 //! person's approval": it records a release `awaiting_approval` and nothing else. **Nothing is read from a repository,
 //! uploaded or served by it,** and the release job never takes up a release a person hasn't approved
-//! (`release_recheck::job_owns`). Approving and declining are the next PR's.
+//! (`release_recheck::job_owns`). Approving and declining are `release_approval`'s.
 //!
 //! **Who** is `podster_policy::release::authorize_release_request`: a person in the room, not there through a public
 //! claim, holding a live `deploy` grant on the room's repository from someone who still holds release authority, and
@@ -38,7 +38,8 @@
 //! `release.requested` by the requester; and the event `release.requested`, about the release by its ID, to the room's
 //! owner and its admins who are people (`roles::room_approvers`): those who may approve it. An agent holding the admin
 //! role hears nothing of it. **The label isn't written to D1's lookup table here,** and the room's
-//! default host has no serve row yet: neither is needed until a release can be queued, which the approval's PR owns.
+//! default host has no serve row yet: neither is needed until a release can be queued, which approval writes
+//! (`release_approval`), and the room's alarm indexes every label not yet in the table, this one included.
 //!
 //! The route exists only while the deployment's setting is on, as every M6 route; otherwise the room answers it as an
 //! unknown route. Logs carry IDs and codes only.
@@ -145,7 +146,7 @@ fn parse(body: &Value) -> R<Named> {
 }
 
 /// A release as the contract's `Release` gives it. `result_url` is never set by a request.
-fn view(release: &Value) -> Value {
+pub(super) fn view(release: &Value) -> Value {
     json!({
         "id": release["id"],
         "commit_sha": release["commit_sha"],
@@ -407,15 +408,19 @@ pub(super) fn handle(
         roles::room_approvers(sql, &caller.id)?,
         now,
     )?;
-    let release = rows(
+    Ok(view(&full_row(sql, &id)?))
+}
+
+/// A release's whole row, as [`view`] answers it.
+pub(super) fn full_row(sql: &SqlStorage, id: &str) -> R<Value> {
+    rows(
         sql,
         &format!("SELECT {RELEASE_COLUMNS}, environment, requested_by, requested_at, approved_by, approved_at, declined_by, declined_at, finished_at FROM release WHERE id = ?"),
-        vec![id.as_str().into()],
+        vec![id.into()],
     )?
     .into_iter()
     .next()
-    .ok_or_else(|| ApiError::internal("a release just written isn't there"))?;
-    Ok(view(&release))
+    .ok_or_else(|| ApiError::internal("a release just written isn't there"))
 }
 
 impl Workspace {

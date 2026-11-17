@@ -201,6 +201,15 @@ describe("an agent asks for a release (M6 step 6, 6g)", () => {
     expect((await switchedOn(() => ask(r, r.agent, "ag-replay"))).body).toEqual(first.body);
   });
 
+  it("compares links only for a stored answer of this request: another command's under the same key is idempotency_mismatch", async () => {
+    const r = await room();
+    // A stored answer of another command of the agent's under the key, with an `id` of its own (as a message's is).
+    await inRoom(r.room, (s) => void s.exec("INSERT INTO idempotency (actor_id, key, request_hash, response_json, expires_at) VALUES (?, 'ag-other', 'another-route', ?, ?)", r.agent.id, JSON.stringify({ id: "msg_ag_other" }), Date.now() + 86_400_000));
+    const before = await everything(r);
+    expect(refused(await switchedOn(() => ask(r, r.agent, "ag-other")))).toEqual([422, "idempotency_mismatch"]);
+    expect(await everything(r)).toBe(before);
+  });
+
   it("is a request a rollback is not: a rollback stays a person's", async () => {
     const r = await room();
     const asked = await switchedOn(() => ask(r));
@@ -265,6 +274,22 @@ describe("an agent's release, approved and rechecked", () => {
       const queued = await everything(r);
       expect([(await recheck(r, id)).status], which).toEqual([503]);
       expect(await everything(r), which).toBe(queued);
+    }
+  });
+
+  it("ends the release on a departure that was read, even when the agent's connection couldn't be read", async () => {
+    // A fact read and failing decides, whatever else is unread (review standards, rule 3).
+    for (const at of ["approval", "job"] as const) {
+      const r = await room({ agent: `agt_unavailable_ag_dep_${rooms + 1}` });
+      const id = (await switchedOn(() => ask(r))).body.id;
+      if (at === "job") await inRoom(r.room, (s) => void s.exec("UPDATE release SET state = 'queued', approved_by = ?, approved_at = 1 WHERE id = ?", r.owner.id, id));
+      await departs(r.linker);
+      if (at === "approval") {
+        const answer = await approve(r, id);
+        expect([answer.status, answer.body?.state, answer.body?.failure_code], at).toEqual([200, "failed", "requester_lost_authority"]);
+      } else {
+        expect((await recheck(r, id)).body, at).toEqual({ release_id: id, state: "failed", rechecked: true, reason: "requester_lost_authority" });
+      }
     }
   });
 

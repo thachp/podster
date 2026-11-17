@@ -2,9 +2,9 @@ import { env } from "cloudflare:test";
 import { decodeJwt } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { CAPABILITIES, capabilitiesFor, RELEASE_ROUTES_PATH, toApiCall } from "../src/capabilities";
+import { CAPABILITIES, capabilitiesFor, RELEASE_ROUTES_FAILURE_TTL_MS, RELEASE_ROUTES_PATH, RELEASE_ROUTES_TTL_MS, releaseRoutesAnswered, toApiCall } from "../src/capabilities";
 import { A2A_CAPABILITIES, LIFECYCLE_METHODS } from "../src/a2a/lifecycle";
-import worker, { a2aCapability, type Env } from "../src/index";
+import worker, { a2aCapability, isPublicAuthRoute, type Env } from "../src/index";
 import { agentOnBoth, BASE, mcpTool, setUpSchemas, signUp, type Person } from "./oauth-helpers";
 
 /**
@@ -16,7 +16,7 @@ import { agentOnBoth, BASE, mcpTool, setUpSchemas, signUp, type Person } from ".
  */
 
 type Agent = Awaited<ReturnType<typeof agentOnBoth>>;
-const e = env as unknown as Env & { TEST_CAPABILITIES: string };
+const e = env as unknown as Env & { TEST_CAPABILITIES: string; TEST_GATEWAY_SOURCES: string };
 const URI = "https://podster.dev/a2a/lifecycle/v1";
 const ON = { "A2A-Extensions": URI };
 const METHOD = "podster.lifecycle.v1.DeployRelease";
@@ -185,7 +185,7 @@ describe("DeployRelease over A2A asks what MCP's deploy_release asks, and answer
       [403, "agent_not_connected"], [403, "public_participant"], [403, "grant_required"], [403, "grant_expired"], [403, "grant_stale"],
       [409, "release_off_for_deployment"], [409, "release_not_delegated"], [409, "release_needs_public_room"], [409, "workspace_archived"], [409, "public_surface_suspended"], [409, "app_suspended"], [409, "repo_not_ready"], [409, "release_off"],
       [409, "commit_not_releasable"], [409, "reviewer_rule_changed"], [409, "no_releaser"], [409, "release_pending"], [429, "release_limit"], [409, "release_not_available"],
-      [404, "not_found"], [400, "invalid_argument"], [409, "idempotency_mismatch"],
+      [404, "not_found"], [400, "invalid_argument"], [422, "idempotency_mismatch"],
     ];
     for (const [status, code] of named) {
       const { overMcp, overA2a, mcpSeen, a2aSeen } = await both(() => refusalOf(status, code));
@@ -221,5 +221,94 @@ describe("DeployRelease over A2A asks what MCP's deploy_release asks, and answer
     for (const id of ["not-an-id", undefined]) expect(reason((await viaA2a(agent.a2a, METHOD, { id, commitSha: SHA, requestId: key() }, quiet.env)).body), String(id)).toBe("TASK_NOT_FOUND");
     expect(reason((await viaA2a(agent.a2a, METHOD, { id: `${WS}:${TASK}`, commitSha: SHA, requestId: key() }, quiet.env, {})).body)).toBe("EXTENSION_SUPPORT_REQUIRED");
     expect(quiet.seen).toEqual([]);
+  });
+});
+
+describe("the gateway's read of whether the API answers the release routes is cached per isolate", () => {
+  /** A fake API that counts its reads and answers what `next` says; the test moves the clock. */
+  const fake = (next: () => Response | Promise<Response>) => {
+    const counted = { reads: 0 };
+    const api = { fetch: async () => { counted.reads++; return next(); } };
+    return { api, counted };
+  };
+
+  it("keeps a clean answer for its time, then reads again", async () => {
+    let now = 1_000_000;
+    const clock = () => now;
+    let answer = true;
+    const { api, counted } = fake(() => reply(200, { answered: answer }));
+    expect(await releaseRoutesAnswered(api, clock)).toBe(true);
+    answer = false;
+    now += RELEASE_ROUTES_TTL_MS - 1;
+    expect(await releaseRoutesAnswered(api, clock)).toBe(true);
+    expect(counted.reads).toBe(1);
+    now += 1;
+    expect(await releaseRoutesAnswered(api, clock)).toBe(false);
+    expect(counted.reads).toBe(2);
+  });
+
+  it("keeps a failed read as no for a shorter time, and shares a read in flight", async () => {
+    let now = 5_000_000;
+    const clock = () => now;
+    let fail = true;
+    const { api, counted } = fake(() => (fail ? reply(500, { answered: true }) : reply(200, { answered: true })));
+    expect(await releaseRoutesAnswered(api, clock)).toBe(false);
+    fail = false;
+    now += RELEASE_ROUTES_FAILURE_TTL_MS - 1;
+    expect(await releaseRoutesAnswered(api, clock)).toBe(false);
+    expect(counted.reads).toBe(1);
+    now += 1;
+    expect(await releaseRoutesAnswered(api, clock)).toBe(true);
+    expect(counted.reads).toBe(2);
+    expect(RELEASE_ROUTES_FAILURE_TTL_MS).toBeLessThan(RELEASE_ROUTES_TTL_MS);
+    // Many requests at once, before the first read answers: one read.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slow = fake(async () => { await gate; return reply(200, { answered: true }); });
+    const asked = Array.from({ length: 20 }, () => releaseRoutesAnswered(slow.api, clock));
+    release();
+    expect(await Promise.all(asked)).toEqual(Array(20).fill(true));
+    expect(slow.counted.reads).toBe(1);
+  });
+
+  it("asks the API once for many card reads in an isolate", async () => {
+    const stand = standIn(() => reply(200, RELEASE));
+    for (let n = 0; n < 10; n++) expect(await card(stand.env)).toContain(METHOD);
+    expect(stand.asked.length).toBe(1);
+  });
+});
+
+describe("an agent's link ends only by a disconnect, which moves its generation (the recheck relies on it)", () => {
+  /** Each place in `source` matching `pattern`, by the function it's in: the nearest `function name(` or `const name =` above it. */
+  const sites = (source: string, pattern: RegExp) => {
+    const found: string[] = [];
+    for (const match of source.matchAll(pattern)) {
+      const before = source.slice(0, match.index);
+      const last = [...before.matchAll(/(?:function\s+(\w+)\s*\(|^(?:export\s+)?const\s+(\w+)\s*=|^\/\/ FILE: (\S+))/gm)].at(-1);
+      found.push(last ? (last[1] ?? last[2] ?? `top of ${last[3]}`) : "top");
+    }
+    return found.sort();
+  };
+  const ENDS_A_LINK = /DELETE\s+FROM\s+(identity_link|agent|agentCapabilityGrant)\b|UPDATE\s+identity_link\b|SET\s+status\s*=\s*'revoked'|\.revokeGrant\(/gi;
+
+  it("ends links and credentials only in the disconnect's cleanup, which only the disconnect and a reconnect after one call", () => {
+    const source = e.TEST_GATEWAY_SOURCES;
+    expect(source).toContain("// FILE: index.ts");
+    // Ending links and credentials: the cleanup alone. Two exceptions, each keeping the link: renewing a link after its
+    // person left and rejoined only moves its start later, which the departure read from the recorded start catches;
+    // consent replaces an OAuth grant of the same link with a new one; and the scheduled clean-up removes plugin agents
+    // that nobody ever claimed, which have no link (`status = 'pending' AND userId IS NULL`).
+    expect(sites(source, ENDS_A_LINK)).toEqual(["approveConsent", "cleanUp", "renewLink", "revokeCredentials", "revokeCredentials", "revokeCredentials", "revokeCredentials"]);
+    expect(source).toMatch(/SELECT id FROM agent WHERE status = 'pending' AND userId IS NULL/);
+    // The cleanup is called only by `handleConnection`: after the API's disconnect moved the generation, and before a
+    // reconnect of an agent the API already shows disconnected.
+    expect(sites(source, /(?<!function\s)\brevokeCredentials\(/g)).toEqual(["handleConnection", "handleConnection"]);
+    // The plugin's own routes that would revoke an agent, a host or a key aren't reachable.
+    for (const route of ["/agent/revoke", "/host/revoke", "/agent/rotate-key", "/host/rotate-key", "/agent/reactivate"]) expect(isPublicAuthRoute(route), route).toBe(false);
+  });
+
+  it("would see a link ended anywhere else (the control)", () => {
+    const planted = `// FILE: x.ts\nasync function forgetOneLink(env) { await env.DB.prepare("DELETE FROM identity_link WHERE external_id = ?").run(); }\nconst dropKey = (env) => env.DB.prepare("UPDATE agent SET status = 'revoked' WHERE id = ?");\n`;
+    expect(sites(planted, ENDS_A_LINK)).toEqual(["dropKey", "forgetOneLink"]);
   });
 });

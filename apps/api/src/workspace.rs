@@ -5311,7 +5311,7 @@ impl Workspace {
                 let asking = release_request::Asking::Request;
                 release_request::may_ask(&who, &identity, asking)?;
                 let reads = Rc::new(
-                    self.release_request_reads(&identity, asking, key.clone())
+                    self.release_request_reads(&identity, asking, key.clone(), hash.clone())
                         .await?,
                 );
                 let again = reads.clone();
@@ -5336,7 +5336,7 @@ impl Workspace {
                 release_request::may_ask(&who, &identity, asking)?;
                 let target = release_approval::named(target)?;
                 let reads = Rc::new(
-                    self.release_request_reads(&identity, asking, key.clone())
+                    self.release_request_reads(&identity, asking, key.clone(), hash.clone())
                         .await?,
                 );
                 let again = reads.clone();

@@ -80,8 +80,9 @@ pub(super) struct RequestReads {
     asking: Asking,
     /// For an agent: the link its credential carries, and whether that link's person still holds. `None` for a person.
     controller: Option<ControllerNow>,
-    /// This attempt's idempotency key, so a replay's stored release can be compared with the link asking now.
-    key: Option<String>,
+    /// This attempt's idempotency key and request hash, so a replay of this very request's stored release can be
+    /// compared with the link asking now.
+    replay: Option<(String, String)>,
 }
 
 /// Which route asks.
@@ -349,7 +350,7 @@ pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads
     };
     // An agent's link must be the one its release records: on a replay, the stored release's; on a first attempt, the
     // one its credential carries, which is what the request records. Any other link, or none, isn't connected.
-    let recorded = match replayed_release(sql, &caller.id, reads.key.as_deref())? {
+    let recorded = match replayed_release(sql, &caller.id, reads.replay.as_ref())? {
         Some(release) if agent => Link::recorded(sql, &release)?,
         _ => link.cloned(),
     };
@@ -395,16 +396,22 @@ pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads
     Ok(())
 }
 
-/// The release a stored answer under this key holds, if this attempt is a replay of one: what `command_checked` would
-/// give back after the standing holds. Read only to compare an agent's link with the one recorded.
-fn replayed_release(sql: &SqlStorage, actor: &str, key: Option<&str>) -> R<Option<String>> {
-    let Some(key) = key else {
+/// The release a stored answer under this key holds, if this attempt is a replay of this very request: what
+/// `command_checked` would give back after the standing holds. The stored request's hash must be this one's, which
+/// names the route and the body, so another command's answer under the same key is never read as a release: the
+/// command then answers `idempotency_mismatch`. Read only to compare an agent's link with the one recorded.
+fn replayed_release(
+    sql: &SqlStorage,
+    actor: &str,
+    replay: Option<&(String, String)>,
+) -> R<Option<String>> {
+    let Some((key, hash)) = replay else {
         return Ok(None);
     };
     Ok(rows(
         sql,
-        "SELECT response_json FROM idempotency WHERE actor_id = ? AND key = ? AND expires_at > ?",
-        vec![actor.into(), key.into(), now_ms().into()],
+        "SELECT response_json FROM idempotency WHERE actor_id = ? AND key = ? AND request_hash = ? AND expires_at > ?",
+        vec![actor.into(), key.as_str().into(), hash.as_str().into(), now_ms().into()],
     )?
     .first()
     .and_then(|row| serde_json::from_str::<Value>(row["response_json"].as_str()?).ok())
@@ -611,18 +618,23 @@ pub(super) fn full_row(sql: &SqlStorage, id: &str) -> R<Value> {
 impl Workspace {
     /// Everything `POST releases` reads outside the room, before its transaction. The release path's gate first, as
     /// every release command passes it.
-    /// `asking` says which route; `key` is this attempt's idempotency key. For an agent, the person who linked its
-    /// credential is asked whether they are still in the agent's organization since the link began (6g).
+    /// `asking` says which route; `key` and `hash` are this attempt's idempotency key and request hash. For an agent, the
+    /// person who linked its credential is asked whether they are still in the agent's organization since the link
+    /// began (6g); the agent itself isn't a person, so its own `Principal` isn't asked that.
     pub(super) async fn release_request_reads(
         &self,
         identity: &Identity,
         asking: Asking,
         key: Option<String>,
+        hash: String,
     ) -> R<RequestReads> {
         let caller_id = identity.id.as_str();
         self.release_path_open().await?;
         let room = self.on_reads().await?;
-        let requester = self.still_holds(Some(caller_id), false).await?;
+        let requester = match identity.kind.as_str() {
+            "person" => self.still_holds(Some(caller_id), false).await?,
+            _ => self.still_holds(None, false).await?,
+        };
         let controller = match identity.kind.as_str() {
             "person" => None,
             _ => {
@@ -660,7 +672,7 @@ impl Workspace {
             labels,
             asking,
             controller,
-            key,
+            replay: key.map(|key| (key, hash)),
         })
     }
 }

@@ -470,6 +470,13 @@ fn gather(
         let holds = read.holds.filter(|_| about_this);
         // The link now: the recorded one while the agent is still connected at its generation (assumed so while
         // unread, as every unread fact here is), and none once its `Principal` says it isn't.
+        //
+        // **The invariant this rests on: an agent's link ends only by a disconnect, which moves its generation.** The
+        // gateway deletes `identity_link` rows and revokes credentials only in its disconnect cleanup, after the API has
+        // moved the generation; a link renewed after its person left begins later, which the departure read catches.
+        // `apps/gateway/test/deploy-release.spec.ts` ("ends a link only by a disconnect") fails if any other code path
+        // ends a single link or revokes a credential. If one ever must, the agent's `Principal` has to record a link
+        // generation the room reads here (docs/m6-step6-plan.md, "What 6g built").
         let current = recorded.clone().filter(|_| connected != Some(false));
         let unchanged = controller_unchanged(
             recorded
@@ -481,7 +488,9 @@ fn gather(
         let holds = match recorded {
             // Nothing on record: nobody can be shown to control it, and it may not.
             None => Some(false),
-            // Unread unless both were read: remembered, and decisive only if everything else holds.
+            // A departure that was read decides, whatever else is unread (review standards, rule 3).
+            Some(_) if holds == Some(false) => Some(false),
+            // Otherwise unread unless both were read: remembered, and decisive only if everything else holds.
             Some(_) if connected.is_none() => None,
             Some(_) => holds,
         };

@@ -10,6 +10,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } fr
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { childEnv } from "../../e2e/child-env.mjs";
 import { freePort, groupGone, prepareStack, startGateway } from "../../e2e/stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -64,7 +65,8 @@ async function waitForStack() {
 /** Runs runner.mjs as its own process. `onLine` sees each JSON line as it arrives. Resolves with all lines and the exit code. */
 function runner(command, stateDir, onLine = () => {}) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [join(here, "runner.mjs"), command, "--base", base, "--state", stateDir], { cwd: here, stdio: ["ignore", "pipe", "pipe"] });
+    // It loads a third-party package, so it gets the allow-listed environment, never ours.
+    const child = spawn(process.execPath, [join(here, "runner.mjs"), command, "--base", base, "--state", stateDir], { cwd: here, stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
     const lines = [];
     let buffer = "";
     let stderr = "";

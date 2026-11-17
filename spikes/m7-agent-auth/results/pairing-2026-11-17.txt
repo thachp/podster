@@ -1,5 +1,5 @@
 
- RUN  v4.1.12 /Users/thachp/repos/podster/.claude/worktrees/agent-af0d8f4342ef6761e/spikes/m7-agent-auth
+ RUN  v4.1.12 spikes/m7-agent-auth
 
 private routes {"/host/create":404,"/host/enroll":404,"/agent/rotate-key":404,"/host/rotate-key":404,"/agent/revoke":404,"/agent/approve-capability":404,"/agent/claim":404}
 

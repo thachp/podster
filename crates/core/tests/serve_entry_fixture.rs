@@ -286,10 +286,11 @@ fn a_kind_is_named_static_or_code_and_nothing_else() {
 }
 
 #[test]
-fn a_scripts_recorded_kind_is_static_only_when_recorded_static_or_never_recorded() {
+fn a_scripts_recorded_kind_is_static_only_when_recorded_static() {
     use podster_core::app_requests::HostKind;
     use podster_core::serve_entry::recorded_kind;
-    assert_eq!(recorded_kind(None), HostKind::Static);
+    // Never recorded: code, the fail-closed side (the architect's reversal of 2026-11-17).
+    assert_eq!(recorded_kind(None), HostKind::Code);
     assert_eq!(recorded_kind(Some("static")), HostKind::Static);
     assert_eq!(recorded_kind(Some("code")), HostKind::Code);
     // A record of any other kind is read as code, the stricter side, never as static files.

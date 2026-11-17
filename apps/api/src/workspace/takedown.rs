@@ -1409,14 +1409,20 @@ async fn stale_taken_down(
         return Ok(CustomFail::Retry("release_not_served"));
     }
     // Kept only while it names a script the rule keeps, in the kind the room recorded for that script: an entry of the
-    // other kind is taken down, as one naming any other script is.
+    // other kind is taken down, as one naming any other script is. The kind is read only for an entry the rule keeps,
+    // and a read that fails takes it down too: nothing that can't be read ever stops a stale entry coming down (the
+    // review of #418).
     if let Some((kind, found)) = entry.named() {
-        let recorded = super::release_commit::script_kind(sql, found)?;
         let keeps = state.as_ref().is_some_and(|state| {
             podster_core::release::waiting_entry_keeps(state, wanted, found, rollback)
         });
-        if keeps && entry_is(Some((recorded, found)), Some((kind, found))) {
-            return Ok(CustomFail::Retry("release_not_served"));
+        if keeps {
+            let recorded = super::release_commit::script_kind(sql, found).ok();
+            if recorded
+                .is_some_and(|recorded| entry_is(Some((recorded, found)), Some((kind, found))))
+            {
+                return Ok(CustomFail::Retry("release_not_served"));
+            }
         }
     }
     let (_, absent) = remove_entry(provider, host).await;

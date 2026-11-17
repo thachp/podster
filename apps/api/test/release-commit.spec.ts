@@ -98,6 +98,8 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
     release(PREV, "served", true, true);
     release(REL, state, named, state !== "awaiting_approval");
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, prev);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, prev);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     // The upload itself is `release-upload.spec.ts`'s. Here a release's upload is on record from the moment it is
@@ -682,6 +684,7 @@ describe("a release that can't go on", () => {
     const h = await healthy({ org, state: "live" });
     await inRoom(h.room, (s) => {
       s.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = 6, flight_version = 6, flight_before = ?", REL, h.script, h.prev);
+      s.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
       s.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 1", REL, h.script);
       s.exec("UPDATE serve_apply SET applied_version = 6, applied_script = ?", h.script);
     });

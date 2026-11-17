@@ -672,10 +672,27 @@ pub(super) fn record_script_kind(
 }
 
 /// The kind of a script, from the room's record of it, as core reads that record
-/// (`podster_core::serve_entry::recorded_kind`): static only when recorded static or never recorded, which no script
-/// with code can be, since its record is written before it is; anything else is code, whose entry the content Worker
-/// holds to the stricter rules. A read that fails is an error, and nothing is written on it.
+/// (`podster_core::serve_entry::recorded_kind`): static only when recorded static; anything else, no record among it,
+/// is code, whose entry the content Worker holds to the stricter rules (the fail-closed side, ruled 2026-11-17). A read
+/// that fails is an error, and nothing is written on it.
 pub(super) fn script_kind(sql: &SqlStorage, script: &str) -> R<HostKind> {
+    // Test builds only: a script a test names in `test_script_kind_unreadable` can't have its kind read.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_script_kind_unreadable'",
+        vec![],
+    )?
+    .is_empty()
+        && !rows(
+            sql,
+            "SELECT 1 AS x FROM test_script_kind_unreadable WHERE script_name = ?",
+            vec![script.into()],
+        )?
+        .is_empty()
+    {
+        return Err(ApiError::internal("test: a script's kind that can't be read"));
+    }
     let found = rows(
         sql,
         "SELECT kind FROM release_script_kind WHERE script_name = ?",

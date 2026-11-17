@@ -142,6 +142,8 @@ async function uploading(opts: { open?: boolean; driver?: boolean } = {}): Promi
     release(PREV, "served");
     release(REL, "uploading");
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, `${label}.${PREV}`);
+    // The kind a real upload records before its script is written (S3): static.
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, `${label}.${PREV}`);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     sql.exec("CREATE TABLE test_release_upload_provider (x INTEGER)");
@@ -484,7 +486,8 @@ type Written = {
 };
 type ProviderState = { calls: { op: string; status: number; query?: string; parts?: string[] }[]; written: Written | null };
 const providerState = async (script: string) => (await (await fetch(`https://content-fake.example.com/upload-state?script=${script}`)).json()) as ProviderState;
-const scriptKind = (room: string) => inRoom(room, (sql) => sql.exec("SELECT release_id, script_name, kind, recorded_at FROM release_script_kind").toArray() as any[]);
+/** The record of the uploading release's script's kind (the fixture records the release it serves, `PREV`, static). */
+const scriptKind = (room: string) => inRoom(room, (sql) => sql.exec("SELECT release_id, script_name, kind, recorded_at FROM release_script_kind WHERE release_id = ?", REL).toArray() as any[]);
 const uploadRow = (room: string) => inRoom(room, (sql) => sql.exec("SELECT files, bytes FROM release_upload WHERE release_id = ?", REL).toArray() as any[]);
 const ASSETS = '{"html_handling":"auto-trailing-slash","not_found_handling":"none"}';
 /** The metadata of a script with code, exactly: `bindings` as given, the entry module last. */
@@ -656,6 +659,47 @@ export function appCodeUploadCases() {
       expect(checked).toBeLessThan(upload.search(/\.write_script\(/));
       // The binding comes from the room's record alone: nothing in the upload names a store's ID or a binding's type.
       expect(upload).not.toMatch(/"d1"|store_id|"STORE"/);
+    });
+
+    it("leaves every script the serve state names with a record of its kind, through the real upload and commit", async () => {
+      const unrecorded = (room: string) => inRoom(room, (sql) => sql.exec(
+        "SELECT s FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL AND s NOT IN (SELECT script_name FROM release_script_kind)").toArray());
+      const commitLive = (room: string) => switchedOn(() => stub(room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: REL }) }).then(async (r: Response) => ({ status: r.status, body: (await r.json()) as any })));
+      for (const [files, kind] of [[codeApp(true), "code"], [STATIC, "static"]] as const) {
+        await github("/reset", {});
+        await github("/seed", repository(files));
+        const r = await uploading();
+        expect(brief(await upload(r.room)), kind).toEqual([200, "uploading", true, null, null]);
+        const live = await commitLive(r.room);
+        expect([live.status, live.body.state], kind).toEqual([200, "live"]);
+        expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name), kind).toBe(r.script);
+        expect(await unrecorded(r.room), kind).toEqual([]);
+        expect((await scriptKind(r.room)).find((row) => row.script_name === r.script)?.kind, kind).toBe(kind);
+      }
+    });
+
+    it("lets nothing but the upload's one path write a script, and that path records its kind first (a tripwire, not a proof)", () => {
+      const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+      // The provider's script write is named in two files: where it is defined, and the upload's one call.
+      const named = Object.entries(sources).filter(([, source]) => /\bwrite_script\s*\(/.test(source)).map(([path]) => path).sort();
+      expect(named).toEqual(["content_provider/upload.rs", "workspace/release_upload.rs"]);
+      expect(sources["content_provider/upload.rs"].match(/\bfn write_script\s*\(/g)).toHaveLength(1);
+      expect(sources["content_provider/upload.rs"].match(/\bwrite_script\s*\(/g)).toHaveLength(1);
+      const upload = sources["workspace/release_upload.rs"];
+      expect(upload.match(/\.write_script\s*\(/g)).toHaveLength(1);
+      // That call is in `upload_of`, after its `write_check`, which records the kind and reads the binding.
+      const body = upload.slice(upload.search(/async fn upload_of\(/));
+      const checked = body.search(/self\s*\.write_check\(/);
+      expect(checked).toBeGreaterThan(0);
+      expect(checked).toBeLessThan(body.search(/\.write_script\s*\(/));
+      // **Under another name:** a script is written by a `PUT` to its URL in the dispatch namespace. Only the provider's
+      // two files build such a URL, and the one function that sends a `PUT` to it is `write_script`.
+      const builders = Object.entries(sources).filter(([, source]) => source.includes("/workers/dispatch/namespaces/")).map(([path]) => path).sort();
+      expect(builders).toEqual(["content_provider.rs"]);
+      const functions = (source: string) => source.split(/\n\s*(?:pub(?:\([a-z]+\))? )?(?:async )?fn /).slice(1).map((text) => ({ name: text.slice(0, text.indexOf("(")), text }));
+      const puts = ["content_provider.rs", "content_provider/upload.rs"].flatMap((path) =>
+        functions(sources[path]).filter((fn) => /Method::Put/.test(fn.text) && /script_url\(|dispatch\/namespaces/.test(fn.text)).map((fn) => `${path}#${fn.name}`));
+      expect(puts).toEqual(["content_provider/upload.rs#write_script"]);
     });
   });
 }

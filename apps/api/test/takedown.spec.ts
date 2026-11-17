@@ -105,11 +105,15 @@ async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = 
     if (opts.plain) {
       sql.exec("INSERT INTO release_config (singleton, enabled, release_epoch, set_by, set_at, updated_at, kept_previous) VALUES (1, 1, ?, 'per_td_owner', 1, 1, ?)", epoch, kept);
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, rel(2), served);
+      // The kind a real upload records before its script is written (S3): static.
+      sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     } else {
       sql.exec(
         "INSERT INTO release_config (singleton, enabled, release_epoch, set_by, set_at, updated_at, kept_previous, in_flight_release, in_flight_script, in_flight_epoch, in_flight_at) VALUES (1, 1, ?, 'per_td_owner', 1, 1, ?, ?, ?, ?, 1)",
         epoch, kept, rel(3), flight, epoch);
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, flight_version, flight_before, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 6, 6, ?, 1)", host, label, rel(3), flight, served);
+      // The kind a real upload records before its script is written (S3): static.
+      sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     }
     // The applier's own record of the entry it last wrote, so a pass has nothing to do until the room changes its mind.
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, ?, ?, 1, 1)", host, opts.plain ? 5 : 6, opts.plain ? served : flight);
@@ -764,6 +768,7 @@ describe("the room's applier and its delete job", () => {
         `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
            VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, a.label, staged, rel(5), Date.now());
       sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = 6, flight_version = 6, flight_before = ?", rel(5), staged, a.served);
+      sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
       sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 4, in_flight_at = 1", rel(5), staged);
     });
     await fake("/seed", { scripts: [staged] });
@@ -1078,6 +1083,8 @@ describe("the room's applier and its delete job", () => {
       sql.exec("INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, updated_at) VALUES (?, ?, 'served', ?, 1, 0, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, 1)", rel(2), SHA, current, script, rel(2));
       sql.exec("INSERT INTO release_config (singleton, enabled, set_by, set_at, updated_at) VALUES (1, 1, 'per_td_owner', 1, 1)");
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 1, 1)", host, current, rel(2), script);
+      // The kind a real upload records before its script is written (S3): static.
+      sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) SELECT substr(s, -36), s, 'static', 1 FROM (SELECT script_name AS s FROM serve_state UNION SELECT flight_before FROM serve_state) WHERE s IS NOT NULL");
     });
     await fake("/seed", { scripts: [script], entries: { [host]: `${old}.${rel(1)}` } });
     await pass(room);
@@ -1269,7 +1276,7 @@ describe("the room's applier and its delete job", () => {
     await fresh();
     const a = await app({ plain: true });
     await inRoom(a.room, (sql) => {
-      sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 1)", rel(2), a.served);
+      sql.exec("INSERT OR REPLACE INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 1)", rel(2), a.served);
       sql.exec("DELETE FROM serve_apply");
     });
     // Read back as the same script with the other kind: it differs, and isn't applied.
@@ -1294,20 +1301,33 @@ describe("the room's applier and its delete job", () => {
   });
 
   it("write a static script's entry unmarked, as before, and put back one that says it carries code", async () => {
-    for (const recorded of [null, "static"]) {
-      await fresh();
-      await fake("/reset", {});
-      const a = await app({ plain: true });
-      if (recorded) await inRoom(a.room, (sql) => sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, ?, 1)", rel(2), a.served, recorded));
-      // The entry names the right script, marked as carrying code, which the room never recorded it as.
-      await fake("/seed", { entries: { [a.host]: `code:${a.served}` } });
-      expect(await reconcile("entries"), String(recorded)).toMatchObject({ changed: 1 });
-      await pass(a.room);
-      expect((await held()).entries[a.host], String(recorded)).toBe(a.served);
-      expect((await applyRows(a.room))[0], String(recorded)).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
-      expect(await reconcile("entries"), String(recorded)).toMatchObject({ changed: 0 });
-      await alarmQuiet(stub(a.room));
-    }
+    await fresh();
+    const a = await app({ plain: true });
+    // The fixture records its scripts static, as a real upload does.
+    expect(await all(a.room, "SELECT kind FROM release_script_kind WHERE script_name = ?", a.served)).toEqual([{ kind: "static" }]);
+    // The entry names the right script, marked as carrying code, which the room never recorded it as.
+    await fake("/seed", { entries: { [a.host]: `code:${a.served}` } });
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(a.served);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+    expect(await reconcile("entries")).toMatchObject({ changed: 0 });
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("serve a script the room holds no record of the kind of as code, the fail-closed side, and put back a static entry for it", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    await inRoom(a.room, (sql) => { sql.exec("DELETE FROM release_script_kind"); sql.exec("DELETE FROM serve_apply"); });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(`code:${a.served}`);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+    // A static entry for it differs, and is written marked again.
+    await fake("/seed", { entries: { [a.host]: a.served } });
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(`code:${a.served}`);
+    await alarmQuiet(stub(a.room));
   });
 });
 

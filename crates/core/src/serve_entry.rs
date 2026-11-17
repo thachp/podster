@@ -74,15 +74,17 @@ pub fn kind_named(name: &str) -> Option<HostKind> {
     }
 }
 
-/// **A script's kind, from the room's record of it** (`None` when the room holds no record). The room records a
-/// script's kind before it writes the script, and every script written before the record existed was static, so a
-/// script with no record was never written with code: it is static, as is one recorded static. **Anything else is
-/// code,** a record that names a kind this rule doesn't know among it: a code entry is held to the stricter rules, and
-/// refused outright while code apps are off, so an unreadable record never serves a script as static files.
+/// **A script's kind, from the room's record of it** (`None` when the room holds no record). **Static only when the
+/// record says `static`;** anything else is code: no record at all, and a record that names a kind this rule doesn't
+/// know (the architect's ruling on review, 2026-11-17, reversing "no record is static"). The room records a script's
+/// kind before it writes the script, and room schema step 52 recorded every earlier script static, so a script with no
+/// record is a fault, and the fault fails closed: a static entry for a script with code would let the content Worker
+/// dispatch reads to it, its store bound, past the rules for a host with code, the code-apps switch and the write
+/// counter. A code entry is held to those rules, and refused outright while code apps are off.
 pub fn recorded_kind(record: Option<&str>) -> HostKind {
     match record {
-        None | Some("static") => HostKind::Static,
-        Some(_) => HostKind::Code,
+        Some("static") => HostKind::Static,
+        _ => HostKind::Code,
     }
 }
 

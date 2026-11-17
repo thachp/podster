@@ -1651,6 +1651,21 @@ impl Workspace {
         self.migrate_if_needed()?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        // Rule 3(b), first and in a transaction of its own (S5 of the store plan): a script whose bindings the reconcile
+        // read is judged against the room's record of its store, and a binding it may not hold suspends the app
+        // before anything slower runs (review standard 4). Only a script question that carries a list asks it.
+        let bindings = if body["kind"] == "script" && body.get("bindings").is_some() {
+            let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+            let (slot, store, asked) = (out.clone(), sql.clone(), body.clone());
+            transaction_sync(&self.state, move || {
+                *slot.borrow_mut() = script_bindings::check_script(&store, &asked, now_ms())?;
+                Ok(())
+            })?;
+            let judged = out.borrow_mut().take();
+            judged
+        } else {
+            None
+        };
         // Whatever was asked, the walk's wake included: the room reads its organization's release switch and applies
         // it (decision 218's backstop, `release_switch`), so a room no notice reached comes down here. A read that
         // fails changes nothing, and the question is answered all the same.
@@ -1678,6 +1693,9 @@ impl Workspace {
             .ok_or_else(|| ApiError::internal("takedown check answered nothing"))?;
         if let (Ok(owed), Value::Object(fields)) = (owed, &mut answer) {
             fields.insert("repo_unpublish_wanted".into(), Value::Bool(owed));
+        }
+        if let (Some(judged), Value::Object(fields)) = (bindings, &mut answer) {
+            fields.insert("bindings".into(), judged);
         }
         Ok(answer)
     }

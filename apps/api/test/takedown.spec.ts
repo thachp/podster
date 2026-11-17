@@ -2544,6 +2544,118 @@ describe("the two reconciles", () => {
   });
 });
 
+// Rule 3(b) (S5 of the store plan): the hourly pass reads each script's bindings with the scripts token, and the
+// script's own room judges them against its record of the label's store. Here, beside the other reconciles, since it
+// shares the content provider's stand-in.
+describe("rule 3(b): each app script's bindings", () => {
+  const OWN_ID = "0123abcd-4567-89ef-0123-456789abcdef";
+  const OTHER_ID = "fedcba98-7654-3210-fedc-ba9876543210";
+  let stores = 0;
+  /** A store record for the app's label, made, with this ID; as `release_store.rs` would leave one. */
+  const recordStore = (a: App, id: string) => inRoom(a.room, (sql) => sql.exec(
+    "INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at) VALUES (?, 'd1', ?, ?, 1, 1, 2, 2)",
+    a.label, `podster-store-${(++stores).toString(16).padStart(8, "0")}${crypto.randomUUID().replace(/-/g, "")}`.slice(0, 46), id));
+  const storeBinding = (id: string) => ({ type: "d1", name: "STORE", id });
+  /** An app serving one script, with a store record, whose served script the stand-in says holds `list`. */
+  async function bound(list: unknown, opts: { record?: string | null } = {}) {
+    await fresh();
+    const a = await app({ plain: true });
+    if (opts.record !== null) await recordStore(a, opts.record ?? OWN_ID);
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.served }, bindings: { [a.served]: list } });
+    return a;
+  }
+  const labelRow = (a: App) => one(a.room, "SELECT label, current, suspended_at IS NOT NULL AS suspended, suspension_reason FROM app_label WHERE label = ?", a.label);
+
+  const FOREIGN: [string, unknown[]][] = [
+    ["write_counter", [{ type: "durable_object_namespace", name: "COUNTER", class_name: "WriteCounter" }]],
+    ["serve_entries", [{ type: "kv_namespace", name: "ENTRIES", namespace_id: FAKE.kvNamespace }]],
+    ["store_foreign", [storeBinding(OTHER_ID)]],
+    ["kv_namespace", [{ type: "kv_namespace", name: "KV", namespace_id: "ab".repeat(16) }]],
+    ["durable_object", [{ type: "durable_object_namespace", name: "DO", class_name: "Other" }]],
+    ["other_binding", [storeBinding(OWN_ID), { type: "service", name: "API", service: "podster-api" }]],
+    ["store_twice", [storeBinding(OWN_ID), storeBinding(OWN_ID)]],
+  ];
+
+  for (const [code, list] of FOREIGN) {
+    it(`suspends the app for a binding it may not hold, keeping its label, and tells operators: ${code}`, async () => {
+      const a = await bound(list);
+      // Another app's store is a real one: recorded by another room.
+      if (code === "store_foreign") await recordStore(await app({ plain: true }), OTHER_ID);
+      expect(await labelRow(a)).toEqual({ label: a.label, current: 1, suspended: 0, suspension_reason: null });
+      const summary = await reconcile("scripts");
+      expect(summary).toMatchObject({ ran: true, code: "ok", unanswered: 0, errors: 0 });
+      expect(summary.changed).toBeGreaterThanOrEqual(1);
+      // An operator's suspension, by Podster: the label kept and current, the app unpublished, nothing served.
+      expect(await labelRow(a)).toEqual({ label: a.label, current: 1, suspended: 1, suspension_reason: "other" });
+      expect(await all(a.room, "SELECT cause, label FROM unpublish")).toEqual([{ cause: "app_suspended", label: a.label }]);
+      expect((await serveRows(a.room)).map((row: any) => row.script_name)).toEqual([null]);
+      expect(await all(a.room, "SELECT actor_id, action FROM audit_event WHERE action LIKE 'app.%'")).toEqual([{ actor_id: "podster", action: "app.suspended" }]);
+      // Told by the script's name, with why; the other script, which holds nothing, isn't.
+      expect(await found()).toContain(`script_binding_foreign ${a.served} ${code}`);
+      expect((await found()).filter((line) => line.startsWith("script_binding_foreign"))).toEqual([`script_binding_foreign ${a.served} ${code}`]);
+      // A second pass changes nothing more in the room and tells again.
+      const epoch = (await configRow(a.room)).release_epoch;
+      await fake("/seed", { scripts: [a.served], bindings: { [a.served]: list } });
+      expect(await reconcile("scripts")).toMatchObject({ code: "ok" });
+      expect((await configRow(a.room)).release_epoch).toBe(epoch);
+      expect((await findings()).find((f) => f.code === "script_binding_foreign")?.seen).toBe(2);
+    });
+  }
+
+  it("suspends for a store bound while the room recorded none", async () => {
+    const a = await bound([storeBinding(OWN_ID)], { record: null });
+    await reconcile("scripts");
+    expect(await labelRow(a)).toMatchObject({ suspended: 1, suspension_reason: "other" });
+    expect(await found()).toContain(`script_binding_foreign ${a.served} store_unrecorded`);
+  });
+
+  it("leaves an app alone that holds nothing or its own store alone, whatever its record's state", async () => {
+    for (const list of [[], [storeBinding(OWN_ID)]]) {
+      const a = await bound(list);
+      // Owed a deletion: a script written before still holds its own store rightly.
+      await inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET delete_owed_at = 3, delete_cause = 'test' WHERE label = ?", a.label));
+      expect(await reconcile("scripts")).toMatchObject({ code: "ok", changed: 0, findings: 0 });
+      expect(await labelRow(a)).toMatchObject({ suspended: 0 });
+      expect(await found()).toEqual([]);
+      // Read with the scripts token, which the stand-in alone accepts: answered 200.
+      expect((await held()).calls.filter((call) => call.op === "script.bindings").map((call) => `${call.name} ${call.status}`).sort()).toEqual([`${a.kept} 200`, `${a.served} 200`].sort());
+    }
+  });
+
+  it("decides nothing on what it couldn't read, and tells operators once for the pass", async () => {
+    const unread: [string, () => Promise<unknown>, unknown][] = [
+      ["no answer", () => fault({ op: "script.bindings", times: 2, status: 500 }), []],
+      ["a 404, the read lagging an upload", () => fault({ op: "script.bindings", times: 2, status: 404 }), []],
+      ["a result that isn't a list", async () => {}, { bindings: [storeBinding(OTHER_ID)] }],
+      ["an entry that isn't an object", async () => {}, [storeBinding(OTHER_ID), "STORE"]],
+      ["an entry with no name, beside a foreign one", async () => {}, [{ type: "service", name: "API" }, { type: "d1", id: OTHER_ID }]],
+      ["a store binding whose ID isn't one", async () => {}, [storeBinding(OWN_ID.toUpperCase())]],
+    ];
+    for (const [what, script, list] of unread) {
+      const a = await bound(list);
+      await script();
+      const summary = await reconcile("scripts");
+      expect(summary, what).toMatchObject({ code: "ok", changed: 0 });
+      expect(await labelRow(a), what).toMatchObject({ suspended: 0 });
+      expect(await all(a.room, "SELECT cause FROM unpublish"), what).toEqual([]);
+      const lines = await found();
+      expect(lines.filter((line) => line.startsWith("script_binding_foreign")), what).toEqual([]);
+      // Faulted, both scripts' reads failed; otherwise only the served script's list was malformed.
+      expect(lines, what).toContain(`script_bindings_unread namespace ${what.startsWith("no answer") || what.startsWith("a 404") ? 2 : 1}`);
+    }
+  });
+
+  it("logs nothing but a code: never a script's name, a label, a store's ID or a binding", () => {
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    const room = sources["workspace/script_bindings.rs"];
+    const logs = [...room.matchAll(/console_(?:log|error|warn|debug)!\(\s*"[^"]*",?([\s\S]*?)\);/g)].map((m) => m[1].trim());
+    expect(logs.length).toBe(1);
+    // Each argument after the format string is a code core names, and nothing else.
+    for (const args of logs) expect(args).toMatch(/^found\.code\(\),?$/);
+  });
+});
+
 // M6 step 8c's cases: here, so they never run beside this file's resets of the content provider's stand-in.
 customRoutingCases();
 // The provider's serve-entry route (M6 stage 1, #415 and S3): here for the same reason.

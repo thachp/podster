@@ -95,7 +95,8 @@ fn escaped(value: &str) -> String {
     }
     out
 }
-/// A configured provider. Its fields never leave this module, except the content domain's name.
+/// A configured provider. Its fields never leave this module, except the content domain's name and, for rule 3(b)'s
+/// check in a room, the serve entries' namespace ID.
 pub(crate) struct Provider {
     account: String,
     namespace: String,
@@ -520,6 +521,27 @@ impl Provider {
             )),
             _ => None,
         }
+    }
+
+    /// A script's bindings, with the scripts token (rule 3(b), S5 of the store plan): the entries of the list as the
+    /// provider gave them, or `None` when there was no answer, or one that isn't a `200` with `"success": true` and an
+    /// array. The store spike read this path with a read token and saw `{ type, name }` in each entry; a `404` (10007)
+    /// or an empty list straight after an upload is the read lagging, which the caller judges as core says. What each
+    /// entry means is `podster_core::app_bindings`'s, in the room.
+    pub(crate) async fn read_bindings(&self, name: &str) -> Option<Vec<Value>> {
+        let url = format!("{}/bindings", self.script_url(name)?);
+        let answer = call(Method::Get, url, &self.scripts_token, None).await?;
+        let body = answer.json();
+        if answer.status != 200 || body["success"] != true {
+            return None;
+        }
+        body["result"].as_array().cloned()
+    }
+
+    /// The ID of the KV namespace that holds the serve entries, for rule 3(b) to tell a binding to it from any other.
+    /// It goes only to a room's check, never into a log or an answer.
+    pub(crate) fn serve_entries_namespace(&self) -> &str {
+        &self.kv_namespace
     }
 
     /// Deletes a script. `None` when there was no answer: the delete may or may not have happened.

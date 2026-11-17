@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod a2a;
+pub mod app_bindings;
 pub mod app_code;
 pub mod app_requests;
 pub mod app_store;

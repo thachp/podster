@@ -108,6 +108,7 @@ mod repo_tokens;
 mod repo_unpublish;
 mod repositories;
 mod roles;
+mod script_bindings;
 mod submission_files;
 mod takedown;
 #[cfg(feature = "failpoints")]

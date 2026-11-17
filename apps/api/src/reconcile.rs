@@ -71,8 +71,10 @@ const MAX_FAILING: i64 = 1000;
 /// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
 /// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
 /// that writes a thousand keys that keep failing among it, can't keep one of these out.
-const OWN_ROOM: [&str; 7] = [
+const OWN_ROOM: [&str; 8] = [
     "script_delete_queued",
+    // Rule 3(b): a script with a binding it may not hold, whose app was suspended for it (S5 of the store plan).
+    podster_core::app_bindings::BINDING_FOREIGN,
     "host_refused",
     "stop_key_differs",
     "stop_key_without_stop",
@@ -385,6 +387,9 @@ struct Counts {
     errors: u32,
     /// Entries the provider gave no readable answer for. Told as one finding, however many.
     unread: u32,
+    /// Scripts whose bindings rule 3(b) couldn't judge: the provider's read gave no list, or the room couldn't tell.
+    /// Told as one finding, however many.
+    bindings_unread: u32,
 }
 
 impl Counts {
@@ -697,9 +702,16 @@ async fn one_key(
 
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
+///
+/// **Rule 3(b)** (S5 of the store plan): the script's bindings are read with the scripts token and sent with the
+/// question, with the serve entries' namespace ID; the room judges them against its record of the label's store, and a
+/// binding the script may not hold suspends the app there. Operators are told here, by the script's name, with why in
+/// `detail`. A read that gave no list is sent as none, which the room judges unknown: nothing is decided, and the pass
+/// counts it.
 async fn one_script(
     sql: &SqlStorage,
     env: &Env,
+    provider: &Provider,
     id: &str,
     listed_at: i64,
     counts: &mut Counts,
@@ -714,14 +726,19 @@ async fn one_script(
     };
     // With when the list was read: a script the room counted gone since then is in the list only because the list is
     // older than the deletion, and isn't found again.
+    let bindings = provider.read_bindings(id).await;
     match ask_room(
         env,
         &room,
-        json!({ "kind": "script", "script": id, "listed_at": listed_at }),
+        json!({
+            "kind": "script", "script": id, "listed_at": listed_at,
+            "bindings": bindings, "serve_entries": provider.serve_entries_namespace(),
+        }),
     )
     .await
     {
         Some(answer) => {
+            bound(sql, id, &answer["bindings"], counts)?;
             counts.take(sql, &answer, now_ms())?;
             if answer["known"] != true {
                 counts.finding(sql, "script_without_room", id, now_ms())?;
@@ -730,6 +747,31 @@ async fn one_script(
         }
         None => Err(Stopped::Unanswered),
     }
+}
+
+/// What the room said of a script's bindings (rule 3(b)): a binding it may not hold is told to operators by the
+/// script's name with the room's code in `detail`, and counted as a change when this answer suspended the app. A
+/// script the room judged unknown is counted unread. A room that answered nothing about it holds no such label, and is
+/// told as `script_without_room` by the caller.
+fn bound(sql: &SqlStorage, id: &str, judged: &Value, counts: &mut Counts) -> R<()> {
+    match judged["verdict"].as_str() {
+        None | Some("clean") => {}
+        Some("foreign") => {
+            if judged["suspended"] == true {
+                counts.changed += 1;
+            }
+            counts.found += 1;
+            record(
+                sql,
+                podster_core::app_bindings::BINDING_FOREIGN,
+                id,
+                Some(judged["foreign"].as_str().unwrap_or("other_binding")),
+                now_ms(),
+            )?;
+        }
+        _ => counts.bindings_unread += 1,
+    }
+    Ok(())
 }
 
 /// What the pass is recorded as having been, once the walk is over too: a pass that skipped a step, or met a room
@@ -911,11 +953,23 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let step = one_script(sql, env, id, listed_at, &mut counts).await;
+        let step = one_script(sql, env, &provider, id, listed_at, &mut counts).await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
         at.cursor = None;
+    }
+    if counts.bindings_unread > 0 {
+        // One finding for the pass, with how many: rule 3(b) decided nothing for those scripts.
+        let told = record(
+            sql,
+            podster_core::app_bindings::BINDINGS_UNREAD,
+            "namespace",
+            Some(&counts.bindings_unread.to_string()),
+            now_ms(),
+        );
+        counts.found += 1;
+        counts.skipped(told);
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
     let woken = wake(sql, env, &mut counts).await;

@@ -122,6 +122,7 @@ pub enum NoBinding {
 }
 
 impl NoBinding {
+    // codes: reasons
     pub fn code(self) -> &'static str {
         match self {
             NoBinding::NoStore => "store_none",
@@ -261,12 +262,17 @@ pub struct ListRead {
     pages: usize,
     /// Set once the list is whole or is no list. Nothing taken after that counts.
     ended: bool,
+    /// Every ID and every name taken so far, so one seen twice is caught.
+    ids: std::collections::BTreeSet<String>,
+    names: std::collections::BTreeSet<String>,
 }
 
 impl ListRead {
     /// Takes one page. A page counts only on `200` with `"success": true`, `result` an array whose every entry has an ID
     /// of D1's form and a name, and a total that is the same on every page; the pages must add up to it exactly, each
-    /// full but the last. Anything else is [`ListStep::Unknown`], and the list read so far is no list: every page taken
+    /// full but the last; and no ID or name may appear twice, on one page or across pages. The list is read by offset,
+    /// so a delete and a create between two pages keep the total, repeat one entry and skip another: a repeat is the
+    /// only sign of it. Anything else is [`ListStep::Unknown`], and the list read so far is no list: every page taken
     /// after an unknown one, or after the list was whole, is unknown too.
     pub fn take(&mut self, page: &ListPage<'_>) -> ListStep {
         if self.ended {
@@ -296,6 +302,9 @@ impl ListRead {
         for entry in entries {
             match (entry.id, entry.name) {
                 (Some(id), Some(name)) if d1_id_form(id) => {
+                    if !self.ids.insert(id.to_owned()) || !self.names.insert(name.to_owned()) {
+                        return ListStep::Unknown;
+                    }
                     more.push((id.to_owned(), name.to_owned()))
                 }
                 _ => return ListStep::Unknown,

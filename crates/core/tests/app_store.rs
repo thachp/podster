@@ -492,15 +492,15 @@ fn ids(n: usize, from: usize) -> Vec<String> {
         .collect()
 }
 
-fn page<'a>(ids: &'a [String], names: &'a [String], total: u64) -> ListPage<'a> {
+/// A page of these databases, each named by its own ID, so names are as distinct as IDs.
+fn page(ids: &[String], total: u64) -> ListPage<'_> {
     ListPage {
         envelope: ok(),
         entries: Some(
             ids.iter()
-                .zip(names)
-                .map(|(id, name)| Described {
+                .map(|id| Described {
                     id: Some(id),
-                    name: Some(name),
+                    name: Some(id),
                 })
                 .collect(),
         ),
@@ -508,44 +508,35 @@ fn page<'a>(ids: &'a [String], names: &'a [String], total: u64) -> ListPage<'a> 
     }
 }
 
-fn names(n: usize) -> Vec<String> {
-    (0..n).map(|i| format!("db-{i}")).collect()
-}
-
 #[test]
 fn a_list_is_whole_only_when_its_pages_add_up() {
-    let names = names(LIST_PAGE);
     // Empty.
     let mut list = ListRead::default();
-    assert_eq!(list.take(&page(&[], &[], 0)), ListStep::Done);
+    assert_eq!(list.take(&page(&[], 0)), ListStep::Done);
     assert!(list.found.is_empty());
     // A page taken after the list was whole doesn't count, even one that would.
-    assert_eq!(list.take(&page(&[], &[], 0)), ListStep::Unknown);
+    assert_eq!(list.take(&page(&[], 0)), ListStep::Unknown);
     // One short page.
     let a = ids(3, 0);
     let mut list = ListRead::default();
-    assert_eq!(list.take(&page(&a, &names, 3)), ListStep::Done);
+    assert_eq!(list.take(&page(&a, 3)), ListStep::Done);
     assert_eq!(list.found.len(), 3);
-    assert_eq!(list.found[0], (a[0].clone(), "db-0".to_string()));
+    assert_eq!(list.found[0], (a[0].clone(), a[0].clone()));
     // A full page, then the rest.
     let full = ids(LIST_PAGE, 0);
     let rest = ids(2, LIST_PAGE);
     let total = (LIST_PAGE + 2) as u64;
     let mut list = ListRead::default();
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::More);
-    assert_eq!(list.take(&page(&rest, &names, total)), ListStep::Done);
+    assert_eq!(list.take(&page(&full, total)), ListStep::More);
+    assert_eq!(list.take(&page(&rest, total)), ListStep::Done);
     assert_eq!(list.found.len(), LIST_PAGE + 2);
     // Exactly one full page.
     let mut list = ListRead::default();
-    assert_eq!(
-        list.take(&page(&full, &names, LIST_PAGE as u64)),
-        ListStep::Done
-    );
+    assert_eq!(list.take(&page(&full, LIST_PAGE as u64)), ListStep::Done);
 }
 
 #[test]
 fn a_list_of_any_other_shape_is_no_list() {
-    let names = names(LIST_PAGE + 1);
     let a = ids(3, 0);
     let full = ids(LIST_PAGE, 0);
     let over = ids(LIST_PAGE + 1, 0);
@@ -556,7 +547,7 @@ fn a_list_of_any_other_shape_is_no_list() {
                 status: 201,
                 ..ok()
             },
-            ..page(&a, &names, 3)
+            ..page(&a, 3)
         }),
         ListStep::Unknown
     );
@@ -566,113 +557,124 @@ fn a_list_of_any_other_shape_is_no_list() {
                 success: None,
                 ..ok()
             },
-            ..page(&a, &names, 3)
+            ..page(&a, 3)
         }),
         ListStep::Unknown
     );
     assert_eq!(
         one(ListPage {
             entries: None,
-            ..page(&a, &names, 3)
+            ..page(&a, 3)
         }),
         ListStep::Unknown
     );
     assert_eq!(
         one(ListPage {
             total: None,
-            ..page(&a, &names, 3)
+            ..page(&a, 3)
         }),
         ListStep::Unknown
     );
     // More than a page's worth in one page.
-    assert_eq!(
-        one(page(&over, &names, (LIST_PAGE + 1) as u64)),
-        ListStep::Unknown
-    );
+    assert_eq!(one(page(&over, (LIST_PAGE + 1) as u64)), ListStep::Unknown);
     // A page longer than the total, or a short page before the end.
-    assert_eq!(one(page(&a, &names, 2)), ListStep::Unknown);
-    assert_eq!(one(page(&a, &names, 4)), ListStep::Unknown);
+    assert_eq!(one(page(&a, 2)), ListStep::Unknown);
+    assert_eq!(one(page(&a, 4)), ListStep::Unknown);
     // An entry without an ID of D1's form, or without a name.
-    let mut bad = page(&a, &names, 3);
+    let mut bad = page(&a, 3);
     bad.entries.as_mut().unwrap()[1].id = Some("not-a-uuid");
     assert_eq!(one(bad), ListStep::Unknown);
-    let mut bad = page(&a, &names, 3);
+    let mut bad = page(&a, 3);
     bad.entries.as_mut().unwrap()[2].name = None;
     assert_eq!(one(bad), ListStep::Unknown);
-    let mut bad = page(&a, &names, 3);
+    let mut bad = page(&a, 3);
     bad.entries.as_mut().unwrap()[0].id = None;
     assert_eq!(one(bad), ListStep::Unknown);
     // The total changes between pages.
     let rest = ids(2, LIST_PAGE);
     let mut list = ListRead::default();
     assert_eq!(
-        list.take(&page(&full, &names, (LIST_PAGE + 2) as u64)),
+        list.take(&page(&full, (LIST_PAGE + 2) as u64)),
         ListStep::More
     );
     assert_eq!(
-        list.take(&page(&rest, &names, (LIST_PAGE + 3) as u64)),
+        list.take(&page(&rest, (LIST_PAGE + 3) as u64)),
         ListStep::Unknown
     );
     // The total grows between two full pages, which would otherwise read as more to come.
     let next = ids(LIST_PAGE, LIST_PAGE);
     let mut list = ListRead::default();
     assert_eq!(
-        list.take(&page(&full, &names, (3 * LIST_PAGE) as u64)),
+        list.take(&page(&full, (3 * LIST_PAGE) as u64)),
         ListStep::More
     );
     assert_eq!(
-        list.take(&page(&next, &names, (4 * LIST_PAGE) as u64)),
+        list.take(&page(&next, (4 * LIST_PAGE) as u64)),
         ListStep::Unknown
     );
     // A second page that runs past the total.
     let mut list = ListRead::default();
     assert_eq!(
-        list.take(&page(&full, &names, (LIST_PAGE + 1) as u64)),
+        list.take(&page(&full, (LIST_PAGE + 1) as u64)),
         ListStep::More
     );
     assert_eq!(
-        list.take(&page(&rest, &names, (LIST_PAGE + 1) as u64)),
+        list.take(&page(&rest, (LIST_PAGE + 1) as u64)),
         ListStep::Unknown
     );
 }
 
 #[test]
 fn a_list_longer_than_its_bound_is_no_list() {
-    let names = names(LIST_PAGE);
-    let full = ids(LIST_PAGE, 0);
+    let pages: Vec<Vec<String>> = (0..=MAX_LIST_PAGES)
+        .map(|at| ids(LIST_PAGE, at * LIST_PAGE))
+        .collect();
     let total = (LIST_PAGE * MAX_LIST_PAGES + 1) as u64;
     let mut list = ListRead::default();
     for at in 1..MAX_LIST_PAGES {
         assert_eq!(
-            list.take(&page(&full, &names, total)),
+            list.take(&page(&pages[at - 1], total)),
             ListStep::More,
             "page {at}"
         );
     }
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::Unknown);
+    assert_eq!(
+        list.take(&page(&pages[MAX_LIST_PAGES - 1], total)),
+        ListStep::Unknown
+    );
     // At exactly the bound, the list is whole.
     let total = (LIST_PAGE * MAX_LIST_PAGES) as u64;
     let mut list = ListRead::default();
-    for _ in 1..MAX_LIST_PAGES {
-        assert_eq!(list.take(&page(&full, &names, total)), ListStep::More);
+    for at in 1..MAX_LIST_PAGES {
+        assert_eq!(list.take(&page(&pages[at - 1], total)), ListStep::More);
     }
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::Done);
+    assert_eq!(
+        list.take(&page(&pages[MAX_LIST_PAGES - 1], total)),
+        ListStep::Done
+    );
+    assert_eq!(list.found.len(), LIST_PAGE * MAX_LIST_PAGES);
     // And a page past the bound is never read as more.
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::Unknown);
+    assert_eq!(
+        list.take(&page(&pages[MAX_LIST_PAGES], total)),
+        ListStep::Unknown
+    );
     // Past the bound, a page that would make the list whole still isn't taken.
     let total = (LIST_PAGE * MAX_LIST_PAGES + 1) as u64;
-    let last = ids(1, 0);
+    let last = ids(1, MAX_LIST_PAGES * LIST_PAGE);
     let mut list = ListRead::default();
-    for _ in 1..MAX_LIST_PAGES {
-        assert_eq!(list.take(&page(&full, &names, total)), ListStep::More);
+    for at in 1..=MAX_LIST_PAGES {
+        let want = if at < MAX_LIST_PAGES {
+            ListStep::More
+        } else {
+            ListStep::Unknown
+        };
+        assert_eq!(list.take(&page(&pages[at - 1], total)), want, "page {at}");
     }
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::Unknown);
-    assert_eq!(list.take(&page(&last, &names, total)), ListStep::Unknown);
+    assert_eq!(list.take(&page(&last, total)), ListStep::Unknown);
 }
 
 #[test]
 fn nothing_taken_after_an_unknown_page_counts() {
-    let names = names(LIST_PAGE);
     let full = ids(LIST_PAGE, 0);
     let rest = ids(2, LIST_PAGE);
     let total = (LIST_PAGE + 2) as u64;
@@ -680,12 +682,86 @@ fn nothing_taken_after_an_unknown_page_counts() {
     assert_eq!(
         list.take(&ListPage {
             total: None,
-            ..page(&full, &names, total)
+            ..page(&full, total)
         }),
         ListStep::Unknown
     );
     // The page that failed added nothing, and the next, which would have been the first, isn't taken.
-    assert_eq!(list.take(&page(&full, &names, total)), ListStep::Unknown);
-    assert_eq!(list.take(&page(&rest, &names, total)), ListStep::Unknown);
+    assert_eq!(list.take(&page(&full, total)), ListStep::Unknown);
+    assert_eq!(list.take(&page(&rest, total)), ListStep::Unknown);
     assert!(list.found.is_empty());
+}
+
+#[test]
+fn an_id_or_a_name_seen_twice_is_no_list() {
+    // Offset paging with one database deleted and one made between two pages: the total holds, and the second page
+    // starts one entry early, so the first page's last entry comes again and the newest is never seen.
+    let first = ids(LIST_PAGE, 0);
+    let mut second = ids(LIST_PAGE - 1, LIST_PAGE);
+    second.insert(0, first[LIST_PAGE - 1].clone());
+    let total = (2 * LIST_PAGE) as u64;
+    let mut list = ListRead::default();
+    assert_eq!(list.take(&page(&first, total)), ListStep::More);
+    assert_eq!(list.take(&page(&second, total)), ListStep::Unknown);
+    // The control: the same two pages with no repeat are whole.
+    let mut list = ListRead::default();
+    assert_eq!(list.take(&page(&first, total)), ListStep::More);
+    assert_eq!(
+        list.take(&page(&ids(LIST_PAGE, LIST_PAGE), total)),
+        ListStep::Done
+    );
+    // A repeat within one page.
+    let mut twice = ids(3, 0);
+    twice[2] = twice[0].clone();
+    assert_eq!(
+        ListRead::default().take(&page(&twice, 3)),
+        ListStep::Unknown
+    );
+    // Another ID under a name already seen, on a later page.
+    let other = ids(1, LIST_PAGE);
+    let mut list = ListRead::default();
+    assert_eq!(
+        list.take(&page(&first, (LIST_PAGE + 1) as u64)),
+        ListStep::More
+    );
+    let renamed = ListPage {
+        entries: Some(vec![Described {
+            id: Some(&other[0]),
+            name: Some(&first[0]),
+        }]),
+        ..page(&other, (LIST_PAGE + 1) as u64)
+    };
+    assert_eq!(list.take(&renamed), ListStep::Unknown);
+    // Two IDs under one name on one page, and the control, two names.
+    let a = ids(2, 0);
+    let named = |second: &'static str| ListPage {
+        entries: Some(vec![
+            Described {
+                id: Some(&a[0]),
+                name: Some("db"),
+            },
+            Described {
+                id: Some(&a[1]),
+                name: Some(second),
+            },
+        ]),
+        ..page(&a, 2)
+    };
+    assert_eq!(ListRead::default().take(&named("db")), ListStep::Unknown);
+    // One ID under two names, on one page.
+    let renamed_twice = ListPage {
+        entries: Some(vec![
+            Described {
+                id: Some(&a[0]),
+                name: Some("db"),
+            },
+            Described {
+                id: Some(&a[0]),
+                name: Some("db2"),
+            },
+        ]),
+        ..page(&a, 2)
+    };
+    assert_eq!(ListRead::default().take(&renamed_twice), ListStep::Unknown);
+    assert_eq!(ListRead::default().take(&named("db2")), ListStep::Done);
 }

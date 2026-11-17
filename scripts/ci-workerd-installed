@@ -6,16 +6,22 @@
 # jobs then failed deep in their tests with "The package "@cloudflare/workerd-linux-64" could not be found". This makes
 # that failure explicit and early: if the package is missing it runs `npm ci` once more, checks again, and fails naming
 # the package if it is still absent. One retry, no loop.
+#
+# A package can hold more than one copy of workerd: apps/web has one at the top and one each under miniflare and
+# wrangler, which is what `wrangler dev` and miniflare load. Every copy found from the package, from miniflare and from
+# wrangler (and from miniflare as wrangler finds it) is checked, each for the platform package it would load, at the
+# version that copy pins.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
 Usage: scripts/ci-workerd-installed <package-dir>
 
-Checks that <package-dir> (e.g. apps/api), after `npm ci`, has workerd and this platform's
-@cloudflare/workerd-<platform> package with its binary. If the platform package is missing, it
-runs `npm ci` once more in <package-dir> and checks again. Exits 0 when the binary is there,
-1 when it is still missing after the retry or workerd itself isn't installed, 2 on bad usage.
+Checks that <package-dir> (e.g. apps/api), after `npm ci`, has workerd and, for every copy of
+workerd it holds (the top-level one and those miniflare and wrangler load), this platform's
+@cloudflare/workerd-<platform> package at the version that copy pins, with its binary. If any is missing, it runs `npm ci` once
+more in <package-dir> and checks again. Exits 0 when every copy has its binary, 1 when one is
+still missing after the retry or workerd isn't installed at all, 2 on bad usage.
 EOF
 }
 
@@ -29,44 +35,72 @@ if [ "$#" -ne 1 ] || [ ! -f "$1/package.json" ]; then
 fi
 dir="$1"
 
-# Prints the platform package's name. Exits 0 if it resolves from workerd's own folder with its binary, as workerd
-# itself looks it up; 3 if workerd isn't installed; 4 if the platform package or its binary is missing.
+# Prints the platform package's name, then one line per copy of workerd that lacks it, its binary or its pinned version, as the path of that
+# workerd relative to <package-dir>. Exits 0 if no copy lacks it, 3 if no workerd is installed, 4 if a copy lacks it.
+# Packages are found as Node finds them, by each node_modules folder from a directory up, so no package's `exports`
+# can hide its package.json.
 check() {
   (cd "$dir" && node -e '
-    const { existsSync } = require("node:fs");
-    const { dirname, join } = require("node:path");
+    const { existsSync, realpathSync } = require("node:fs");
+    const { dirname, join, relative } = require("node:path");
     const os = { linux: "linux", darwin: "darwin", win32: "windows" }[process.platform] ?? process.platform;
     const arch = { x64: "64", arm64: "arm64" }[process.arch] ?? process.arch;
     const name = `@cloudflare/workerd-${os}-${arch}`;
+    const exe = process.platform === "win32" ? "workerd.exe" : "workerd";
+    const find = (pkg, from) => {
+      for (let at = from; ; at = dirname(at)) {
+        const candidate = join(at, "node_modules", pkg);
+        if (existsSync(join(candidate, "package.json"))) return realpathSync(candidate);
+        if (dirname(at) === at) return null;
+      }
+    };
+    const root = process.cwd();
+    const starts = [root];
+    for (const pkg of ["miniflare", "wrangler"]) {
+      const found = find(pkg, root);
+      if (found) starts.push(found);
+    }
+    const wrangler = find("wrangler", root);
+    const wranglerMiniflare = wrangler && find("miniflare", wrangler);
+    if (wranglerMiniflare) starts.push(wranglerMiniflare);
+    const copies = [...new Set(starts.map((start) => find("workerd", start)).filter(Boolean))];
     console.log(name);
-    let workerd;
-    try { workerd = dirname(require.resolve("workerd/package.json")); } catch { process.exit(3); }
-    let platform;
-    try { platform = dirname(require.resolve(`${name}/package.json`, { paths: [workerd] })); } catch { process.exit(4); }
-    const bin = join(platform, "bin", process.platform === "win32" ? "workerd.exe" : "workerd");
-    process.exit(existsSync(bin) ? 0 : 4);
+    if (!copies.length) process.exit(3);
+    // A copy whose own platform package is missing would fall through to another copy'"'"'s, of another version, so the
+    // package it finds must be the version that copy of workerd pins.
+    const missing = copies.filter((workerd) => {
+      const platform = find(name, workerd);
+      if (!platform || !existsSync(join(platform, "bin", exe))) return true;
+      const wanted = require(join(workerd, "package.json")).optionalDependencies?.[name];
+      return wanted !== undefined && require(join(platform, "package.json")).version !== wanted;
+    });
+    for (const workerd of missing) console.log(relative(root, workerd));
+    process.exit(missing.length ? 4 : 0);
   ')
 }
 
 status=0
-name="$(check)" || status=$?
+out="$(check)" || status=$?
+name="$(printf '%s\n' "$out" | head -n 1)"
 if [ "$status" -eq 3 ]; then
   echo "ci-workerd-installed: workerd isn't installed in $dir; this check is only for packages that use it" >&2
   exit 1
 fi
 if [ "$status" -eq 0 ]; then
-  echo "ci-workerd-installed: $name is installed in $dir"
+  echo "ci-workerd-installed: $name is installed for every workerd in $dir"
   exit 0
 fi
 
-echo "::warning::ci-workerd-installed: npm ci left out $name in $dir; running npm ci once more"
+lacking="$(printf '%s\n' "$out" | tail -n +2 | paste -sd ' ' -)"
+echo "::warning::ci-workerd-installed: npm ci left out $name for $lacking in $dir; running npm ci once more"
 (cd "$dir" && npm ci)
 
 status=0
-name="$(check)" || status=$?
+out="$(check)" || status=$?
 if [ "$status" -eq 0 ]; then
-  echo "ci-workerd-installed: $name is installed in $dir after the second npm ci"
+  echo "ci-workerd-installed: $name is installed for every workerd in $dir after the second npm ci"
   exit 0
 fi
-echo "::error::ci-workerd-installed: $name is still missing in $dir after a second npm ci; workerd can't start without it" >&2
+lacking="$(printf '%s\n' "$out" | tail -n +2 | paste -sd ' ' -)"
+echo "::error::ci-workerd-installed: $name is still missing for ${lacking:-workerd} in $dir after a second npm ci; workerd can't start without it"
 exit 1

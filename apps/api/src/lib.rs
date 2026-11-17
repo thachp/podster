@@ -331,6 +331,11 @@ async fn route(
     if path == "/health" {
         return Ok(Response::ok("ok")?);
     }
+    // Whether the release routes are answered now, for the gateway's listing of `deploy_release` (M6 step 6, 6g). It
+    // names no one and grants nothing, so it takes no assertion, as `/health` doesn't.
+    if path == releases::ROUTES_ANSWERED_PATH && req.method() == Method::Get {
+        return releases::routes_answered(&env).await;
+    }
     // The test pool can't run a queue consumer, so test builds reach the same work here.
     #[cfg(feature = "failpoints")]
     if path == "/test/consume-wake" {
@@ -446,7 +451,9 @@ async fn route(
                 return releases::answer(&env, &caller, audience, &parts, body.as_deref(), &req)
                     .await;
             }
-            if caller.kind != "person" {
+            // An agent reaches exactly one: asking for a release, the `deploy_release` capability (step 6, 6g). The
+            // room decides whether it may.
+            if caller.kind != "person" && !releases::agent_route(&method, &parts) {
                 return Err(ApiError::not_allowed());
             }
         }

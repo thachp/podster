@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { decodeJwt } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { CAPABILITIES } from "../src/capabilities";
+import { CAPABILITIES, RELEASE_ROUTES_PATH } from "../src/capabilities";
 import { A2A_CAPABILITIES, LIFECYCLE_METHODS } from "../src/a2a/lifecycle";
 import worker, { a2aCapability, type Env } from "../src/index";
 import { a2a, agentOnBoth, BASE, dash, mcpTool, setUpSchemas, signUp, type Person } from "./oauth-helpers";
@@ -250,6 +250,9 @@ function standIn(answer: (method: string, path: string) => Response) {
   const api = {
     fetch: async (request: Request) => {
       const url = new URL(request.url);
+      // The gateway's read of whether the API answers the release routes (M6 step 6, 6g): no, here, and not one of the
+      // calls these tests compare. `deploy-release.spec.ts` tests it.
+      if (url.pathname === RELEASE_ROUTES_PATH) return reply(200, { answered: false });
       const assertion = request.headers.get("x-podster-assertion");
       seen.push({ method: request.method, path: url.pathname + url.search, body: await request.text(), key: request.headers.get("idempotency-key"), sub: assertion ? decodeJwt(assertion).sub : undefined });
       return answer(request.method, url.pathname);
@@ -394,8 +397,10 @@ describe("GetRepoAccess, against a stand-in API with managed repositories on", (
 
   it("is on the card only while managed repositories are on, as MCP lists its tool", async () => {
     const card = async (environment: object) => (await (await worker.fetch(new Request(`${BASE}/.well-known/agent-card.json`), environment as never, ctx)).json<any>()).capabilities.extensions[0].params.methods as string[];
-    expect(await card({ ...e, MANAGED_REPOSITORIES: "true" })).toEqual(Object.keys(LIFECYCLE_METHODS));
-    for (const value of [undefined, "", "TRUE", "yes"]) expect(await card({ ...e, MANAGED_REPOSITORIES: value }), String(value)).toEqual(Object.keys(LIFECYCLE_METHODS).filter((m) => m !== M("GetRepoAccess")));
+    // DeployRelease isn't listed here: the real API answers the release routes nowhere (`deploy-release.spec.ts`).
+    const listed = Object.keys(LIFECYCLE_METHODS).filter((m) => m !== M("DeployRelease"));
+    expect(await card({ ...e, MANAGED_REPOSITORIES: "true" })).toEqual(listed);
+    for (const value of [undefined, "", "TRUE", "yes"]) expect(await card({ ...e, MANAGED_REPOSITORIES: value }), String(value)).toEqual(listed.filter((m) => m !== M("GetRepoAccess")));
   });
 });
 

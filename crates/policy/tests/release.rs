@@ -762,8 +762,104 @@ fn the_proof_job_goes_on_only_where_asking_still_could_and_waits_on_what_it_cant
     assert_eq!(hostname_proof_room(&unread), HostnameProofStep::Wait);
 }
 
+fn link(person: &str, linked_since: i64, generation: u64) -> ControllerLink<'_> {
+    ControllerLink {
+        person,
+        linked_since,
+        generation,
+    }
+}
+
 #[test]
-fn a_persons_request_needs_what_asking_needs_and_their_own_standing_and_no_agent_asks_yet() {
+fn an_agents_controller_holds_only_while_its_link_is_exactly_the_one_recorded() {
+    let recorded = link("per_c", 10, 3);
+    assert!(controller_unchanged(
+        Some(&recorded),
+        Some(&link("per_c", 10, 3))
+    ));
+    // Another person, a link made again (a later generation of the link) or a connection made again: not the same.
+    for (why, current) in [
+        ("another person", link("per_d", 10, 3)),
+        ("the link made again", link("per_c", 11, 3)),
+        ("the agent connected again", link("per_c", 10, 4)),
+    ] {
+        assert!(
+            !controller_unchanged(Some(&recorded), Some(&current)),
+            "{why}"
+        );
+    }
+    // Nothing on record, nothing now, or neither: never a match. Two missing values are not a match.
+    assert!(!controller_unchanged(None, Some(&recorded)));
+    assert!(!controller_unchanged(Some(&recorded), None));
+    assert!(!controller_unchanged(None, None));
+}
+
+#[test]
+fn an_agent_asks_only_with_a_controller_on_record_and_never_through_a_public_claim() {
+    let g = grant("agt_a");
+    let room = ReleaseRoom::OPEN;
+    let agent = caller("agt_a", Agent, Role::Member);
+    let held = standing(Some(&g));
+    // A connected agent with a live grant, whose controlling person still holds, may ask (6g).
+    assert_eq!(
+        authorize_release_request(&agent, &room, &held, true),
+        Ok(())
+    );
+    assert_eq!(may_ask_for_deploy(&agent, true), Ok(()));
+    // With no controlling person on its credential, it is refused before anything is read.
+    assert_eq!(
+        may_ask_for_deploy(&agent, false),
+        Err(ReleaseDenial::AgentDisconnected)
+    );
+    // A person needs no link: they are their own controller.
+    assert_eq!(
+        may_ask_for_deploy(&caller("per_m", Person, Role::Member), false),
+        Ok(())
+    );
+    assert_eq!(
+        may_ask_for_deploy(&caller("agt_a", Agent, Role::None), true),
+        Err(ReleaseDenial::NotParticipant)
+    );
+    // Its controlling person having left the organization refuses it as an agent no longer connected.
+    assert_eq!(
+        authorize_release_request(&agent, &room, &held, false),
+        Err(ReleaseDenial::AgentDisconnected)
+    );
+    // Its link not the one recorded, or its connection gone.
+    let moved = ReleaseStanding {
+        agent_connected: false,
+        ..held
+    };
+    assert_eq!(
+        authorize_release_request(&agent, &room, &moved, true),
+        Err(ReleaseDenial::AgentDisconnected)
+    );
+    // Through a public claim, whatever it holds (decision 159): refused by that, before its grant.
+    let public = ReleaseStanding {
+        through_public_claim: true,
+        ..held
+    };
+    for role in [Role::Guest, Role::Member] {
+        assert_eq!(
+            authorize_release_request(&caller("agt_a", Agent, role), &room, &public, true),
+            Err(ReleaseDenial::PublicParticipant),
+            "{role:?}"
+        );
+    }
+    // A rollback stays a person's: the person-only rule still refuses every agent.
+    assert_eq!(may_ask_for_release(&agent), Err(ReleaseDenial::NotAllowed));
+    // An agent asks by a grant of its own, whatever its role.
+    for role in [Role::Admin, Role::Owner] {
+        assert_eq!(
+            authorize_release_request(&caller("agt_b", Agent, role), &room, &held, true),
+            Err(ReleaseDenial::Grant(GrantRefusal::GrantRequired)),
+            "{role:?}"
+        );
+    }
+}
+
+#[test]
+fn a_persons_request_needs_what_asking_needs_and_their_own_standing() {
     let p = grant("per_m");
     let member = caller("per_m", Person, Role::Member);
     let room = ReleaseRoom::OPEN;
@@ -782,26 +878,6 @@ fn a_persons_request_needs_what_asking_needs_and_their_own_standing_and_no_agent
         authorize_release_request(&caller("per_m", Person, Role::None), &room, &held, true),
         Err(ReleaseDenial::NotParticipant)
     );
-    // An agent never, even one that holds a live grant from someone who still holds authority and is connected.
-    let g = grant("agt_a");
-    let agent = caller("agt_a", Agent, Role::Member);
-    assert_eq!(
-        authorize_deploy_release(&agent, &room, &standing(Some(&g))),
-        Ok(()),
-        "the agent would pass the deployment rule itself"
-    );
-    for role in [Role::Member, Role::Admin, Role::Owner] {
-        assert_eq!(
-            authorize_release_request(
-                &caller("agt_a", Agent, role),
-                &room,
-                &standing(Some(&g)),
-                true
-            ),
-            Err(ReleaseDenial::NotAllowed),
-            "{role:?}"
-        );
-    }
     // The room's facts refuse in the deployment rule's order, a private room first among the room's.
     for (change, denial) in ROOM_CHANGES {
         let mut room = ReleaseRoom::OPEN;

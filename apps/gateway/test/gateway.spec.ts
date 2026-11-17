@@ -1480,7 +1480,8 @@ describe("rate limits", () => {
     expect(await called("get_task_release_status")).toEqual(await called("no_such_tool"));
     expect((await called("merge_task"))[1]).toContain("<tool>");
     // Nothing else is ever gated, and the gated tool is a retry-safe command that names only the task.
-    expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => !["get_repo_access", "merge_task", "get_task_release_status"].includes(n)));
+    // deploy_release (M6 step 6, 6g) is listed only while the API answers the release routes: `deploy-release.spec.ts`.
+    expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => !["get_repo_access", "merge_task", "get_task_release_status", "deploy_release"].includes(n)));
     // The release status (M5 step 8) is listed the same way, and off, calling it answers exactly as a missing tool does.
     for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("get_task_release_status");
     expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("get_task_release_status");

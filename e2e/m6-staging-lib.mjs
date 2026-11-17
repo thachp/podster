@@ -321,14 +321,24 @@ export function agentCapabilities(capabilities) {
   return [...String(capabilities).matchAll(/^ {2}([a-z0-9_]+):\s*\{[^}]*operation:\s*([A-Za-z0-9_]+)/gm)].map(([, name, operation]) => ({ name, operation }));
 }
 
-/** Why the contract's M6 operations can't be trusted, or null: each must be person-only, and none an agent capability. */
+/**
+ * The one agent capability that reaches an M6 operation (M6 step 6, 6g): an agent's request for a release. The gateway
+ * lists it only while the API answers the release routes, so on a deployment with release off no agent sees it.
+ */
+export const AGENT_RELEASE = { name: "deploy_release", operation: "requestRelease" };
+
+/**
+ * Why the contract's M6 operations can't be trusted, or null: each must be person-only, but for `requestRelease`, which
+ * must be `deploy_release`'s and no other capability's; and no other is an agent capability.
+ */
 export function operationsProblem(operations, personOnlyList, capabilities = []) {
   const ids = operations.map((op) => op.operation);
   if (ids.length === 0) return "the contract marks no operation as M6's";
   if (new Set(ids).size !== ids.length) return "the contract names an M6 operation twice";
-  const unlisted = ids.filter((id) => !personOnlyList.includes(id));
+  const isAgentRelease = (c) => c.name === AGENT_RELEASE.name && c.operation === AGENT_RELEASE.operation;
+  const unlisted = ids.filter((id) => !personOnlyList.includes(id) && !(id === AGENT_RELEASE.operation && capabilities.some(isAgentRelease)));
   if (unlisted.length) return `capabilities.yaml doesn't list ${unlisted.join(", ")} under person_only`;
-  const given = capabilities.filter((c) => ids.includes(c.operation)).map((c) => c.name);
+  const given = capabilities.filter((c) => ids.includes(c.operation) && !isAgentRelease(c)).map((c) => c.name);
   return given.length ? `capabilities.yaml gives agents ${given.join(", ")}, for M6 operations` : null;
 }
 
@@ -464,10 +474,11 @@ export const toolNotFound = (text) => /^(MCP error -32602: )?Tool <tool> not fou
 // ---- what counts as M6's ----
 
 /**
- * Tool names M6 will add that the contract doesn't list yet, by hand. Each is pinned by the self-test to the text of
- * capabilities.yaml and ADR 0010, so a renamed one fails there.
+ * Tool names of M6's that aren't an operation's own name, by hand: `deploy_release`, which reaches `requestRelease`
+ * (6g) and is listed to agents only while the API answers the release routes. Each is pinned by the self-test to the
+ * text of capabilities.yaml and ADR 0010, so a renamed one fails there.
  */
-export const PLANNED_TOOLS = ["deploy_release"];
+export const PLANNED_TOOLS = [AGENT_RELEASE.name];
 
 /** The keys step 9 added to the operators' report list, which only release switched on shows (M6-S02e). */
 export const QUEUE_KEYS = ["kind", "host"];

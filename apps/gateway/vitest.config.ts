@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
@@ -27,6 +27,9 @@ export default defineConfig({
           TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql") + read("../api/migrations/0002_room_status.sql") + read("../api/migrations/0003_membership_by_org.sql") + read("../api/migrations/0004_ownerless_rooms.sql") + read("../api/migrations/0005_public_workroom_index.sql") + read("../api/migrations/0006_public_explore_order.sql") + read("../api/migrations/0007_repo_room_index.sql") + read("../api/migrations/0008_app_label_index.sql") + read("../api/migrations/0009_app_label_approved.sql"),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
+          // Every gateway source file, each after a `// FILE:` line, for the static check that an agent's link ends only by
+          // a disconnect (deploy-release.spec.ts).
+          TEST_GATEWAY_SOURCES: readdirSync(new URL("./src", import.meta.url), { recursive: true }).map(String).filter((f) => f.endsWith(".ts")).sort().map((f) => `// FILE: ${f}\n${readFileSync(new URL(`./src/${f}`, import.meta.url), "utf8")}`).join("\n"),
           TEST_CAPABILITIES: readFileSync(new URL("../../packages/contracts/capabilities.yaml", import.meta.url), "utf8"),
           TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
           TEST_A2A_PROFILE: readFileSync(new URL("../../docs/spec/A2A-PROFILE.md", import.meta.url), "utf8"),

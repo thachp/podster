@@ -5307,8 +5307,13 @@ impl Workspace {
             // Asking for a release of a task's merged commit (M6 step 6): who first, by the room's rows, then the
             // release path's gate and what it needs from outside, and the transaction decides again.
             (Method::Post, ["releases"]) if release_route_on => {
-                release_request::may_ask(&who)?;
-                let reads = Rc::new(self.release_request_reads(&identity.id).await?);
+                // A person, or an agent through `deploy_release` with a controlling person on its credential (6g).
+                let asking = release_request::Asking::Request;
+                release_request::may_ask(&who, &identity, asking)?;
+                let reads = Rc::new(
+                    self.release_request_reads(&identity, asking, key.clone(), hash.clone())
+                        .await?,
+                );
                 let again = reads.clone();
                 self.command_checked(
                     &identity,
@@ -5327,9 +5332,13 @@ impl Workspace {
             // Asking to roll back to an earlier release (M6 step 6, 6h): a request, with the same standing and reads,
             // naming the release it rolls back to.
             (Method::Post, ["releases", target, "rollback"]) if release_route_on => {
-                release_request::may_ask(&who)?;
+                let asking = release_request::Asking::Rollback;
+                release_request::may_ask(&who, &identity, asking)?;
                 let target = release_approval::named(target)?;
-                let reads = Rc::new(self.release_request_reads(&identity.id).await?);
+                let reads = Rc::new(
+                    self.release_request_reads(&identity, asking, key.clone(), hash.clone())
+                        .await?,
+                );
                 let again = reads.clone();
                 self.command_checked(
                     &identity,

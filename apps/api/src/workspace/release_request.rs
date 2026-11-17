@@ -4,12 +4,13 @@
 //! uploaded or served by it,** and the release job never takes up a release a person hasn't approved
 //! (`release_recheck::job_owns`). Approving and declining are `release_approval`'s.
 //!
-//! **Who** is `podster_policy::release::authorize_release_request`: a person in the room, not there through a public
-//! claim, holding a live `deploy` grant on the room's repository from someone who still holds release authority, and
-//! still in the organization their place here is held in; and only where release may happen at all, a public room
-//! first. **An agent never asks here yet:** the Worker refuses one by its kind, and so does the room. The rows a request
-//! writes keep who asked and not the person who controls them, so an agent's release couldn't be rechecked; its request
-//! arrives with the `deploy_release` capability, which records that person.
+//! **Who** is `podster_policy::release::authorize_release_request`: someone in the room, not there through a public
+//! claim, holding a live `deploy` grant on the room's repository from someone who still holds release authority, whose
+//! controlling person is still in their organization; and only where release may happen at all, a public room first.
+//! **An agent asks here through the `deploy_release` capability (6g):** its controlling person is whoever linked the
+//! credential it asks with, read from the gateway's assertion ([`Link`]), and asked of their own `Principal`. The request
+//! records that link (`release_requester`), and every later pass compares the agent's link then with it: a replay here,
+//! and the approval's and the job's recheck (`release_recheck`). A rollback stays a person's ([`Asking::Rollback`]).
 //!
 //! **What** is `podster_core::release_request::request_release`: exactly the commit Podster's own merge confirmed for
 //! the task named, on the room's own repository, the room's reviewer rule as it is now, no hold because nobody may
@@ -53,8 +54,9 @@ use podster_core::release_request::{
     pending_for_commit, request_release, ReleaseRequest, RequestRefusal, REQUESTED_STATE,
 };
 use podster_policy::release::{
-    authorize_release_request, delegation_holder, may_ask_for_release, DeployGrant, ReleaseDenial,
-    ReleaseStanding, DEPLOY_ACTION,
+    authorize_release_request, controller_unchanged, delegation_holder, may_ask_for_deploy,
+    may_ask_for_release, ControllerLink, DeployGrant, ReleaseDenial, ReleaseStanding,
+    DEPLOY_ACTION,
 };
 
 /// The longest task ID a request may name: as long as a principal's ID may be.
@@ -65,7 +67,7 @@ const LABEL_TRIES: usize = 4;
 /// The shortest word of the room's name or handle a label must not hold. A shorter one would turn away most labels.
 const AVOIDED_WORD: usize = 4;
 
-/// What was read outside the room before the transaction. Never taken from a request.
+/// What was read outside the room before the transaction. Never taken from a request's body.
 pub(super) struct RequestReads {
     room: OnReads,
     /// The requester's own standing: whether they still belong to the organization their place here is held in.
@@ -74,12 +76,91 @@ pub(super) struct RequestReads {
     giver: Asked,
     /// Randomness for a label, made outside the transaction, used only if the room has none current.
     labels: Vec<[u8; 16]>,
+    /// Who may ask: anyone `deploy_release` reaches, an agent too (a request), or a person alone (a rollback).
+    asking: Asking,
+    /// For an agent: the link its credential carries, and whether that link's person still holds. `None` for a person.
+    controller: Option<ControllerNow>,
+    /// This attempt's idempotency key and request hash, so a replay of this very request's stored release can be
+    /// compared with the link asking now.
+    replay: Option<(String, String)>,
 }
 
-/// Whether someone may ask at all, by the room's rows alone: asked before anything outside the room is read, and again
-/// before a stored answer is given back.
-pub(super) fn may_ask(who: &Participant) -> R<()> {
-    may_ask_for_release(&who.caller).map_err(denied)
+/// Which route asks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Asking {
+    /// `requestRelease`: a person, or an agent through `deploy_release` (6g).
+    Request,
+    /// `rollbackRelease`: a person alone.
+    Rollback,
+}
+
+/// The person who controls an agent, as its credential says now and as recorded with its release (6g): who linked it,
+/// in which organization, since when, and the connection generation it was checked at. From the gateway's assertion,
+/// never from a body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Link {
+    pub(super) person: String,
+    pub(super) org: String,
+    pub(super) since: i64,
+    pub(super) generation: u64,
+}
+
+impl Link {
+    pub(super) fn policy(&self) -> ControllerLink<'_> {
+        ControllerLink {
+            person: &self.person,
+            linked_since: self.since,
+            generation: self.generation,
+        }
+    }
+
+    /// The link an agent's credential carries, from its verified identity: `None` with no linker or no generation.
+    pub(super) fn of(identity: &Identity) -> Option<Link> {
+        let linker = identity.linker.as_ref()?;
+        Some(Link {
+            person: linker.person.clone(),
+            org: identity.org.clone(),
+            since: linker.since,
+            generation: identity.gen?,
+        })
+    }
+
+    /// The link recorded with a release, if the release has one: an agent's request since 6g.
+    pub(super) fn recorded(sql: &SqlStorage, release_id: &str) -> R<Option<Link>> {
+        Ok(rows(
+            sql,
+            "SELECT requester_person, org_id, linked_since, generation FROM release_requester WHERE release_id = ?",
+            vec![release_id.into()],
+        )?
+        .first()
+        .and_then(|row| {
+            Some(Link {
+                person: text(&row["requester_person"])?,
+                org: text(&row["org_id"])?,
+                since: row["linked_since"].as_i64()?,
+                generation: u64::try_from(row["generation"].as_i64()?).ok()?,
+            })
+        }))
+    }
+}
+
+/// An agent's controlling link as read before the transaction: what its credential carries, and whether that person is
+/// still in the agent's organization since the link began (`None` when their record didn't answer).
+pub(super) struct ControllerNow {
+    link: Option<Link>,
+    holds: Option<bool>,
+}
+
+/// Whether someone may ask at all, by the room's rows and the caller's credential alone: asked before anything outside
+/// the room is read, and again before a stored answer is given back. An agent asks only a request, and only with a
+/// controlling person on its credential; a rollback is a person's.
+pub(super) fn may_ask(who: &Participant, identity: &Identity, asking: Asking) -> R<()> {
+    match asking {
+        Asking::Request => {
+            may_ask_for_deploy(&who.caller, Link::of(identity).is_some()).map_err(denied)
+        }
+        Asking::Rollback => may_ask_for_release(&who.caller).map_err(denied),
+    }
 }
 
 /// A policy refusal, as the API answers it. Who is asking and a grant are 403; a fact of the room's is 409.
@@ -89,10 +170,10 @@ fn denied(denial: ReleaseDenial) -> ApiError {
             // error-codes: grant_required, grant_expired, grant_stale
             ApiError::api(403, refusal.code())
         }
-        // `public_participant` is who is asking.
-        ReleaseDenial::PublicParticipant => {
+        // `public_participant` and `agent_not_connected` are who is asking.
+        ReleaseDenial::PublicParticipant | ReleaseDenial::AgentDisconnected => {
             let code = denial.code();
-            // error-codes: public_participant
+            // error-codes: public_participant, agent_not_connected
             ApiError::api(403, code)
         }
         other => super::release_config::denial(other),
@@ -253,9 +334,31 @@ fn current_label(sql: &SqlStorage, candidates: &[[u8; 16]], now: i64) -> R<Strin
 pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads) -> R<()> {
     let now = release_now(sql);
     let caller = &who.caller;
-    may_ask(who)?;
+    let agent = caller.kind == PrincipalKind::Agent;
+    let link = reads.controller.as_ref().and_then(|c| c.link.as_ref());
+    match reads.asking {
+        Asking::Request => may_ask_for_deploy(caller, link.is_some()).map_err(denied)?,
+        Asking::Rollback => may_ask_for_release(caller).map_err(denied)?,
+    }
     let (room, room_unknown) = room_assuming(sql, &reads.room)?;
-    let requester_holds = settled(sql, &reads.requester, Some(&caller.id), false)?;
+    // Whoever controls the requester still in their organization: a person themselves, by their own record; an agent,
+    // the person who linked its credential, by theirs, in the agent's organization since the link began (6g).
+    let requester_holds = if agent {
+        reads.controller.as_ref().and_then(|c| c.holds)
+    } else {
+        settled(sql, &reads.requester, Some(&caller.id), false)?
+    };
+    // An agent's link must be the one its release records: on a replay, the stored release's; on a first attempt, the
+    // one its credential carries, which is what the request records. Any other link, or none, isn't connected.
+    let recorded = match replayed_release(sql, &caller.id, reads.replay.as_ref())? {
+        Some(release) if agent => Link::recorded(sql, &release)?,
+        _ => link.cloned(),
+    };
+    let agent_connected = agent
+        && controller_unchanged(
+            recorded.as_ref().map(Link::policy).as_ref(),
+            link.map(Link::policy).as_ref(),
+        );
     let grant = deploy_grant(sql, &caller.id, now)?;
     let giver = grant.as_ref().map(|grant| grant.delegated_by.clone());
     let giver_holds = settled(sql, &reads.giver, giver.as_deref(), true)?;
@@ -280,8 +383,8 @@ pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads
         link_repo_id,
         delegation_holder: holder,
         through_public_claim: public_claims::is_public_participant(sql, &caller.id)?,
-        // Never read: a person's request.
-        agent_connected: false,
+        // Ignored for a person. The Worker checked an agent's connection at this generation for this request.
+        agent_connected,
         now,
     };
     authorize_release_request(caller, &room, &standing, requester_holds.unwrap_or(true))
@@ -291,6 +394,28 @@ pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads
         return Err(standing_unknown());
     }
     Ok(())
+}
+
+/// The release a stored answer under this key holds, if this attempt is a replay of this very request: what
+/// `command_checked` would give back after the standing holds. The stored request's hash must be this one's, which
+/// names the route and the body, so another command's answer under the same key is never read as a release: the
+/// command then answers `idempotency_mismatch`. Read only to compare an agent's link with the one recorded.
+fn replayed_release(
+    sql: &SqlStorage,
+    actor: &str,
+    replay: Option<&(String, String)>,
+) -> R<Option<String>> {
+    let Some((key, hash)) = replay else {
+        return Ok(None);
+    };
+    Ok(rows(
+        sql,
+        "SELECT response_json FROM idempotency WHERE actor_id = ? AND key = ? AND request_hash = ? AND expires_at > ?",
+        vec![actor.into(), key.as_str().into(), hash.as_str().into(), now_ms().into()],
+    )?
+    .first()
+    .and_then(|row| serde_json::from_str::<Value>(row["response_json"].as_str()?).ok())
+    .and_then(|answer| text(&answer["id"])))
 }
 
 /// `POST releases`, in the room's transaction, after [`Workspace::release_request_reads`]. **Run only as the handler of
@@ -420,6 +545,31 @@ pub(super) fn record(
             now.into(),
         ],
     )?;
+    // Who controls the requester, as of this request (6g): a person themselves, with no link; an agent, the link its
+    // credential carries, which every later pass compares with the agent's link then.
+    let link = match caller.kind {
+        PrincipalKind::Agent => Some(
+            reads
+                .controller
+                .as_ref()
+                .and_then(|c| c.link.clone())
+                .ok_or_else(|| ApiError::internal("an agent's request with no link"))?,
+        ),
+        _ => None,
+    };
+    exec(
+        sql,
+        "INSERT INTO release_requester (release_id, requester_person, org_id, linked_since, generation) VALUES (?, ?, ?, ?, ?)",
+        vec![
+            id.as_str().into(),
+            link.as_ref().map_or(caller.id.as_str(), |l| l.person.as_str()).into(),
+            link.as_ref().map_or(V::Null, |l| l.org.as_str().into()),
+            link.as_ref().map_or(V::Null, |l| l.since.into()),
+            link.as_ref().map_or(V::Null, |l| {
+                i64::try_from(l.generation).unwrap_or(i64::MAX).into()
+            }),
+        ],
+    )?;
     let mut trail = json!({ "state": REQUESTED_STATE.name(), "task_id": asked.task_id, "commit_sha": asked.commit_sha });
     if let Some(target) = asked.rollback_to {
         exec(
@@ -468,10 +618,39 @@ pub(super) fn full_row(sql: &SqlStorage, id: &str) -> R<Value> {
 impl Workspace {
     /// Everything `POST releases` reads outside the room, before its transaction. The release path's gate first, as
     /// every release command passes it.
-    pub(super) async fn release_request_reads(&self, caller_id: &str) -> R<RequestReads> {
+    /// `asking` says which route; `key` and `hash` are this attempt's idempotency key and request hash. For an agent, the
+    /// person who linked its credential is asked whether they are still in the agent's organization since the link
+    /// began (6g); the agent itself isn't a person, so its own `Principal` isn't asked that.
+    pub(super) async fn release_request_reads(
+        &self,
+        identity: &Identity,
+        asking: Asking,
+        key: Option<String>,
+        hash: String,
+    ) -> R<RequestReads> {
+        let caller_id = identity.id.as_str();
         self.release_path_open().await?;
         let room = self.on_reads().await?;
-        let requester = self.still_holds(Some(caller_id), false).await?;
+        let requester = match identity.kind.as_str() {
+            "person" => self.still_holds(Some(caller_id), false).await?,
+            _ => self.still_holds(None, false).await?,
+        };
+        let controller = match identity.kind.as_str() {
+            "person" => None,
+            _ => {
+                let link = Link::of(identity);
+                let holds = match &link {
+                    Some(link) => {
+                        principal::departed_since(&self.env, &link.person, &link.org, link.since)
+                            .await
+                            .ok()
+                            .map(|departed| !departed)
+                    }
+                    None => Some(false),
+                };
+                Some(ControllerNow { link, holds })
+            }
+        };
         let sql = self.state.storage().sql();
         let giver =
             deploy_grant(&sql, caller_id, release_now(&sql))?.map(|grant| grant.delegated_by);
@@ -491,6 +670,9 @@ impl Workspace {
             requester,
             giver,
             labels,
+            asking,
+            controller,
+            replay: key.map(|key| (key, hash)),
         })
     }
 }

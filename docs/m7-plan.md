@@ -23,7 +23,7 @@ From [RUNNER.md](spec/RUNNER.md)'s status lines:
 
 This replaces the plan's first choice of adapter, a `claude -p --bare` session of the Claude Code binary, and the owner's follow-up drops `claude -p` from the plan altogether, as a fallback too. The Claude Agent SDK is the only Claude path. Lines that said so are kept below with a dated note rather than rewritten. RUNNER.md's [integration scope](spec/RUNNER.md#purpose-and-direction) already names Claude Code, Codex and Cursor as illustrative, not as a list, and requires that "each integration and mode must be validated separately before support is claimed". Nothing in this ruling changes that, or any of RUNNER.md's rules.
 
-**RUNNER.md now lags this ruling.** Its proposed [Claude Code primary flow](spec/RUNNER.md#local-cli-adapters-and-two-sign-ins) still launches the binary with `-p` and `--bare`, and R-11 still speaks of "Claude bare mode". Both are owed a follow-up RUNNER.md update to the Agent SDK; this change touches only this plan.
+**RUNNER.md now lags this ruling.** Its proposed [Claude Code primary flow](spec/RUNNER.md#local-cli-adapters-and-two-sign-ins) still launches the binary with `-p` and `--bare`, and R-11 still speaks of "Claude bare mode". Both are owed a follow-up RUNNER.md update to the Agent SDK; this change touches only this plan. *Updated 2026-11-17:* RUNNER.md's Claude flow, its budget line, R-11 and its open item now follow the ruling, still Proposed, with the old text struck through and dated.
 
 **The architect's rulings that follow from it, 2026-11-17.** The adapter interface and the first adapter are decided as direction; their details, and every step they touch, stay **Proposed** until the spikes report.
 

@@ -156,9 +156,9 @@ fn only_the_rooms_owner_and_admins_as_people_configure_and_approve() {
 }
 
 #[test]
-fn only_the_rooms_owner_as_a_person_deletes_its_apps_data() {
-    // S4 of the store plan: the owner alone, while their authority holds. An admin, who may configure release and
-    // approve, may not; nor may any agent, whatever role is stored for it.
+fn only_the_rooms_owner_or_an_admin_as_a_person_deletes_its_apps_data() {
+    // S4 of the store plan, decision 220 (7): the owner or an admin, as a person, while their authority holds. Never a
+    // member, and never an agent, an agent holding the admin role included.
     let mut allowed = Vec::new();
     for kind in [Person, Agent] {
         for role in Role::ALL {
@@ -166,7 +166,7 @@ fn only_the_rooms_owner_as_a_person_deletes_its_apps_data() {
                 let got = authorize_app_data_delete(&caller("x", kind, role), holds);
                 let expected = if role == Role::None {
                     Err(ReleaseDenial::NotParticipant)
-                } else if kind == Person && role == Role::Owner && holds {
+                } else if kind == Person && matches!(role, Role::Owner | Role::Admin) && holds {
                     Ok(())
                 } else {
                     Err(ReleaseDenial::NotAllowed)
@@ -178,16 +178,13 @@ fn only_the_rooms_owner_as_a_person_deletes_its_apps_data() {
             }
         }
     }
-    assert_eq!(allowed, [(Person, Role::Owner, true)]);
-    // The control: an admin may configure release, so the narrowing is this rule's own.
     assert_eq!(
-        authorize_release_config(
-            &caller("x", Person, Role::Admin),
-            true,
-            &ReleaseRoom::OPEN,
-            ConfigChange::TurnOff
-        ),
-        Ok(())
+        allowed,
+        [(Person, Role::Owner, true), (Person, Role::Admin, true)]
+    );
+    assert_eq!(
+        authorize_app_data_delete(&caller("x", Agent, Role::Admin), true),
+        Err(ReleaseDenial::NotAllowed)
     );
 }
 

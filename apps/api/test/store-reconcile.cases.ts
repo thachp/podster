@@ -253,18 +253,22 @@ export function storeReconcileCases(h: Helpers) {
       expect(await ask(a.room, { label: other, settle: { name: otherName, id: ids[name] } })).toMatchObject({ settled: false, store: { id: null } });
     });
 
-    it("settles nothing for a record owed a deletion, and settles it once it is owed none", async () => {
+    it("settles a record owed a deletion, or counted gone, whose name the list shows, so a store that landed late is deleted", async () => {
+      // S4's fix round, ruling E: a create that landed after the deletion's own lists counted the name gone.
       await fresh();
-      const a = await h.app({ plain: true });
-      const owed = newName();
-      const ids = await seed([owed]);
+      const [a, c] = [await h.app({ plain: true }), await h.app({ plain: true })];
+      const [owed, late] = [newName(), newName()];
+      const ids = await seed([owed, late]);
       await record(a.room, a.label, owed, { owed: true });
-      expect(await pass()).toMatchObject({ settled: 0 });
-      expect(await rowOf(a.room, a.label)).toMatchObject({ store_id: null });
-      // The control: the same record owed no deletion is settled.
-      await h.inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET delete_owed_at = NULL, delete_cause = NULL WHERE label = ?", a.label));
-      expect(await pass()).toMatchObject({ settled: 1 });
-      expect(await rowOf(a.room, a.label)).toMatchObject({ store_id: ids[owed] });
+      await record(c.room, c.label, late, { owed: true, sent: null });
+      await h.inRoom(c.room, (sql) => sql.exec("UPDATE app_store SET gone_at = 4, first_gone_at = 3 WHERE label = ?", c.label));
+      expect(await pass()).toMatchObject({ settled: 2 });
+      const owedRow = (room: string, label: string) => h.one(room, "SELECT store_id, gone_at, first_gone_at, delete_next_at IS NOT NULL AS due, create_sent_at IS NOT NULL AS sent FROM app_store WHERE label = ?", label);
+      // Recorded by the listed ID, no longer counted gone, and its deletion due again at once.
+      expect(await owedRow(a.room, a.label)).toEqual({ store_id: ids[owed], gone_at: null, first_gone_at: null, due: 1, sent: 1 });
+      expect(await owedRow(c.room, c.label)).toEqual({ store_id: ids[late], gone_at: null, first_gone_at: null, due: 1, sent: 1 });
+      // The reconcile itself still deletes nothing.
+      expect(await d1Calls("delete")).toEqual([]);
     });
 
     it("logs nothing but codes and counts: never a store's name, its ID or a label", () => {

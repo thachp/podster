@@ -258,10 +258,36 @@ pub(super) fn script_binding_for(
 ) -> R<Result<Option<Binding>, NoBinding>> {
     let kept = kept(sql, label)?;
     let bound = script_binding(wants_store, kept.as_ref().map(Kept::record).as_ref());
-    if let Err(why) = bound {
-        log(sql, release_id, why.code());
+    match &bound {
+        Err(why) => log(sql, release_id, why.code()),
+        // Recorded in this same transaction, before the script is written: from here the release can reach the store
+        // (S4's fix round, ruling B).
+        Ok(Some(binding)) => exec(
+            sql,
+            "INSERT INTO release_store_binding (release_id, label, store_id, recorded_at) VALUES (?, ?, ?, ?)
+               ON CONFLICT (release_id) DO NOTHING",
+            vec![
+                release_id.into(),
+                label.into(),
+                binding.id.as_str().into(),
+                release_now(sql).into(),
+            ],
+        )?,
+        Ok(None) => {}
     }
     Ok(bound)
+}
+
+/// Whether a release's script was bound to its label's store and that store is now owed a deletion, or gone: such a
+/// release never goes live (S4's fix round, ruling B), and fails by `store_delete_owed` at its stage and its commit.
+pub(super) fn bound_to_owed(sql: &SqlStorage, release_id: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS owed FROM release_store_binding b JOIN app_store s ON s.label = b.label
+           WHERE b.release_id = ? AND (s.delete_owed_at IS NOT NULL OR s.gone_at IS NOT NULL)",
+        vec![release_id.into()],
+    )?
+    .is_empty())
 }
 
 /// Whether the lease the step holds took an upload slot: the room's upload attempt recorded at the lease's own time.
@@ -337,11 +363,16 @@ pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Valu
             && podster_core::app_store::d1_id_form(id)
             && !taken
         {
+            // A record owed a deletion, or gone, is settled too, whatever its create says, and its deletion is due again
+            // at once: a database that landed after the deletion's own lists is deleted (S4's fix round, ruling E).
             exec(
                 sql,
-                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?, first_gone_at = NULL
-                   WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL AND delete_owed_at IS NULL AND gone_at IS NULL",
-                vec![id.into(), now.into(), now.into(), label.into(), name.into()],
+                "UPDATE app_store SET store_id = ?2, made_at = ?1, updated_at = ?1, first_gone_at = NULL, gone_at = NULL,
+                   create_sent_at = coalesce(create_sent_at, ?1),
+                   delete_next_at = CASE WHEN delete_owed_at IS NOT NULL THEN ?1 END, delete_attempts = 0
+                   WHERE label = ?3 AND store_name = ?4 AND store_id IS NULL
+                     AND ((create_sent_at IS NOT NULL AND delete_owed_at IS NULL AND gone_at IS NULL) OR delete_owed_at IS NOT NULL)",
+                vec![now.into(), id.into(), label.into(), name.into()],
             )?;
             // Only an ID no record held before this write was recorded by it: `taken` above was read just before.
             settled = kept(sql, label)?.is_some_and(|kept| kept.id.as_deref() == Some(id));
@@ -616,14 +647,12 @@ impl Workspace {
             let now = release_now(&store);
             exec(
                 &store,
-                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?, first_gone_at = NULL WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL",
-                vec![
-                    store_id.into(),
-                    now.into(),
-                    now.into(),
-                    label.into(),
-                    name.into(),
-                ],
+                // Owed a deletion, or gone, meanwhile: the store D1 made is deleted all the same, due at once (S4's fix
+                // round, ruling E).
+                "UPDATE app_store SET store_id = ?2, made_at = ?1, updated_at = ?1, first_gone_at = NULL, gone_at = NULL,
+                   delete_next_at = CASE WHEN delete_owed_at IS NOT NULL THEN ?1 END, delete_attempts = 0
+                   WHERE label = ?3 AND store_name = ?4 AND store_id IS NULL AND create_sent_at IS NOT NULL",
+                vec![now.into(), store_id.into(), label.into(), name.into()],
             )
         })
     }

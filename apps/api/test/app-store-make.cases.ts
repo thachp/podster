@@ -621,6 +621,35 @@ export function appCodeUploadCases() {
       }
     });
 
+    it("counts a release bound to its store as reaching it from the write check on, and never lets it go live once the store is owed a deletion", async () => {
+      // S4's fix round, ruling B: the binding is fixed in the transaction just before the script's write.
+      await github("/seed", repository(codeApp(true)));
+      const r = await uploading();
+      const id = "0123abcd-4567-89ef-0123-456789abcdef";
+      await madeRecord(r, id);
+      // Nothing else of the label serves: its host is confirmed down, so only this release can reach the store.
+      await inRoom(r.room, (sql) => {
+        sql.exec("UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = 6");
+        sql.exec("UPDATE serve_apply SET applied_version = 6, applied_script = NULL");
+      });
+      const gate = await providerGate(r.script, "script");
+      const uploading_ = upload(r.room);
+      await gate.arrived();
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT release_id, store_id FROM release_store_binding").toArray())).toEqual([{ release_id: REL, store_id: id }]);
+      // Between the write check and the upload's record, the owner asks: refused, and nothing is owed.
+      const asked = await switchedOn(() => api(OWNER, "POST", `/v1/workspaces/${r.room}/apps/${r.label}/delete-data`, { confirm: r.label }));
+      expect([asked.status, asked.body.error.code]).toEqual([409, "app_still_served"]);
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT delete_owed_at FROM app_store").one().delete_owed_at)).toBeNull();
+      // Owed anyway meanwhile (as an operator's would): the upload is recorded, and the release never goes live.
+      await inRoom(r.room, (sql) => sql.exec("UPDATE app_store SET delete_owed_at = ?, delete_cause = 'operator_takedown'", T));
+      await gate.release();
+      expect(brief(await uploading_)).toEqual([200, "uploading", true, null, null]);
+      const live = await switchedOn(() => stub(r.room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: REL }) }).then((res: Response) => res.json() as Promise<any>));
+      expect(live.state).toBe("failed");
+      expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "store_delete_owed" });
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name)).toBeNull();
+    });
+
     it("fails a code release that fails core's checks by the problem's code, and never uploads it as static files", async () => {
       const page = { "index.html": "<p>x</p>\n" };
       for (const [files, code] of [

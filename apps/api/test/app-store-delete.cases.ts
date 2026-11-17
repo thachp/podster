@@ -210,6 +210,52 @@ export function appStoreDeleteCases() {
         expect(await row(s)).toMatchObject({ store_id: theirs.uuid, delete_owed_at: null, gone_at: null });
       });
 
+      it("holds the delete while the edge may still route to a script bound to the store, or a release bound to it is under way", async () => {
+        const r = await room();
+        const db = await database();
+        await recordStore(r, db, { owed: T });
+        const host = `${r.label}.example`;
+        await inRoom(r.id, (sql) => {
+          sql.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 3, 1)", host);
+          sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 2, ?, 1, 1)", host, `${r.label}.rel_${"5e".repeat(16)}`);
+        });
+        await pass(r, T);
+        expect(await row(r)).toMatchObject({ delete_attempts: 1, delete_next_at: T + 5_000, first_gone_at: null });
+        expect(await calls()).toEqual([]);
+        // Confirmed down, but a release of the label whose script was bound to the store is still live in the room's own
+        // record (its host not yet switched to it): held. (One still uploading is held the same way, shown through the
+        // real upload in `app-store-make.cases.ts`; written by hand here the alarm's bookkeeping would end it first.)
+        const release = `rel_${"5f".repeat(16)}`;
+        await inRoom(r.id, (sql) => {
+          sql.exec("UPDATE serve_apply SET applied_version = 3, applied_script = NULL");
+          sql.exec("INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, updated_at) VALUES (?, ?, 'live', ?, 1, 0, ?, ?, 'per_x', 1, 'per_x', 1, 1)",
+            release, "a5".repeat(20), r.label, `${r.label}.${release}`, release);
+          sql.exec("INSERT INTO release_store_binding (release_id, label, store_id, recorded_at) VALUES (?, ?, ?, 1)", release, r.label, db.uuid);
+        });
+        await pass(r, T + 5_000);
+        expect(await row(r)).toMatchObject({ delete_attempts: 2, delete_next_at: T + 15_000 });
+        expect(await calls()).toEqual([]);
+        // Once that release has ended, nothing can reach the store: deleted.
+        await inRoom(r.id, (sql) => sql.exec("UPDATE release SET state = 'failed', failure_code = 'x', finished_at = 1 WHERE id = ?", release));
+        await pass(r, T + 15_000);
+        expect(await calls()).toEqual([["delete", db.uuid], ["read", db.uuid]]);
+        expect(await row(r)).toMatchObject({ first_gone_at: T + 15_000 });
+      });
+
+      it("waits its turn when a step writes nothing: an ID found by the name that another record holds", async () => {
+        const r = await room();
+        const db = await database();
+        // Another of the room's records already holds the ID D1 lists under this record's name.
+        await inRoom(r.id, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, NULL, 1, 1)", `${r.label}z`));
+        await inRoom(r.id, (sql) => sql.exec(
+          "INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at) VALUES (?, 'd1', ?, ?, 1, 1, 2, 2)", `${r.label}z`, newName(), db.uuid));
+        await recordStore(r, { name: db.name }, { owed: T });
+        await pass(r, T);
+        // Not due again at once: the room isn't woken in a loop.
+        expect(await row(r)).toMatchObject({ store_id: null, delete_attempts: 1, delete_next_at: T + 5_000 });
+        expect((await calls()).map(([op]) => op)).toEqual(["list"]);
+      });
+
       it("waits, recording the deletion owed and sending nothing, with no store provider", async () => {
         const r = await room();
         const db = await database();
@@ -249,19 +295,69 @@ export function appStoreDeleteCases() {
         expect(await row(r)).toMatchObject({ delete_owed_at: null });
       });
 
-      it("is the room's owner's alone, as a person: an admin and a member are refused, and nothing is written", async () => {
+      it("is the room's owner's or an admin's, as a person (decision 220 (7)): a member and an agent admin are refused, and write nothing", async () => {
         const r = await room();
         await recordStore(r, await database());
         await switchedOn(async () => {
-          for (const who of [r.admin, r.member]) {
-            const refused = await ask(r, who);
-            expect([refused.status, refused.body.error.code], who.id).toEqual([403, "not_allowed"]);
-          }
+          const refused = await ask(r, r.member);
+          expect([refused.status, refused.body.error.code]).toEqual([403, "not_allowed"]);
+          // An agent holding the admin role: refused by its kind.
+          const agent = { id: "agt_s4_admin", org: r.owner.org };
+          await inRoom(r.id, (sql) => sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'admin', ?, 1)", agent.id, r.owner.org, r.owner.id));
+          const now = Math.floor(Date.now() / 1000);
+          const token = await new SignJWT({ kind: "agent", org: agent.org, gen: 1 }).setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(agent.id)
+            .setAudience("podster-api").setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
+          const byAgent = await SELF.fetch(`https://api.internal/v1/workspaces/${r.id}/apps/${r.label}/delete-data`, {
+            method: "POST", headers: { "content-type": "application/json", "x-podster-assertion": token, "idempotency-key": `s4-agent-${crypto.randomUUID()}` }, body: JSON.stringify({ confirm: r.label }),
+          });
+          // Refused at the Worker, before the room, whichever of its agent checks answers first; the policy's own test
+          // shows an agent admin refused by its kind (`crates/policy/tests/release.rs`).
+          expect(byAgent.status).toBe(403);
           // Someone outside the room learns nothing of it.
           const outsider = await ask(r, { id: "per_s4_outsider", org: "org_s4_outside" });
           expect(outsider.body.error.code).toBe("workspace_not_found");
+          expect(await row(r)).toMatchObject({ delete_owed_at: null });
+          // An admin who is a person may.
+          const byAdmin = await ask(r, r.admin);
+          expect([byAdmin.status, byAdmin.body.cause, byAdmin.body.notice]).toEqual([200, "owner_deleted", NOTICE]);
+        });
+        expect(await inRoom(r.id, (sql) => sql.exec("SELECT actor_id FROM audit_event WHERE action = 'app_data.delete_owed'").toArray())).toEqual([{ actor_id: r.admin.id }]);
+      });
+
+      it("refuses while the edge may still serve one of the label's scripts, by what the applier last confirmed", async () => {
+        const r = await room();
+        await recordStore(r, await database());
+        const script = `${r.label}.rel_${"5e".repeat(16)}`;
+        await inRoom(r.id, (sql) => {
+          // The room wants nothing on the host, but the applier last wrote the label's script there, at an older version.
+          sql.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 3, 1)", `${r.label}.example`);
+          sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 2, ?, 1, 1)", `${r.label}.example`, script);
+        });
+        await switchedOn(async () => {
+          expect((await ask(r, r.owner)).body.error.code).toBe("app_still_served");
+          // Removed at the current version, but not yet confirmed: still refused.
+          await inRoom(r.id, (sql) => sql.exec("UPDATE serve_apply SET applied_script = NULL"));
+          expect((await ask(r, r.owner)).body.error.code).toBe("app_still_served");
+          expect(await row(r)).toMatchObject({ delete_owed_at: null });
+          // Confirmed down at the host's current version: owed, and the words are true.
+          await inRoom(r.id, (sql) => sql.exec("UPDATE serve_apply SET applied_version = 3"));
+          expect((await ask(r, r.owner)).body).toMatchObject({ data: "deleting", notice: NOTICE });
+        });
+      });
+
+      it("refuses with data left and no store provider, since nothing would delete it", async () => {
+        const r = await room();
+        await recordStore(r, await database());
+        await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_app_store_provider_off (x INTEGER)"));
+        await switchedOn(async () => {
+          const refused = await ask(r, r.owner);
+          expect([refused.status, refused.body.error.code]).toEqual([409, "data_delete_unavailable"]);
+          const byOperator = await api(OPERATOR, "POST", `/v1/moderation/apps/${r.label}/delete-data`, { reason: "abuse" });
+          expect([byOperator.status, byOperator.body.error.code]).toEqual([409, "data_delete_unavailable"]);
         });
         expect(await row(r)).toMatchObject({ delete_owed_at: null });
+        // The operator's refusal suspended nothing either.
+        expect(await inRoom(r.id, (sql) => sql.exec("SELECT suspended_at FROM app_label").one().suspended_at)).toBeNull();
       });
 
       it("owes the store a deletion once nothing serves the app, answers in the owner's words, and asking again changes nothing", async () => {
@@ -334,6 +430,39 @@ export function appStoreDeleteCases() {
         });
         expect(await row(r)).toMatchObject({ delete_owed_at: null });
         expect(await inRoom(r.id, (sql) => sql.exec("SELECT suspended_at FROM app_label").one().suspended_at)).toBeNull();
+      });
+
+      it("gives the owner's words only once nothing can reach the store", async () => {
+        const r = await room();
+        await recordStore(r, await database());
+        const host = `${r.label}.example`;
+        const script = `${r.label}.rel_${"5e".repeat(16)}`;
+        await inRoom(r.id, (sql) => {
+          sql.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 3, 1)", host);
+          sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 3, ?, 1, 1)", host, script);
+        });
+        // Straight after the suspension the applier hasn't taken the entry down: owed, and no words yet.
+        const first = await switchedOn(() => ask(r.label));
+        expect(first.body).toMatchObject({ data: "deleting", cause: "operator_takedown", notice: null });
+        // Confirmed down: asking again changes nothing, and the words are now true.
+        await inRoom(r.id, (sql) => sql.exec("UPDATE serve_apply SET applied_script = NULL, applied_version = (SELECT version FROM serve_state WHERE host = ?)", host));
+        const again = await switchedOn(() => ask(r.label));
+        expect(again.body).toEqual({ ...first.body, notice: NOTICE });
+      });
+
+      it("owes a retired label's data without suspending the room's current app, which that label doesn't serve", async () => {
+        const r = await room();
+        const retired = `${r.label}r`;
+        await inRoom(r.id, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, NULL, 1, 1)", retired));
+        await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(retired, r.id).run();
+        const db = await database();
+        await inRoom(r.id, (sql) => sql.exec(
+          "INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at) VALUES (?, 'd1', ?, ?, 1, 1, 2, 2)", retired, db.name, db.uuid));
+        const answer = await switchedOn(() => ask(retired));
+        expect(answer.body).toMatchObject({ label: retired, data: "deleting", cause: "operator_takedown", notice: NOTICE });
+        expect(await inRoom(r.id, (sql) => sql.exec("SELECT label, suspended_at FROM app_label ORDER BY label").toArray())).toEqual([
+          { label: r.label, suspended_at: null }, { label: retired, suspended_at: null },
+        ]);
       });
 
       it("suspends the app first, then owes its store a deletion as Podster's act, and answers in the owner's words", async () => {

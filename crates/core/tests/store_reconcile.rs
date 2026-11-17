@@ -74,12 +74,30 @@ fn a_store_owed_a_deletion_or_gone_is_left_to_its_deletion() {
         ..owed.clone()
     };
     assert_eq!(check(&gone, &[]), RecordCheck::Fine);
-    // An unmade record owed a deletion is never settled: nothing is recorded made that is owed going.
+    // An unmade record owed a deletion, or gone, whose name the list shows is settled by the listed ID, whether or not
+    // its create is outstanding, so a database that landed late is deleted (S4's fix round, ruling E).
     let unmade_owed = StoreRecord {
         delete_owed_at: Some(3),
         ..unmade()
     };
-    assert_eq!(check(&unmade_owed, &[(ID, NAME)]), RecordCheck::Fine);
+    assert_eq!(
+        check(&unmade_owed, &[(ID, NAME)]),
+        RecordCheck::Settle(ID.to_owned())
+    );
+    assert_eq!(
+        check_record(&unmade_owed, None, &list(&[(ID, NAME)])),
+        RecordCheck::Settle(ID.to_owned())
+    );
+    let unmade_gone = StoreRecord {
+        gone_at: Some(4),
+        ..unmade_owed.clone()
+    };
+    assert_eq!(
+        check(&unmade_gone, &[(ID, NAME)]),
+        RecordCheck::Settle(ID.to_owned())
+    );
+    // Not listed: left to its deletion.
+    assert_eq!(check(&unmade_gone, &[(ID, OTHER_NAME)]), RecordCheck::Fine);
 }
 
 #[test]

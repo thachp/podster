@@ -1013,6 +1013,11 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
         let reason = UploadFailure::LabelRetired.code();
         return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
     }
+    // A script bound to its label's store, once that store is owed a deletion, never goes live (S4).
+    if super::release_store::bound_to_owed(sql, release_id)? {
+        let reason = podster_core::app_store::NoBinding::DeleteOwed.code();
+        return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
+    }
     // Only a script the room has recorded as written whole is ever set on a host.
     if !uploaded(sql, release_id, &script)? {
         let mut waiting = answer(&release, false, None);
@@ -1094,6 +1099,11 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
     // Reads older than the bound are an answer about too long ago: nothing is decided on them.
     if reads.age(now) > MAX_READ_AGE_MS {
         return Err(standing_unknown());
+    }
+    // Owed a deletion between the stage and this commit: the flight is set back, and the release ends (S4).
+    if super::release_store::bound_to_owed(sql, release_id)? {
+        let reason = podster_core::app_store::NoBinding::DeleteOwed.code();
+        return failed(sql, release_id, reason, now);
     }
     match judge(sql, &release, reads, now)? {
         Verdict::Unknown => Err(standing_unknown()),

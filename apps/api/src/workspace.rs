@@ -5315,6 +5315,7 @@ impl Workspace {
             (Method::Post, ["apps", label, "delete-data"]) if release_route_on => {
                 store_delete::may_ask(&who)?;
                 let reads = self.config_reads(&identity.id, false).await?;
+                let provider_on = store_delete::provider_configured(&self.env, &sql);
                 let label = (*label).to_owned();
                 self.command_checked(
                     &identity,
@@ -5324,7 +5325,15 @@ impl Workspace {
                     test_fail,
                     |_: &SqlStorage, who: &Participant| store_delete::may_ask(who),
                     move |sql, who, now| {
-                        store_delete::handle_owner_delete(sql, who, &label, &body, &reads, now)
+                        store_delete::handle_owner_delete(
+                            sql,
+                            who,
+                            &label,
+                            &body,
+                            &reads,
+                            provider_on,
+                            now,
+                        )
                     },
                 )
             }

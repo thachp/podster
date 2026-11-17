@@ -1,0 +1,18 @@
+{
+  "name": "podster-spike-m7-agent-auth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "local": "node run-local.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@auth/agent": "0.6.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.1",
+    "@cloudflare/workers-types": "5.20261104.1",
+    "vitest": "4.1.12",
+    "wrangler": "4.157.0"
+  }
+}

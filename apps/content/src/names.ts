@@ -1,8 +1,9 @@
 // The two names the content Worker reads, and their forms. Both are decided in Rust, by the private API, which is
 // the only writer of the serve entries' namespace: `podster_core::release::script_owner` for a script's name, and
 // `apps/api/src/content_provider.rs` for the stop key and for what a host may look like. This is a second check of
-// what was read, never the authority. `packages/contracts/serve-entry.fixture.json` holds the vectors both sides
-// are tested against.
+// what was read, never the authority. The mark that a script has code is `podster_core::serve_entry`'s.
+// `packages/contracts/serve-entry.fixture.json` holds the vectors both sides are tested against.
+import type { HostKind } from "./requests";
 
 /** The key that stops the whole content domain. A host can't contain `_`, so no host is ever this key. */
 export const STOP_KEY = "_stop";
@@ -46,6 +47,40 @@ export function customEntryScript(host: string, value: string): string | null {
   if (at < 0) return null;
   const script = value.slice(0, at);
   return isWrittenHost(host) && value.slice(at + 1) === host && isScriptName(script) ? script : null;
+}
+
+/**
+ * Before a serve entry's value when its script's release carries code (M6 stage 1), as
+ * `podster_core::serve_entry::CODE_MARK` has it. A static entry carries no mark. It ends in `:`, which no script's name
+ * and no written host holds, so no static entry can begin with it.
+ */
+export const CODE_MARK = "code:";
+
+/** What a confirmed serve entry names: its script, and whether that script's release carries code. */
+export type EntryRead = { kind: HostKind; script: string };
+
+/** An entry's kind, and the static form left once its mark, if any, is taken off: once, from the start only. */
+function unmarked(value: string): { kind: HostKind; rest: string } {
+  return value.startsWith(CODE_MARK) ? { kind: "code", rest: value.slice(CODE_MARK.length) } : { kind: "static", rest: value };
+}
+
+/**
+ * A default host's entry, as `podster_core::serve_entry::default_entry_script` reads it: a script's name, after the
+ * mark when it has code. Null for anything else. Which label the host takes is the caller's to check.
+ */
+export function defaultEntryKind(value: string): EntryRead | null {
+  const { kind, rest } = unmarked(value);
+  return isScriptName(rest) ? { kind, script: rest } : null;
+}
+
+/**
+ * A custom hostname's entry, read for exactly `host`, as `podster_core::serve_entry::custom_entry_script_kind` reads
+ * it: `customEntryScript`'s form, after the mark when it has code. Null for anything else.
+ */
+export function customEntryKind(host: string, value: string): EntryRead | null {
+  const { kind, rest } = unmarked(value);
+  const script = customEntryScript(host, rest);
+  return script === null ? null : { kind, script };
 }
 
 /** A label that reads as a number, as `is_number` in `podster_core::hostnames`: decimal, or `0x` hexadecimal. */

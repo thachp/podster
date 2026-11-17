@@ -199,11 +199,11 @@ describe("the Worker reaches nothing but its two bindings", () => {
     expect(handle.match(/CODE_APPS_ENABLED/g)?.length).toBe(3);
     expect(handle).toContain("export const CODE_APPS_ENABLED: false = false;");
     expect(handle).toContain("const off: false = CODE_APPS_ENABLED;");
-    // The Worker's entry reads no binding or variable for it, and says every script is static: the serve entry has no
-    // mark of code until that contract change lands.
+    // The Worker's entry reads no binding or variable for it. A host's kind comes from the mark on its serve entry
+    // alone (`podster_core::serve_entry`), read in the handler, and nothing the entry passes can say otherwise.
     const index = read("src/index.ts");
-    expect(index.replaceAll("CODE_APPS_ENABLED", "")).not.toMatch(/CODE_APPS|hostKind:\s*\(\s*[a-z]/i);
-    expect(index).toContain('hostKind: () => "static",');
+    expect(index.replaceAll("CODE_APPS_ENABLED", "")).not.toMatch(/CODE_APPS/i);
+    for (const [name, text] of [["index", index], ["handle", handle]]) expect(text, name).not.toMatch(/hostKind/);
     // And it passes the switch itself, the constant of type `false`, as the request's: never anything else.
     expect(index.match(/codeApps:/g)).toHaveLength(1);
     expect(index).toContain("codeApps: CODE_APPS_ENABLED satisfies false,");

@@ -361,6 +361,12 @@ async fn route(
         return Ok(app_stores::test_route(&env, req.json().await?).await?);
     }
 
+    // Test builds only: the content provider's write and read of a serve entry, marked or not (M6 stage 1).
+    #[cfg(feature = "failpoints")]
+    if path == "/test/serve-entry" && req.method() == Method::Post {
+        return Ok(content_provider::test_route(&env, req.json().await?).await?);
+    }
+
     #[cfg(feature = "failpoints")]
     if path == "/test/dead-letter-a2a" {
         let body: Value = req.json().await?;

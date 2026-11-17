@@ -535,7 +535,8 @@ async fn entry(
     let found = match provider.read_entry(host).await {
         // Gone since it was listed: nothing to ask about.
         Entry::Absent => return Ok(()),
-        Entry::Present(script) => Some(script),
+        // Marked as carrying code or not, the script names its app and so its room, which is asked about it.
+        Entry::Present(script) | Entry::Code(script) => Some(script),
         // There, and not a script's name Rust made: something else wrote it. Operators are told, by the host, and
         // the room is asked as for one that differs from anything it could want.
         Entry::Foreign => {

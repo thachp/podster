@@ -62,7 +62,6 @@ export default {
       now: () => Date.now(),
       stop,
       domain: DOMAIN,
-      hostKind: () => "static",
       codeApps: false,
     });
   },

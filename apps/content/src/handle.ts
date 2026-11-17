@@ -16,7 +16,9 @@
 //      the second lock, and the public one. A custom hostname's entry is read only in its own form, which names that
 //      very host (`customEntryScript`); the API writes it only while the room holds the name's live claim and
 //      Cloudflare reports it `active`, and the hostname's object agrees.
-//   6. The host's kind, static or with code (`requests.ts`, the mirror of `podster_core::app_requests`). A static
+//   6. The host's kind, static or with code, from the mark on its entry alone (`podster_core::serve_entry`, copied in
+//      `names.ts`): an entry with code begins with the mark, and a static entry carries none and is read exactly as
+//      before. The rules for each kind are `requests.ts`, the mirror of `podster_core::app_requests`. A static
 //      host takes GET and HEAD only, as it always has. A host with code meets the rules for its kind, and then the
 //      code-apps switch, which is off: nothing of an app with code is served, and a write that passes every rule is
 //      refused as not available, since the store and the write budget aren't built.
@@ -30,7 +32,7 @@
 // instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
 // Nothing is logged for a request (ADR 0010's "Logs").
-import { customEntryScript, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, STOP_KEY } from "./names";
+import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
@@ -68,12 +70,6 @@ export interface Deps {
   stop: StopMemory;
   /** The content domain, from configuration. Not a host, and every request is not-found. */
   domain: string;
-  /**
-   * The kind of host a confirmed script serves. The serve entry carries no mark that a script has code yet: that mark
-   * is a contract change, alone in its turn (docs/m6-plan.md, stage 1's build order). Until it lands, the Worker's
-   * entry says every script is static, which is what every entry has been.
-   */
-  hostKind: (script: string) => HostKind;
   /**
    * The code-apps switch, as this request sees it. The Worker's entry passes `CODE_APPS_ENABLED`, which is of type
    * `false`; only a test passes anything else. While it is off, any method but GET and HEAD gets today's `405` before
@@ -303,11 +299,13 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
       return unconfirmed();
     }
     // A default host: only a script's name, and only one under this host's own label, so a host never serves another
-    // app's script. A custom hostname: only its own form, naming this very host.
-    const script = value === null ? null : custom ? customEntryScript(host, value) : scriptLabel(value) === label ? value : null;
-    if (script === null) return unconfirmed();
+    // app's script. A custom hostname: only its own form, naming this very host. Either may begin with the mark that
+    // its script has code, which is the host's kind; anything else that looks like a mark is no entry.
+    const entry = value === null ? null : custom ? customEntryKind(host, value) : defaultEntryKind(value);
+    if (entry === null || (!custom && scriptLabel(entry.script) !== label)) return unconfirmed();
+    const script = entry.script;
 
-    kind = deps.hostKind(script);
+    kind = entry.kind;
     if (kind === "code") return await codeHost(request, site);
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();

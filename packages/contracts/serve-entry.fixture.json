@@ -71,5 +71,71 @@
   "custom_entry_formed_hosts": [
     "co.uk",
     "app.example.com"
+  ],
+  "code_mark_about": "M6 stage 1 (ADR 0010's revision, section 4). A serve entry whose script's release carries code begins with the code mark, then exactly the form a static entry of that host has: the script's name alone on a default host, or the script's name, the separator and the host on a custom one. A static entry carries no mark and is exactly as before. The mark ends in a colon, which no script's name and no host Podster writes can hold, so no static entry of either form can begin with it; it is taken off once, from the start only, and what is left is read as a static entry of that host is. Anything else that looks like a mark (another case, another word, a mark twice, a mark at the end or inside) is not an entry. The private API writes the mark only when told a release carries code, which nothing tells it yet.",
+  "code_mark": "code:",
+  "valid_code_entries": [
+    "code:a.rel_00000000000000000000000000000000",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code:abcdefghijklmnopqrstuvwxyz.rel_ffffffffffffffffffffffffffffffff",
+    "code:0.rel_a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+  ],
+  "static_entries_not_marked_about": "Static script names that begin with the mark's word but not with the mark: each is a static entry, never one with code.",
+  "static_entries_not_marked": [
+    "code.rel_0123456789abcdef0123456789abcdef",
+    "codek3v9q2.rel_0123456789abcdef0123456789abcdef"
+  ],
+  "invalid_code_entries": [
+    "code:",
+    "code:code:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "Code:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "CODE:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code;k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code-k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code_k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    ":k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code::k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    " code:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code: k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef ",
+    "k3v9q2.rel_0123456789abcdef0123456789abcdef:code",
+    "k3v9q2.rel_0123456789abcdef0123456789abcdefcode:",
+    "static:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code=k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code:stopped",
+    "code:_stop",
+    "code:someone-elses-script",
+    "code:k3v9q2.rel_0123456789ABCDEF0123456789abcdef",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcde",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code:k3v9q2"
+  ],
+  "valid_code_custom_entries": [
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code:a.rel_00000000000000000000000000000000@app.example.com"
+  ],
+  "invalid_code_custom_entries": [
+    "code:",
+    "code:@app.example.com",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef",
+    "code:code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "Code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "CODE:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    ":k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code::k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    " code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code: k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "k3v9q2.rel_0123456789abcdef0123456789abcdef@code:app.example.com",
+    "k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com:code",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@www.example.com",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com ",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@APP.example.com",
+    "code:k3v9q2.rel_0123456789abcdef0123456789abcdef@@app.example.com",
+    "code:K3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code:someone-elses-script@app.example.com",
+    "static:k3v9q2.rel_0123456789abcdef0123456789abcdef@app.example.com",
+    "code:stopped",
+    "code:_stop"
   ]
 }

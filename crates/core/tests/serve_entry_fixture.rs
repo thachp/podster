@@ -126,3 +126,147 @@ fn no_custom_entry_is_written_or_read_for_a_host_rust_never_writes() {
         assert_eq!(custom_entry_script(host, &value), Some(script));
     }
 }
+
+/// The mark is the fixture's, and no static entry of either form can begin with it.
+#[test]
+fn the_code_mark_is_the_fixtures_and_no_static_entry_can_begin_with_it() {
+    use podster_core::serve_entry::CODE_MARK;
+    assert_eq!(scalar("code_mark"), CODE_MARK);
+    // It ends in a character no script's name and no written host holds.
+    assert!(CODE_MARK.ends_with(':'));
+    for name in strings("valid_script_names") {
+        assert!(!name.contains(':'), "{name:?}");
+    }
+    for value in strings("valid_custom_entries") {
+        assert!(!value.contains(':'), "{value:?}");
+    }
+}
+
+#[test]
+fn a_default_hosts_entry_reads_its_kind_by_the_mark_and_every_earlier_vector_reads_as_before() {
+    use podster_core::app_requests::HostKind;
+    use podster_core::serve_entry::{default_entry_script, default_entry_value, CODE_MARK};
+    // Every static name is read as before: static, the same script, and written back unmarked.
+    let valid = strings("valid_script_names");
+    assert!(valid.len() >= 4);
+    for name in valid {
+        assert_eq!(
+            default_entry_script(name),
+            Some((HostKind::Static, name)),
+            "{name:?}"
+        );
+        assert_eq!(
+            default_entry_value(HostKind::Static, name).as_deref(),
+            Some(name)
+        );
+        assert_eq!(
+            default_entry_value(HostKind::Code, name),
+            Some(format!("{CODE_MARK}{name}"))
+        );
+    }
+    for name in strings("invalid_script_names") {
+        assert_eq!(default_entry_script(name), None, "{name:?}");
+        // A mark never makes a name that isn't a script's into one.
+        let marked = format!("{CODE_MARK}{name}");
+        assert_eq!(default_entry_script(&marked), None, "{marked:?}");
+        assert_eq!(default_entry_value(HostKind::Static, name), None);
+        assert_eq!(default_entry_value(HostKind::Code, name), None);
+    }
+    let code = strings("valid_code_entries");
+    assert!(code.len() >= 4);
+    for value in code {
+        let read = default_entry_script(value);
+        assert_eq!(
+            read.map(|(kind, _)| kind),
+            Some(HostKind::Code),
+            "{value:?}"
+        );
+        let script = read.map(|(_, script)| script).unwrap_or_default();
+        assert_eq!(Some(script), value.strip_prefix(CODE_MARK));
+        assert_eq!(
+            default_entry_value(HostKind::Code, script).as_deref(),
+            Some(value)
+        );
+    }
+    let unmarked = strings("static_entries_not_marked");
+    assert!(unmarked.len() >= 2);
+    for value in unmarked {
+        assert_eq!(
+            default_entry_script(value),
+            Some((HostKind::Static, value)),
+            "{value:?}"
+        );
+    }
+    let invalid = strings("invalid_code_entries");
+    assert!(invalid.len() >= 20);
+    assert!(invalid.contains(&"code:"));
+    for value in invalid {
+        assert_eq!(default_entry_script(value), None, "{value:?}");
+    }
+}
+
+#[test]
+fn a_custom_hosts_entry_reads_its_kind_by_the_mark_and_every_earlier_vector_reads_as_before() {
+    use podster_core::app_requests::HostKind;
+    use podster_core::serve_entry::{custom_entry_script_kind, custom_entry_value_kind, CODE_MARK};
+    let host = scalar("custom_entry_host");
+    let valid = strings("valid_custom_entries");
+    assert!(valid.len() >= 2);
+    for value in valid {
+        let read = custom_entry_script_kind(host, value);
+        assert_eq!(
+            read.map(|(kind, _)| kind),
+            Some(HostKind::Static),
+            "{value:?}"
+        );
+        let script = read.map(|(_, script)| script).unwrap_or_default();
+        assert_eq!(
+            custom_entry_value_kind(HostKind::Static, host, script).as_deref(),
+            Some(value)
+        );
+        assert_eq!(
+            custom_entry_value_kind(HostKind::Code, host, script),
+            Some(format!("{CODE_MARK}{value}"))
+        );
+    }
+    for value in strings("invalid_custom_entries") {
+        assert_eq!(custom_entry_script_kind(host, value), None, "{value:?}");
+        let marked = format!("{CODE_MARK}{value}");
+        assert_eq!(custom_entry_script_kind(host, &marked), None, "{marked:?}");
+    }
+    let code = strings("valid_code_custom_entries");
+    assert!(code.len() >= 2);
+    for value in code {
+        let read = custom_entry_script_kind(host, value);
+        assert_eq!(
+            read.map(|(kind, _)| kind),
+            Some(HostKind::Code),
+            "{value:?}"
+        );
+        let script = read.map(|(_, script)| script).unwrap_or_default();
+        assert_eq!(
+            custom_entry_value_kind(HostKind::Code, host, script).as_deref(),
+            Some(value)
+        );
+    }
+    let invalid = strings("invalid_code_custom_entries");
+    assert!(invalid.len() >= 20);
+    for value in invalid {
+        assert_eq!(custom_entry_script_kind(host, value), None, "{value:?}");
+    }
+    // Each form is refused where the other is read: a default host's entry with code is no custom host's entry.
+    for value in strings("valid_code_entries") {
+        assert_eq!(custom_entry_script_kind(host, value), None, "{value:?}");
+    }
+    // And no entry is written for a host Rust never writes, marked or not.
+    let script = strings("valid_script_names")
+        .get(1)
+        .copied()
+        .unwrap_or_default();
+    for refused in strings("custom_entry_refused_hosts") {
+        assert_eq!(
+            custom_entry_value_kind(HostKind::Code, refused, script),
+            None
+        );
+    }
+}

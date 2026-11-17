@@ -78,15 +78,24 @@ function repository() {
 // --- the provider's stand-in --------------------------------------------------------------------------------------------
 const content = (path: string, query: string, body?: unknown) =>
   fetch(`https://content-fake.example.com/${path}?${query}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
-/** The provider holds `script`: its read answers with a script object. */
-const exists = (script: string) => content("seed", "", { scripts: [script] });
-/** The provider deletes `script`, as anything outside the room might. */
-const deleteAtProvider = (script: string) =>
-  fetch(`https://api.cloudflare.com/client/v4/accounts/${FAKE.account}/workers/dispatch/namespaces/${FAKE.namespace}/scripts/${script}?force=true`, { method: "DELETE", headers: { authorization: `Bearer ${FAKE.scriptsToken}` } });
-/** How many times the provider was asked to read `script`. */
-const reads = async (script: string) => ((await (await content("state", "")).json()) as { calls: { op: string; name: string }[] }).calls.filter((c) => c.op === "script.get" && c.name === script).length;
+/**
+ * The provider holds `script`: it is written through the stand-in's upload part, with no files, so its read answers
+ * with a script object. That part is kept by script name and no other spec's reset touches it; a script never written
+ * there reads as gone (`"script": null`).
+ */
+async function exists(script: string) {
+  const base = `https://api.cloudflare.com/client/v4/accounts/${FAKE.account}/workers/dispatch/namespaces/${FAKE.namespace}/scripts/${script}`;
+  const auth = { authorization: `Bearer ${FAKE.scriptsToken}` };
+  const session = (await (await fetch(`${base}/assets-upload-session`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ manifest: {} }) })).json()) as { result: { jwt: string } };
+  const form = new FormData();
+  form.set("metadata", JSON.stringify({ assets: { jwt: session.result.jwt } }));
+  const put = await fetch(base, { method: "PUT", headers: auth, body: form });
+  expect(put.status).toBe(200);
+}
 /** What the provider's upload part holds for `script`: every call, and whether it was written. */
-const uploadState = async (script: string) => (await (await content("upload-state", `script=${script}`)).json()) as { calls: unknown[]; written: unknown };
+const uploadState = async (script: string) => (await (await content("upload-state", `script=${script}`)).json()) as { calls: { op: string }[]; written: unknown };
+/** How many times the provider was asked to read `script`, a script `exists` wrote. */
+const reads = async (script: string) => (await uploadState(script)).calls.filter((c) => c.op === "read").length;
 const serve = (host: string, body: string) => content("marker-serve", `host=${host}`, { body });
 const marker = (release: string, commit: string) => `{"release_id":"${release}","commit":"${commit}"}\n`;
 
@@ -338,9 +347,10 @@ describe("a rollback that can't switch back", () => {
     return { r, id, after: await pass(r.room) };
   }
 
-  it("is uploaded again when Cloudflare's read at the switch says the kept script is gone, though it was there before", async () => {
+  it("is uploaded again when Cloudflare's read at the switch says the kept script is gone, though the room's rows said it could switch", async () => {
     await github("/seed", repository());
-    const { r, id, after } = await atSwitch((r) => deleteAtProvider(r.kept));
+    // The start chose the switch on the room's rows alone; only the read at the switch finds the script gone.
+    const { r, id, after } = await atSwitch(async () => undefined, false);
     expect(after.outcome).toBe("next");
     const own = `${r.label}.${id}`;
     expect(await releaseOf(r, id)).toEqual({ state: "uploading", script_name: own, script_release_id: id, failure_code: null });
@@ -387,15 +397,54 @@ describe("a rollback that can't switch back", () => {
   });
 
   it("decides nothing while Cloudflare's read gives no answer, and switches nothing", async () => {
-    const { r, id, after } = await atSwitch(async (r) => {
-      await deleteAtProvider(r.kept);
-      // The provider's upload part answers this script's next read with a 500.
-      await content("upload-fault", `script=${r.kept}`, { op: "read", times: 1, status: 500 });
-    });
+    // The provider answers this script's next read with a 500.
+    const { r, id, after } = await atSwitch((r) => content("upload-fault", `script=${r.kept}`, { op: "read", times: 1, status: 500 }));
     expect([after.outcome, after.code]).toEqual(["retry", "rollback_script_unread"]);
     expect(await releaseOf(r, id)).toMatchObject({ state: "uploading", script_name: r.kept, script_release_id: r.old });
     expect(await defaultHost(r)).toEqual({ script_name: r.live, version: 5 });
     expect(await config(r)).toMatchObject({ in_flight_release: null });
+  });
+
+  it("waits while the operators' record is full and can't say no finding is open, then switches once it can", async () => {
+    // The record turned a finding away: "none" can't be said of any script (the review of #412, S2).
+    await inModeration((s) => void s.exec("INSERT INTO takedown_finding (code, subject, first_seen_at, last_seen_at) VALUES ('findings_full', 'script', 1, 1)"));
+    try {
+      const { r, id, after } = await atSwitch(async () => undefined);
+      expect([after.outcome, after.code]).toEqual(["retry", "rollback_finding_unread"]);
+      expect(await releaseOf(r, id)).toMatchObject({ state: "uploading", script_name: r.kept, script_release_id: r.old });
+      expect(await defaultHost(r)).toEqual({ script_name: r.live, version: 5 });
+      // The control: the record no longer full, the same rollback switches at its next turn.
+      await inModeration((s) => void s.exec("DELETE FROM takedown_finding WHERE code = 'findings_full'"));
+      await inRoom(r.room, (s) => void s.exec("UPDATE test_release_clock SET now = ?", T + 60_000));
+      expect((await pass(r.room)).state).toBe("live");
+      expect(await defaultHost(r)).toEqual({ script_name: r.kept, version: 6 });
+    } finally {
+      await inModeration((s) => void s.exec("DELETE FROM takedown_finding WHERE code = 'findings_full'"));
+    }
+  });
+
+  it("ends failed with its hosts back, not uploaded again, when a switch it already staged reads a refusal on its retry", async () => {
+    const r = await room();
+    const id = await approved(r);
+    expect((await pass(r.room)).outcome).toBe("next");
+    // The switch is staged, but its confirm can't decide: the content domain's stop can't be read.
+    await moderation().fetch("https://do/content-stop");
+    await inModeration((s) => void s.exec("CREATE TABLE IF NOT EXISTS test_stop_unreadable (x INTEGER)"));
+    try {
+      const staged = await pass(r.room);
+      expect([staged.outcome, staged.code]).toEqual(["retry", "standing_unknown"]);
+    } finally { await inModeration((s) => void s.exec("DROP TABLE IF EXISTS test_stop_unreadable")); }
+    expect(await defaultHost(r)).toEqual({ script_name: r.kept, version: 6 });
+    expect(await config(r)).toMatchObject({ in_flight_release: id, in_flight_script: r.kept });
+    // Before its retry, a takedown finding is opened against the kept script: the staged switch can't stand.
+    await inModeration((s) => void s.exec("INSERT INTO takedown_finding (code, subject, first_seen_at, last_seen_at) VALUES ('script_without_room', ?, 1, 1)", r.kept));
+    await inRoom(r.room, (s) => void s.exec("UPDATE test_release_clock SET now = ?", T + 60_000));
+    await pass(r.room);
+    expect(await releaseOf(r, id)).toMatchObject({ state: "failed", failure_code: "rollback_finding_open", script_release_id: r.old });
+    expect(await defaultHost(r)).toEqual({ script_name: r.live, version: 7 });
+    expect(await config(r)).toEqual({ kept_previous: r.kept, in_flight_release: null, in_flight_script: null });
+    expect(await queuedScripts(r)).toEqual([]);
+    expect(await all(r.room, "SELECT 1 FROM audit_event WHERE action = 'release.rollback_uploads'")).toEqual([]);
   });
 
   it("fails, switching nothing, on the release's own recheck: the epoch, the commit and the reviewer rule", async () => {

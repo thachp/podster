@@ -1102,20 +1102,29 @@ pub fn confirmed_script(state: &ServeState) -> Option<String> {
 /// security re-check of PR #404): `held` is what the entry holds, `wanted` what the host wants now. It keeps `wanted`
 /// itself. And during an ordinary commit's flight, the commit's own release going live with `wanted` as its script, it
 /// keeps the release last confirmed served ([`confirmed_script`]), so a release never darkens a custom host while its
-/// marker is out. During a rollback's flight, whose own record names another release's script, the release being
-/// rolled away from is what the rollback is for taking down, so it isn't kept; nor is anything else, with no flight or
-/// another. A stale release is worse than none.
-pub fn waiting_entry_keeps(state: &ServeState, wanted: &str, held: &str) -> bool {
+/// marker is out. During a rollback's flight the release being rolled away from is what the rollback is for taking
+/// down, so it isn't kept; nor is anything else, with no flight or another. A stale release is worse than none.
+///
+/// `flight_is_rollback` is whether the flight's own record is a rollback's, from the room's rows. **Either way a
+/// rollback is one** (from the review of PR #412, S1): one switched back names another release's script, and one
+/// uploaded again names its own, as a commit does, so only its record says it is a rollback.
+pub fn waiting_entry_keeps(
+    state: &ServeState,
+    wanted: &str,
+    held: &str,
+    flight_is_rollback: bool,
+) -> bool {
     if held == wanted {
         return true;
     }
     let Some(flight) = state.in_flight.as_ref() else {
         return false;
     };
-    let commit = matches!(
-        script_owner(&flight.script),
-        ScriptOwner::Podster { release_id, .. } if release_id == flight.release_id
-    );
+    let commit = !flight_is_rollback
+        && matches!(
+            script_owner(&flight.script),
+            ScriptOwner::Podster { release_id, .. } if release_id == flight.release_id
+        );
     commit && flight.script == wanted && confirmed_script(state).as_deref() == Some(held)
 }
 

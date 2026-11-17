@@ -350,6 +350,26 @@ export function customRoutingCases() {
         expect(await applyRow(c.r, c.name)).toMatchObject({ last_code: "release_not_served_taken_down" });
       });
 
+      it("S2a, from the review of #412: takes down what a rollback uploaded again rolls away from, though its script is its own", async () => {
+        const c = await routed("org_cr_s2a_reupload");
+        await jobLater(c);
+        // A commit live and waiting for its marker, as above, whose record is a rollback's: it couldn't switch back, so
+        // it was uploaded again under its own script.
+        await commitNext(c);
+        const OLD = `rel_${"3a".repeat(16)}`;
+        await inRoom(c.r.room, (sql) => {
+          sql.exec(
+            `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, served_at, updated_at)
+               VALUES (?, ?, 'replaced', ?, 3, 2, 'tsk_cr_1', ?, ?, ?, 0, ?, 0, 0, 0, 0)`, OLD, SHA, c.r.label, `${c.r.label}.${OLD}`, OLD, c.r.owner.id, c.r.owner.id);
+          sql.exec("INSERT INTO release_rollback (release_id, rollback_to) VALUES (?, ?)", NEXT, OLD);
+        });
+        // The host still holds the release last served, which an ordinary commit's flight would keep.
+        expect((await held()).entries[c.name]).toBe(`${c.r.script}@${c.name}`);
+        await pass(c.r);
+        expect((await held()).entries[c.name]).toBeUndefined();
+        expect(await applyRow(c.r, c.name)).toMatchObject({ last_code: "release_not_served_taken_down" });
+      });
+
       it("S2b: has a custom host the reconcile finds without a live claim due at once, even while it waits", async () => {
         await fresh();
         const c = await routed("org_cr_s2b");

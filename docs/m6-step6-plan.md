@@ -253,6 +253,17 @@ The flip list in `m6-plan.md` is updated in each PR for what it closes.
 4. **The approvals list (`ReleaseApproval`) doesn't say a release is a rollback.** *Recommended:* add `rollback_to` there in the screens' PR, in its own contract turn.
 5. **A switch's start is audited `release.upload_started`,** the state being core's `uploading` though nothing is uploaded. *Recommended:* keep the one trail; `release.rollback_uploads` marks the turn to an upload.
 
+**From the quick review and the deep security review of #412 (at `8ad887ca`), 2026-11-16, with the architect's rulings:**
+
+- **S1, fixed: a rollback uploaded again follows #404's custom-host rule too.** Core's `waiting_entry_keeps` took a flight whose script names its own release for an ordinary commit, so a rollback that couldn't switch kept the release it rolls away from on a custom host for the whole marker wait. It now takes whether the flight's record is a rollback's (a `release_rollback` row, read by the applier) and treats every rollback flight, switched or uploaded again, as one: the stale entry comes down until the marker confirms. Pure tests both ways, a room test of the re-upload case, and a mutation of each.
+- **S2, fixed: the operators' record, once full, can't say "no finding".** Once a `findings_full` row is kept, a finding about the kept script may have been turned away, so `/takedown-finding-open` answers `{ open: null }` for a script with none kept, and the switch waits `rollback_finding_unread` and asks again. A test shows it, and that the same rollback switches once the record isn't full.
+- **S3, the architect's ruling, for the owner to review: the finding gate stops only the switch.** A finding against the kept script means that script isn't switched back to; a new upload of the same commit under a new script is allowed, as `requestRelease` already allows a release of that commit. Taking content down is an operator's suspension, which unpublishes, not a finding. So a rollback to an `unpublished` release re-uploads its commit once a suspension is lifted, as a new `requestRelease` of it would.
+- **S4, an accepted window:** a finding that lands after the switch's read isn't read again at the confirm or at the marker. The switch's read is the gate; what lands later is an operator's to act on, by suspension. Likewise a finding forgotten after seven days unseen no longer stops a switch.
+- **S5, recorded:** the marker a rollback waits for names the release it rolls back to, whose script it serves (`marker_release`), not the rollback's own record.
+- **S6, recorded:** the rollback route checks the target's state (`rollback_target_invalid`) before the target's task's visibility (`task_not_found`), as the contract's summary says.
+- **Quick #1, fixed:** `rollbackRelease`'s summary gives the refusals in the code's order: who and the ID's form first, then the gate, then the standing.
+- **Quick #2:** room tests for a switch already staged whose retry reads a refusal (it ends failed with its hosts back, never uploaded again), for `rollback_finding_unread`, and a mutation of the staged branch. **Core's `rollback` refusing `NotKept` after `rollback_path` said switch can't be reached:** both read the same `kept_previous` in the same transaction, with `kept_exists` passed as true. Its arm stays as a safe fallback (an upload) and has no room test.
+
 ## Not settled here
 
 - **How long a room keeps serving after `RELEASES` goes off.** Up to one lap of the walk. That is ⌈L/50⌉ × 5 minutes at worst, sooner for rooms the entries pass asks about directly.

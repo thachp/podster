@@ -297,8 +297,8 @@ fn a_switch_back_swaps_the_live_and_the_kept_script_and_deletes_neither() {
         (R, script(A).as_str())
     );
     // While its marker is out, a custom host's entry holding the release being rolled away from isn't kept.
-    assert!(!waiting_entry_keeps(&staged, &script(A), &script(B)));
-    assert!(waiting_entry_keeps(&staged, &script(A), &script(A)));
+    assert!(!waiting_entry_keeps(&staged, &script(A), &script(B), true));
+    assert!(waiting_entry_keeps(&staged, &script(A), &script(A), true));
     // Served: the release rolled away from becomes the kept one, and nothing is deleted.
     let confirmed = confirm_served(&staged, &mark, &script(A)).unwrap();
     assert_eq!(

@@ -265,10 +265,26 @@ mod waiting_entry {
             unreachable!("the commit should go live");
         };
         let wanted = script(NEXT);
-        assert!(waiting_entry_keeps(&during, &wanted, &script(PREV)));
+        assert!(waiting_entry_keeps(&during, &wanted, &script(PREV), false));
         // What it wants is kept too, and anything else comes down.
-        assert!(waiting_entry_keeps(&during, &wanted, &wanted));
-        assert!(!waiting_entry_keeps(&during, &wanted, &script(OLD)));
+        assert!(waiting_entry_keeps(&during, &wanted, &wanted, false));
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(OLD), false));
+    }
+
+    #[test]
+    fn a_rollback_uploaded_again_takes_down_the_release_it_rolls_away_from_too() {
+        // A rollback that couldn't switch is committed under its own script, as a commit is: only its record says it
+        // is a rollback, and that alone decides.
+        let Ok((during, _)) =
+            commit_live(&serving(), 2, &script(ROLL), ROLL, ReleaseState::Uploading)
+        else {
+            unreachable!("the re-upload should go live");
+        };
+        let wanted = script(ROLL);
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(PREV), true));
+        assert!(waiting_entry_keeps(&during, &wanted, &wanted, true));
+        // The same flight as an ordinary commit's keeps the release last served.
+        assert!(waiting_entry_keeps(&during, &wanted, &script(PREV), false));
     }
 
     #[test]
@@ -282,8 +298,10 @@ mod waiting_entry {
             during.in_flight.as_ref().map(|f| f.release_id.as_str()),
             Some(ROLL)
         );
-        assert!(!waiting_entry_keeps(&during, &wanted, &script(PREV)));
-        assert!(waiting_entry_keeps(&during, &wanted, &wanted));
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(PREV), true));
+        assert!(waiting_entry_keeps(&during, &wanted, &wanted, true));
+        // Even if the room's rows failed to say it was a rollback, the script naming another release says so.
+        assert!(!waiting_entry_keeps(&during, &wanted, &script(PREV), false));
     }
 
     #[test]
@@ -300,18 +318,21 @@ mod waiting_entry {
         assert!(!waiting_entry_keeps(
             &after.state,
             &script(NEXT),
-            &script(PREV)
+            &script(PREV),
+            false
         ));
         assert!(waiting_entry_keeps(
             &after.state,
             &script(NEXT),
-            &script(NEXT)
+            &script(NEXT),
+            false
         ));
         // And with no flight at all, a wanted release that isn't served keeps nothing else.
         assert!(!waiting_entry_keeps(
             &serving(),
             &script(NEXT),
-            &script(PREV)
+            &script(PREV),
+            false
         ));
     }
 }

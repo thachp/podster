@@ -4,7 +4,7 @@ import { ContentTypeNotSupportedError, toJsonRpcError, UnsupportedOperationError
 import { agentCard } from "./card";
 import { Task } from "@a2a-js/sdk";
 import { guarded, PodsterA2AHandler } from "./handler";
-import { activated, isLifecycleMethod, LIFECYCLE_URI, REPOSITORY_METHOD, runLifecycle, type LifecycleOptions } from "./lifecycle";
+import { activated, isLifecycleMethod, LIFECYCLE_URI, methodListed, REPOSITORY_METHOD, runLifecycle, type LifecycleOptions } from "./lifecycle";
 import { INCOMPLETE_HEADER, type ApiReads, type ReadNotes } from "./reads";
 import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
 
@@ -82,7 +82,7 @@ export function handleA2aCard(request: Request, url: URL, baseUrl: string, optio
 /** The card's body and a strong validator from its own bytes (A2A's CARD-CACHE-002 SHOULD), made once per base URL. */
 const cards = new Map<string, { body: string; etag: string }>();
 function cardFor(baseUrl: string, options: LifecycleOptions) {
-  const key = `${options.managedRepositories ? "1" : "0"} ${baseUrl}`;
+  const key = `${options.managedRepositories ? "1" : "0"}${options.releases ? "1" : "0"} ${baseUrl}`;
   let card = cards.get(key);
   if (!card) {
     const body = JSON.stringify(agentCard(baseUrl, options));
@@ -103,6 +103,9 @@ function fnv1a64(text: string): string {
 }
 
 export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
+
+/** Whether a request is for the card, so its options are worked out only then. */
+export const isCardPath = (url: URL) => url.pathname === CARD_PATH;
 
 /** A version header longer than this is never a version: `999.999.999999`. */
 const MAX_VERSION_LENGTH = 14;
@@ -165,7 +168,8 @@ export async function answerA2a(text: string, agentId: string, baseUrl: string, 
   const { id, method } = envelope(text);
   // While managed repositories are off, GetRepoAccess doesn't exist: it answers exactly as any method that doesn't, as
   // MCP's get_repo_access answers as a tool that doesn't, and nothing reaches the API.
-  if (method === REPOSITORY_METHOD && !options.managedRepositories) return json({ jsonrpc: "2.0", id: safeId(id), error: { code: -32601, message: "Method not found" } });
+  // So does DeployRelease while the API doesn't answer the release routes, as MCP's deploy_release isn't listed then.
+  if (typeof method === "string" && isLifecycleMethod(method) && !methodListed(method, options)) return json({ jsonrpc: "2.0", id: safeId(id), error: { code: -32601, message: "Method not found" } });
   // Step 10: the lifecycle extension's own methods, which the SDK's transport doesn't know.
   if (isLifecycleMethod(method)) {
     const extensions = activated(extensionsHeader);

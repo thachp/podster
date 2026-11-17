@@ -90,6 +90,25 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
     )
 }
 
+/// Whether an M6 route is the one an agent may reach: asking for a release (`requestRelease`), which is the
+/// `deploy_release` capability (step 6, 6g). Every other M6 route is a person's or an operator's, and the Worker refuses
+/// an agent by its kind before the room is asked.
+pub(crate) fn agent_route(method: &Method, parts: &[&str]) -> bool {
+    *method == Method::Post && matches!(parts, ["v1", "workspaces", _, "releases"])
+}
+
+/// The path of [`routes_answered`], outside `/v1`: the gateway's own read over its service binding, never a client's.
+pub(crate) const ROUTES_ANSWERED_PATH: &str = "/release-routes";
+
+/// What the gateway reads to know whether the API answers the release routes now (`/release-routes`, 6g): `{ answered }`,
+/// true only while the deployment's setting is exactly `true`. The gateway lists the `deploy_release` tool and skill only
+/// then, so the two can't disagree. Listing authorizes nothing: the room decides every call.
+pub(crate) async fn routes_answered(env: &Env) -> R<Response> {
+    Ok(Response::from_json(
+        &json!({ "answered": switched_on(env).await }),
+    )?)
+}
+
 /// The deployment's release setting, `RELEASES`, read by core's one rule (`podster_core::release::deployment_release`):
 /// on only for exactly `true`, off only for exactly `false`, and undecided for anything else, unset included. A
 /// deployment reads its Worker variable alone. Test builds can also be switched on while D1 holds a table named

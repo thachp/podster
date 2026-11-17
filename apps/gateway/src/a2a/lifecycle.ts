@@ -25,12 +25,19 @@ export const LIFECYCLE_METHODS = {
   "podster.lifecycle.v1.SubmitTask": "submit_task",
   "podster.lifecycle.v1.ClaimRole": "claim_role",
   "podster.lifecycle.v1.GetRepoAccess": "get_repo_access",
+  "podster.lifecycle.v1.DeployRelease": "deploy_release",
 } as const;
 export type LifecycleMethod = keyof typeof LIFECYCLE_METHODS;
 export const isLifecycleMethod = (method: unknown): method is LifecycleMethod => typeof method === "string" && Object.hasOwn(LIFECYCLE_METHODS, method);
 
 /** The one method that exists only while managed repositories are switched on, as MCP's `get_repo_access` tool does. */
 export const REPOSITORY_METHOD = "podster.lifecycle.v1.GetRepoAccess";
+
+/**
+ * The one method that exists only while the API answers the release routes (M6 step 6, 6g), as MCP's `deploy_release`
+ * tool does: an agent asks for a release of a task's merged commit.
+ */
+export const RELEASE_METHOD = "podster.lifecycle.v1.DeployRelease";
 
 /**
  * Every capability an `/a2a` token reaches, and nothing else: the reads behind `GetTask` and `ListTasks`, `SendMessage`'s
@@ -42,8 +49,14 @@ export const A2A_CAPABILITIES = ["get_task", "list_tasks", "list_workspaces", "s
 /** What one lifecycle call answers: the task, as `GetTask` reads it, or for the methods that aren't about one task, a plain object. */
 export type LifecycleResult = { task: Task } | { value: Record<string, unknown> };
 
-/** Options from the gateway's own configuration, never from the request. */
-export type LifecycleOptions = { managedRepositories: boolean };
+/**
+ * Options the gateway works out, never from the request: its own managed-repository switch, and whether the API itself
+ * said it answers the release routes now. A missing `releases` is no.
+ */
+export type LifecycleOptions = { managedRepositories: boolean; releases?: boolean };
+
+/** Whether a method exists under these options: GetRepoAccess only with managed repositories, DeployRelease only with release. */
+export const methodListed = (method: string, options: LifecycleOptions) => (method !== REPOSITORY_METHOD || options.managedRepositories) && (method !== RELEASE_METHOD || options.releases === true);
 
 /** Which extensions a request named in `A2A-Extensions`: each comma-separated entry, trimmed. */
 export const activated = (header: string | null) => (header ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -70,6 +83,8 @@ const ALLOWED: Record<LifecycleMethod, string[]> = {
   // No requestId: MCP's get_repo_access takes no idempotency key, and the API keeps none, because a stored answer would be
   // a second copy of the token. Asking again is safe.
   "podster.lifecycle.v1.GetRepoAccess": ["id"],
+  // The task by its A2A ID, the commit its merge confirmed, and the key: MCP's deploy_release's `task_id` and `commit_sha`.
+  "podster.lifecycle.v1.DeployRelease": ["id", "commitSha", "requestId"],
 };
 
 /** A path value the API decides on: 1 to 200 printable characters with no spaces. The API answers for one that doesn't exist. */
@@ -98,6 +113,12 @@ function parse(method: LifecycleMethod, params: unknown, options: LifecycleOptio
   const target = parseA2aTaskId(p.id);
   if (!target) throw new TaskNotFoundError("Task not found.");
   if (method === REPOSITORY_METHOD) return { ...target, a2aId: p.id as string, args: {} };
+  if (method === RELEASE_METHOD) {
+    // Only the type is checked here, as MCP's tool schema does: the room decides whether it is the task's merged commit.
+    if (typeof p.commitSha !== "string" || p.commitSha === "") throw malformed("commitSha is the commit Podster's merge confirmed for the task, as text.");
+    if (typeof p.requestId !== "string" || !REQUEST_ID.test(p.requestId)) throw malformed("requestId is 1 to 200 printable characters with no spaces.");
+    return { ...target, a2aId: p.id as string, requestId: p.requestId, args: { commit_sha: p.commitSha } };
+  }
   if (!Number.isSafeInteger(p.version) || (p.version as number) < 1) throw malformed("version is the task's podster.dev/version, a positive integer.");
   if (typeof p.requestId !== "string" || !REQUEST_ID.test(p.requestId)) throw malformed("requestId is 1 to 200 printable characters with no spaces.");
   const args: Record<string, unknown> = { version: p.version };
@@ -183,6 +204,17 @@ const REPO_ACCESS_REFUSALS = new Set([
   // The API's own switch off, while the gateway's is on: it answers as a route that doesn't exist, and MCP says so too.
   "not_found",
 ]);
+/**
+ * `DeployRelease`'s refusals, each the room's fixed code as MCP's `deploy_release` answers it (`requestRelease`'s
+ * contract): who is asking and where, the grant, what is asked for, and the gate on the release path. `not_found` is the
+ * API answering the route as one that doesn't exist, as it does once release is switched off after the card was read.
+ */
+const RELEASE_REFUSALS = new Set([
+  "agent_not_connected", "public_participant", "grant_required", "grant_expired", "grant_stale",
+  "release_off_for_deployment", "release_not_delegated", "release_needs_public_room", "workspace_archived", "public_surface_suspended", "app_suspended", "repo_not_ready", "release_off",
+  "commit_not_releasable", "reviewer_rule_changed", "no_releaser", "release_pending", "release_limit", "release_not_available",
+  "not_found",
+]);
 
 /** The API's fixed code, in the error's `ErrorInfo.metadata.code`, so a client can read it as it reads MCP's. */
 const named = <E extends A2AError>(make: (o: { message: string; metadata: Record<string, string> }) => E, message: string, code: string) => make({ message, metadata: { code } });
@@ -205,12 +237,12 @@ function refusal(status: number, body: any): Error {
   return new UpstreamError(status);
 }
 
-/** A refusal of `ClaimRole` or `GetRepoAccess`, named by its code as MCP names it. */
+/** A refusal of `ClaimRole`, `GetRepoAccess` or `DeployRelease`, named by its code as MCP names it. */
 function namedRefusal(method: LifecycleMethod, status: number, body: any): Error {
   const code = body?.error?.code;
-  const refusals = method === "podster.lifecycle.v1.ClaimRole" ? CLAIM_REFUSALS : REPO_ACCESS_REFUSALS;
+  const refusals = method === "podster.lifecycle.v1.ClaimRole" ? CLAIM_REFUSALS : method === RELEASE_METHOD ? RELEASE_REFUSALS : REPO_ACCESS_REFUSALS;
   if (typeof code !== "string") return new UpstreamError(status);
-  if (method === REPOSITORY_METHOD && (HIDDEN.has(code) || (status === 404 && code !== "not_found"))) return new TaskNotFoundError("Task not found.");
+  if ((method === REPOSITORY_METHOD || method === RELEASE_METHOD) && (HIDDEN.has(code) || (status === 404 && code !== "not_found"))) return new TaskNotFoundError("Task not found.");
   if (refusals.has(code)) return refusedCode(`Podster refused that: ${code}.`, code);
   if (code === "idempotency_mismatch") return malformedCode("This requestId was already used for a different request.", code);
   if (code === "invalid_argument") return malformedCode(`Podster couldn't do that: ${code}.`, code);
@@ -229,6 +261,14 @@ function repoAccess(body: any): Record<string, unknown> {
   return { token, expires_at, repository, clone_url, permissions, authority_ends_at };
 }
 
+/** The release's answer, exactly the contract's `Release` fields. Anything else from the API is a failure, never passed on. */
+const RELEASE_FIELDS = ["id", "commit_sha", "environment", "state", "requested_by", "requested_at", "approved_by", "approved_at", "declined_by", "declined_at", "result_url", "failure_code", "finished_at", "rollback_to"] as const;
+function releaseAnswer(body: any): Record<string, unknown> {
+  const ok = body && typeof body === "object" && !Array.isArray(body) && typeof body.id === "string" && typeof body.state === "string" && RELEASE_FIELDS.every((field) => field in body);
+  if (!ok) throw new UpstreamError(200);
+  return Object.fromEntries(RELEASE_FIELDS.map((field) => [field, body[field]]));
+}
+
 /**
  * One lifecycle call. A task's command answers with the task as `GetTask` reads it afterwards, and a retry with the same
  * `requestId`, task and parameters does nothing new: the API's idempotency record answers it. `ClaimRole` answers the
@@ -236,8 +276,9 @@ function repoAccess(body: any): Record<string, unknown> {
  */
 export async function runLifecycle(api: ApiReads, callerId: string, method: LifecycleMethod, params: unknown, extensions: string[], options: LifecycleOptions): Promise<LifecycleResult> {
   if (!lifecycleActive(extensions)) throw new ExtensionSupportRequiredError(`Name ${LIFECYCLE_URI} in A2A-Extensions to call ${method}.`);
-  // The route never gets here for GetRepoAccess while the switch is off. Checked again, so this can't be the only guard.
-  if (method === REPOSITORY_METHOD && !options.managedRepositories) throw new UnsupportedOperationError("Not available.");
+  // The route never gets here for GetRepoAccess while the switch is off, or for DeployRelease while the API doesn't answer
+  // the release routes. Checked again, so this can't be the only guard.
+  if (!methodListed(method, options)) throw new UnsupportedOperationError("Not available.");
   const parsed = parse(method, params, options);
   if (method === "podster.lifecycle.v1.ClaimRole") {
     const { status, body } = await api.command("claim_role", { workspace_id: parsed.workspaceId, role_id: parsed.roleId }, `a2a-lc:${parsed.requestId}`);
@@ -250,6 +291,11 @@ export async function runLifecycle(api: ApiReads, callerId: string, method: Life
     const { status, body } = await api.command("get_repo_access", { workspace_id: parsed.workspaceId, task_id: parsed.taskId });
     if (status !== 200) throw namedRefusal(method, status, body);
     return { value: repoAccess(body) };
+  }
+  if (method === RELEASE_METHOD) {
+    const { status, body } = await api.command("deploy_release", { workspace_id: parsed.workspaceId, task_id: parsed.taskId, ...parsed.args }, `a2a-lc:${parsed.requestId}`);
+    if (status !== 200) throw namedRefusal(method, status, body);
+    return { value: releaseAnswer(body) };
   }
   const { status, body } = await api.command(LIFECYCLE_METHODS[method], { workspace_id: parsed.workspaceId, task_id: parsed.taskId, ...parsed.args }, `a2a-lc:${parsed.requestId}`);
   if (status !== 200) throw refusal(status, body);

@@ -57,6 +57,12 @@ capabilities:
   # M5 step 8. Listed by the gateway only while managed repositories are switched on. M6 step 7 added the release beside
   # checks and merge, in its answer only: still a query, and nothing it reads deploys or reaches a host.
   get_task_release_status: { kind: query, operation: getTaskReleaseStatus }
+  # M6 step 6, 6g (ADR 0010's `deploy_release`): an agent asks for a release of a task's merged commit, through the person's
+  # route. Listed by the gateway, as an MCP tool and the A2A skill DeployRelease, only while the API answers the release
+  # routes, which the gateway reads from the API, never from a variable of its own. The room decides every call: a live
+  # `deploy` grant, never through a public claim (decision 159), and the person who controls the agent recorded with the
+  # release and rechecked on every pass. While the release path isn't complete it answers `release_not_available`.
+  deploy_release: { kind: command, operation: requestRelease }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
 # getAgentParticipationPolicy, getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the
@@ -79,16 +85,14 @@ person_only:
   # M5 step 5b. Grants on the room's repository are given and taken back by people. An agent learns of its grant only
   # through a token, from step 6.
   # M6 step 2 (ADR 0010): the contract and the state only. Every one answers as a missing route while release is switched
-  # off, which is everywhere. deploy_release isn't listed anywhere yet: it arrives with the step that
-  # builds it, so no agent sees a deploy tool before the release path exists (AC-17). get_task_release_status gained the
-  # release's fields with step 7, and nothing that deploys.
+  # off, which is everywhere. deploy_release, which reaches requestRelease alone, arrived with 6g; no capability reaches
+  # anything else of release (AC-17). get_task_release_status gained the release's fields with step 7, and nothing that
+  # deploys.
   - getReleaseConfig
   - setReleaseConfig
   # M6 step 10(b): the room's releases awaiting approval, for a person's Needs attention. Person-only, as approving is.
   - listReleaseApprovals
-  # M6 step 6: a person asks for a release of a task's merged commit. Person-only until the `deploy_release` capability
-  # arrives in its own contract turn, recording an agent's controlling person, so no agent sees a deploy tool before then.
-  - requestRelease
+  # M6 step 6: requestRelease is a person's and, since 6g, the `deploy_release` capability's, so it is listed there.
   - approveRelease
   - declineRelease
   # M6 step 6, 6h: a person asks to roll back to an earlier release, its own record, approved as any release is.
@@ -200,6 +204,7 @@ provider_only:
 # capabilities, and a gateway test holds the two together, so the token's reach changes only with this list. Policy and the
 # state machine decide every call, as for MCP. ClaimRole, GetRepoAccess and SubmitTask's commit and pull request were added
 # for the engineer's steps on 2026-11-14. GetRepoAccess, like get_repo_access, exists only while managed repositories are on.
+# DeployRelease (M6 step 6, 6g), like deploy_release, exists only while the API answers the release routes.
 a2a:
   GetTask: get_task
   ListTasks: [list_workspaces, list_tasks, get_task]
@@ -210,3 +215,4 @@ a2a:
   podster.lifecycle.v1.SubmitTask: submit_task
   podster.lifecycle.v1.ClaimRole: claim_role
   podster.lifecycle.v1.GetRepoAccess: get_repo_access
+  podster.lifecycle.v1.DeployRelease: deploy_release

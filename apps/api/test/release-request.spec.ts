@@ -46,7 +46,7 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
   try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
 }
 
-/** An agent, registered once: it never asks here, refused by its kind before the room is asked. */
+/** An agent, registered once, whose credential names no linker: it may not ask here (6g asks with one). */
 const AGENT: Who = { id: "agt_rq_agent", org: "org_rq_agents", kind: "agent" };
 
 const SHA = "e1".repeat(20);
@@ -229,14 +229,15 @@ describe("who may ask (podster_policy::release::authorize_release_request)", () 
     }
   });
 
-  it("never an agent: the Worker refuses one by its kind, whatever it holds", async () => {
+  it("an agent only with a controlling person on its credential (6g: `release-agent.spec.ts`)", async () => {
     const r = await room();
     await inRoom(r.room, (s) => {
       s.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'member', ?, 1)", AGENT.id, AGENT.org, r.owner.id);
       s.exec("UPDATE provider_grant SET principal_id = ?", AGENT.id);
     });
     const before = await everything(r);
-    expect(refused(await switchedOn(() => ask(r, undefined, AGENT)))).toEqual([403, "not_allowed"]);
+    // This credential names no person who linked it, so nobody can be shown to control the agent.
+    expect(refused(await switchedOn(() => ask(r, undefined, AGENT)))).toEqual([403, "agent_not_connected"]);
     expect(await everything(r)).toBe(before);
   });
 

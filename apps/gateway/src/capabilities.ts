@@ -73,6 +73,7 @@ export const CAPABILITIES: Capability[] = [
   { name: "get_repo_access", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/repo-access", idempotent: true, fields: TASK, description: "Get a short-lived token for the room's repository, to clone it, push a branch for this task and open a pull request. Only for a task assigned to you and accepted, in a room whose repository is ready, with a push grant from the room's owner or one of its admins, which counts only while whoever gave it still is one. You name only the task: the repository is the room's own. The token reaches that one repository, can write contents and pull requests and read metadata, and can't merge to the default branch, change settings or touch workflows. It expires at expires_at, within an hour. Asking again returns the same token until 5 minutes before it expires, and then a new one, after the same checks; the old one is revoked. It's revoked early if your grant, your place in the room or the task ends. Keep it out of files, commits, logs and messages, and use it only with clone_url. Safe to retry." },
   { name: "merge_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/merge", fields: { ...TASK, submission_no: { type: "integer", required: true, description: "The approved submission." }, commit_sha: { type: "string", required: true, description: "The commit that submission named." } }, description: "Ask for a task's approved, reviewed commit to be merged into the default branch of the room's repository. Approval alone never merges: this needs a merge grant from the room's owner or one of its admins, which counts only while whoever gave it still is one, and you can't merge work you submitted, a task assigned to you, or work submitted by another agent of the person who controls you. The commit must also have been approved by someone the submitter's person doesn't control, or it's refused self_review. You name the task, the approved submission and its commit, never a repository or pull request. It only records the request and answers merge_state requested. Podster then checks everything again, merges exactly that commit if the pull request still has it as its head, and records merge.succeeded or merge.failed with a reason in the room's activity. If the commit changed after review, the merge fails with commit_changed and the way on is a follow-up task." },
   { name: "get_task_release_status", kind: "query", method: "GET", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/release-status", fields: TASK, description: "Read a task's checks, its merge and its release, each as Podster last observed it, with the time of that observation. They're reported apart: checks can fail on a task whose merge succeeded, a merge can fail on one whose checks pass, and merged is never deployed. checks.state is null when Podster hasn't read the head commit's checks, which says nothing about whether they pass. merge.state is not_requested, requested, succeeded, failed with a reason code, or outcome_unknown. release.exists is false while the room's app isn't released or nothing was asked for the merged commit; otherwise release.state is the latest attempt's, with observed_at and a failure_code when failed. The app is live only when release.served is true, and then result_url is its address. release.state awaiting_confirmation means switched with its check through the host not back yet: not live. Nothing is fetched when you ask: wait and ask again for something newer. You get what your view of the task shows and no more: the task's assignee and reviewer, and people in the room, get all of it; if you asked for the merge and aren't one of them, you get the merge alone, with pull_request and checks null, and release null while release is on; anyone else who can read the task is refused not_allowed." + UNTRUSTED },
+  { name: "deploy_release", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/releases", fields: { ...WS, task_id: { type: "string", required: true, description: "The completed task whose merged commit to release." }, commit_sha: { type: "string", required: true, description: "The commit Podster's merge confirmed for that task." } }, description: "Ask for a release of a completed task's merged commit, the room's app. It only records the request, awaiting a person's approval: nothing is uploaded or served until the room's owner or one of its admins approves it, and the person who linked your credential may approve it. Needs a deploy grant of your own from the room's owner or one of its admins, which counts only while whoever gave it still is one, in a public room with release on; never through a public claim. The commit must be exactly the one Podster's merge confirmed for that task. The person who linked the credential you ask with is recorded, and the release fails if they leave your organization or you're disconnected before it goes live. Read how it goes with get_task_release_status." },
 ];
 
 /** Capabilities that exist only while managed repositories are switched on. */
@@ -80,19 +81,47 @@ const MANAGED_REPOSITORY_CAPABILITIES = new Set(["get_repo_access", "merge_task"
 /** Fields of other capabilities that exist only then: a task's pull request (M5 step 7a). No capability is added. */
 const MANAGED_REPOSITORY_FIELDS: Record<string, string[]> = { submit_task: ["pr_number"] };
 
+/** Capabilities that exist only while the API answers the release routes (M6 step 6, 6g): an agent's request for a release. */
+export const RELEASE_CAPABILITIES = new Set(["deploy_release"]);
+
+/** What the listing is told beside this Worker's own configuration: whether the API answers the release routes now. */
+export type ListingOptions = { releases?: boolean };
+
 /**
  * The capabilities an agent is offered here. A managed-repository tool is listed only when this Worker's own
- * MANAGED_REPOSITORIES is exactly "true". Listing authorizes nothing: the API decides every call, and answers as if the
- * route doesn't exist while its own switch is off, so a mismatch between the two fails closed.
+ * MANAGED_REPOSITORIES is exactly "true", and `deploy_release` only when the API itself said it answers the release
+ * routes now (`releases`, from {@link releaseRoutesAnswered}), never from a variable of this Worker's, so the two can't
+ * disagree. Listing authorizes nothing: the API decides every call, and answers as if the route doesn't exist while its
+ * own switch is off, so a mismatch between the two fails closed.
  */
-export function capabilitiesFor(env: { MANAGED_REPOSITORIES?: string }): Capability[] {
+export function capabilitiesFor(env: { MANAGED_REPOSITORIES?: string }, { releases = false }: ListingOptions = {}): Capability[] {
   const managed = env.MANAGED_REPOSITORIES === "true";
-  if (managed) return CAPABILITIES;
-  return CAPABILITIES.filter((c) => !MANAGED_REPOSITORY_CAPABILITIES.has(c.name)).map((c) => {
+  const listed = releases ? CAPABILITIES : CAPABILITIES.filter((c) => !RELEASE_CAPABILITIES.has(c.name));
+  if (managed) return listed;
+  return listed.filter((c) => !MANAGED_REPOSITORY_CAPABILITIES.has(c.name)).map((c) => {
     const hidden = MANAGED_REPOSITORY_FIELDS[c.name];
     if (!hidden || !c.fields) return c;
     return { ...c, fields: Object.fromEntries(Object.entries(c.fields).filter(([name]) => !hidden.includes(name))) };
   });
+}
+
+/** The API's own answer to whether it answers the release routes now: a path outside `/v1` that names no one. */
+export const RELEASE_ROUTES_PATH = "/release-routes";
+
+/**
+ * Whether the API answers the release routes now, read from the API over the service binding, never from this
+ * Worker's configuration. Only exactly `{ "answered": true }` is yes; anything else, an error or no answer included, is
+ * no, so `deploy_release` is hidden whenever the API can't be shown to answer it.
+ */
+export async function releaseRoutesAnswered(api: { fetch: (request: Request) => Promise<Response> }): Promise<boolean> {
+  try {
+    const response = await api.fetch(new Request(`https://api.internal${RELEASE_ROUTES_PATH}`, { method: "GET", signal: AbortSignal.timeout(5000) }));
+    if (response.status !== 200) return false;
+    const body = await response.json().catch(() => null);
+    return !!body && typeof body === "object" && (body as { answered?: unknown }).answered === true;
+  } catch {
+    return false;
+  }
 }
 
 export const needsKey = (c: Capability) => c.kind === "command" && !c.idempotent;

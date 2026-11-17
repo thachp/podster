@@ -9,15 +9,15 @@ import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
-import { CAPABILITIES, capabilitiesFor, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
+import { CAPABILITIES, capabilitiesFor, InvalidArguments, jsonSchema, releaseRoutesAnswered, toApiCall, zodShape, type ApiCall, type Capability, type ListingOptions } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
-import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
+import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath, isCardPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
-import { A2A_CAPABILITIES } from "./a2a/lifecycle";
+import { A2A_CAPABILITIES, type LifecycleOptions } from "./a2a/lifecycle";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 import { filterPublicRead, publicPassthrough, PUBLIC_READ_CAPABILITIES } from "./public/reads";
 
@@ -319,8 +319,12 @@ export function spentToken(pluginAgent: string, authorization: string | null | u
   return { key: `${pluginAgent}:${jti}`, expiresAt: Math.min(iat ?? now, now) + AGENT_JWT_MAX_AGE_SECONDS + 30 };
 }
 
-/** `testPeople` is only for the test sign-up, once it has checked everything. Requests never get this instance. */
-export function createAuth(env: Env, { testPeople = false } = {}) {
+/**
+ * `testPeople` is only for the test sign-up, once it has checked everything. Requests never get this instance.
+ * `releases` is whether the API said it answers the release routes now, read for the agent's own routes only: it lists
+ * `deploy_release` (M6 step 6, 6g). Every other instance lists no release capability.
+ */
+export function createAuth(env: Env, { testPeople = false, releases = false } = {}) {
   // Better Auth falls back to a public default outside production, and Workers don't set NODE_ENV.
   if (!env.AUTH_SECRET) throw new Error("AUTH_SECRET is not set");
   const social: Record<string, { clientId: string; clientSecret: string }> = {};
@@ -384,9 +388,9 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
         absoluteLifetime: 0,
         // Claiming is an explicit action on a signed-in session, so an older session is fine.
         freshSessionWindow: 0,
-        capabilities: capabilitiesFor(env).map((c) => ({ name: c.name, description: c.description, input: jsonSchema(c) as any, approvalStrength: "session" as const })),
+        capabilities: capabilitiesFor(env, { releases }).map((c) => ({ name: c.name, description: c.description, input: jsonSchema(c) as any, approvalStrength: "session" as const })),
         onExecute: async ({ ctx, capability, arguments: args, agentSession }) => {
-          const definition = capabilitiesFor(env).find((c) => c.name === capability);
+          const definition = capabilitiesFor(env, { releases }).find((c) => c.name === capability);
           if (!definition) throw new APIError("BAD_REQUEST", { message: "unknown_capability" });
           // A download reaches here only once the plugin has checked the agent's get_asset_link grant, as for any call of it.
           const download = ctx.request ? DOWNLOADS.get(ctx.request) : undefined;
@@ -1009,7 +1013,7 @@ async function claim(request: Request, env: Env, userId: string, body: ClaimBody
     // The code comes first, so only someone holding one can learn that a host is taken.
     if (!(await codeMatchesLiveApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
     if (!(await claimHost(env, pluginAgent, userId))) return denied("host_owned_by_another_person", 403);
-    const approval = await createAuth(env).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
+    const approval = await createAuth(env, { releases: await releaseRoutesAnswered(env.API) }).api.approveCapability({ headers: request.headers, body: { agent_id: pluginAgent, user_code: body.user_code, action: "approve" }, asResponse: true }).catch(() => null);
     const result = approval?.ok ? await approval.json<{ status?: string }>().catch(() => null) : null;
     // If two people raced with the right code, only the one the plugin recorded goes on.
     if (result?.status !== "approved" || !(await claimedByThisPerson(env, pluginAgent, userId))) return denied("not_allowed", 403);
@@ -1095,7 +1099,7 @@ const appHandler = {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
-    const card = onApplicationHost ? null : handleA2aCard(request, url, publicEnv.BASE_URL, a2aOptions(publicEnv));
+    const card = onApplicationHost || !isCardPath(url) ? null : handleA2aCard(request, url, publicEnv.BASE_URL, await a2aOptions(publicEnv));
     if (card) return card;
     // GitHub's deliveries come to the gateway's own host, never the application's.
     const webhook = onApplicationHost ? null : await handleGithubWebhook(request, url, publicEnv);
@@ -1124,14 +1128,16 @@ const appHandler = {
       }
       if (!isPublicAuthRoute(route)) return denied("not_found", 404);
       if (publicEnv.APP_URL && !onApplicationHost && STARTS_SESSION.test(route)) return denied("not_found", 404);
+      // The agent's own routes list and run capabilities, so only they ask the API whether it answers the release routes.
+      const listing: ListingOptions = /^\/(agent|capability)\//.test(route) ? { releases: await releaseRoutesAnswered(publicEnv.API) } : {};
       if (route === "/agent/register" && request.method === "POST") {
         // Read once and passed on, so what we checked is what the plugin parses.
         const text = await request.text();
         const refused = await refusedRegistration(request, text);
         if (refused) return refused;
-        return createAuth(env).handler(new Request(request, { body: text }));
+        return createAuth(env, listing).handler(new Request(request, { body: text }));
       }
-      return createAuth(env).handler(request);
+      return createAuth(env, listing).handler(request);
     }
 
     const auth = createAuth(env);
@@ -1243,7 +1249,8 @@ const mcpHandler = {
     // One batch would run up to 100 calls for one count. The protocol's clients send single messages.
     if (Array.isArray(await new Response(body).json().catch(() => null))) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "batch requests aren't supported" } }, 400);
     const server = new McpServer({ name: "podster", version: "0.0.0" });
-    for (const capability of capabilitiesFor(env)) {
+    // `deploy_release` is a tool only while the API itself says it answers the release routes (M6 step 6, 6g).
+    for (const capability of capabilitiesFor(env, { releases: await releaseRoutesAnswered(env.API) })) {
       server.registerTool(capability.name, { description: capability.description, inputSchema: zodShape(capability) as any }, async (args: Record<string, unknown>) => {
         const fail = (code: string) => ({ isError: true, content: [{ type: "text" as const, text: code }] });
         try {
@@ -1264,29 +1271,35 @@ const mcpHandler = {
   },
 };
 
-/** The gateway's own A2A options: `GetRepoAccess` and a submission's `prNumber` exist exactly when MCP's tool and field do. */
-const a2aOptions = (env: { MANAGED_REPOSITORIES?: string }) => ({ managedRepositories: capabilitiesFor(env).some((c) => c.name === "get_repo_access") });
+/**
+ * The gateway's own A2A options: `GetRepoAccess` and a submission's `prNumber` exist exactly when MCP's tool and field
+ * do, and `DeployRelease` exactly when MCP's `deploy_release` does, while the API itself says it answers the release routes.
+ */
+async function a2aOptions(env: Pick<Env, "API" | "MANAGED_REPOSITORIES">): Promise<LifecycleOptions> {
+  const listed = capabilitiesFor(env, { releases: await releaseRoutesAnswered(env.API) });
+  return { managedRepositories: listed.some((c) => c.name === "get_repo_access"), releases: listed.some((c) => c.name === "deploy_release") };
+}
 
 /**
  * One capability an `/a2a` token may reach, as MCP offers it under this Worker's switch. Only the capabilities in
  * `A2A_CAPABILITIES` are ever found, so nothing reaches a capability MCP alone has.
  */
-export function a2aCapability(env: { MANAGED_REPOSITORIES?: string }, name: string): Capability {
-  const capability = (A2A_CAPABILITIES as readonly string[]).includes(name) ? capabilitiesFor(env).find((c) => c.name === name) : undefined;
+export function a2aCapability(env: { MANAGED_REPOSITORIES?: string }, name: string, listing: ListingOptions = {}): Capability {
+  const capability = (A2A_CAPABILITIES as readonly string[]).includes(name) ? capabilitiesFor(env, listing).find((c) => c.name === name) : undefined;
   if (!capability) throw new Error("capability not on /a2a");
   return capability;
 }
 
 /** The API reads A2A needs, through the same capabilities MCP calls, as the agent the token resolved to. */
-function a2aReads(env: Env, identity: Identity): ApiReads {
-  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, a2aCapability(env, name), args);
+function a2aReads(env: Env, identity: Identity, listing: ListingOptions = {}): ApiReads {
+  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, a2aCapability(env, name, listing), args);
   return {
     getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
     listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
     listWorkspaces: () => run("list_workspaces", {}),
     // The same call MCP's tool makes: `toApiCall` takes only the capability's own fields, and the key only when one is given.
     command: async (name, args, idempotencyKey) => {
-      const response = await callApi(env, identity, toApiCall(a2aCapability(env, name), idempotencyKey === undefined ? args : { ...args, idempotency_key: idempotencyKey }));
+      const response = await callApi(env, identity, toApiCall(a2aCapability(env, name, listing), idempotencyKey === undefined ? args : { ...args, idempotency_key: idempotencyKey }));
       return { status: response.status, body: await response.json().catch(() => null) };
     },
     // `send_message`'s own call, with `via` added, which no capability field can set: it tells the room the message
@@ -1310,7 +1323,8 @@ const a2aHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     try {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
-      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity), request.headers.get("A2A-Extensions"), a2aOptions(env));
+      const options = await a2aOptions(env);
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity, { releases: options.releases }), request.headers.get("A2A-Extensions"), options);
     } catch (error) {
       // error-codes: from new AgentRefused
       if (error instanceof AgentRefused) return denied(error.message, 403);

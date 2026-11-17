@@ -35,10 +35,13 @@
 //! **Facts with no source yet, said plainly:**
 //! - *The organization deleted, and the room deleted.* Nothing deletes either. `organization_exists` is always true and
 //!   `deleted` is true only for a room whose status is neither active nor archived, which nothing sets.
-//! - *An agent that asked for the release.* The release keeps who asked and not the person who controls them, so
-//!   whether that person still holds can't be asked. An agent's release fails here, `requester_lost_authority`, until
-//!   the `deploy_release` capability (step 6's 6g) records it. A person's request (`release_request`) can't come from an
-//!   agent at all.
+//! - *An agent that asked for the release* (6g). The release records the link its credential carried
+//!   (`release_requester`): the person who linked it, in which organization, since when, and the agent's connection
+//!   generation. Every pass asks the agent's own `Principal` whether it is still connected at that generation (every
+//!   disconnect moves it, and ends every link of the agent's) and that person's own `Principal` whether they are still in
+//!   the agent's organization since the link began (a link made again after they left begins later); the link now must
+//!   be exactly the recorded one (`podster_policy::release::controller_unchanged`). An agent's release that records no
+//!   link fails `requester_lost_authority`; an unread answer decides nothing.
 //! - *Whether the task was reviewed under the room's person-reviewer rule.* It isn't recorded. What is checked is that
 //!   the release meets the rule the room has now: if the room requires a person as reviewer, the task's reviewer was
 //!   one.
@@ -56,8 +59,8 @@ use podster_core::release::{
     ReleaseState, ReleaseSwitch, RoomReleaseFacts,
 };
 use podster_policy::release::{
-    authorize_approval, delegation_holder, may_release_now, DeployGrant, ReleaseRoom,
-    ReleaseStanding, DEPLOY_ACTION,
+    authorize_approval, controller_unchanged, delegation_holder, may_release_now, DeployGrant,
+    ReleaseRoom, ReleaseStanding, DEPLOY_ACTION,
 };
 
 /// The room's path for one pass of the recheck. Nothing outside the Worker reaches it, and nothing calls it yet.
@@ -102,6 +105,22 @@ pub(super) struct Reads {
     approver: Asked,
     requester: Asked,
     giver: Asked,
+    /// For an agent's release (6g): what was read of the person who controls the agent, as recorded with the release.
+    controller: ControllerRead,
+}
+
+/// What a pass read of an agent requester's controlling link, as the release records it (6g). Nothing is read for a
+/// person's release, or for an agent's that records no link.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ControllerRead {
+    /// The recorded link the reads were about. An answer about another says nothing of the one recorded now.
+    about: Option<release_request::Link>,
+    /// Whether the agent's own `Principal` says it is still connected at the recorded generation: every disconnect
+    /// moves the generation, and ends every link of the agent's. `None` when it gave no answer.
+    connected: Option<bool>,
+    /// Whether the person who linked the credential is still in the agent's organization since the link began, by their
+    /// own record. A link made again after they left begins later, so it isn't the recorded one. `None` when unread.
+    holds: Option<bool>,
 }
 
 impl Reads {
@@ -125,6 +144,7 @@ impl Reads {
             approver: nobody(),
             requester: nobody(),
             giver: nobody(),
+            controller: ControllerRead::default(),
         }
     }
 }
@@ -438,16 +458,46 @@ fn gather(
         expires_at: g.expires_at,
         revoked_at: None,
     });
+    // An agent (6g): its controlling link now must be exactly the one recorded with the release, and that link's person
+    // still in the agent's organization. Its link now is the recorded one only while its `Principal` says it is still
+    // connected at the recorded generation; with no link recorded there is nothing to compare, and it may not.
+    let (agent_connected, requester_holds) = if kind == PrincipalKind::Agent {
+        let recorded = release_request::Link::recorded(sql, id)?;
+        let read = &reads.controller;
+        // A read about another link, or about none, says nothing of the one recorded now: both facts are unread.
+        let about_this = recorded.is_some() && read.about == recorded;
+        let connected = read.connected.filter(|_| about_this);
+        let holds = read.holds.filter(|_| about_this);
+        // The link now: the recorded one while the agent is still connected at its generation (assumed so while
+        // unread, as every unread fact here is), and none once its `Principal` says it isn't.
+        let current = recorded.clone().filter(|_| connected != Some(false));
+        let unchanged = controller_unchanged(
+            recorded
+                .as_ref()
+                .map(release_request::Link::policy)
+                .as_ref(),
+            current.as_ref().map(release_request::Link::policy).as_ref(),
+        );
+        let holds = match recorded {
+            // Nothing on record: nobody can be shown to control it, and it may not.
+            None => Some(false),
+            // Unread unless both were read: remembered, and decisive only if everything else holds.
+            Some(_) if connected.is_none() => None,
+            Some(_) => holds,
+        };
+        (unchanged, holds)
+    } else {
+        (false, requester_holds)
+    };
     let standing = ReleaseStanding {
         grant: grant.as_ref(),
         link_repo_id,
         delegation_holder: holder,
         through_public_claim: public_claims::is_public_participant(sql, &requester)?,
-        agent_connected: false,
+        agent_connected,
         now,
     };
     let requester_may_release_now = may_release_now(&requester, kind, role, &standing).is_ok()
-        && kind == PrincipalKind::Person
         && requester_holds.unwrap_or(true);
     // Unknown matters only where the answer would be yes on everything that is known.
     if requester_may_release_now && (requester_holds.is_none() || giver_holds.is_none()) {
@@ -737,6 +787,7 @@ impl Workspace {
         let approver = self.still_holds(people.approver.as_deref(), true).await?;
         let requester = self.still_holds(Some(&people.requester), false).await?;
         let giver = self.still_holds(people.giver.as_deref(), true).await?;
+        let controller = self.controller_read(&sql, release_id).await?;
         let org_may_provision = match &provider {
             Some(provider) => {
                 let delegation = principal::org_delegation(&self.env, &org, provider)
@@ -799,6 +850,37 @@ impl Workspace {
             approver,
             requester,
             giver,
+            controller,
+        })
+    }
+
+    /// For an agent's release (6g), what the agent's own `Principal` and the person who linked its credential say now of
+    /// the link recorded with the release: still connected at the recorded generation, and that person still in the
+    /// agent's organization since the link began. Each `None` when it gave no answer; the other is still read. Nothing
+    /// is read for a release that records no link, which is every person's.
+    async fn controller_read(&self, sql: &SqlStorage, release_id: &str) -> R<ControllerRead> {
+        let Some(link) = release_request::Link::recorded(sql, release_id)? else {
+            return Ok(ControllerRead::default());
+        };
+        let agent = rows(
+            sql,
+            "SELECT requested_by FROM release WHERE id = ?",
+            vec![release_id.into()],
+        )?
+        .first()
+        .and_then(|row| text(&row["requested_by"]))
+        .unwrap_or_default();
+        let connected = principal::connected_at(&self.env, &agent, link.generation)
+            .await
+            .ok();
+        let holds = principal::departed_since(&self.env, &link.person, &link.org, link.since)
+            .await
+            .ok()
+            .map(|departed| !departed);
+        Ok(ControllerRead {
+            about: Some(link),
+            connected,
+            holds,
         })
     }
 

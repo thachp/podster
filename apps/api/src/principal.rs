@@ -162,6 +162,27 @@ pub async fn check_active(
     }
 }
 
+/// Whether the agent is still connected at exactly this generation, from its own Principal, spending nothing (M6 step 6,
+/// 6g: an agent's release is rechecked against the connection it asked under). `Ok(false)` only for the Principal's own
+/// refusal, `agent_disconnected`; an answer that isn't a clear yes or that refusal is an error, never a disconnect, so
+/// the caller can decide nothing on it.
+pub async fn connected_at(env: &Env, agent: &str, generation: u64) -> R<bool> {
+    let body = json!({ "gen": generation, "agent": agent, "read_only": true });
+    let mut response = internal(env, agent, "/internal/check", &body).await?;
+    match response.status_code() {
+        200 => Ok(true),
+        403 => {
+            let answer: Value = response.json().await?;
+            if answer["error"]["code"].as_str() == Some("agent_disconnected") {
+                Ok(false)
+            } else {
+                Err(ApiError::internal("connection check unavailable"))
+            }
+        }
+        _ => Err(ApiError::internal("connection check unavailable")),
+    }
+}
+
 /// Refuses a person who has left this organization since `since`, in milliseconds. A departure reaches their Principal as soon as
 /// the gateway delivers it, which is before any room hears, and it's kept for longer than an upload can last. Someone who left
 /// before `since` had rejoined by then, or wouldn't have been let in.
@@ -2145,6 +2166,16 @@ impl Principal {
             }
             "/internal/check" => {
                 let body: Value = req.json().await?;
+                // Tests can't otherwise make this Principal fail to answer a read of its connection. Only a read that
+                // spends nothing (`connected_at`), so the agent's own requests still pass the Worker's check.
+                #[cfg(feature = "failpoints")]
+                if body["read_only"].as_bool() == Some(true)
+                    && body["agent"]
+                        .as_str()
+                        .is_some_and(|a| a.starts_with("agt_unavailable_"))
+                {
+                    return Err(ApiError::api(503, "unavailable"));
+                }
                 let conn = connection(&sql)?.ok_or_else(ApiError::agent_disconnected)?;
                 if conn["status"].as_str() != Some(ACTIVE)
                     || body["gen"].as_i64() != Some(int(&conn["generation"]))

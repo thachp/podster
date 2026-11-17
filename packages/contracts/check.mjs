@@ -101,8 +101,10 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 }
 
 // Release (M6 step 2, ADR 0010): the contract and the state only. Every operation is a person's or an operator's, and
-// names only what its path may. No capability reaches one: no agent sees a deploy tool before the release path exists
-// (AC-17), so `deploy_release` and anything else that names a release or a deployment is in no agent's list.
+// names only what its path may. One capability reaches one, since 6g: `deploy_release`, an agent's request for a
+// release, reaches `requestRelease` and nothing else. Anything else that names a release or a deployment is in no
+// agent's list (AC-17).
+const AGENT_RELEASE = { capability: "deploy_release", operation: "requestRelease" };
 const releaseOperations = {
   getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
@@ -135,11 +137,15 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     if (gated && !found.op.summary?.includes(gates[id])) problems.push(`${id}: its summary must say when its gate answers \`release_not_available\``);
     if (built ? found.op.summary?.includes("Not built") || (!gated && found.op.summary?.includes("`release_not_available`")) : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);
   }
-  if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
+  if (id === AGENT_RELEASE.operation) {
+    if (personOnly.includes(id)) problems.push(`${id}: is ${AGENT_RELEASE.capability}'s, so it can't be person_only`);
+  } else if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 }
+if (capabilities[AGENT_RELEASE.capability]?.operation !== AGENT_RELEASE.operation || capabilities[AGENT_RELEASE.capability]?.kind !== "command") problems.push(`${AGENT_RELEASE.capability}: must be the command that reaches ${AGENT_RELEASE.operation}`);
 for (const [name, cap] of Object.entries(capabilities)) {
+  if (name === AGENT_RELEASE.capability && cap.operation === AGENT_RELEASE.operation) continue;
   const found = operations.get(cap.operation);
-  if (/deploy|release[-_]?config|app[-_]?host|content[-_]?domain/i.test(`${name} ${cap.operation} ${found?.path ?? ""}`) || /\/releases\//.test(found?.path ?? "")) problems.push(`${name}: no capability may reach a release, a deployment or an app's hosts yet`);
+  if (/deploy|release[-_]?config|app[-_]?host|content[-_]?domain/i.test(`${name} ${cap.operation} ${found?.path ?? ""}`) || /\/releases(\/|$)/.test(found?.path ?? "") || releaseOperations[cap.operation] !== undefined) problems.push(`${name}: no capability but ${AGENT_RELEASE.capability} may reach a release, a deployment or an app's hosts`);
 }
 // The closed sets are `crates/core`'s, never restated here: core-sets.mjs reads them from its source, and the contract's
 // enums and the room's column checks must each equal them, value for value and in core's order. So a state, a trigger or
@@ -234,8 +240,8 @@ const INTERNAL_ONLY = {
     sites: { "apps/api/src/workspace/objects.rs#record_verdict": 1 },
   },
   unavailable: {
-    why: "a person's object answering three internal routes, /internal/repo-request-reserve, /internal/departed and /internal/a2a-endpoint-report, and only in test builds, where the failpoints feature makes it",
-    sites: { "apps/api/src/principal.rs#Principal::dispatch": 3 },
+    why: "a person's or an agent's object answering four internal routes, /internal/repo-request-reserve, /internal/departed, /internal/a2a-endpoint-report and /internal/check's read-only connection read, and only in test builds, where the failpoints feature makes it",
+    sites: { "apps/api/src/principal.rs#Principal::dispatch": 4 },
   },
 };
 /**

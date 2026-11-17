@@ -419,6 +419,13 @@ CREATE TRIGGER IF NOT EXISTS serve_state_one_default BEFORE INSERT ON serve_stat
 ", "
 CREATE TABLE IF NOT EXISTS release_rollback (release_id TEXT PRIMARY KEY REFERENCES release (id), rollback_to TEXT NOT NULL REFERENCES release (id),
   CHECK (release_id != rollback_to)) WITHOUT ROWID;
+", "
+CREATE TABLE IF NOT EXISTS release_requester (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  requester_person TEXT NOT NULL CHECK (length(requester_person) BETWEEN 1 AND 128),
+  org_id TEXT CHECK (org_id IS NULL OR length(org_id) BETWEEN 1 AND 128),
+  linked_since INTEGER CHECK (linked_since IS NULL OR typeof(linked_since) = 'integer'),
+  generation INTEGER CHECK (generation IS NULL OR (typeof(generation) = 'integer' AND generation >= 0)),
+  CHECK ((org_id IS NULL) = (linked_since IS NULL) AND (linked_since IS NULL) = (generation IS NULL))) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

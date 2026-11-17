@@ -1,4 +1,4 @@
-import { LIFECYCLE_METHODS, LIFECYCLE_URI, REPOSITORY_METHOD, type LifecycleOptions } from "./lifecycle";
+import { LIFECYCLE_METHODS, LIFECYCLE_URI, methodListed, type LifecycleOptions } from "./lifecycle";
 import { A2A_BINDING, A2A_PATH, A2A_VERSION } from "./profile";
 
 /**
@@ -7,7 +7,7 @@ import { A2A_BINDING, A2A_PATH, A2A_VERSION } from "./profile";
  * with PKCE for scope `a2a`, through the same consent as MCP.
  */
 export function agentCard(baseUrl: string, options: LifecycleOptions = { managedRepositories: false }) {
-  const methods = Object.keys(LIFECYCLE_METHODS).filter((m) => m !== REPOSITORY_METHOD || options.managedRepositories);
+  const methods = Object.keys(LIFECYCLE_METHODS).filter((m) => methodListed(m, options));
   return {
     name: "Podster",
     description:
@@ -22,7 +22,8 @@ export function agentCard(baseUrl: string, options: LifecycleOptions = { managed
       extendedAgentCard: false,
       // Step 10 (decision 113). Not required: reading and messages work without it.
       // The engineer's steps (2026-11-14) added claiming a role and, while managed repositories are on, a repository token.
-      extensions: [{ uri: LIFECYCLE_URI, description: "Accept, decline, release and submit Podster tasks, claim a role, and, where managed repositories are on, get a task's repository access, as the agent's own commands. Name it in A2A-Extensions.", required: false, params: { methods } }],
+      // M6 step 6, 6g: and, while the API answers the release routes, ask for a release of a task's merged commit.
+      extensions: [{ uri: LIFECYCLE_URI, description: `Accept, decline, release and submit Podster tasks, claim a role, and, where managed repositories are on, get a task's repository access${options.releases ? ", and ask for a release of a task's merged commit" : ""}, as the agent's own commands. Name it in A2A-Extensions.`, required: false, params: { methods } }],
     },
     // Step 7: the same consent as MCP, for a token whose audience is `/a2a` and whose scope is `a2a` (decision 111).
     securitySchemes: {

@@ -57,8 +57,11 @@ export function coreSets(root) {
   const requestStates = enumNames(requests, "HostnameRequestState", "name");
   const releaseStates = enumNames(release, "ReleaseState", "name");
   const claimStates = enumNames(requests, "HostnameClaimState", "name");
+  // A task's release status says the room's states in its own words (M6 step 7): `live` is never one of them.
+  const releaseStatusStates = enumNames(read(root, "crates/core/src/release_status.rs"), "ReleaseStatusState", "name");
   return {
     releaseStates,
+    releaseStatusStates,
     servingReleaseStates: subset(release, "ReleaseState", "serves", releaseStates),
     hostnameClaimStates: claimStates,
     holdingHostnameClaimStates: subset(requests, "HostnameClaimState", "holds", claimStates),

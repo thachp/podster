@@ -22,6 +22,7 @@ export const FAKE_ID_BLOCKS = {
   "release-driver": { block: 3, tag: "rd" },
   "release-marker": { block: 9, tag: "rm" },
   "release-read": { block: 4, tag: "rr" },
+  "release-status": { block: 11, tag: "rs" },
   "release-uncertain": { block: 10, tag: "un" },
   "release-upload": { block: 5, tag: "ru" },
   "repo-access": { block: 6, tag: "ra" },

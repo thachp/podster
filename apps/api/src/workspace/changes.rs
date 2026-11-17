@@ -24,7 +24,10 @@ use crate::github::{
 };
 use podster_core::provider_deliveries::{poll_wait_ms, read_allowed, stale, ChangeWatch, Stale};
 use podster_core::rate_limit::limit_repeated_after_reset;
-use podster_core::release_status::{report, summarize_checks, CheckSeen, ChecksReport};
+use podster_core::release_status::{
+    release_report, report, summarize_checks, AttemptHeld, CheckSeen, ChecksReport, HostHeld,
+    ReleaseReport, StopSeen,
+};
 use podster_core::repo_merge::{ObservedMerge, PullState};
 use podster_core::repositories::{task_block, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{
@@ -1146,18 +1149,190 @@ fn apply_checks(sql: &SqlStorage, task_id: &str, head: &str, seen: &ChecksSeen, 
     Ok(())
 }
 
-/// `GET tasks/{task}/release-status` (M5 step 8): the task's checks and its merge, apart, each as Podster last
-/// observed it and with that observation's time, and that no release exists. Read from the room's own rows: nothing is
-/// asked of GitHub. For whoever is shown the task's change, and whoever asked for its merge.
-pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str) -> R<Value> {
+/// What a task's release status needs from outside the room's rows (M6 step 7): the deployment's release switch, the
+/// content domain, and the stop for the whole content domain. Asked only after the caller is authorized, and the stop
+/// only for a caller shown the task's change while the room has a release of the task's merged commit recorded
+/// `served`, since nothing else could be shown served; unasked, it reads as stopped.
+pub(super) struct ReleaseFacts {
+    pub(super) switched_on: bool,
+    pub(super) domain: Option<String>,
+    pub(super) stop: StopSeen,
+}
+
+/// Who may read the task's release status, and whether they are shown the task's change (`true`) or given the merge
+/// alone, by `podster_policy::repositories::authorize_release_status` on the room's rows. Refused callers are answered
+/// here, before anything outside the room is asked.
+fn release_status_view(sql: &SqlStorage, who: &Participant, task_id: &str) -> R<bool> {
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
-    let row = change_row(sql, task_id)?;
-    let asked = row
-        .as_ref()
+    let asked = change_row(sql, task_id)?
         .is_some_and(|row| row["merge_requested_by"].as_str() == Some(who.caller.id.as_str()));
     let view = podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
         .map_err(repositories::denied)?;
-    let whole = view == podster_policy::repositories::ReleaseView::Whole;
+    Ok(view == podster_policy::repositories::ReleaseView::Whole)
+}
+
+impl Workspace {
+    pub(super) async fn release_status_facts(
+        &self,
+        sql: &SqlStorage,
+        who: &Participant,
+        task_id: &str,
+    ) -> R<ReleaseFacts> {
+        // Authorize first: a caller who is refused causes no read of the switch or the stop.
+        let whole = release_status_view(sql, who, task_id)?;
+        let switched_on = crate::releases::switched_on(&self.env).await;
+        // A row that can't be read here is read again by the status itself, which then refuses; the stop is asked
+        // anyway, so nothing is shown served on a guess.
+        // Nothing can be shown served while the room's release is off or the room isn't public, so the stop isn't asked.
+        let candidate = whole
+            && switched_on
+            && room_release_on(sql).unwrap_or(true)
+            && room_public(sql).unwrap_or(true)
+            && served_attempt(sql, task_id).unwrap_or(true);
+        let stop = if candidate {
+            match crate::content_stop::read_from(&self.env).await {
+                crate::content_stop::Stop::Clear => StopSeen::Clear,
+                crate::content_stop::Stop::Stopped => StopSeen::Stopped,
+                crate::content_stop::Stop::Unreadable => StopSeen::Unread,
+            }
+        } else {
+            StopSeen::Unread
+        };
+        Ok(ReleaseFacts {
+            switched_on,
+            domain: crate::content_provider::content_domain(&self.env),
+            stop,
+        })
+    }
+}
+
+/// The task's merged commit, from its change: the commit a release of the task names.
+fn merged_commit(sql: &SqlStorage, task_id: &str) -> R<Option<String>> {
+    Ok(change_row(sql, task_id)?.and_then(|row| text(&row["merge_sha"])))
+}
+
+/// Whether the room's own release setting is on.
+fn room_release_on(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT enabled FROM release_config", vec![])?
+        .first()
+        .is_some_and(|row| int(&row["enabled"]) == 1))
+}
+
+/// Whether the room is public now, by its own row. Only a public room's app is served.
+fn room_public(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|row| row["visibility"].as_str() == Some("public")))
+}
+
+/// Whether any release of the task's merged commit is recorded `served`.
+fn served_attempt(sql: &SqlStorage, task_id: &str) -> R<bool> {
+    let Some(commit) = merged_commit(sql, task_id)? else {
+        return Ok(false);
+    };
+    Ok(!rows(
+        sql,
+        "SELECT id FROM release WHERE task_id = ? AND commit_sha = ? AND state = 'served' LIMIT 1",
+        vec![task_id.into(), commit.as_str().into()],
+    )?
+    .is_empty())
+}
+
+/// The release part of a task's release status (M6 step 7), as `podster_core::release_status::release_report` decides
+/// it from the room's rows: `{ exists: false }` while release is off for the deployment or the room, or while nothing
+/// was asked for the task's merged commit; otherwise the latest attempt, with `served` and the default host's address
+/// only while the commit is what that host serves. Whoever is given the merge alone gets `null` while release is on, and
+/// while it is off the same `{ exists: false }` as everyone, which is what every caller was answered before M6.
+fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bool) -> R<Value> {
+    let none = json!({ "exists": false });
+    let room_on = room_release_on(sql)?;
+    if !whole {
+        return Ok(if facts.switched_on && room_on {
+            Value::Null
+        } else {
+            none
+        });
+    }
+    let Some(commit) = merged_commit(sql, task_id)? else {
+        return Ok(none);
+    };
+    let attempts = rows(
+        sql,
+        "SELECT id, state, script_name, updated_at, failure_code FROM release WHERE task_id = ? AND commit_sha = ? ORDER BY seq",
+        vec![task_id.into(), commit.as_str().into()],
+    )?;
+    let host = rows(
+        sql,
+        "SELECT label, script_name FROM serve_state WHERE kind = 'default'",
+        vec![],
+    )?;
+    let host = host.first();
+    let held = rows(sql, "SELECT cause FROM release_hold", vec![])?
+        .first()
+        .is_some_and(|row| !row["cause"].is_null());
+    let app_suspended = rows(
+        sql,
+        "SELECT suspended_at FROM app_label WHERE current = 1",
+        vec![],
+    )?
+    .first()
+    .is_some_and(|row| !row["suspended_at"].is_null());
+    let held_attempts: Vec<AttemptHeld> = attempts
+        .iter()
+        .map(|row| AttemptHeld {
+            id: row["id"].as_str().unwrap_or_default(),
+            state: row["state"].as_str().unwrap_or_default(),
+            script_name: row["script_name"].as_str(),
+            recorded_at: int(&row["updated_at"]),
+            failure_code: row["failure_code"].as_str(),
+        })
+        .collect();
+    let host_held = HostHeld {
+        default_script: host.and_then(|row| row["script_name"].as_str()),
+        held,
+        app_suspended,
+        room_public: room_public(sql)?,
+        stop: facts.stop,
+    };
+    // A stored state the room doesn't recognise refuses the read: it is never guessed at, and never served.
+    let report = release_report(facts.switched_on && room_on, &held_attempts, &host_held)
+        .map_err(|_| ApiError::internal("release state unknown"))?;
+    Ok(match report {
+        ReleaseReport::NoRelease => none,
+        ReleaseReport::Attempt {
+            id,
+            state,
+            observed_at,
+            failure_code,
+            served,
+        } => {
+            // The address is the default host's, only while the commit is what it serves.
+            let label = host.and_then(|row| row["label"].as_str());
+            let result_url = match (served, label, facts.domain.as_deref()) {
+                (true, Some(label), Some(domain)) => json!(format!("https://{label}.{domain}/")),
+                _ => Value::Null,
+            };
+            json!({
+                "exists": true, "release_id": id, "commit_sha": commit, "state": state.name(),
+                "observed_at": observed_at, "failure_code": failure_code, "served": served, "result_url": result_url,
+            })
+        }
+    })
+}
+
+/// `GET tasks/{task}/release-status` (M5 step 8, M6 step 7): the task's checks, its merge and its release, apart, each
+/// as Podster last observed it and with that observation's time. Read from the room's own rows: nothing is asked of
+/// GitHub. For whoever is shown the task's change, and whoever asked for its merge, who is given the merge alone.
+pub(super) fn release_status(
+    sql: &SqlStorage,
+    who: &Participant,
+    task_id: &str,
+    facts: &ReleaseFacts,
+) -> R<Value> {
+    // Decided again on the same rows, in the same turn as the facts were read.
+    let whole = release_status_view(sql, who, task_id)?;
+    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
+    let row = change_row(sql, task_id)?;
     // Checks are reported only for the commit they were read for. If the head is another now, they're unobserved.
     let stored = row
         .as_ref()
@@ -1196,6 +1371,7 @@ pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str)
     });
     // Whoever asked for the merge and isn't shown the task's change gets how the merge went, and nothing of the pull
     // request or its checks: never more than their view of the change shows.
+    let release = release_part(sql, task_id, facts, whole)?;
     let (pull, checks) = if whole {
         (pull, checks)
     } else {
@@ -1211,7 +1387,6 @@ pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str)
             "sha": row.as_ref().map_or(Value::Null, |row| row["merge_sha"].clone()),
             "requested_by": row.as_ref().map_or(Value::Null, |row| row["merge_requested_by"].clone()),
         },
-        // M5 has no releases. M6 adds them.
-        "release": { "exists": false },
+        "release": release,
     }))
 }

@@ -64,7 +64,7 @@ fn another_store_is_foreign_and_its_own_is_not() {
         ..store(OTHER)
     };
     assert_eq!(
-        verdict(&[renamed_other.clone()]),
+        verdict(std::slice::from_ref(&renamed_other)),
         Verdict::Foreign(Foreign::OtherStore)
     );
     assert_eq!(

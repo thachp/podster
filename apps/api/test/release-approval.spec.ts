@@ -143,7 +143,7 @@ describe("approving a release (M6 step 6, 6f)", () => {
     expect(answer.status, answer.text).toBe(200);
     expect(answer.body).toEqual({
       id: r.release, commit_sha: SHA, environment: "production", state: "queued", requested_by: r.requester.id, requested_at: T,
-      approved_by: r.owner.id, approved_at: T, declined_by: null, declined_at: null, result_url: null, failure_code: null, finished_at: null,
+      approved_by: r.owner.id, approved_at: T, declined_by: null, declined_at: null, result_url: null, failure_code: null, finished_at: null, rollback_to: null,
     });
     // The address: the label's lookup row, this room's, recorded in the room; and the default host's serve row, which
     // names no script, so it serves nothing.

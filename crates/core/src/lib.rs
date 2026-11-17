@@ -23,6 +23,7 @@ pub mod release;
 pub mod release_driver;
 pub mod release_marker;
 pub mod release_request;
+pub mod release_rollback;
 pub mod release_status;
 pub mod release_tree;
 pub mod release_uncertain;

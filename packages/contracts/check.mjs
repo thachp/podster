@@ -104,7 +104,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 // names only what its path may. No capability reaches one: no agent sees a deploy tool before the release path exists
 // (AC-17), so `deploy_release` and anything else that names a release or a deployment is in no agent's list.
 const releaseOperations = {
-  getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
+  getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
   getReleaseDelegation: "org", setReleaseDelegation: "org",
 };
@@ -123,14 +123,14 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 8's first PR built the room's custom hostname, read, asked for and removed, which the room itself answers.
     // Step 10(b) built the room's list of releases awaiting approval, which the room itself answers.
     // Step 6 built a person's request for a release, which the room itself answers.
-    // Step 6's 6f built approving and declining one, which the room itself answers.
-    const built = ["requestRelease", "approveRelease", "declineRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
+    // Step 6's 6f built approving and declining one, and 6h asking to roll back, which the room itself answers.
+    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
     // and a provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a
     // release, and approving one, until the release path is complete (`RELEASE_PATH_COMPLETE`). Declining only takes
     // away and passes no gate, so its summary may not name `release_not_available` at all.
-    const gates = { requestAppHostname: "**Until custom hostname claims are complete**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**" };
+    const gates = { requestAppHostname: "**Until custom hostname claims are complete**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**", rollbackRelease: "**Until the release path is complete**" };
     const gated = id in gates;
     if (gated && !found.op.summary?.includes(gates[id])) problems.push(`${id}: its summary must say when its gate answers \`release_not_available\``);
     if (built ? found.op.summary?.includes("Not built") || (!gated && found.op.summary?.includes("`release_not_available`")) : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);

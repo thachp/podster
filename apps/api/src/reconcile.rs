@@ -45,6 +45,7 @@ pub(crate) const ENTRIES_PATH: &str = "/reconcile/entries";
 pub(crate) const SCRIPTS_PATH: &str = "/reconcile/scripts";
 pub(crate) const FINDING_PATH: &str = "/takedown-finding";
 pub(crate) const FINDINGS_PATH: &str = "/takedown-findings";
+pub(crate) const FINDING_OPEN_PATH: &str = "/takedown-finding-open";
 
 /// `takedown_finding`: what an operator should know, one row for each code and subject, counted and dated each time
 /// it is seen again. The subject is a host, a script's name or a key, as the provider or a room gave it: data, never
@@ -214,6 +215,23 @@ pub(crate) fn keep(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
         return Err(ApiError::invalid_argument());
     };
     record(sql, code, subject, body["detail"].as_str(), now)
+}
+
+/// `{ subject }` from a room, about one of its scripts: `{ open }`, whether any finding is kept with that subject. A
+/// rollback asks it at its switch (M6 step 6, 6h), and switches back to a kept script only when none is. It answers
+/// nothing else, and never another subject's findings.
+pub(crate) fn open_for(sql: &SqlStorage, body: &Value) -> R<Value> {
+    let subject = body["subject"]
+        .as_str()
+        .filter(|subject| (1..=253).contains(&subject.len()))
+        .ok_or_else(ApiError::invalid_argument)?;
+    let open = !rows(
+        sql,
+        "SELECT 1 AS open FROM takedown_finding WHERE subject = ? LIMIT 1",
+        vec![subject.into()],
+    )?
+    .is_empty();
+    Ok(json!({ "open": open }))
 }
 
 /// What an operator reads: `{ findings: [{ code, subject, detail, first_seen_at, last_seen_at, seen }] }`, the most

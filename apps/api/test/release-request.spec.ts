@@ -118,7 +118,7 @@ describe("asking for a release (M6 step 6)", () => {
     expect(id).toMatch(/^rel_[0-9a-f]{32}$/);
     expect(answer.body).toEqual({
       id, commit_sha: SHA, environment: "production", state: "awaiting_approval", requested_by: r.requester.id, requested_at: T,
-      approved_by: null, approved_at: null, declined_by: null, declined_at: null, result_url: null, failure_code: null, finished_at: null,
+      approved_by: null, approved_at: null, declined_by: null, declined_at: null, result_url: null, failure_code: null, finished_at: null, rollback_to: null,
     });
     // Under the room's configuration and epoch as they are now, for the task named, with a label the room made: random,
     // the room's only current one, and in no name of the room's.

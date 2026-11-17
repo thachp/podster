@@ -91,6 +91,8 @@ person_only:
   - requestRelease
   - approveRelease
   - declineRelease
+  # M6 step 6, 6h: a person asks to roll back to an earlier release, its own record, approved as any release is.
+  - rollbackRelease
   - getAppHostname
   - requestAppHostname
   - removeAppHostname

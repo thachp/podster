@@ -47,7 +47,7 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
         ["v1", "workspaces", _, "release-config"] if get || put => Some(Audience::Person),
         ["v1", "workspaces", _, "release-approvals"] if get => Some(Audience::Person),
         ["v1", "workspaces", _, "releases"] if post => Some(Audience::Person),
-        ["v1", "workspaces", _, "releases", _, "approve" | "decline"] if post => {
+        ["v1", "workspaces", _, "releases", _, "approve" | "decline" | "rollback"] if post => {
             Some(Audience::Person)
         }
         ["v1", "workspaces", _, "app-hostname"] if get || put || delete => Some(Audience::Person),
@@ -79,7 +79,14 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
             "workspaces",
             _,
             "release-config" | "app-hostname" | "release-approvals" | "releases"
-        ] | ["v1", "workspaces", _, "releases", _, "approve" | "decline"]
+        ] | [
+            "v1",
+            "workspaces",
+            _,
+            "releases",
+            _,
+            "approve" | "decline" | "rollback"
+        ]
     )
 }
 

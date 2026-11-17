@@ -735,6 +735,11 @@ impl Moderation {
                 Ok(json!({ "kept": true }))
             }
             (Method::Get, reconcile::FINDINGS_PATH) => reconcile::list(&sql),
+            // Whether a finding is kept against one script, for a rollback's switch (M6 step 6, 6h).
+            (Method::Post, reconcile::FINDING_OPEN_PATH) => {
+                let body: Value = req.json().await?;
+                reconcile::open_for(&sql, &body)
+            }
             // The stop for the whole content domain (M6 step 4(a)): this object is its home. A room asks here before
             // it writes a default host's serve entry.
             (Method::Get, content_stop::PATH) => {

@@ -416,6 +416,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS serve_state_default_serving ON serve_state (ki
 CREATE TRIGGER IF NOT EXISTS serve_state_one_default BEFORE INSERT ON serve_state
   WHEN NEW.kind = 'default' AND EXISTS (SELECT 1 FROM serve_state WHERE kind = 'default' AND host NOT IN (SELECT host FROM serve_retired))
   BEGIN SELECT RAISE(ABORT, 'one default host'); END;
+", "
+CREATE TABLE IF NOT EXISTS release_rollback (release_id TEXT PRIMARY KEY REFERENCES release (id), rollback_to TEXT NOT NULL REFERENCES release (id),
+  CHECK (release_id != rollback_to)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

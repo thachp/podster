@@ -1104,8 +1104,14 @@ async function keyboardPaths(s) {
       await own.getByRole("button", { name: "Confirm ownership" }).waitFor({ timeout: 15_000 });
       ok(own.url() === `${app}/claim`, `the page was left at ${own.url().replace(s.pending.userCode, "<code>")}`);
       ok((await own.locator("main").innerText()).includes(s.pending.userCode), "the page didn't show the code to compare");
-      const cookie = (await own.context().cookies(`${app}/claim`)).find((c) => c.name === "podster-claim");
-      ok(cookie?.httpOnly === true && cookie.path === "/claim" && cookie.sameSite === "Lax", `the code's cookie was ${cookie ? `${cookie.path} httpOnly=${cookie.httpOnly} ${cookie.sameSite}` : "missing"}`);
+      // This run is on plain http://localhost, so the cookie has the local name; over HTTPS it's `__Host-podster-claim`.
+      const held = async () => (await own.context().cookies(`${app}/claim`)).find((c) => c.name === "podster-claim-local");
+      const cookie = await held();
+      ok(cookie?.httpOnly === true && cookie.path === "/" && cookie.sameSite === "Lax", `the code's cookie was ${cookie ? `${cookie.path} httpOnly=${cookie.httpOnly} ${cookie.sameSite}` : "missing"}`);
+      // Not now connects nothing, and the cookie goes.
+      await own.getByRole("button", { name: "Not now" }).click();
+      await own.getByRole("status").filter({ hasText: "Nothing was connected" }).waitFor({ timeout: 15_000 });
+      ok((await held()) === undefined, "the code's cookie was still held after Not now");
     } finally {
       await own.close();
     }

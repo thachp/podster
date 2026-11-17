@@ -700,23 +700,48 @@ async function approverChoices(env: Env, adminOrgs: string[]) {
 
 /**
  * The Agent Auth plugin builds an approval link as `/claim?agent_id=…&code=…`, and can't be told otherwise. So the first
- * request that carries the code moves it into this cookie, scoped to `/claim`, and sends the browser to the bare page: the
- * code then isn't in the address bar, the history entry, a sign-in's `next`, a Referer, or any URL we fetch with it.
- * apps/web/lib/claim-link.ts writes the same cookie on the application host.
+ * request that carries the code moves it into this cookie and sends the browser to the bare page: the code then isn't in
+ * the address bar, the history entry, a sign-in's `next`, a Referer, or any URL we fetch with it. A successful claim or a
+ * decline clears it. apps/web/lib/claim-link.ts writes the same cookie on the application host.
+ *
+ * `__Host-` makes the browser hold it to this host, over HTTPS, at `Path=/`. It's HttpOnly, so the wider path shows it to
+ * no script. A browser on plain `http://localhost` gets a plain name instead, read only there, so local runs work; plain
+ * HTTP anywhere else gets no cookie.
  */
 // Not exported: workerd refuses a main module's named export that isn't a handler, a class or a function.
-const CLAIM_COOKIE = "podster-claim";
+const CLAIM_COOKIE = "__Host-podster-claim";
+const LOCAL_CLAIM_COOKIE = "podster-claim-local";
 const CLAIM_COOKIE_SECONDS = 600;
 // A plugin's agent ID and code are far shorter. Anything longer isn't a real link, and a cookie that size could be dropped.
 const MAX_CLAIM_COOKIE_LENGTH = 512;
+
+const isLocalHttp = (url: URL) => url.protocol === "http:" && (url.hostname === "localhost" || url.hostname.endsWith(".localhost") || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+const claimCookieName = (url: URL) => (url.protocol === "https:" ? CLAIM_COOKIE : isLocalHttp(url) ? LOCAL_CLAIM_COOKIE : null);
+
+/** The cookie holding a link, or, with no value, the one clearing it. Null where none may be set. */
+function claimCookie(url: URL, value?: string) {
+  const name = claimCookieName(url);
+  if (!name) return null;
+  return `${name}=${value ?? ""}; Path=/; Max-Age=${value === undefined ? 0 : CLAIM_COOKIE_SECONDS}; HttpOnly; SameSite=Lax${name === CLAIM_COOKIE ? "; Secure" : ""}`;
+}
+
+/** A successful claim or decline ends the link, so its cookie goes. A refusal keeps it, so the person can try again. */
+function claimCookieCleared(response: Response, url: URL) {
+  const cookie = claimCookie(url);
+  if (response.status !== 200 || !cookie) return response;
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", cookie);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
 
 export function claimLinkMoved(url: URL): Response | null {
   if (url.pathname !== "/claim" || !url.searchParams.has("code")) return null;
   const value = encodeURIComponent(new URLSearchParams({ agent_id: url.searchParams.get("agent_id") ?? "", code: url.searchParams.get("code") ?? "" }).toString());
   const headers = new Headers({ location: "/claim", "referrer-policy": "no-referrer", "cache-control": "no-store" });
-  const secure = url.protocol === "https:" ? "; Secure" : "";
-  // Too long to be real: the bare page then says the link isn't valid, which it isn't.
-  if (value.length <= MAX_CLAIM_COOKIE_LENGTH) headers.set("set-cookie", `${CLAIM_COOKIE}=${value}; Path=/claim; Max-Age=${CLAIM_COOKIE_SECONDS}; HttpOnly; SameSite=Lax${secure}`);
+  // Too long to be real: the bare page then says the link isn't valid, and the last link's cookie is cleared, so an older
+  // pending agent can't be shown in its place.
+  const cookie = claimCookie(url, value.length <= MAX_CLAIM_COOKIE_LENGTH ? value : undefined);
+  if (cookie) headers.set("set-cookie", cookie);
   return new Response(null, { status: 303, headers });
 }
 
@@ -724,7 +749,8 @@ export function claimLinkMoved(url: URL): Response | null {
 function claimLink(request: Request) {
   const url = new URL(request.url);
   if (url.searchParams.has("code")) return { agentId: url.searchParams.get("agent_id") ?? "", code: url.searchParams.get("code") ?? "" };
-  const raw = (request.headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${CLAIM_COOKIE}=`))?.slice(CLAIM_COOKIE.length + 1);
+  const name = claimCookieName(url);
+  const raw = name ? (request.headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1) : undefined;
   let fields = new URLSearchParams();
   try {
     if (raw && raw.length <= MAX_CLAIM_COOKIE_LENGTH) fields = new URLSearchParams(decodeURIComponent(raw));
@@ -924,7 +950,12 @@ async function handleClaimApi(request: Request, env: Env, userId: string): Promi
   if (request.method !== "GET" && request.method !== "POST") return denied("not_found", 404);
   if (request.method === "POST" && !sameOrigin(request, env)) return denied("not_allowed", 403);
   if (!(await withinLimit(env.RL_SENSITIVE, `claim:${userId}`))) return rateLimited();
-  if (request.method === "POST") return claim(request, env, userId, await request.json<ClaimBody>().catch(() => null));
+  if (request.method === "POST") {
+    const body = await request.json<ClaimBody & { decision?: unknown }>().catch(() => null);
+    // "Not now" changes nothing but the link's cookie: the agent's request expires by itself.
+    if (body?.decision === "decline") return claimCookieCleared(json({ declined: true }), new URL(request.url));
+    return claimCookieCleared(await claim(request, env, userId, body), new URL(request.url));
+  }
   const choices = await claimChoices(env, claimLink(request), userId);
   if (choices === "not_admin") return denied("not_allowed", 403);
   if (choices === "invalid_link") return denied("not_found", 404);
@@ -1204,7 +1235,7 @@ const appHandler = {
     if (url.pathname === "/claim" && request.method === "POST") {
       if (!session) return denied("sign_in_required", 401);
       if (!(await withinLimit(env.RL_SENSITIVE, `claim:${session.user.id}`))) return rateLimited();
-      return handleClaim(request, env, session.user.id);
+      return claimCookieCleared(await handleClaim(request, env, session.user.id), url);
     }
     if (url.pathname === "/claim" && request.method === "GET") {
       // Before sign-in, so its `next` never carries the code either.

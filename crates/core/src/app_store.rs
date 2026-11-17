@@ -785,3 +785,17 @@ pub fn delete_wait_ms(attempts: i64) -> i64 {
         .saturating_mul(1_i64 << attempts.clamp(0, 6) as u32)
         .min(LONGEST)
 }
+
+/// **Proposed.** A deletion is told to operators, as [`STORE_DELETE_FAILING`] by the store's name, once this many tries
+/// in a row have decided nothing (the record's `delete_attempts`, which a note of gone, a store found by its name or a
+/// fresh owing sets back to 0). As a script's delete is told after twelve; with [`delete_wait_ms`]'s waits between
+/// them, about half an hour. A try held because something can still reach the store counts too.
+pub const DELETE_TOLD_AFTER: i64 = 12;
+
+/// The operators' finding for a deletion that keeps failing.
+pub const STORE_DELETE_FAILING: &str = "store_delete_failing";
+
+/// Whether a deletion whose tries have decided nothing `attempts` times in a row is told to operators.
+pub fn delete_told(attempts: i64) -> bool {
+    attempts >= DELETE_TOLD_AFTER
+}

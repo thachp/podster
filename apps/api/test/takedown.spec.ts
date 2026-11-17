@@ -72,6 +72,20 @@ let labels = 0;
 /** A label no other test has used: lower-case letters and digits, as the server would make. */
 const newLabel = () => `td${(++labels).toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
 const rel = (n: number) => `rel_${n.toString(16).padStart(2, "0").repeat(16)}`;
+/**
+ * A store of `label` made and owed a deletion whose tries have decided nothing `attempts` times in a row, its next try
+ * due at `due`, far ahead. A label the room doesn't hold is added as a retired one. Gives the store's name.
+ */
+function storeOwed(sql: any, label: string, attempts: number, due: number, n: number): string {
+  const name = `podster-store-${(0xc0de00 + n).toString(16).padStart(32, "0")}`;
+  const id = `${(0xd1d100 + n).toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  if (sql.exec("SELECT 1 FROM app_label WHERE label = ?", label).toArray().length === 0) sql.exec("INSERT INTO app_label (label, created_at, retired_at) VALUES (?, 1, 1)", label);
+  sql.exec(
+    `INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, delete_owed_at, delete_cause, updated_at, delete_next_at, delete_attempts)
+       VALUES (?, 'd1', ?, ?, 1, 1, 1, 2, 'operator_takedown', 2, ?, ?)`,
+    label, name, id, due, attempts);
+  return name;
+}
 const SHA = "ab".repeat(20);
 
 type App = { room: string; label: string; host: string; served: string; kept: string; flight: string; queued: string };
@@ -472,10 +486,10 @@ describe("an operator's suspension of an app", () => {
     // checked when the Worker is compiled, and read here from the same constants.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     const constant = (file: string, name: string) => Number(sources[file].match(new RegExp(`const ${name}: (?:i64|usize) = (\\d+);`))?.[1]);
-    const [hosts, failing, queued, taken] = [constant("workspace/takedown.rs", "HOST_FINDINGS"), constant("workspace/takedown.rs", "FINDINGS"), constant("workspace/takedown.rs", "QUEUED_FINDINGS"), constant("reconcile.rs", "ROOM_FINDINGS_TAKEN")];
-    expect([hosts, failing, queued, taken]).toEqual([7, 8, 32, 48]);
-    expect(1 + hosts + failing + queued).toBeLessThanOrEqual(taken);
-    expect(sources["workspace/takedown.rs"]).toContain("1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64");
+    const [hosts, failing, stores, queued, taken] = [constant("workspace/takedown.rs", "HOST_FINDINGS"), constant("workspace/takedown.rs", "FINDINGS"), constant("workspace/takedown.rs", "STORE_FINDINGS"), constant("workspace/takedown.rs", "QUEUED_FINDINGS"), constant("reconcile.rs", "ROOM_FINDINGS_TAKEN")];
+    expect([hosts, failing, stores, queued, taken]).toEqual([7, 8, 4, 32, 52]);
+    expect(1 + hosts + failing + stores + queued).toBeLessThanOrEqual(taken);
+    expect(sources["workspace/takedown.rs"].replace(/\s+/g, " ")).toContain("1 + HOST_FINDINGS + FINDINGS + STORE_FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64");
     expect(sources["reconcile.rs"]).toContain(".take(ROOM_FINDINGS_TAKEN)");
     // A room has two live hosts at most, so the hosts' share is never short: one default host, by the room's own schema,
     // and one custom hostname, since a room has one open request for one. Each is refused by the room's own schema.
@@ -495,13 +509,46 @@ describe("an operator's suspension of an app", () => {
         // Half keep failing, and all were queued under no unpublish just now, as a pass queues them.
         sql.exec("INSERT INTO script_delete (script_name, label, queued_at, attempts, next_attempt_at, last_code) VALUES (?, ?, ?, ?, ?, 'delete_500')", `${a.label}.${id}`, a.label, Date.now(), i % 2 === 0 ? 12 : 0, T);
       }
+      // Six retired labels, each with a store whose deletion keeps failing: more than one answer carries.
+      for (let i = 0; i < 6; i += 1) storeOwed(sql, newLabel(), 12, T, i);
     });
     const answer = await stub(a.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }).then((r: Response) => r.json() as Promise<any>);
     const counts: Record<string, number> = {};
     for (const finding of answer.findings) counts[finding.code] = (counts[finding.code] ?? 0) + 1;
-    expect(counts).toEqual({ release_bookkeeping_failing: 1, script_delete_failing: 8, script_delete_queued: 32 });
+    expect(counts).toEqual({ release_bookkeeping_failing: 1, script_delete_failing: 8, store_delete_failing: 4, script_delete_queued: 32 });
     expect(answer.findings.length).toBeLessThanOrEqual(taken);
     expect(answer.findings[0].code).toBe("release_bookkeeping_failing");
+  });
+
+  it("tells operators of a store deletion from its twelfth try in a row that decided nothing, held or not, by the store's name", async () => {
+    // S4's question 7: as a script's delete is told. The room's alarms are the test's, so nothing tries meanwhile.
+    await fresh();
+    const a = await app({ plain: true });
+    const T = 1_800_000_000_000;
+    const ask = () => stub(a.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) })
+      .then((r: Response) => r.json() as Promise<any>)
+      .then((answer: any) => answer.findings.filter((finding: any) => finding.code === "store_delete_failing"));
+    const name = await inRoom(a.room, (sql) => storeOwed(sql, a.label, 11, T, 0));
+    // The eleventh isn't told.
+    expect(await ask()).toEqual([]);
+    // The twelfth is, by the store's name. The app is still served, so the deletion is held.
+    await inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET delete_attempts = 12"));
+    expect(await ask()).toEqual([{ code: "store_delete_failing", subject: name, detail: "held" }]);
+    // Once nothing can reach the store, it is a deletion tried and not yet read gone.
+    await inRoom(a.room, (sql) => {
+      sql.exec("UPDATE release_config SET kept_previous = NULL, in_flight_script = NULL");
+      sql.exec("DELETE FROM serve_apply");
+      sql.exec("UPDATE serve_state SET script_name = NULL, release_id = NULL, label = NULL, label_current = NULL, flight_before = NULL");
+    });
+    expect(await ask()).toEqual([{ code: "store_delete_failing", subject: name, detail: "unconfirmed" }]);
+    // A store read gone is told no more, nor is one no deletion is owed.
+    await inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET gone_at = ?, delete_next_at = NULL", T));
+    expect(await ask()).toEqual([]);
+    // A pass of the reconcile carries it to the operators' record.
+    await inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET gone_at = NULL, delete_next_at = ?", T));
+    await fake("/seed", { scripts: [a.kept, a.served], entries: {} });
+    await reconcile("scripts");
+    expect((await found()).filter((line) => line.startsWith("store_delete_failing"))).toEqual([`store_delete_failing ${name} unconfirmed`]);
   });
 
   it("doesn't count an unpublish done with its files while a release's own script is still unqueued", async () => {

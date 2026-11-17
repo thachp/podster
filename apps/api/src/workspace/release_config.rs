@@ -213,7 +213,9 @@ pub(super) fn handle_set(
         &caller.id,
         None,
         &Transition::NONE,
-        roles::room_managers(sql, &caller.id)?,
+        // People only (the release events' rule, M6 step 6): only a person may set release, so an agent holding the
+        // admin role isn't told of a change it could never make or answer.
+        roles::room_approvers(sql, &caller.id)?,
         now,
     )?;
     if change == ReleaseConfigChange::TurnOff {

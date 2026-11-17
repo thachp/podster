@@ -116,7 +116,7 @@ fn own_label(sql: &SqlStorage, label: &str) -> R<()> {
 ///
 /// The owner's command owes nothing until this holds, the job deletes nothing at D1 until it does, and the owner's words
 /// are shown only once it does.
-fn store_unreachable(sql: &SqlStorage, label: &str) -> R<bool> {
+pub(super) fn store_unreachable(sql: &SqlStorage, label: &str) -> R<bool> {
     let of_label = |script: &Value| {
         script.as_str().is_some_and(|script| {
             matches!(script_owner(script), ScriptOwner::Podster { label: owner, .. } if owner == label)

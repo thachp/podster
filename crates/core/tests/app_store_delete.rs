@@ -284,3 +284,17 @@ fn a_try_that_decides_nothing_waits_longer_each_time_up_to_five_minutes() {
     assert_eq!(delete_wait_ms(-1), 5_000);
     assert_eq!(delete_wait_ms(i64::MAX), 300_000);
 }
+
+#[test]
+fn a_deletion_is_told_to_operators_from_its_twelfth_try_that_decided_nothing() {
+    // Proposed: as a script's delete is told, from the twelfth try in a row, about half an hour of waits.
+    assert_eq!(DELETE_TOLD_AFTER, 12);
+    assert_eq!(STORE_DELETE_FAILING, "store_delete_failing");
+    assert!(!delete_told(0));
+    assert!(!delete_told(-1));
+    assert!(!delete_told(DELETE_TOLD_AFTER - 1));
+    assert!(delete_told(DELETE_TOLD_AFTER));
+    assert!(delete_told(i64::MAX));
+    let waited: i64 = (0..DELETE_TOLD_AFTER - 1).map(delete_wait_ms).sum();
+    assert_eq!(waited, 1_815_000);
+}

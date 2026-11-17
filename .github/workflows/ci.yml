@@ -76,6 +76,8 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/api
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/api
       # vitest's JSON report is read by the step after this one. The two other reporters are what CI printed before.
       - run: npm test -- --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations.json"
         working-directory: apps/api
@@ -97,6 +99,8 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/web
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/web
       - run: npm run typecheck
         working-directory: apps/web
       - run: npm test
@@ -115,6 +119,8 @@ jobs:
           restore-keys: worker-build-0.8.7-${{ runner.os }}-
       - run: npm ci
         working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
       - run: npm ci
         working-directory: e2e
       # The browser from Playwright's own host, then its system packages from apt with bounded retries. If the runner's
@@ -206,6 +212,8 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
       - run: npm run typecheck
         working-directory: apps/gateway
       # vitest's JSON report is read by the step after this one. The two other reporters are what CI printed before.
@@ -240,6 +248,8 @@ jobs:
       # This uses the gateway's pinned wrangler.
       - run: npm ci
         working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
       - run: npm ci
         working-directory: e2e
       # Every script here, read without running it: an assignment to a constant, a name nothing declares, and a

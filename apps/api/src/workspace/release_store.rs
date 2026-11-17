@@ -178,6 +178,63 @@ fn log(sql: &SqlStorage, release_id: &str, code: &str) {
     );
 }
 
+/// **The store reconcile's question** (S5 of the store plan, its second PR): `{ kind: "store", label }` from the
+/// `Moderation` object's hourly pass, in the caller's transaction. Answers `{ known, store, settled }`: whether the label
+/// is this room's, its record of that label's store as the row holds it (or `null`), and whether this answer recorded it
+/// made.
+///
+/// **With `settle: { name, id }`** the pass read a whole list that shows this record's name under that ID, while the
+/// record holds no ID. The room records it made, here, in this module, the only writer of `app_store`: only while the
+/// record still has exactly that name, no ID and no deletion owed, and only for an ID of D1's form that no other record
+/// of this room holds. A create outstanding that the release job is settling meanwhile finds it made and goes on; a
+/// create that settling had cleared (`create_sent_at` null) is the one D1 now lists, so it is taken as sent when the
+/// name was recorded. Nothing is logged: the answer is the pass's, which logs codes and counts.
+pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let Some(label) = body["label"].as_str() else {
+        return Err(ApiError::invalid_argument());
+    };
+    let known = !rows(
+        sql,
+        "SELECT 1 AS known FROM app_label WHERE label = ?",
+        vec![label.into()],
+    )?
+    .is_empty();
+    if !known {
+        return Ok(json!({ "known": false, "store": null, "settled": false }));
+    }
+    let mut settled = false;
+    if let (Some(name), Some(id)) = (
+        body["settle"]["name"].as_str(),
+        body["settle"]["id"].as_str(),
+    ) {
+        let taken = !rows(
+            sql,
+            "SELECT 1 AS taken FROM app_store WHERE store_id = ?",
+            vec![id.into()],
+        )?
+        .is_empty();
+        if podster_core::app_store::is_store_name(name)
+            && podster_core::app_store::d1_id_form(id)
+            && !taken
+        {
+            exec(
+                sql,
+                "UPDATE app_store SET store_id = ?, made_at = ?, create_sent_at = coalesce(create_sent_at, recorded_at), updated_at = ?
+                   WHERE label = ? AND store_name = ? AND store_id IS NULL AND delete_owed_at IS NULL AND gone_at IS NULL",
+                vec![id.into(), now.into(), now.into(), label.into(), name.into()],
+            )?;
+            settled = kept(sql, label)?.is_some_and(|kept| kept.id.as_deref() == Some(id));
+        }
+    }
+    let store = kept(sql, label)?.map(|kept| {
+        json!({
+            "kind": kept.kind, "name": kept.name, "id": kept.id, "made_at": kept.made_at,
+            "create_sent_at": kept.create_sent_at, "delete_owed_at": kept.delete_owed_at, "gone_at": kept.gone_at,
+        })
+    });
+    Ok(json!({ "known": true, "store": store, "settled": settled }))
+}
+
 impl Workspace {
     /// **The gate on making a store,** the release path's constant (`release_commit::RELEASE_PATH_COMPLETE`), alone:
     /// closed everywhere while it is false, whatever the providers and `RELEASES` say. Test builds only: a room a test

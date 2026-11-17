@@ -222,6 +222,9 @@ export default defineConfig({
           // The app stores' own credential (M6 stage 1), on the content provider's account, pointing at D1's stand-in.
           // A test value: no environment binds this name, and the real token is the owner's to make.
           CONTENT_STORE_TOKEN: FAKE_STORES.token,
+          // Test builds only: the store reconcile's own account at D1's stand-in (S5's second PR), so the hourly passes
+          // `takedown.spec.ts` runs never touch the databases `app-store.spec.ts` keeps beside it. A test value.
+          TEST_STORE_RECONCILE_ACCOUNT: FAKE_STORES.reconcileAccount,
           TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
           // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in, and a few of the Public
           // Suffix List's rules, in the list's own format. Test values: no environment binds either name.

@@ -1651,6 +1651,30 @@ impl Workspace {
         self.migrate_if_needed()?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        // The store reconcile's question (S5 of the store plan, its second PR): the room's record of one label's store,
+        // and, when the pass's whole list shows a name the record holds with no ID, that ID recorded made by the store's
+        // own module. Nothing else of the reconcile's question runs for it.
+        if body["kind"] == "store" {
+            #[cfg(feature = "failpoints")]
+            if !rows(
+                &sql,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_store_question_fails'",
+                vec![],
+            )?
+            .is_empty()
+            {
+                return Err(ApiError::internal("test: the store question failed"));
+            }
+            let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+            let (slot, store) = (out.clone(), sql.clone());
+            transaction_sync(&self.state, move || {
+                let now = release_recheck::release_now(&store);
+                *slot.borrow_mut() = Some(release_store::store_question(&store, &body, now)?);
+                Ok(())
+            })?;
+            let answer = out.borrow_mut().take();
+            return answer.ok_or_else(|| ApiError::internal("the store question answered nothing"));
+        }
         // Rule 3(b), first and in a transaction of its own (S5 of the store plan): a script whose bindings the reconcile
         // read is judged against the room's record of its store, and a binding it may not hold suspends the app
         // before anything slower runs (review standard 4). Only a script question that carries a read asks it. **A
@@ -1678,6 +1702,34 @@ impl Workspace {
         } else {
             None
         };
+        // Test builds only, after the bindings' check has committed: a test runs a second scripts pass while this
+        // question's pass waits on this answer (two passes overlapping, deterministically), or loses this answer, to
+        // show the ceiling counts a suspension from when it was asked (the deep review of PR #420, items a and b).
+        #[cfg(feature = "failpoints")]
+        if bindings.is_some() {
+            let table = |name: &str| {
+                rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    vec![name.into()],
+                )
+                .is_ok_and(|found| !found.is_empty())
+            };
+            if table("test_reenter_scripts_pass") {
+                exec(&sql, "DROP TABLE test_reenter_scripts_pass", vec![])?;
+                let _ = crate::moderation::call(
+                    &self.env,
+                    crate::reconcile::SCRIPTS_PATH,
+                    Method::Post,
+                    None,
+                )
+                .await;
+            }
+            if table("test_takedown_answer_lost") {
+                exec(&sql, "DROP TABLE test_takedown_answer_lost", vec![])?;
+                return Err(ApiError::internal("test: the room's answer was lost"));
+            }
+        }
         match self.takedown_rest(&sql, body).await {
             Ok(mut answer) => {
                 if let (Some(judged), Value::Object(fields)) = (bindings, &mut answer) {

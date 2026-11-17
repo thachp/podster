@@ -10,8 +10,9 @@
 //! to the second account's repeat of the spike** (item 7).
 //!
 //! **Nothing is configured anywhere.** The release job makes a store through [`StoreProvider::create`] and settles a
-//! lost create through [`StoreProvider::list`] (`workspace/release_store.rs`, S2 of the store plan); the read and the
-//! delete wait for S4 and are reached only by a test-only route. [`StoreProvider::from_env`] answers `None` unless both
+//! lost create through [`StoreProvider::list`] (`workspace/release_store.rs`, S2 of the store plan); the `Moderation`
+//! object's store reconcile lists and reads ([`StoreProvider::for_reconcile`], S5's second PR) and never deletes; the
+//! delete waits for S4 and is reached only by a test-only route. [`StoreProvider::from_env`] answers `None` unless both
 //! settings are bound and well-formed, and no environment binds `CONTENT_STORE_TOKEN`.
 //!
 //! **What was seen and what is assumed.** The store spike (`spikes/m6-store`) saw a create (`POST`, `{"name": …}`,
@@ -160,6 +161,24 @@ impl StoreProvider {
         StoreProvider::from_settings(env, ACCOUNT, TOKEN, OTHER_TOKENS)
     }
 
+    /// The store provider the `Moderation` object's store reconcile reads with (S5 of the store plan, its second PR):
+    /// the store token, D1 Edit alone, as ruled on 2026-11-17, and [`StoreProvider::from_env`] exactly. **Test builds
+    /// only:** when the test Worker binds `TEST_STORE_RECONCILE_ACCOUNT`, the reconcile reads that account at D1's
+    /// stand-in instead, so its hourly passes, which every reconcile test runs, never read or change the databases the
+    /// release job's tests keep under the content account in another spec file running beside them.
+    pub(crate) fn for_reconcile(env: &Env) -> Option<StoreProvider> {
+        #[cfg(feature = "failpoints")]
+        if let Setting::Text(_) = setting(env, "TEST_STORE_RECONCILE_ACCOUNT") {
+            return StoreProvider::from_settings(
+                env,
+                "TEST_STORE_RECONCILE_ACCOUNT",
+                TOKEN,
+                OTHER_TOKENS,
+            );
+        }
+        StoreProvider::from_env(env)
+    }
+
     /// The same, read from the settings of these names. Only [`StoreProvider::from_env`] and the test-only route call
     /// it; the route names other settings to show each refusal.
     fn from_settings(
@@ -209,9 +228,8 @@ impl StoreProvider {
         )
     }
 
-    /// Reads the database with this ID, which the room recorded under this name. Only the test-only route reads one
-    /// until S4 deletes stores.
-    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
+    /// Reads the database with this ID, which the room recorded under this name: the store reconcile's read of a made
+    /// store its list didn't show (S5's second PR), and the test-only route's.
     pub(crate) async fn read(&self, id: &str, name: &str) -> StoreRead {
         if !d1_id_form(id) || !is_store_name(name) {
             return StoreRead::Unknown;

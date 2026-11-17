@@ -22,6 +22,7 @@ mod reconcile;
 mod releases;
 mod repo_ceiling;
 mod store;
+mod store_reconcile;
 #[cfg(feature = "failpoints")]
 mod test_clock;
 mod wake;

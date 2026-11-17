@@ -8,7 +8,11 @@
 // is there, and the list's `result_info`, follow Cloudflare's usual envelope here and are assumptions. A token without
 // D1's permission is answered as the spike saw it: `401` with code `10000`.
 //
-// The account holds one list of databases, which only `app-store.spec.ts` uses, so its tests reset it. A test scripts
+// The content account holds one list of databases, which only `app-store.spec.ts` uses, so its tests reset it. **A
+// second account, `reconcileAccount`, is the store reconcile's alone** (S5's second PR): test builds point the
+// `Moderation` object's store reads at it (`TEST_STORE_RECONCILE_ACCOUNT`), so the hourly passes `takedown.spec.ts`
+// runs never read or change the content account's list while `app-store.spec.ts` runs beside it. Each account keeps
+// its own databases, calls and faults; a control call names the second with `?account=reconcile`. A test scripts
 // how a call misbehaves through `stores-fake.example.com`, seeds databases that aren't Podster's, and reads back every
 // call it saw. Calls are recorded by kind, by whether the store token sent them, and by name or ID, never with a token.
 
@@ -17,6 +21,7 @@ import { FAKE_CONTENT } from "./fake-content.ts";
 /** Test values only. No real token has this form's value. */
 export const FAKE_STORES = {
   token: "test-store-token-000000000000",
+  reconcileAccount: "e5".repeat(16),
 };
 
 type Op = "create" | "read" | "delete" | "list";
@@ -51,9 +56,10 @@ type FaultKind =
   | "noInfo" | "totalDrift" | "badEntry" | "shortPage";
 type Fault = { op: Op; kind: FaultKind; times: number };
 
-let databases: { uuid: string; name: string }[] = [];
-let calls: { op: Op; token: "store" | "other"; key: string }[] = [];
-let faults: Fault[] = [];
+type Account = { databases: { uuid: string; name: string }[]; calls: { op: Op; token: "store" | "other"; key: string }[]; faults: Fault[] };
+const accounts = new Map<string, Account>();
+const fresh = (): Account => ({ databases: [], calls: [], faults: [] });
+for (const account of [FAKE_CONTENT.account, FAKE_STORES.reconcileAccount]) accounts.set(account, fresh());
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const envelope = (result: unknown, extra: Record<string, unknown> = {}) => ({ success: true, errors: [], messages: [], result, ...extra });
@@ -62,8 +68,8 @@ const failure = (status: number, codes: unknown[], extra: Record<string, unknown
 const notFound = () => failure(404, [7404]);
 const describe = (db: { uuid: string; name: string }) => ({ uuid: db.uuid, name: db.name, created_at: "2026-11-17T00:00:00.000Z", version: "production", num_tables: 0, file_size: 12288 });
 
-function takeFault(op: Op) {
-  const fault = faults.find((f) => f.op === op && f.times > 0);
+function takeFault(held: Account, op: Op) {
+  const fault = held.faults.find((f) => f.op === op && f.times > 0);
   if (!fault) return undefined;
   fault.times -= 1;
   return fault.kind;
@@ -87,26 +93,34 @@ function answered(fault: FaultKind | undefined, db: { uuid: string; name: string
 export async function fakeStores(request: Request): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (url.hostname === "stores-fake.example.com") {
-    if (url.pathname === "/reset") { databases = []; calls = []; faults = []; return json({ ok: true }); }
-    if (url.pathname === "/fault") { faults.push((await request.json()) as Fault); return json({ ok: true }); }
+    const account = url.searchParams.get("account") === "reconcile" ? FAKE_STORES.reconcileAccount : FAKE_CONTENT.account;
+    const held = accounts.get(account)!;
+    if (url.pathname === "/reset") { accounts.set(account, fresh()); return json({ ok: true }); }
+    if (url.pathname === "/fault") { held.faults.push((await request.json()) as Fault); return json({ ok: true }); }
     if (url.pathname === "/seed") {
-      const { count, prefix } = (await request.json()) as { count: number; prefix: string };
-      for (let n = 0; n < count; n++) databases.push({ uuid: crypto.randomUUID(), name: `${prefix}${n}` });
-      return json({ ok: true });
+      const { count, prefix, names, entries } = (await request.json()) as { count?: number; prefix?: string; names?: string[]; entries?: { uuid: string; name: string }[] };
+      for (let n = 0; n < (count ?? 0); n++) held.databases.push({ uuid: crypto.randomUUID(), name: `${prefix}${n}` });
+      for (const name of names ?? []) held.databases.push({ uuid: crypto.randomUUID(), name });
+      for (const entry of entries ?? []) held.databases.push(entry);
+      return json({ ok: true, databases: held.databases });
     }
-    if (url.pathname === "/state") return json({ databases, calls });
+    if (url.pathname === "/state") return json({ databases: held.databases, calls: held.calls });
     if (url.pathname === "/echo") return json(envelope(describe({ uuid: url.searchParams.get("uuid") ?? "", name: url.searchParams.get("name") ?? "" })));
     return json({ error: "unknown" }, 404);
   }
-  const base = `/client/v4/accounts/${FAKE_CONTENT.account}/d1/database`;
+  const account = [...accounts.keys()].find((known) => url.pathname.startsWith(`/client/v4/accounts/${known}/d1/database`));
+  if (!account) return undefined;
+  const base = `/client/v4/accounts/${account}/d1/database`;
   if (url.hostname !== "api.cloudflare.com" || (url.pathname !== base && !url.pathname.startsWith(`${base}/`))) return undefined;
+  const held = accounts.get(account)!;
+  const { databases, calls } = held;
   const store = request.headers.get("authorization") === `Bearer ${FAKE_STORES.token}`;
   const rest = url.pathname.slice(base.length);
   const op: Op = request.method === "POST" ? "create" : request.method === "DELETE" ? "delete" : rest === "" ? "list" : "read";
   const key = op === "create" ? String(((await request.clone().json().catch(() => ({}))) as { name?: unknown }).name ?? "") : rest.slice(1);
   calls.push({ op, token: store ? "store" : "other", key });
   if (!store) return failure(401, [10000]);
-  const fault = takeFault(op);
+  const fault = takeFault(held, op);
   // A redirect to an answer that would count if the client followed it: the database asked for, described as made or
   // present, though nothing was done.
   if (fault === "redirect") {

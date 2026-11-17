@@ -35,6 +35,7 @@ pub mod repo_grants;
 pub mod repo_merge;
 pub mod repositories;
 pub mod serve_entry;
+pub mod store_reconcile;
 pub mod submission_files;
 pub mod task_change;
 pub mod write_budget;

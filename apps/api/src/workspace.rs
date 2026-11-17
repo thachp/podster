@@ -89,6 +89,7 @@ mod provisioning;
 mod public;
 mod public_claims;
 mod readiness_upkeep;
+mod release_approvals;
 mod release_commit;
 mod release_config;
 mod release_driver;
@@ -4455,9 +4456,11 @@ impl Workspace {
         let tail = parts.get(3..).unwrap_or(&[]);
         // The room's release configuration (M6 step 6) is there only while the deployment's setting is on, as every M6
         // route. Otherwise it answers as a route that doesn't exist.
-        // So is the room's custom hostname (M6 step 8).
-        let release_route_on = matches!(tail, ["release-config"] | ["app-hostname"])
-            && crate::releases::switched_on(&self.env).await;
+        // So is the room's custom hostname (M6 step 8), and its releases awaiting approval (M6 step 10(b)).
+        let release_route_on = matches!(
+            tail,
+            ["release-config"] | ["app-hostname"] | ["release-approvals"]
+        ) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
         // recovery, which doesn't come through here, can change its owner. `command`
@@ -4557,6 +4560,7 @@ impl Workspace {
                     crate::content_provider::content_domain(&self.env).as_deref(),
                 ),
                 ["app-hostname"] if release_route_on => hostname::read(&sql, &who, now_ms()),
+                ["release-approvals"] if release_route_on => release_approvals::read(&sql, &who),
                 _ => Err(ApiError::not_found()),
             };
         }

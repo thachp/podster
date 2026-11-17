@@ -104,7 +104,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 // names only what its path may. No capability reaches one: no agent sees a deploy tool before the release path exists
 // (AC-17), so `deploy_release` and anything else that names a release or a deployment is in no agent's list.
 const releaseOperations = {
-  getReleaseConfig: "ws", setReleaseConfig: "ws", approveRelease: "ws,release", declineRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
+  getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", approveRelease: "ws,release", declineRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
   getReleaseDelegation: "org", setReleaseDelegation: "org",
 };
@@ -121,7 +121,8 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Decision 218's PR B built the operator's release switch for an organization, read and set.
     // Step 6 built the room's release configuration, read and set, which the room itself answers.
     // Step 8's first PR built the room's custom hostname, read, asked for and removed, which the room itself answers.
-    const built = ["suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
+    // Step 10(b) built the room's list of releases awaiting approval, which the room itself answers.
+    const built = ["listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
     // and a provider answers it `release_not_available`, and its summary must say exactly when.
@@ -198,11 +199,17 @@ if (api.components.schemas.ReleaseConfig?.properties?.environments?.items?.enum?
 // name, the label, a `.` and the ID, is at most 63 characters (ADR 0010, "Script names").
 const idPattern = `^${core.releaseIdPrefix}[0-9a-f]{${core.idLen - core.releaseIdPrefix.length}}$`;
 if (api.components.schemas.Release?.properties?.id?.pattern !== idPattern) problems.push(`Release.id: must be ${idPattern}`);
+// M6 step 10(b): what awaits approval is exactly core's awaiting state, named by the release's own ID and commit forms.
+{
+  const approval = api.components.schemas.ReleaseApproval?.properties;
+  if (approval?.state?.enum?.join() !== "awaiting_approval" || !core.releaseStates.includes("awaiting_approval")) problems.push("ReleaseApproval.state: must be exactly core's awaiting_approval");
+  if (approval?.id?.pattern !== idPattern || approval?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("ReleaseApproval: its ID and commit must have the release's forms");
+}
 for (const id of ["approveRelease", "declineRelease"]) {
   if (operations.get(id)?.path && api.paths[operations.get(id).path].parameters?.find((p) => p.name === "release")?.schema?.pattern !== idPattern) problems.push(`${id}: its release parameter must be ${idPattern}`);
 }
 if (api.components.parameters.appLabel?.schema?.pattern !== `^[a-z0-9]{1,${core.maxLabelLen}}$`) problems.push(`appLabel: must be at most ${core.maxLabelLen} lower-case letters and digits`);
-for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "AppHostnameRequest", "AppHostname", "SetAppHostname"]) {
+for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "ReleaseApproval", "ReleaseApprovalList", "AppHostnameRequest", "AppHostname", "SetAppHostname"]) {
   const found = api.components.schemas[schema];
   if (found?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
   if ((found?.required ?? []).slice().sort().join() !== Object.keys(found?.properties ?? {}).sort().join()) problems.push(`${schema}: must require exactly its properties`);

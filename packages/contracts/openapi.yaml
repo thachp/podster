@@ -754,6 +754,13 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetReleaseConfig" } } } }
       responses: { "200": { description: "The room's release configuration, as changed", content: { application/json: { schema: { $ref: "#/components/schemas/ReleaseConfig" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/release-approvals:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listReleaseApprovals
+      tags: [queries]
+      summary: "The room's releases awaiting a person's approval (M6, ADR 0010, decision 199), for Needs attention: each one's ID, its task if it has one, its commit, its state and who asked for it when, newest first, at most 50, with `more` true when there are others. Only releases that started under the room's current release epoch while release is on in the room are listed, so one the room's bookkeeping ends is never offered. For those who may approve or decline one: the room's owner or one of its admins, as a person, by the room's rows (decision 215). Anyone else in the room gets `not_allowed` (403), and so does every agent, whatever its role; nobody's `Principal` is asked, because a read grants nothing, and `approveRelease` checks the approver's standing again. A read: nothing is written. **Built in M6 step 10(b), behind the switch.** While release is switched off, which is every deployment, this can't be told from a path nobody defined: the room answers it as an unknown route (`not_found`, or to that caller `workspace_not_found`, `access_revoked` or `invalid_argument`)"
+      responses: { "200": { description: "The room's releases awaiting approval", content: { application/json: { schema: { $ref: "#/components/schemas/ReleaseApprovalList" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/releases/{release}/approve:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: release, in: path, required: true, schema: { type: string, pattern: "^rel_[0-9a-f]{32}$" } }]
     post:
@@ -1350,6 +1357,25 @@ components:
       properties:
         enabled: { type: boolean }
         expected_version: { type: integer, description: "The configuration's `version` as the caller read it; 0 if it was never set." }
+    ReleaseApproval:
+      type: object
+      description: "One release awaiting a person's approval (M6 step 10(b)): IDs, a commit and a time only. Nothing an agent wrote is in it."
+      additionalProperties: false
+      required: [id, task_id, commit_sha, state, requested_by, requested_at]
+      properties:
+        id: { type: string, pattern: "^rel_[0-9a-f]{32}$" }
+        task_id: { type: [string, "null"], description: "The task whose merged commit it releases, or null if it names none." }
+        commit_sha: { type: string, pattern: "^[0-9a-f]{40}$" }
+        state: { type: string, enum: [awaiting_approval] }
+        requested_by: { type: string }
+        requested_at: { type: integer }
+    ReleaseApprovalList:
+      type: object
+      additionalProperties: false
+      required: [releases, more]
+      properties:
+        releases: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/ReleaseApproval" } }
+        more: { type: boolean, description: "Whether more releases await approval than are listed." }
     Release:
       type: object
       description: "One attempt to release a room's app (M6, ADR 0010, decision 197): a copy of one fixed directory of the room's repository at one commit that Podster's own merge put on the default branch and confirmed. Each attempt is its own record, kept apart from the task's state and the merge's. Its states are the release rules' own (`podster_core::release::ReleaseState`), by the names they give: `awaiting_approval` until a person approves or declines it; `queued`, then `uploading` while its job reads and uploads it; `uncertain` when an upload's answer was lost; `live` once the room committed it and set its hosts to it; `served` once its marker came back through the host, which is the only state shown as live to a reader (UI-02); `replaced` when a later release is served in its place; `unpublished`; `declined`; and `failed`, with a reason, which leaves an earlier release serving."

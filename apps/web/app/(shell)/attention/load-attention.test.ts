@@ -200,13 +200,38 @@ describe("release approvals (M6 step 10(b))", () => {
       "/api/v1/workspaces/ws_2/release-approvals": fail(500),
       "/api/v1/workspaces/ws_3/release-approvals": ok({ releases: [approval("3", 30, { state: "queued" })], more: false }),
       "/api/v1/workspaces/ws_4/release-approvals": ok({ releases: "none" }),
-      // A room whose role changed since the listing: it's simply gone, not a failure.
+      // A room whose role changed since the listing, or that the person left: it couldn't be read, so it's counted too.
       "/api/v1/workspaces/ws_5/release-approvals": { ok: false as const, status: 403, code: "not_allowed" },
+      "/api/v1/workspaces/ws_6/release-approvals": { ok: false as const, status: 403, code: "access_revoked" },
       "/api/v1/workspaces/ws_": page([]),
-      "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "owner"), room("ws_3", "owner"), room("ws_4", "owner"), room("ws_5", "admin")),
+      "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "owner"), room("ws_3", "owner"), room("ws_4", "owner"), room("ws_5", "admin"), room("ws_6", "admin")),
     });
     const result = await loadAttention(query, "per_me");
-    expect(result.approvals).toMatchObject({ state: "read", failedRooms: 3, items: [{ workspace: "ws_1" }] });
+    expect(result.approvals).toMatchObject({ state: "read", failedRooms: 5, items: [{ workspace: "ws_1" }] });
+  });
+
+  it("is unavailable when a later room says release is off, though the first couldn't be read", async () => {
+    for (const code of ["access_revoked", "workspace_not_found"]) {
+      const { query, asked } = stub({
+        "/api/v1/inbox": ok(emptyInbox),
+        "/api/v1/workspaces/ws_1/release-approvals": { ok: false as const, status: code === "access_revoked" ? 403 : 404, code },
+        "/api/v1/workspaces/ws_2/release-approvals": off,
+        "/api/v1/workspaces/ws_": page([]),
+        "/api/v1/workspaces": rooms(room("ws_1", "owner"), room("ws_2", "admin")),
+      });
+      expect((await loadAttention(query, "per_me")).approvals, code).toEqual({ state: "unavailable" });
+      expect(approvalsOf(asked), code).toHaveLength(2);
+    }
+  });
+
+  it("says it couldn't check, not that nothing waits, when the only room can't be read", async () => {
+    const { query } = stub({
+      "/api/v1/inbox": ok(emptyInbox),
+      "/api/v1/workspaces/ws_1/release-approvals": { ok: false as const, status: 403, code: "access_revoked" },
+      "/api/v1/workspaces/ws_": page([]),
+      "/api/v1/workspaces": rooms(room("ws_1", "owner")),
+    });
+    expect((await loadAttention(query, "per_me")).approvals).toEqual({ state: "read", items: [], failedRooms: 1, fullRooms: 0, uncheckedRooms: 0 });
   });
 
   it("asks nothing when the person owns and administers no room, and fails when the listing does", async () => {

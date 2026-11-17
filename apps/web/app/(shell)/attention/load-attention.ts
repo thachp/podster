@@ -12,9 +12,10 @@ type Query = <T>(path: string) => Promise<GatewayResult<T>>;
  * with. That's 36 at these limits, and a decision adds the Sheet's own 2, so about 3 decisions a minute use it all up. With
  * 3 rooms and one shared organization it's about 13. It stops here and says so.
  *
- * Release approvals (M6 step 10(b)) add 1 read while release is off for the deployment, which is everywhere today: the
- * first room the person owns or administers answers as a route that doesn't exist, and that says it for every room. On,
- * they add 1 per such room, up to `MAX_APPROVAL_ROOMS`, so at most 46 a render at these limits.
+ * Release approvals (M6 step 10(b)) add 1 read while release is off for the deployment, which is everywhere today, when
+ * the first room the person owns or administers answers: it answers as a route that doesn't exist, and that says it for
+ * every room. If that room can't be read (the person left it, say), the rest are asked too, so it is at most
+ * `MAX_APPROVAL_ROOMS`, off or on: at most 46 a render at these limits.
  */
 export const MAX_ROOMS = 20;
 
@@ -120,18 +121,21 @@ async function loadApprovals(query: Query, listed: RoomEntry[], roomNames: Recor
   if (rooms.length === 0) return { state: "none" };
   const asked = rooms.slice(0, MAX_APPROVAL_ROOMS);
   const read = (workspace: string) => query<unknown>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/release-approvals`);
-  // Release is switched on or off for the whole deployment, so the first room's answer says it for the rest.
+  // Release is switched on or off for the whole deployment, so any room's "no such route" says it for every room. The
+  // first room is asked alone, so today that is one read; only if it answers something else are the rest asked.
   const first = await read(asked[0]);
   if (releaseOff(first)) return { state: "unavailable" };
   const answers = [first, ...(await Promise.all(asked.slice(1).map(read)))];
+  if (answers.some(releaseOff)) return { state: "unavailable" };
   const items: ApprovalItem[] = [];
   let failedRooms = 0;
   let fullRooms = 0;
   answers.forEach((answer, index) => {
     const workspace = asked[index];
     if (!answer.ok) {
-      // A room the person has lost, or whose role changed since the listing, is simply gone. Anything else is a failure.
-      if (!isGone(answer)) failedRooms += 1;
+      // A room that couldn't be read, whether it failed, the person left it or their role changed since the listing, is
+      // counted, so the screen never calls a list it couldn't read empty (review standard 3).
+      failedRooms += 1;
       return;
     }
     const parsed = parseApprovals(answer.data);

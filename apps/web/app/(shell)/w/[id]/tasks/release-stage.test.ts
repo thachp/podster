@@ -52,9 +52,15 @@ describe("the deployment stage (DESIGN.md's release stages, UI-02)", () => {
   it("is Live only while served, linking only to the address for this task's merged commit", () => {
     const live = deploymentStage({ switchedOn: true, read: { kind: "release", release: release() }, ...merged });
     expect([live.label, live.link, live.commit, live.observedAt]).toEqual(["Live", URL, MERGED, 5]);
-    // Served, but for a commit that isn't this task's merge: Live may be true of the app, but no link is offered here.
-    expect(deploymentStage({ switchedOn: true, read: { kind: "release", release: release({ commit_sha: OTHER }) }, ...merged }).link).toBeNull();
-    expect(deploymentStage({ switchedOn: true, read: { kind: "release", release: release() }, merge_state: "succeeded", merge_sha: null }).link).toBeNull();
+    // Served, but for a commit that isn't this task's merge, or with no merged commit to compare: the read doesn't agree
+    // with itself, so it couldn't be checked, and it is neither Live nor linked (review standard 3).
+    for (const stage of [
+      deploymentStage({ switchedOn: true, read: { kind: "release", release: release({ commit_sha: OTHER }) }, ...merged }),
+      deploymentStage({ switchedOn: true, read: { kind: "release", release: release() }, merge_state: "succeeded", merge_sha: null }),
+    ]) {
+      expect([stage.label, stage.link]).toEqual(["Couldn't check", null]);
+      expect(stage.text).not.toMatch(/confirmed|served/);
+    }
     // Served with no address, and an address that isn't https, give no link.
     expect(deploymentStage({ switchedOn: true, read: { kind: "release", release: release({ result_url: null }) }, ...merged })).toMatchObject({ label: "Live", link: null });
     expect(deploymentStage({ switchedOn: true, read: { kind: "release", release: release({ result_url: "javascript:alert(1)" }) }, ...merged }).link).toBeNull();

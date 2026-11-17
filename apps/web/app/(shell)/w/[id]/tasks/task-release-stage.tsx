@@ -26,7 +26,8 @@ export function DeploymentStageRow({ workspace, taskId, change }: { workspace: s
       try {
         const on = releaseSwitchedOn(await clientQuery(`${base}/release-config`, { signal: controller.signal }));
         if (controller.signal.aborted) return;
-        if (on === false || !merged) {
+        // Off, unknown (the stage is then Couldn't check whatever the status says) or not merged: nothing more to read.
+        if (on !== true || !merged) {
           setSwitchedOn(on);
           return;
         }

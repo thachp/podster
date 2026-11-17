@@ -95,6 +95,14 @@ describe("the Release panel's deployment stage", () => {
     expect(await within(shown).findByText("Merged · Couldn't check")).toBeInTheDocument();
   });
 
+  it("reads no status when it can't tell whether release is on, and says it couldn't check", async () => {
+    reads.config = () => refused(500, "error");
+    const shown = await stage();
+    expect(await within(shown).findByText("Merged · Couldn't check")).toBeInTheDocument();
+    expect(within(shown).queryByRole("link")).toBeNull();
+    expect(urls.filter((url) => url.endsWith("/release-status"))).toEqual([]);
+  });
+
   it("waits for the merge before reading any release", async () => {
     reads.config = () => json(200, {});
     reads.task = () => json(200, detail({ merge_state: "not_requested", merge_sha: null, merge_finished_at: null }));

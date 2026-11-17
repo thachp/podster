@@ -109,8 +109,11 @@ export function deploymentStage({ switchedOn, read, merge_state, merge_sha }: St
   const { release } = read;
   const at = { commit: release.commit_sha, observedAt: release.observed_at };
   if (release.served) {
-    // Live only here. A link only for this task's merged commit, and only to an https address the server gave.
-    const link = merge_sha !== null && release.commit_sha === merge_sha ? httpsOnly(release.result_url) : null;
+    // A served release that isn't of this task's merged commit, or with no merged commit to compare, is a read that
+    // doesn't agree with itself: couldn't check, never Live (review standard 3).
+    if (merge_sha === null || release.commit_sha !== merge_sha) return { label: "Couldn't check", tone: "amber", text: "Podster's answer about this task's release didn't match its merged commit. Reload to try again.", ...none };
+    // Live only here, and a link only to an https address the server gave.
+    const link = httpsOnly(release.result_url);
     const text = release.state === "failed" ? `The latest attempt failed, and the earlier release of this commit is still served.${reason(release.failure_code)}` : "Podster confirmed this commit is what the app serves.";
     return { label: "Live", tone: "green", text, link, ...at };
   }

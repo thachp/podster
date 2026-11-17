@@ -42,8 +42,8 @@ pub const STORE_KINDS: &[&str] = &["d1"];
 
 /// What every store's name starts with. The rest is 32 lower-case hexadecimal digits Podster chose at random.
 pub const STORE_NAME_PREFIX: &str = "podster-store-";
-/// The random part of a store's name, in hexadecimal digits.
-pub const STORE_NAME_NONCE_DIGITS: usize = 32;
+/// The part of a store's name after its prefix, in hexadecimal digits: the 128 bits the room drew, written out.
+pub const STORE_NAME_SUFFIX_DIGITS: usize = 32;
 
 /// D1's error code for a database that isn't there, as the store spike recorded it for a read and a second delete of
 /// a deleted database (404, 7404).
@@ -60,16 +60,17 @@ fn lower_hex(value: &str) -> bool {
         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A store's name from the random part the caller drew: `podster-store-` and 32 lower-case hexadecimal digits.
-pub fn store_name(nonce: &str) -> Option<String> {
-    (nonce.len() == STORE_NAME_NONCE_DIGITS && lower_hex(nonce))
-        .then(|| format!("{STORE_NAME_PREFIX}{nonce}"))
+/// A store's name from the 128 bits the caller drew at random: `podster-store-` and those bits as 32 lower-case
+/// hexadecimal digits, leading zeros kept. It is a name, not a secret: it only has to be unlikely to meet another, so
+/// that a lost create can be found by it. Every value gives a name [`is_store_name`] accepts.
+pub fn store_name(suffix: u128) -> String {
+    format!("{STORE_NAME_PREFIX}{suffix:032x}")
 }
 
 /// Whether a name is one Podster gives a store. Anything else in the account is never Podster's store.
 pub fn is_store_name(name: &str) -> bool {
     name.strip_prefix(STORE_NAME_PREFIX)
-        .is_some_and(|nonce| nonce.len() == STORE_NAME_NONCE_DIGITS && lower_hex(nonce))
+        .is_some_and(|suffix| suffix.len() == STORE_NAME_SUFFIX_DIGITS && lower_hex(suffix))
 }
 
 /// A D1 database's ID as the room keeps it: a UUID in lower case, `8-4-4-4-12`.

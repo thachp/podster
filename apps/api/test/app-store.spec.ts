@@ -27,8 +27,8 @@ async function client(body: Record<string, unknown>) {
   expect(res.status).toBe(200);
   return (await res.json()) as any;
 }
-const nonce = () => crypto.randomUUID().replace(/-/g, "");
-const storeName = () => `podster-store-${nonce()}`;
+const randomHex = () => crypto.randomUUID().replace(/-/g, "");
+const storeName = () => `podster-store-${randomHex()}`;
 
 describe("the store client", () => {
   beforeEach(() => fake("/reset"));
@@ -198,7 +198,7 @@ async function room() {
   const org = `org_store_${n}`;
   const res = await SELF.fetch("https://api.internal/v1/workspaces", {
     method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": `store-${n}-${nonce()}`, "x-podster-assertion": await assertion(owner, org) },
+    headers: { "content-type": "application/json", "idempotency-key": `store-${n}-${randomHex()}`, "x-podster-assertion": await assertion(owner, org) },
     body: JSON.stringify({ name: "Store" }),
   });
   expect(res.status).toBe(200);

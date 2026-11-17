@@ -11,10 +11,16 @@
 use podster_core::app_store::*;
 
 const ID: &str = "0123abcd-4567-89ef-0123-456789abcdef";
-const NONCE: &str = "00112233445566778899aabbccddeeff";
+/// The suffix the tests' store is named by. A store's suffix is 128 bits the room draws; any value names a store.
+const SUFFIX: u128 = 0x0011_2233_4455_6677_8899_aabb_ccdd_eeff;
+
+/// 32 lower-case hexadecimal digits for `n`, as a name's suffix is written.
+fn digits(n: u128) -> String {
+    format!("{n:032x}")
+}
 
 fn name() -> String {
-    store_name(NONCE).unwrap()
+    store_name(SUFFIX)
 }
 
 #[test]
@@ -29,23 +35,33 @@ fn kinds_are_exactly_d1() {
 
 #[test]
 fn a_store_name_is_the_prefix_and_32_lower_hex_digits() {
-    assert_eq!(name(), format!("podster-store-{NONCE}"));
+    let hex = digits(SUFFIX);
+    assert_eq!(hex, "00112233445566778899aabbccddeeff");
+    assert_eq!(name(), format!("podster-store-{hex}"));
     assert!(is_store_name(&name()));
-    assert_eq!(store_name(&NONCE[1..]), None);
-    assert_eq!(store_name(&format!("{NONCE}0")), None);
-    assert_eq!(store_name(&NONCE.to_uppercase()), None);
-    assert_eq!(store_name(&format!("{}g", &NONCE[1..])), None);
-    assert_eq!(store_name(""), None);
+    // Every value names a store of the form: leading zeros are written, and the largest value fits.
+    assert_eq!(store_name(0), format!("podster-store-{}", "0".repeat(32)));
+    assert_eq!(store_name(1), format!("podster-store-{}1", "0".repeat(31)));
+    assert_eq!(
+        store_name(u128::MAX),
+        format!("podster-store-{}", "f".repeat(32))
+    );
+    for n in [0, 1, 0xa, 1 << 64, SUFFIX, u128::MAX] {
+        assert!(is_store_name(&store_name(n)), "{n}");
+    }
+    assert_ne!(store_name(1), store_name(2));
     for bad in [
-        format!("podster-store-{}", &NONCE[1..]),
-        format!("podster-store-{NONCE}0"),
-        format!("podster-store-{}", NONCE.to_uppercase()),
-        format!("Podster-store-{NONCE}"),
-        format!("podster-stores-{NONCE}"),
-        format!("x-podster-store-{NONCE}"),
-        format!("podster-store-{}-", &NONCE[1..]),
-        NONCE.to_string(),
+        format!("podster-store-{}", &hex[1..]),
+        format!("podster-store-{hex}0"),
+        format!("podster-store-{}", hex.to_uppercase()),
+        format!("podster-store-{}g", &hex[1..]),
+        format!("Podster-store-{hex}"),
+        format!("podster-stores-{hex}"),
+        format!("x-podster-store-{hex}"),
+        format!("podster-store-{}-", &hex[1..]),
+        hex.clone(),
         "podster-store-".to_string(),
+        String::new(),
     ] {
         assert!(!is_store_name(&bad), "{bad}");
     }
@@ -274,7 +290,7 @@ fn a_create_counts_only_when_it_names_exactly_what_was_asked() {
         None
     );
     // The description: this name, and an ID of D1's form.
-    let other = store_name("ffeeddccbbaa99887766554433221100").unwrap();
+    let other = store_name(SUFFIX + 1);
     assert_eq!(
         created(
             &ok(),
@@ -385,7 +401,7 @@ fn a_read_is_present_only_for_this_id_and_name_and_gone_only_on_d1s_not_found() 
         ),
         StoreRead::Unknown
     );
-    let other = store_name("ffeeddccbbaa99887766554433221100").unwrap();
+    let other = store_name(SUFFIX + 1);
     assert_eq!(
         read(
             &ok(),

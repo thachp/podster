@@ -74,7 +74,10 @@ describe("merging from the task Sheet", () => {
     expect(dialog).toHaveTextContent("into the repository's default branch, main");
     // M6: the confirmation says that merging releases nothing.
     expect(dialog).toHaveTextContent(MERGE_RELEASES_NOTHING);
-    expect(button).toHaveAccessibleDescription(new RegExp(MERGE_RELEASES_NOTHING.replace(/[.:]/g, "\\$&")));
+    // The button's description is the paragraph it names, which carries the sentence as plain text.
+    const described = document.getElementById(button.getAttribute("aria-describedby") ?? "");
+    expect(described).not.toBeNull();
+    expect(described).toHaveTextContent(MERGE_RELEASES_NOTHING);
     expect(calls.filter((call) => call.method === "POST")).toEqual([]);
     await userEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
     await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));

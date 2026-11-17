@@ -6,7 +6,8 @@
   "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
   "`lines_when_listed` and `listed_at` are for a reader: the check doesn't use them, and lines move.",
   "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E.",
-  "Rules 4 to 6 (`runtime-alarms`, `direct-alarm`, `runtime-opt-out`) were added with the test-only switch that puts a room's alarms under the test's control (PR 406)."
+  "Rules 4 to 6 (`runtime-alarms`, `direct-alarm`, `runtime-opt-out`) were added with the test-only switch that puts a room's alarms under the test's control (PR 406).",
+  "Rule 7 (`bare-alarm-read`) was added after a bare getAlarm() read null once the runtime's firing took an alarm due at once (PR 428)."
  ],
  "categories": {
   "A": "sleep: a bounded poll for the state itself (right as it is, unless its reason says owed)",
@@ -26,7 +27,8 @@
   "T": "sleep: a stand-in's scripted delay",
   "M": "runtime-alarms: an API spec whose rooms keep the runtime's own alarms",
   "N": "direct-alarm: a test that calls the handler the runtime calls, on purpose",
-  "O": "runtime-opt-out: a room given back to the runtime's own alarms with runtimeAlarms"
+  "O": "runtime-opt-out: a room given back to the runtime's own alarms with runtimeAlarms",
+  "P": "bare-alarm-read: a stored alarm read in the same turn as what set it, or on an object whose alarms aren't the test's (right as it is)"
  },
  "known_gaps": [
   {
@@ -1329,6 +1331,26 @@
    "listed_at": "PR 406",
    "code": "await runtimeAlarms(stub(r.room));",
    "reason": "The switch's own control: the reproduction's steps with the room given back to the runtime, to show the forced firing runs the job there and the switch is the only difference. Right as it is, not a debt."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "bare-alarm-read",
+   "where": "an operator's suspension of an app > removes the entries and the scripts though release bookkeeping fails on every pass, and a commit asked again sets the alarm for what is owed",
+   "category": "P",
+   "owed": false,
+   "listed_at": "PR 428",
+   "code": "const alarm = await state.storage.getAlarm();",
+   "reason": "Read inside the same runInDurableObject turn as the commit that set it, so no firing of the runtime's can take it first; the test then accepts the alarm or what its run did."
+  },
+  {
+   "file": "apps/api/test/takedown.spec.ts",
+   "rule": "bare-alarm-read",
+   "where": "an operator's suspension of a custom hostname",
+   "category": "P",
+   "owed": false,
+   "listed_at": "PR 428",
+   "code": "const alarm = await state.storage.getAlarm();",
+   "reason": "settleAndHold reads a hostname claim's alarm, not a room's, in the same turn as the run that set it: that object's alarms aren't the test's, and nothing can fire in between."
   }
  ]
 }

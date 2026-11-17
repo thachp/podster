@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm.ts";
 
 // M3 step 12: outbound offers (ADR 0007, decisions 117, 118, 122 and 129). An offer to an agent records an attempt with the
 // offer. The room's outbox puts it on the A2A queue with IDs only. The consumer asks the agent's Principal, then the room,
@@ -402,10 +402,10 @@ describe("the room's one alarm", () => {
     await alarmPass(roomStub(room));
     const far = Date.now() + 3_600_000;
     await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(far));
-    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBe(far);
+    expect(await nextAlarm(roomStub(room))).toBe(far);
     // Any write schedules the room, even a refused one.
     expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
-    return { alarm: (await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())) as number, attemptAt, inboxAt };
+    return { alarm: (await nextAlarm(roomStub(room))) as number, attemptAt, inboxAt };
   }
 
   it("follows an inbox recipient due before a pending A2A attempt", async () => {
@@ -429,7 +429,7 @@ describe("the room's one alarm", () => {
     const far = Date.now() + 3_600_000;
     await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(far));
     expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
-    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBe(far);
+    expect(await nextAlarm(roomStub(room))).toBe(far);
   });
 });
 

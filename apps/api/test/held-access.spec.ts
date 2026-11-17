@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms, runAlarm } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm, runAlarm } from "./alarm.ts";
 
 // A room whose migration fails answers every request with an error. Removing someone's access still has to reach it: a
 // disconnect's fence and an organization departure are held, acknowledged, and applied before anything else once the room
@@ -174,7 +174,7 @@ describe("a room whose migration fails", () => {
     await alarmPass(stub(id));
     expect(await queued()).toBeGreaterThan(0);
     // It comes back on the outbox's failure delay, 5 seconds, not straight away.
-    const next = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+    const next = await nextAlarm(stub(id));
     expect(next).not.toBeNull();
     expect(next as number).toBeGreaterThan(Date.now() + 1_000);
     const before = await inRoom(id, (sql) => sql.exec("SELECT e.type FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", AGENT.id).toArray().map((r: any) => r.type));

@@ -3,7 +3,7 @@
 //
 //   node test-timing-check.mjs [--self-test] [--json] [file.spec.ts ...]
 //
-// It reports six things:
+// It reports seven things:
 //
 // - sleep: a timer used as a wait.
 //   - `setTimeout` or `setInterval` inside a `new Promise(...)`, or awaited. That includes reaching it as
@@ -46,10 +46,17 @@
 //   test-only route. It misses a handler reached through a computed name or passed as an argument.
 // - runtime-opt-out: each call to `runtimeAlarms`, which gives a room back to the runtime's own alarms, so every
 //   opt-out is listed with its reason.
+// - bare-alarm-read: a call to `getAlarm` (`state.storage.getAlarm()`, `["getAlarm"]`, or a function of that name) in
+//   an API test file whose rooms are the test's (it calls `manualAlarms`, or imports a helper file of the folder that
+//   does), anywhere but apps/api/test/alarm.ts. In such a room an alarm due at once is taken by the runtime's own
+//   firing, which records when it was due and deletes it: a bare read straight after a command races that firing and
+//   reads null. `nextAlarm` reads the stored alarm or, when none is, the one the firing took. A bare read that is right
+//   (one in the command's or the pass's own turn, or of an object whose alarms aren't the test's) is listed with its
+//   reason. It misses a file whose rooms come from a helper it doesn't import by a relative path.
 //
 // It reads every file under apps/api/test and apps/gateway/test, specs and the helpers and stand-ins beside them, whether a
-// spec imports them or not; the room rules (unquieted, runtime-alarms) apply to the API's specs only, direct-alarm and runtime-opt-out to
-// the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them.
+// spec imports them or not; the room rules (unquieted, runtime-alarms) apply to the API's specs only, direct-alarm,
+// runtime-opt-out and bare-alarm-read to the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them.
 //
 // How it reads TypeScript: esbuild (pinned in e2e/package.json, so a bump elsewhere can't change it) strips the types
 // with a source map. acorn parses what is left, as static-check.mjs does, and each finding is mapped back to its line.
@@ -472,6 +479,10 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
   // Rule 5: an object's alarm handler called directly, not through `alarm.ts`. In a room whose alarms are the test's it
   // does nothing, and anywhere it can overlap a run the runtime started.
   // Rule 6: a room given back to the runtime's own alarms (`runtimeAlarms`): each call is listed with why.
+  // Rule 7: a stored alarm read with a bare `getAlarm()` rather than `nextAlarm`.
+  // A file whose rooms are the test's: it calls `manualAlarms`, or imports a helper file of the folder that does.
+  const callsManual = [...every(tree)].some((n) => n.type === "CallExpression" && calleeName(n) === "manualAlarms");
+  const manualRooms = callsManual || [...helpers.values()].some((h) => h?.manual);
   if (file !== ALARM_HELPERS && !file.startsWith("apps/gateway/")) {
     const isAlarm = (m) => m?.type === "MemberExpression" && propertyName(m) === "alarm";
     for (const node of every(tree)) {
@@ -483,6 +494,9 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
           || calleeName(node) === "runDurableObjectAlarm";
         if (direct) report(node, "direct-alarm", "runs an alarm handler directly: use alarmPass, alarmQuiet or runAlarm from alarm.ts");
         if (callee.type === "Identifier" && callee.name === "runtimeAlarms") report(node, "runtime-opt-out", "gives a room back to the runtime's own alarms: list it with its reason");
+        // Rule 7: a stored alarm read bare, in a file whose rooms are the test's. There one due at once is taken by the
+        // runtime's firing, which records it and deletes it, so the bare read races that firing and can read null.
+        if (manualRooms && calleeName(node) === "getAlarm") report(node, "bare-alarm-read", "reads the stored alarm bare, which reads null once the runtime's firing took one due at once: use nextAlarm from alarm.ts");
       }
       // The handler taken under another name: `const run = instance.alarm`, or `const { alarm } = instance` (from a name, not
       // from a call's result, whose `alarm` is a time).
@@ -497,6 +511,7 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     found: found.filter((f) => !seen.has(`${f.line}|${f.rule}|${f.text}|${f.where}`) && seen.add(`${f.line}|${f.rule}|${f.text}|${f.where}`)).sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule)),
     rooms: makers,
     sleepers: sleeping,
+    manual: callsManual,
   };
 }
 
@@ -567,7 +582,7 @@ export async function check(files) {
     try {
       result = await analyze(source, { api: file.startsWith("apps/api/") && file.endsWith(".spec.ts"), file, path, helpers: new Map([...helpers].filter(([, v]) => v)) });
     } catch (error) {
-      result = { found: [{ line: error?.loc?.line ?? 0, rule: "parse", text: `doesn't parse: ${String(error?.message ?? error).slice(0, 120)}`, where: "(module)" }], rooms: new Set(), sleepers: new Set() };
+      result = { found: [{ line: error?.loc?.line ?? 0, rule: "parse", text: `doesn't parse: ${String(error?.message ?? error).slice(0, 120)}`, where: "(module)" }], rooms: new Set(), sleepers: new Set(), manual: false };
     }
     if (result === null) return null;
     results.set(path, { ...result, file, source });
@@ -693,6 +708,25 @@ async function selfTest() {
   await expect("direct-alarm: a gateway test is outside the rule", "await i.alarm();\n", [], { api: false, file: "apps/gateway/test/x.spec.ts" });
   // Rule 6: every room given back to the runtime is listed.
   await expect("runtime-opt-out: each runtimeAlarms call is a finding", 'it("a", async () => {\n  await runtimeAlarms(stub(a));\n  await manualAlarms(stub(a));\n});\n', ["2: runtime-opt-out"], { api: false });
+  // Rule 7: a stored alarm read bare where rooms are the test's.
+  const manualRoom = "await manualAlarms(stub(id));\n";
+  await expect("bare-alarm-read: getAlarm() in a file whose rooms are the test's, by name or computed", `${manualRoom}const at = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());\nconst too = await inRoom(id, (_sql, state) => state.storage["getAlarm"]());\n`, ["2: bare-alarm-read", "3: bare-alarm-read"], { api: false });
+  await expect("bare-alarm-read: nextAlarm is the read to use", `${manualRoom}const at = await nextAlarm(stub(id));\n`, [], { api: false });
+  await expect("bare-alarm-read: alarm.ts itself reads the stored alarm", `${manualRoom}export const nextAlarm = (room: any) => runInDurableObject(room, (_: any, state: any) => state.storage.getAlarm());\n`, [], { api: false, file: "apps/api/test/alarm.ts" });
+  await expect("bare-alarm-read: a file whose rooms keep the runtime's alarms is outside the rule", "const at = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());\n", [], { api: false });
+  await expect("bare-alarm-read: a gateway test is outside the rule", `${manualRoom}const at = await state.storage.getAlarm();\n`, [], { api: false, file: "apps/gateway/test/x.spec.ts" });
+  await expect("bare-alarm-read: a file whose rooms come from a helper file that calls manualAlarms", "import { room } from \"./rooms.ts\";\nconst at = await runInDurableObject(stub(await room()), (_: any, state: any) => state.storage.getAlarm());\n", ["2: bare-alarm-read"], { api: false, file: "apps/api/test/x.spec.ts", path: "/r/apps/api/test/x.spec.ts", helpers: new Map([["/r/apps/api/test/rooms.ts", { rooms: new Set(["room"]), sleepers: new Set(), manual: true }]]) });
+  {
+    // A bare read that is right passes with its entry, and only with it.
+    const text = `${manualRoom}it("reads in its turn", async () => {\n  await runInDurableObject(stub(id), async (_: any, state: any) => {\n    const at = await state.storage.getAlarm();\n  });\n});\n`;
+    const got = ((await findings(text, { api: false })) ?? []).map((f) => ({ file: "a.spec.ts", ...f, code: lineText(text, f.line) }));
+    const listed = { file: "a.spec.ts", rule: "bare-alarm-read", where: "reads in its turn", code: "const at = await state.storage.getAlarm();", category: "P", reason: "read in the command's own turn, before any firing can take it", owed: false };
+    const withEntry = judge(got, [listed], { P: "a bare read" });
+    const without = judge(got, [], { P: "a bare read" });
+    const passed = got.length === 1 && withEntry.allowed.length === 1 && withEntry.failing.length === 0 && withEntry.stale.length === 0 && without.failing.length === 1;
+    if (!passed) failures.push("bare-alarm-read: an allowed entry passes, and the read fails without it");
+    console.log(`${passed ? "ok  " : "FAIL"} bare-alarm-read: an allowed entry passes, and the read fails without it${passed ? "" : `: got ${JSON.stringify(got)}`}`);
+  }
   // Where a finding is, for the allow-list's key.
   const wheres = ((await findings('describe("rooms", () => {\n  it("waits", async () => {\n    await new Promise((r) => setTimeout(r, 5));\n  });\n});\nconst poll = async () => {\n  await new Promise((r) => setTimeout(r, 5));\n};\n')) ?? []).map((f) => f.where);
   const whereOk = JSON.stringify(wheres) === JSON.stringify(["rooms > waits", "function poll"]);

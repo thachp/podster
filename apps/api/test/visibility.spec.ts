@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm.ts";
 
 // A room's visibility (M4 step 5, ADR 0008): the owner's preview, publishing with its hash, going private, the topic, and
 // `publicly_claimable` on openings. `PUBLIC_ROOMS` is off unless a test build's request says `x-test-public-rooms: on`.
@@ -879,7 +879,7 @@ describe("the discovery-index reconcile", () => {
         await alarmPass(stub(id));
         expect(await stored(id, FAILURES)).toBe(n);
         const next = (await stored(id, NEXT)) as number;
-        const alarm = (await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())) as number;
+        const alarm = (await nextAlarm(stub(id))) as number;
         expect(next - before).toBeGreaterThanOrEqual(5_000 * 2 ** (n - 1));
         expect(next - before).toBeLessThanOrEqual(5_000 * 2 ** (n - 1) * 1.2 + 1_000);
         // Nothing else is due, so the alarm waits for it too, and never spins.

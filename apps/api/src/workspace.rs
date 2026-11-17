@@ -99,6 +99,7 @@ mod release_recheck;
 mod release_request;
 mod release_rollback;
 mod release_settle;
+mod release_store;
 mod release_switch;
 mod release_upload;
 mod releasers;

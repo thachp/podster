@@ -441,3 +441,40 @@ fn the_fixed_names_podster_writes() {
     assert!(MANIFEST_FIELDS.iter().all(|f| !CONFIG_KEYS.contains(f)));
     assert!(!MANIFEST_PATH.contains('/') && !MODULES_DIRECTORY.contains('/'));
 }
+
+#[test]
+fn a_release_asks_for_its_store_only_through_a_whole_manifest_that_says_so() {
+    let files = app(vec![]);
+    // The control: a code release whose manifest says `true`.
+    assert!(asks_for_store(&plan(files.clone()), Some(GOOD)));
+    // One change away, each asks for none.
+    assert!(!asks_for_store(
+        &plan(files.clone()),
+        Some(br#"{"main":"index.js","store":false}"#)
+    ));
+    // A manifest that isn't read whole asks for nothing: no store is made on a guess.
+    for bad in [
+        &br#"{"main":"index.js","store":"true"}"#[..],
+        br#"{"main":"index.js","store":true,"store":true}"#,
+        br#"{"main":"index.js","store":true,"d1_databases":[]}"#,
+        br#"{"main":"other.js","store":true}"#,
+        br#"{"store":true}"#,
+        b"",
+    ] {
+        assert!(
+            !asks_for_store(&plan(files.clone()), Some(bad)),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+    // No manifest's bytes, or a tree that isn't a whole code release's: none.
+    assert!(!asks_for_store(&plan(files.clone()), None));
+    assert!(!asks_for_store(
+        &plan(vec![f("index.html", 10), f("app.js", 10)]),
+        Some(GOOD)
+    ));
+    assert!(!asks_for_store(
+        &plan(app(vec![f("worker/data.txt", 10)])),
+        Some(GOOD)
+    ));
+}

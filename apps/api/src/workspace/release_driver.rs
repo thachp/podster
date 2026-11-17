@@ -458,8 +458,9 @@ fn lease(
         set_job(sql, &head.id, None, Some(ATTEMPTS_EXHAUSTED), now)?;
         return Ok(answer("gave_up", Some(ATTEMPTS_EXHAUSTED), None));
     }
-    // A settling read reads nothing from GitHub, so it takes no upload slot.
-    if step == DriveStep::Upload && !settling {
+    // A settling read reads nothing from GitHub, so it takes no upload slot; nor does settling the app's store's create
+    // outstanding, which the upload step does first and alone (`release_store`).
+    if step == DriveStep::Upload && !settling && !release_store::settles_first_for(sql, &head.id)? {
         exec(
             sql,
             "DELETE FROM release_upload_attempt WHERE at < ?",

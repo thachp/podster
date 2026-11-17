@@ -2,11 +2,13 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmQuiet, manualAlarms } from "./alarm";
+import { appStoreMakeCases } from "./app-store-make.cases";
 
 // M6 stage 1, the first PR of the store plan: the room's record of its app's store, and the client that makes, reads,
-// deletes and lists stores with its own D1 credential. Nothing makes a store yet: the client is reached here only
-// through the test-only route `/test/app-store`, against D1's stand-in (`fake-stores.ts`), and the record is written
-// here only by hand, to show what the room's table holds and refuses.
+// deletes and lists stores with its own D1 credential. The client is reached here through the test-only route
+// `/test/app-store`, against D1's stand-in (`fake-stores.ts`), and the record is written here by hand, to show what the
+// room's table holds and refuses. *Since S2 (2026-11-17):* the release job makes a store, and its cases run here too,
+// in this file, since this file owns the stand-in and resets it (`app-store-make.cases.ts`).
 
 const BINDINGS = env as any;
 const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { account: string; scriptsToken: string; routingToken: string };
@@ -297,3 +299,5 @@ describe("the room's record of its store", () => {
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT label, store_id FROM app_store").toArray())).toEqual([{ label: "todo", store_id: ID }]);
   });
 });
+
+appStoreMakeCases();

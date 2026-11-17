@@ -207,6 +207,40 @@ pub fn created(envelope: &Envelope, result: &Described<'_>, asked: &str) -> Opti
     result.id.filter(|id| d1_id_form(id)).map(str::to_owned)
 }
 
+/// What a create's answer says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CreateAnswer {
+    /// Made, exactly as [`created`] counts it: its ID.
+    Made(String),
+    /// Refused in so many words: nothing was made by this create. The release fails by [`STORE_CREATE_REFUSED`].
+    Refused,
+    /// Anything else, which may or may not have made it: only a list by name settles it.
+    Unknown,
+}
+
+/// A create's answer, read strictly. Made only as [`created`] allows. **Refused** only on a `4xx` that says it failed
+/// (`"success": false`) and why (at least one error code), and never on `408`, `409` or `429`: a timeout or a limit may
+/// still be followed by the database, and a conflict may be an earlier create of this very name that landed, so each
+/// is settled by the list. Everything else is [`CreateAnswer::Unknown`].
+pub fn create_answer(envelope: &Envelope, result: &Described<'_>, asked: &str) -> CreateAnswer {
+    if let Some(id) = created(envelope, result, asked) {
+        return CreateAnswer::Made(id);
+    }
+    let refused = is_store_name(asked)
+        && (400..500).contains(&envelope.status)
+        && !matches!(envelope.status, 408 | 409 | 429)
+        && envelope.success == Some(false)
+        && envelope
+            .errors
+            .as_ref()
+            .is_some_and(|codes| !codes.is_empty());
+    if refused {
+        CreateAnswer::Refused
+    } else {
+        CreateAnswer::Unknown
+    }
+}
+
 /// What a read of one store found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreRead {
@@ -325,5 +359,140 @@ impl ListRead {
             return ListStep::Unknown;
         }
         ListStep::More
+    }
+}
+
+// --- Making a store (S2 of the store plan) ---------------------------------------------------------------------------
+//
+// The release job makes its app's store, for a release whose manifest asks for one, once its recheck holds and before
+// its upload. The room records the name it drew and when it sent the create (`create_sent_at`) in its own transaction
+// before it sends it, so **a create is outstanding from the moment it may have been sent,** and while one is, nothing
+// sends another: one store for one label. An outstanding create is settled by a whole list read by the name: found, its
+// ID is recorded as made; read without it on two whole lists at least [`GONE_SPAN_MS`] apart, the first no sooner than
+// that after the create, it is no longer outstanding, and a release that asks for the store creates it again under the
+// same name.
+
+/// **Proposed.** How long after a create, and between two whole lists without the store's name, before the create is
+/// taken for one that made nothing: the same ten minutes as a custom hostname's two reads of gone
+/// (`crate::hostname_requests::GONE_SPAN_MS`), since no spike has measured how long a database just made takes to show
+/// in D1's list.
+pub const GONE_SPAN_MS: i64 = 10 * 60 * 1000;
+
+/// The release fails by this when D1 refused its store's create in so many words ([`CreateAnswer::Refused`]).
+pub const STORE_CREATE_REFUSED: &str = "store_create_refused";
+/// A release waits: the gate on making stores, the release path's constant, is closed. Nothing was recorded or sent.
+pub const STORE_CREATE_INCOMPLETE: &str = "store_create_incomplete";
+/// A release waits: no store provider is configured.
+pub const STORE_PROVIDER_MISSING: &str = "store_provider_missing";
+/// A release waits: its store's create got no answer to go on, and the list didn't find it yet.
+pub const STORE_CREATE_UNANSWERED: &str = "store_create_unanswered";
+/// A release waits: its store's create is outstanding and a list without it didn't settle it yet.
+pub const STORE_UNSETTLED: &str = "store_unsettled";
+/// A release waits: the list of stores wasn't whole.
+pub const STORE_LIST_UNKNOWN: &str = "store_list_unknown";
+/// A release waits one step: a create outstanding was found by the list and its store recorded made.
+pub const STORE_SETTLED: &str = "store_settled";
+/// A release waits one step: a create outstanding was settled as having made nothing, so the store is created again.
+pub const STORE_CREATE_OWED: &str = "store_create_owed";
+
+/// What the release job does about its app's store before it uploads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MakeStep {
+    /// The release asks for no store: none is made, and the upload goes on.
+    Nothing,
+    /// The store is made and recorded: nothing more is made, and the upload goes on.
+    Made,
+    /// Record the name and `create_sent_at`, then send the create.
+    Create,
+    /// A create is outstanding: settle it by the list, and send nothing.
+    Settle,
+    /// The release fails by this code, and nothing is made.
+    Fail(NoBinding),
+}
+
+/// What the job does for a release that asks for a store (`wants`, `crate::app_code::asks_for_store`), given the room's
+/// record of its label's store and when its create was last sent. **Never a second create while one is outstanding,
+/// and never one for a store recorded made,** so a label has one store. A record owed a deletion, or not of the room's
+/// form, fails the release and makes nothing.
+pub fn make_step(
+    wants: bool,
+    record: Option<&StoreRecord<'_>>,
+    create_sent_at: Option<i64>,
+) -> MakeStep {
+    if !wants {
+        return MakeStep::Nothing;
+    }
+    if record.is_none() {
+        return MakeStep::Create;
+    }
+    match binding(record) {
+        Ok(_) => MakeStep::Made,
+        Err(NoBinding::NotMade) if create_sent_at.is_some() => MakeStep::Settle,
+        Err(NoBinding::NotMade | NoBinding::NoStore) => MakeStep::Create,
+        Err(other) => MakeStep::Fail(other),
+    }
+}
+
+/// Whether the record holds a create outstanding, which the job settles by the list before anything else for this
+/// release, reading nothing from GitHub and taking no upload slot. Whatever the release asks for: settling a create the
+/// label already sent makes nothing.
+pub fn settles_first(record: Option<&StoreRecord<'_>>, create_sent_at: Option<i64>) -> bool {
+    record.is_some() && create_sent_at.is_some() && binding(record) == Err(NoBinding::NotMade)
+}
+
+/// What a whole list says of a create outstanding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Settle {
+    /// The name is listed: this is its ID, to record as made.
+    Found(String),
+    /// Not settled yet: read again at `at`. `note_gone` when this list is the first without it that counts, which the
+    /// room notes as the record's last change.
+    Wait { at: i64, note_gone: bool },
+    /// Two whole lists without it, far enough apart: the create made nothing, and may be sent again.
+    CreateAgain,
+    /// No whole list: nothing is decided.
+    Unknown,
+}
+
+/// A whole list (`None` when it wasn't) read at `now` for a create of `name` sent at `create_sent_at`, whose record last
+/// changed at `last_change_at`. While a create is outstanding the record changes only when it is recorded and when a
+/// list without it counts, so a last change at least [`GONE_SPAN_MS`] after the create is the first that counted.
+///
+/// Found at any time. Otherwise a list counts only from [`GONE_SPAN_MS`] after the create; the first that counts is
+/// noted; and a second at least [`GONE_SPAN_MS`] after the first settles the create as having made nothing.
+pub fn settle(
+    list: Option<&[(String, String)]>,
+    name: &str,
+    create_sent_at: i64,
+    last_change_at: i64,
+    now: i64,
+) -> Settle {
+    let Some(list) = list else {
+        return Settle::Unknown;
+    };
+    if let Some((id, _)) = list.iter().find(|(_, listed)| listed == name) {
+        return Settle::Found(id.clone());
+    }
+    let earliest = create_sent_at.saturating_add(GONE_SPAN_MS);
+    if now < earliest {
+        return Settle::Wait {
+            at: earliest,
+            note_gone: false,
+        };
+    }
+    if last_change_at >= earliest {
+        let second = last_change_at.saturating_add(GONE_SPAN_MS);
+        return if now >= second {
+            Settle::CreateAgain
+        } else {
+            Settle::Wait {
+                at: second,
+                note_gone: false,
+            }
+        };
+    }
+    Settle::Wait {
+        at: now.saturating_add(GONE_SPAN_MS),
+        note_gone: true,
     }
 }

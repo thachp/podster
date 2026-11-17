@@ -781,3 +781,229 @@ fn an_id_or_a_name_seen_twice_is_no_list() {
     assert_eq!(ListRead::default().take(&renamed_twice), ListStep::Unknown);
     assert_eq!(ListRead::default().take(&named("db2")), ListStep::Done);
 }
+
+// --- S2: the release job makes its app's store ---------------------------------------------------------------------
+
+fn asked(n: &str) -> StoreRecord<'_> {
+    StoreRecord {
+        kind: Some("d1"),
+        name: Some(n),
+        id: None,
+        made_at: None,
+        delete_owed_at: None,
+        gone_at: None,
+    }
+}
+
+#[test]
+fn the_job_makes_a_store_only_for_a_release_that_asks_and_never_a_second_for_one_label() {
+    let n = name();
+    let made = StoreRecord {
+        id: Some(ID),
+        made_at: Some(3),
+        ..asked(&n)
+    };
+    // A release that asks for none makes none, whatever the room holds.
+    for record in [None, Some(&made), Some(&asked(&n))] {
+        assert_eq!(make_step(false, record, Some(2)), MakeStep::Nothing);
+        assert_eq!(make_step(false, record, None), MakeStep::Nothing);
+    }
+    // No record: one is made.
+    assert_eq!(make_step(true, None, None), MakeStep::Create);
+    // Made: nothing more is made.
+    assert_eq!(make_step(true, Some(&made), Some(2)), MakeStep::Made);
+    // A create outstanding is settled, never sent again: one store for one label.
+    assert_eq!(make_step(true, Some(&asked(&n)), Some(2)), MakeStep::Settle);
+    // Recorded with no create outstanding (settled gone): created again, under the name already recorded.
+    assert_eq!(make_step(true, Some(&asked(&n)), None), MakeStep::Create);
+    // Owed a deletion, or not of the room's form: the release fails by that code and nothing is made.
+    let owed = StoreRecord {
+        delete_owed_at: Some(9),
+        ..made.clone()
+    };
+    assert_eq!(
+        make_step(true, Some(&owed), Some(2)),
+        MakeStep::Fail(NoBinding::DeleteOwed)
+    );
+    let owed_unmade = StoreRecord {
+        delete_owed_at: Some(9),
+        ..asked(&n)
+    };
+    assert_eq!(
+        make_step(true, Some(&owed_unmade), None),
+        MakeStep::Fail(NoBinding::DeleteOwed)
+    );
+    let malformed = StoreRecord {
+        kind: Some("kv"),
+        ..asked(&n)
+    };
+    assert_eq!(
+        make_step(true, Some(&malformed), None),
+        MakeStep::Fail(NoBinding::Malformed)
+    );
+    assert_eq!(NoBinding::DeleteOwed.code(), "store_delete_owed");
+}
+
+#[test]
+fn only_a_create_outstanding_is_settled_first_by_the_list() {
+    let n = name();
+    assert!(settles_first(Some(&asked(&n)), Some(2)));
+    assert!(!settles_first(Some(&asked(&n)), None));
+    assert!(!settles_first(None, Some(2)));
+    let made = StoreRecord {
+        id: Some(ID),
+        made_at: Some(3),
+        ..asked(&n)
+    };
+    assert!(!settles_first(Some(&made), Some(2)));
+    let owed = StoreRecord {
+        delete_owed_at: Some(9),
+        ..asked(&n)
+    };
+    assert!(!settles_first(Some(&owed), Some(2)));
+    let malformed = StoreRecord {
+        name: Some("my-database"),
+        ..asked(&n)
+    };
+    assert!(!settles_first(Some(&malformed), Some(2)));
+}
+
+fn env(status: u16, success: Option<bool>, errors: Option<Vec<i64>>) -> Envelope {
+    Envelope {
+        status,
+        success,
+        errors,
+    }
+}
+
+#[test]
+fn a_create_is_made_refused_or_unknown_and_only_a_definite_refusal_refuses() {
+    let n = name();
+    let described = Described {
+        id: Some(ID),
+        name: Some(&n),
+    };
+    assert_eq!(
+        create_answer(&env(200, Some(true), Some(vec![])), &described, &n),
+        CreateAnswer::Made(ID.to_owned())
+    );
+    // What `created` doesn't count is never made here either.
+    assert_eq!(
+        create_answer(&env(201, Some(true), Some(vec![])), &described, &n),
+        CreateAnswer::Unknown
+    );
+    let none = Described::default();
+    // A refusal: a 4xx that says it failed and why.
+    for status in [400, 401, 403, 404, 422] {
+        assert_eq!(
+            create_answer(&env(status, Some(false), Some(vec![10000])), &none, &n),
+            CreateAnswer::Refused,
+            "{status}"
+        );
+    }
+    // Not a refusal: a conflict (an earlier create may have made it), a timeout or a limit, a server's error, and any
+    // answer that doesn't say in so many words that it failed and why.
+    for (status, success, errors) in [
+        (409, Some(false), Some(vec![7502])),
+        (408, Some(false), Some(vec![1])),
+        (429, Some(false), Some(vec![971])),
+        (500, Some(false), Some(vec![1])),
+        (502, None, None),
+        (400, None, Some(vec![7400])),
+        (400, Some(true), Some(vec![7400])),
+        (400, Some(false), Some(vec![])),
+        (400, Some(false), None),
+        (302, Some(false), Some(vec![1])),
+    ] {
+        assert_eq!(
+            create_answer(&env(status, success, errors.clone()), &none, &n),
+            CreateAnswer::Unknown,
+            "{status} {success:?} {errors:?}"
+        );
+    }
+    // A name that isn't a store's is never made or refused.
+    assert_eq!(
+        create_answer(&env(403, Some(false), Some(vec![10000])), &none, "db"),
+        CreateAnswer::Unknown
+    );
+}
+
+const SENT: i64 = 1_000_000;
+
+fn listed(names: &[(&str, &str)]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .map(|(id, name)| (id.to_string(), name.to_string()))
+        .collect()
+}
+
+#[test]
+fn a_lost_create_is_found_by_its_name_on_a_whole_list() {
+    let n = name();
+    let other = store_name(7);
+    let list = listed(&[("aaaaaaaa-0000-0000-0000-000000000000", &other), (ID, &n)]);
+    // Found at any time, the first read included.
+    for now in [SENT, SENT + 1, SENT + GONE_SPAN_MS * 5] {
+        assert_eq!(
+            settle(Some(&list), &n, SENT, SENT, now),
+            Settle::Found(ID.to_owned())
+        );
+    }
+    // No list is no answer, never gone.
+    assert_eq!(
+        settle(None, &n, SENT, SENT, SENT + GONE_SPAN_MS * 5),
+        Settle::Unknown
+    );
+}
+
+#[test]
+fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes_apart() {
+    let n = name();
+    let list = listed(&[(ID, &store_name(7))]);
+    let span = GONE_SPAN_MS;
+    assert_eq!(span, 600_000);
+    // Before ten minutes from the create, a list without it counts for nothing.
+    assert_eq!(
+        settle(Some(&list), &n, SENT, SENT, SENT + span - 1),
+        Settle::Wait {
+            at: SENT + span,
+            note_gone: false
+        }
+    );
+    // The first that counts, at ten minutes: noted, and read again ten minutes on.
+    assert_eq!(
+        settle(Some(&list), &n, SENT, SENT, SENT + span),
+        Settle::Wait {
+            at: SENT + 2 * span,
+            note_gone: true
+        }
+    );
+    // A last change before ten minutes from the create is no first: a first is noted now.
+    assert_eq!(
+        settle(Some(&list), &n, SENT, SENT + span - 1, SENT + 3 * span),
+        Settle::Wait {
+            at: SENT + 4 * span,
+            note_gone: true
+        }
+    );
+    // A second within ten minutes of the first counts for nothing.
+    let first = SENT + span;
+    assert_eq!(
+        settle(Some(&list), &n, SENT, first, first + span - 1),
+        Settle::Wait {
+            at: first + span,
+            note_gone: false
+        }
+    );
+    // A second ten minutes after the first: gone, and the create may be sent again.
+    assert_eq!(
+        settle(Some(&list), &n, SENT, first, first + span),
+        Settle::CreateAgain
+    );
+    // Found after a first was noted: found, whatever the count said.
+    let with = listed(&[(ID, &n)]);
+    assert_eq!(
+        settle(Some(&with), &n, SENT, first, first + span),
+        Settle::Found(ID.to_owned())
+    );
+}

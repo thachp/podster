@@ -176,7 +176,7 @@ The flip list in `m6-plan.md` is updated in each PR for what it closes.
   - the rollback's requester needs their own live `deploy` grant;
   - the switch with no upload requires the room's current label, its current epoch, no suspension and no open takedown finding, core's `releasable_commit` and the reviewer rule, and a fresh read from Cloudflare at the switch;
   - a re-upload counts toward the room's daily cap and the read budget.
-- **Events for a person to decide on go to people only.** 6e's `release.requested` uses `roles::room_approvers`, which leaves out an agent holding the admin role. `release.config_set` (step 6's contract PR) still uses the unfiltered `roles::room_managers`, and **should move to `room_approvers` in its own PR, with a test.**
+- **Events for a person to decide on go to people only.** 6e's `release.requested` uses `roles::room_approvers`, which leaves out an agent holding the admin role. `release.config_set` (step 6's contract PR) still uses the unfiltered `roles::room_managers`, and **should move to `room_approvers` in its own PR, with a test.** *Done 2026-11-17 (branch `fix/m6-owed-1`), tested in `release-config.spec.ts`.*
 
 **Decided by the owner on 2026-11-16 ("Yes, allow it"):**
 

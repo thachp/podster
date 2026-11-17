@@ -113,7 +113,7 @@ const OWN_ROOM: [&str; 15] = [
 ];
 /// How many findings are taken from one room's answer. A room's answer is built never to hold more
 /// (`workspace::takedown`), and that is checked when the Worker is compiled.
-pub(crate) const ROOM_FINDINGS_TAKEN: usize = 48;
+pub(crate) const ROOM_FINDINGS_TAKEN: usize = 52;
 /// What a room that gave no answer is counted as, in this object's own record. It is no answer to any caller.
 const UNANSWERED: &str = "room_unanswered";
 

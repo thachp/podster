@@ -66,10 +66,15 @@ const BOOKKEEPING_FAILING: &str = "release_bookkeeping_failing";
 /// Hosts the applier refused that one answer carries. A room has two hosts at most.
 const HOST_FINDINGS: i64 = 7;
 // One answer never holds more than the reconcile takes from it, whatever the room holds: the bookkeeping's one, the
-// hosts, the failing deletes and the queued ones. So no finding is dropped for want of room in an answer.
+// hosts, the failing script deletes, the failing store deletions and the queued ones. So no finding is dropped for want
+// of room in an answer.
 const _: () = assert!(
-    1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64
+    1 + HOST_FINDINGS + FINDINGS + STORE_FINDINGS + QUEUED_FINDINGS
+        <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64
 );
+/// Store deletions that keep failing that one answer carries: a room has one store for each label it ever had, a
+/// handful at most, and the deletion job takes as many in one alarm.
+const STORE_FINDINGS: i64 = 4;
 /// A script's delete is told to operators once it has failed this many times: with the waits, over half an hour.
 const DELETE_REPORT_AFTER: i64 = 12;
 /// Findings of one kind one answer carries. A room has two hosts at most and a handful of scripts.
@@ -682,6 +687,36 @@ fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
         .iter()
         .map(|row| json!({ "code": "script_delete_failing", "subject": row["subject"], "detail": row["detail"] })),
     );
+    // A store deletion whose tries have decided nothing `DELETE_TOLD_AFTER` times in a row (S4's question 7), by the
+    // store's name, as the store reconcile's findings are. `detail` says whether it is held because something can
+    // still reach the store, or tried and not yet read gone. The job goes on trying either way.
+    for row in rows(
+        sql,
+        "SELECT label, store_name, delete_attempts FROM app_store
+           WHERE delete_owed_at IS NOT NULL AND gone_at IS NULL AND delete_attempts >= ?
+           ORDER BY store_name LIMIT ?",
+        vec![
+            podster_core::app_store::DELETE_TOLD_AFTER.into(),
+            STORE_FINDINGS.into(),
+        ],
+    )? {
+        let (Some(label), Some(name)) = (text(&row["label"]), text(&row["store_name"])) else {
+            continue;
+        };
+        if !podster_core::app_store::delete_told(int(&row["delete_attempts"])) {
+            continue;
+        }
+        let detail = if store_delete::store_unreachable(sql, &label)? {
+            "unconfirmed"
+        } else {
+            "held"
+        };
+        found.push(json!({
+            "code": podster_core::app_store::STORE_DELETE_FAILING,
+            "subject": name,
+            "detail": detail,
+        }));
+    }
     found.extend(
         rows(
             sql,

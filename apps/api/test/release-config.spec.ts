@@ -236,6 +236,14 @@ describe("the room's release configuration (M6 step 6)", () => {
     expect(await serving(r)).toEqual(DOWN);
   });
 
+  it("tells people only: the room's other people who may set it hear of a change, and an agent holding the admin role doesn't", async () => {
+    const r = await room("org_rc_told");
+    await inRoom(r.room, (s) => void s.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'admin', ?, 1)", AGENT.id, AGENT.org, r.owner.id));
+    expect((await switchedOn(() => put(r, { enabled: false, expected_version: 3 }, { who: r.admin }))).status).toBe(200);
+    const [event] = await all(r.room, "SELECT id FROM event WHERE type = 'release.config_set'");
+    expect((await all(r.room, "SELECT recipient_principal_id AS who FROM outbox WHERE event_id = ? ORDER BY who", event.id)).map((o: any) => o.who)).toEqual([r.owner.id]);
+  });
+
   it("is switched on only where release may happen at all, and switched off wherever it is on", async () => {
     // Never set, with no repository: refused by the first fact that fails, and nothing is written.
     const bare = await room("org_rc_bare", { configured: false });

@@ -761,3 +761,109 @@ fn the_proof_job_goes_on_only_where_asking_still_could_and_waits_on_what_it_cant
     };
     assert_eq!(hostname_proof_room(&unread), HostnameProofStep::Wait);
 }
+
+#[test]
+fn a_persons_request_needs_what_asking_needs_and_their_own_standing_and_no_agent_asks_yet() {
+    let p = grant("per_m");
+    let member = caller("per_m", Person, Role::Member);
+    let room = ReleaseRoom::OPEN;
+    let held = standing(Some(&p));
+    assert_eq!(
+        authorize_release_request(&member, &room, &held, true),
+        Ok(())
+    );
+    // A person who left the organization their place here is held in may not, whatever else holds.
+    assert_eq!(
+        authorize_release_request(&member, &room, &held, false),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    // Someone not in the room learns nothing more.
+    assert_eq!(
+        authorize_release_request(&caller("per_m", Person, Role::None), &room, &held, true),
+        Err(ReleaseDenial::NotParticipant)
+    );
+    // An agent never, even one that holds a live grant from someone who still holds authority and is connected.
+    let g = grant("agt_a");
+    let agent = caller("agt_a", Agent, Role::Member);
+    assert_eq!(
+        authorize_deploy_release(&agent, &room, &standing(Some(&g))),
+        Ok(()),
+        "the agent would pass the deployment rule itself"
+    );
+    for role in [Role::Member, Role::Admin, Role::Owner] {
+        assert_eq!(
+            authorize_release_request(
+                &caller("agt_a", Agent, role),
+                &room,
+                &standing(Some(&g)),
+                true
+            ),
+            Err(ReleaseDenial::NotAllowed),
+            "{role:?}"
+        );
+    }
+    // The room's facts refuse in the deployment rule's order, a private room first among the room's.
+    for (change, denial) in ROOM_CHANGES {
+        let mut room = ReleaseRoom::OPEN;
+        change(&mut room);
+        assert_eq!(
+            authorize_release_request(&member, &room, &held, true),
+            Err(denial)
+        );
+    }
+    // The grant: none, another action, expired, or one whose giver no longer holds authority.
+    let merge = DeployGrant {
+        action: "merge",
+        ..grant("per_m")
+    };
+    let expired = DeployGrant {
+        expires_at: Some(NOW),
+        ..grant("per_m")
+    };
+    let stale = ReleaseStanding {
+        delegation_holder: None,
+        ..standing(Some(&p))
+    };
+    for (why, standing, refusal) in [
+        ("no grant", standing(None), GrantRefusal::GrantRequired),
+        (
+            "a merge grant",
+            standing(Some(&merge)),
+            GrantRefusal::GrantRequired,
+        ),
+        (
+            "expired",
+            standing(Some(&expired)),
+            GrantRefusal::GrantExpired,
+        ),
+        ("its giver lost authority", stale, GrantRefusal::GrantStale),
+    ] {
+        assert_eq!(
+            authorize_release_request(&member, &room, &standing, true),
+            Err(ReleaseDenial::Grant(refusal)),
+            "{why}"
+        );
+    }
+    // In the room through a public claim only.
+    let public = ReleaseStanding {
+        through_public_claim: true,
+        ..standing(Some(&p))
+    };
+    assert_eq!(
+        authorize_release_request(&member, &room, &public, true),
+        Err(ReleaseDenial::PublicParticipant)
+    );
+    // The owner and an admin ask as anyone does: by a grant of their own, not by their role.
+    for role in [Role::Owner, Role::Admin] {
+        assert_eq!(
+            authorize_release_request(
+                &caller("per_x", Person, role),
+                &room,
+                &standing(Some(&p)),
+                true
+            ),
+            Err(ReleaseDenial::Grant(GrantRefusal::GrantRequired)),
+            "{role:?}"
+        );
+    }
+}

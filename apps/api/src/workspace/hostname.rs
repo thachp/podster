@@ -250,8 +250,9 @@ fn sweep_expired(sql: &SqlStorage, now: i64) -> R<()> {
     )
 }
 
-/// 32 random bytes from the Worker's own `crypto.getRandomValues`, for one challenge.
-fn random_32() -> R<[u8; 32]> {
+/// 32 random bytes from the Worker's own `crypto.getRandomValues`, for one challenge, or for an app's label
+/// (`release_request`).
+pub(super) fn random_32() -> R<[u8; 32]> {
     use wasm_bindgen::JsCast;
     let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into())
         .map_err(|_| ApiError::internal("no crypto"))?;

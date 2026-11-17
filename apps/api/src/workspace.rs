@@ -95,6 +95,7 @@ mod release_config;
 mod release_driver;
 mod release_marker;
 mod release_recheck;
+mod release_request;
 mod release_settle;
 mod release_switch;
 mod release_upload;
@@ -4456,10 +4457,11 @@ impl Workspace {
         let tail = parts.get(3..).unwrap_or(&[]);
         // The room's release configuration (M6 step 6) is there only while the deployment's setting is on, as every M6
         // route. Otherwise it answers as a route that doesn't exist.
-        // So is the room's custom hostname (M6 step 8), and its releases awaiting approval (M6 step 10(b)).
+        // So is the room's custom hostname (M6 step 8), its releases awaiting approval (M6 step 10(b)), and asking for a
+        // release (M6 step 6).
         let release_route_on = matches!(
             tail,
-            ["release-config"] | ["app-hostname"] | ["release-approvals"]
+            ["release-config"] | ["app-hostname"] | ["release-approvals"] | ["releases"]
         ) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
@@ -5286,6 +5288,21 @@ impl Workspace {
                     test_fail,
                     |_: &SqlStorage, who: &Participant| hostname::may_change(who),
                     move |sql, who, now| hostname::handle_remove(sql, who, &reads, now),
+                )
+            }
+            // Asking for a release of a task's merged commit (M6 step 6): who first, by the room's rows, then the
+            // release path's gate and what it needs from outside, and the transaction decides again.
+            (Method::Post, ["releases"]) if release_route_on => {
+                release_request::may_ask(&who)?;
+                let reads = self.release_request_reads(&identity.id).await?;
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| release_request::may_ask(who),
+                    move |sql, who, _| release_request::handle(sql, who, &body, &reads),
                 )
             }
             _ => Err(ApiError::not_found()),

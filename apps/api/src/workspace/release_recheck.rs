@@ -37,7 +37,8 @@
 //!   `deleted` is true only for a room whose status is neither active nor archived, which nothing sets.
 //! - *An agent that asked for the release.* The release keeps who asked and not the person who controls them, so
 //!   whether that person still holds can't be asked. An agent's release fails here, `requester_lost_authority`, until
-//!   the step that takes a release's request (step 6) records it.
+//!   the `deploy_release` capability (step 6's 6g) records it. A person's request (`release_request`) can't come from an
+//!   agent at all.
 //! - *Whether the task was reviewed under the room's person-reviewer rule.* It isn't recorded. What is checked is that
 //!   the release meets the rule the room has now: if the room requires a person as reviewer, the task's reviewer was
 //!   one.
@@ -170,13 +171,13 @@ pub(super) enum Verdict {
 /// past its expiry at `now`, for the action, and for the repository and the provider the room's link names. A grant
 /// on any other repository isn't looked at: with no repository linked, there is none. The room keeps at most one
 /// unrevoked grant for a principal, a repository and an action, so there is one such row or none.
-struct GrantRow {
-    provider_repo_id: i64,
-    delegated_by: String,
-    expires_at: Option<i64>,
+pub(super) struct GrantRow {
+    pub(super) provider_repo_id: i64,
+    pub(super) delegated_by: String,
+    pub(super) expires_at: Option<i64>,
 }
 
-fn deploy_grant(sql: &SqlStorage, principal: &str, now: i64) -> R<Option<GrantRow>> {
+pub(super) fn deploy_grant(sql: &SqlStorage, principal: &str, now: i64) -> R<Option<GrantRow>> {
     Ok(rows(
         sql,
         "SELECT g.provider_repo_id, g.delegated_by, g.expires_at FROM provider_grant g

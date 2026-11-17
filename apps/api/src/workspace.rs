@@ -109,6 +109,7 @@ mod repo_unpublish;
 mod repositories;
 mod roles;
 mod script_bindings;
+mod store_delete;
 mod submission_files;
 mod takedown;
 #[cfg(feature = "failpoints")]
@@ -121,6 +122,7 @@ pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use release_switch::INTERNAL_RELEASE_SWITCH_NOTICE;
+pub(crate) use store_delete::INTERNAL_APP_DATA_DELETE;
 pub(crate) use takedown::{
     INTERNAL_APP_SUSPENSION, INTERNAL_HOSTNAME_NOTICE, INTERNAL_TAKEDOWN_CHECK,
 };
@@ -3916,6 +3918,15 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // An app's data owed a deletion (S4 of the store plan). Nothing while no store provider is configured.
+        if let Some(next) = migrated
+            .then(|| store_delete::next_due(&sql, &self.env))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // The oldest webhook delivery ID, when it's time to forget it.
         if let Some(next) = migrated
             .then(|| repositories::next_delivery_expiry(&sql, now))
@@ -4217,6 +4228,9 @@ impl Workspace {
         if req.path() == takedown::INTERNAL_APP_SUSPENSION {
             return self.app_suspension(req).await;
         }
+        if req.path() == store_delete::INTERNAL_APP_DATA_DELETE {
+            return self.app_data_delete(req).await;
+        }
         if req.path() == takedown::INTERNAL_HOSTNAME_NOTICE {
             return self.hostname_notice(req).await;
         }
@@ -4475,6 +4489,7 @@ impl Workspace {
                 | ["release-approvals"]
                 | ["releases"]
                 | ["releases", _, "approve" | "decline" | "rollback"]
+                | ["apps", _, "delete-data"]
         ) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
@@ -4499,6 +4514,8 @@ impl Workspace {
                 // Declining only takes away. Approving in an archived room is refused by core's recheck, by its own
                 // code, which ends the release.
                 | (Method::Post, ["releases", _, "approve" | "decline"])
+                // Deleting the app's data only takes away (S4 of the store plan).
+                | (Method::Post, ["apps", _, "delete-data"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -5293,6 +5310,24 @@ impl Workspace {
                     move |sql, who, now| hostname::handle_request(sql, who, &body, &reads, now),
                 )
             }
+            // Deleting the app's data, the room's owner's (S4 of the store plan): who first, by the room's rows, then the
+            // owner's own standing, read from their `Principal`, and the transaction decides again.
+            (Method::Post, ["apps", label, "delete-data"]) if release_route_on => {
+                store_delete::may_ask(&who)?;
+                let reads = self.config_reads(&identity.id, false).await?;
+                let label = (*label).to_owned();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| store_delete::may_ask(who),
+                    move |sql, who, now| {
+                        store_delete::handle_owner_delete(sql, who, &label, &body, &reads, now)
+                    },
+                )
+            }
             (Method::Delete, ["app-hostname"]) if release_route_on => {
                 hostname::may_change(&who)?;
                 let reads = self.config_reads(&identity.id, false).await?;
@@ -5506,6 +5541,10 @@ impl DurableObject for Workspace {
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());
+        }
+        // An app's data owed a deletion (S4 of the store plan), after the applier and the script deletes.
+        if let Err(error) = self.store_delete_upkeep().await {
+            console_error!("store delete upkeep failed: {:?}", error.code());
         }
         // The custom hostname's proof job (M6 step 8): one bounded step, after the applier.
         if let Err(error) = self.hostname_upkeep().await {

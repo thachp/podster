@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // Rule 3(b) (S5 of the store plan; the architect's ruling on the store, 2026-11-16): the hourly pass reads each app
 // script's bindings with the scripts token, and the script's own room judges them against its record of the label's
@@ -258,6 +258,23 @@ export function scriptBindingsCases(h: Helpers) {
       expect((await labelRow(second)).suspended).toBe(1);
     });
 
+    it("keeps a slot kept for a lost answer when the room's clock stamped its suspension up to a minute before the slot", async () => {
+      // The deep re-review of PR #423, a low item: the room stamps its suspension by its own clock, this object the slot
+      // by its own. A room a minute behind still keeps the slot; one stamped further before it frees it.
+      for (const [behind, pair] of [[60_000, [1, 0]], [60_001, [1, 1]]] as const) {
+        const { first, second } = await two();
+        await h.inRoom(first.room, (sql) => sql.exec("CREATE TABLE test_takedown_answer_lost (x INTEGER)"));
+        await h.reconcile("scripts");
+        expect(await kept(), String(behind)).toEqual([first.served]);
+        const at = await h.inModeration((sql) => sql.exec("SELECT at FROM binding_slot_kept").one().at as number);
+        await h.inRoom(first.room, (sql) => { sql.exec("DROP TABLE IF EXISTS test_takedown_answer_lost"); sql.exec("UPDATE app_label SET suspended_at = ? WHERE label = ?", at - behind, first.label); });
+        await h.reconcile("scripts");
+        expect(await kept(), String(behind)).toEqual([]);
+        // Kept, the second stays held for the hour; freed, it comes down in the same pass.
+        expect(await suspendedPair(first, second), String(behind)).toEqual(pair);
+      }
+    });
+
     it("frees a slot kept for a lost answer once the room answers that nothing was suspended since", async () => {
       const { first, second } = await two();
       // The check fails, so nothing is suspended, and the answer is lost: the slot is kept, and the second is held.
@@ -288,10 +305,20 @@ export function scriptBindingsCases(h: Helpers) {
 
     it("asks a script whose foreign store only the room's record shows again with a slot, once the room holds it for want of one", async () => {
       const { first, second } = await two({ first: [storeBinding(OTHER_ID)], second: [storeBinding(OTHER_ID)] });
-      expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
+      // The rooms' log lines, to show the ceiling is said to have held only the one it did hold (the deep re-review of
+      // PR #423, a low item): a first ask with no slot offered isn't held by the ceiling, and is asked again.
+      const logged: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+      try {
+        expect(await h.reconcile("scripts")).toMatchObject({ changed: 1 });
+      } finally {
+        spy.mockRestore();
+      }
       expect(await suspendedPair(first, second)).toEqual([1, 0]);
       expect(await slots()).toBe(1);
       expect(await lines("script_binding_held")).toEqual([`script_binding_held ${second.served} ceiling_reached`]);
+      expect(logged.filter((line) => line.includes("the ceiling held the suspension"))).toEqual(["takedown: a script holds a binding it may not, and the ceiling held the suspension: code=store_foreign"]);
+      expect(logged.filter((line) => line.includes("and the app was suspended"))).toHaveLength(1);
     });
 
     it("gives the slot back for a room that answered without suspending", async () => {

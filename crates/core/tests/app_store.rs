@@ -982,13 +982,13 @@ fn a_lost_create_is_found_by_its_name_on_a_whole_list() {
     // Found at any time, the first read included.
     for now in [SENT, SENT + 1, SENT + GONE_SPAN_MS * 5] {
         assert_eq!(
-            settle(Some(&list), &n, SENT, SENT, now),
+            settle(Some(&list), &n, SENT, None, now),
             Settle::Found(ID.to_owned())
         );
     }
     // No list is no answer, never gone.
     assert_eq!(
-        settle(None, &n, SENT, SENT, SENT + GONE_SPAN_MS * 5),
+        settle(None, &n, SENT, None, SENT + GONE_SPAN_MS * 5),
         Settle::Unknown
     );
 }
@@ -1001,7 +1001,7 @@ fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes
     assert_eq!(span, 600_000);
     // Before ten minutes from the create, a list without it counts for nothing.
     assert_eq!(
-        settle(Some(&list), &n, SENT, SENT, SENT + span - 1),
+        settle(Some(&list), &n, SENT, None, SENT + span - 1),
         Settle::Wait {
             at: SENT + span,
             note_gone: false
@@ -1009,15 +1009,21 @@ fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes
     );
     // The first that counts, at ten minutes: noted, and read again ten minutes on.
     assert_eq!(
-        settle(Some(&list), &n, SENT, SENT, SENT + span),
+        settle(Some(&list), &n, SENT, None, SENT + span),
         Settle::Wait {
             at: SENT + 2 * span,
             note_gone: true
         }
     );
-    // A last change before ten minutes from the create is no first: a first is noted now.
+    // A note from before ten minutes after the create is no first: a first is noted now.
     assert_eq!(
-        settle(Some(&list), &n, SENT, SENT + span - 1, SENT + 3 * span),
+        settle(
+            Some(&list),
+            &n,
+            SENT,
+            Some(SENT + span - 1),
+            SENT + 3 * span
+        ),
         Settle::Wait {
             at: SENT + 4 * span,
             note_gone: true
@@ -1026,7 +1032,7 @@ fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes
     // A second within ten minutes of the first counts for nothing.
     let first = SENT + span;
     assert_eq!(
-        settle(Some(&list), &n, SENT, first, first + span - 1),
+        settle(Some(&list), &n, SENT, Some(first), first + span - 1),
         Settle::Wait {
             at: first + span,
             note_gone: false
@@ -1034,13 +1040,13 @@ fn a_lost_create_is_sent_again_only_after_two_whole_lists_without_it_ten_minutes
     );
     // A second ten minutes after the first: gone, and the create may be sent again.
     assert_eq!(
-        settle(Some(&list), &n, SENT, first, first + span),
+        settle(Some(&list), &n, SENT, Some(first), first + span),
         Settle::CreateAgain
     );
     // Found after a first was noted: found, whatever the count said.
     let with = listed(&[(ID, &n)]);
     assert_eq!(
-        settle(Some(&with), &n, SENT, first, first + span),
+        settle(Some(&with), &n, SENT, Some(first), first + span),
         Settle::Found(ID.to_owned())
     );
 }

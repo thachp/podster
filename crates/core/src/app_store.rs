@@ -522,9 +522,9 @@ pub enum Settle {
     Unknown,
 }
 
-/// A whole list (`None` when it wasn't) read at `now` for a create of `name` sent at `create_sent_at`, whose record last
-/// changed at `last_change_at`. While a create is outstanding the record changes only when it is recorded and when a
-/// list without it counts, so a last change at least [`GONE_SPAN_MS`] after the create is the first that counted.
+/// A whole list (`None` when it wasn't) read at `now` for a create of `name` sent at `create_sent_at`, whose first
+/// counted list without it was read at `first_gone_at`, if one was: the record's own column since S4's schema step
+/// (S2 kept it in `updated_at`). A note from before [`GONE_SPAN_MS`] after the create is no first that counted.
 ///
 /// Found at any time. Otherwise a list counts only from [`GONE_SPAN_MS`] after the create; the first that counts is
 /// noted; and a second at least [`GONE_SPAN_MS`] after the first settles the create as having made nothing.
@@ -532,7 +532,7 @@ pub fn settle(
     list: Option<&[(String, String)]>,
     name: &str,
     create_sent_at: i64,
-    last_change_at: i64,
+    first_gone_at: Option<i64>,
     now: i64,
 ) -> Settle {
     let Some(list) = list else {
@@ -548,8 +548,8 @@ pub fn settle(
             note_gone: false,
         };
     }
-    if last_change_at >= earliest {
-        let second = last_change_at.saturating_add(GONE_SPAN_MS);
+    if let Some(first) = first_gone_at.filter(|first| *first >= earliest) {
+        let second = first.saturating_add(GONE_SPAN_MS);
         return if now >= second {
             Settle::CreateAgain
         } else {
@@ -563,4 +563,225 @@ pub fn settle(
         at: now.saturating_add(GONE_SPAN_MS),
         note_gone: true,
     }
+}
+
+// --- Deleting a store (S4 of the store plan) -------------------------------------------------------------------------
+//
+// An app's data is deleted by an operator (ADR 0010's revision, section 3.3: "a new operator command deletes an app's
+// store") or by the room's owner (its summary's row 7). Either command marks the room's record owed a deletion, with its
+// cause, in the command's own transaction, once nothing serves the app; nothing is bound to a record owed a deletion
+// ([`binding`]). Then the room's own job deletes it at D1 and **counts it gone only on D1's own not-found, read twice at
+// least [`GONE_SPAN_MS`] apart.** A delete's answer is never trusted. A record holding a name and no ID is resolved by a
+// whole list read by its name first: listed, its ID is recorded and deleted as any; not listed on two whole lists
+// [`GONE_SPAN_MS`] apart, the first no sooner than that after its create, it was never made. **Only a store the room's
+// own record names is ever deleted:** a store no room records (the reconcile's `store_orphan`) is never this job's.
+
+/// The owner-approved words for an app's data deleted (the owner, 2026-11-17), exactly. The commands' answer carries
+/// them, and so does anything a person or an agent is shown about it.
+pub const DATA_DELETED_NOTICE: &str = "Your app’s data is deleted now, and nothing can read it. Cloudflare keeps a recoverable copy for up to 7 days; after that it’s gone for good.";
+
+/// Why a store is owed a deletion: the closed set the room's `delete_cause` column holds. The column only checks the
+/// form (lower-case letters and `_`), so the set can grow without rebuilding the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteCause {
+    /// A Podster operator deleted the app's data, which suspends the app.
+    OperatorTakedown,
+    /// The room's owner deleted the app's data, once nothing served it.
+    OwnerDeleted,
+    /// The app's label was retired. **Nothing retires a label yet;** the cause is here so the set is whole.
+    LabelRetired,
+    /// The room was deleted. **Nothing deletes a room's app yet;** the cause is here so the set is whole.
+    RoomDeleted,
+}
+
+impl DeleteCause {
+    pub const ALL: [DeleteCause; 4] = [
+        DeleteCause::OperatorTakedown,
+        DeleteCause::OwnerDeleted,
+        DeleteCause::LabelRetired,
+        DeleteCause::RoomDeleted,
+    ];
+
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            DeleteCause::OperatorTakedown => "operator_takedown",
+            DeleteCause::OwnerDeleted => "owner_deleted",
+            DeleteCause::LabelRetired => "label_retired",
+            DeleteCause::RoomDeleted => "room_deleted",
+        }
+    }
+
+    /// The cause a record names, or `None` for anything else.
+    pub fn parse(code: &str) -> Option<DeleteCause> {
+        DeleteCause::ALL
+            .into_iter()
+            .find(|cause| cause.code() == code)
+    }
+}
+
+/// What a command that deletes an app's data does to the room's record of its store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owe {
+    /// The room holds no record of a store for the app: there is no data to delete, and nothing is written.
+    NoStore,
+    /// Mark the record owed a deletion now, with the command's cause.
+    Owe,
+    /// Already owed a deletion, or gone: nothing changes, and the first cause stands. Asking again is answered the same.
+    Owed,
+}
+
+/// **Idempotent:** a record already owed, or gone, is left as it is, whatever cause asks again. Any other record is
+/// owed, a create outstanding and a record not of the room's form among them: deleting is the safe direction, and a
+/// record owed binds nothing.
+pub fn owe(record: Option<&StoreRecord<'_>>) -> Owe {
+    match record {
+        None => Owe::NoStore,
+        Some(record) if record.delete_owed_at.is_some() || record.gone_at.is_some() => Owe::Owed,
+        Some(_) => Owe::Owe,
+    }
+}
+
+/// What a command answers of the app's data: none, being deleted, or deleted (confirmed by D1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataState {
+    None,
+    Deleting,
+    Deleted,
+}
+
+impl DataState {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            DataState::None => "none",
+            DataState::Deleting => "deleting",
+            DataState::Deleted => "deleted",
+        }
+    }
+}
+
+/// The state of a record's data, for the commands' answer, which owe it first: no record is `none`, a record gone is
+/// `deleted`, and any other `deleting`.
+pub fn data_state(record: Option<&StoreRecord<'_>>) -> DataState {
+    match record {
+        None => DataState::None,
+        Some(record) if record.gone_at.is_some() => DataState::Deleted,
+        Some(_) => DataState::Deleting,
+    }
+}
+
+/// What the deletion job does next for one record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteStep {
+    /// Not owed a deletion, or already gone.
+    Nothing,
+    /// Send the delete for this ID, whose answer isn't trusted, then read it.
+    Delete(String),
+    /// Read this ID only: D1 already said gone once, so only a second read of it counts now.
+    Read(String),
+    /// The record has a name and no ID: read the whole list, and find the name.
+    List,
+    /// The record isn't of the room's form: nothing is sent.
+    Malformed,
+}
+
+/// The job's next step for a record and the first read of gone noted on it (`first_gone_at`). An ID is sent only when
+/// it is of D1's form, and a name looked up only when it is a store's name; anything else is [`DeleteStep::Malformed`].
+pub fn delete_step(record: Option<&StoreRecord<'_>>, first_gone_at: Option<i64>) -> DeleteStep {
+    let Some(record) = record else {
+        return DeleteStep::Nothing;
+    };
+    if record.delete_owed_at.is_none() || record.gone_at.is_some() {
+        return DeleteStep::Nothing;
+    }
+    if record.kind.and_then(StoreKind::parse).is_none() || !record.name.is_some_and(is_store_name) {
+        return DeleteStep::Malformed;
+    }
+    match record.id {
+        Some(id) if d1_id_form(id) => {
+            if first_gone_at.is_some() {
+                DeleteStep::Read(id.to_owned())
+            } else {
+                DeleteStep::Delete(id.to_owned())
+            }
+        }
+        Some(_) => DeleteStep::Malformed,
+        None => DeleteStep::List,
+    }
+}
+
+/// What one read, or one list, came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// The first read of gone that counts: note it, and read again at `at`.
+    NoteGone { at: i64 },
+    /// Gone again, too soon after the first to count: read again at `at`.
+    WaitGone { at: i64 },
+    /// Gone, read so twice at least [`GONE_SPAN_MS`] apart: the record is gone.
+    Gone,
+    /// D1 described the store: it is still there. Any note of gone is forgotten, and it is deleted again.
+    Present,
+    /// The record's name is listed under this ID: record it, and delete it by it.
+    Found(String),
+    /// A whole list without the name, too soon after its create to count: read again at `at`.
+    TooSoon { at: i64 },
+    /// Nothing to go on: no answer, or not D1's own. Tried again; nothing is noted or forgotten.
+    Unknown,
+}
+
+/// A read by ID during a deletion: gone only on D1's own not-found, twice at least [`GONE_SPAN_MS`] apart.
+pub fn after_read(read: StoreRead, first_gone_at: Option<i64>, now: i64) -> DeleteOutcome {
+    match read {
+        StoreRead::Present => DeleteOutcome::Present,
+        StoreRead::Unknown => DeleteOutcome::Unknown,
+        StoreRead::Gone => gone_again(first_gone_at, now),
+    }
+}
+
+fn gone_again(first_gone_at: Option<i64>, now: i64) -> DeleteOutcome {
+    match first_gone_at {
+        None => DeleteOutcome::NoteGone {
+            at: now.saturating_add(GONE_SPAN_MS),
+        },
+        Some(first) if now >= first.saturating_add(GONE_SPAN_MS) => DeleteOutcome::Gone,
+        Some(first) => DeleteOutcome::WaitGone {
+            at: first.saturating_add(GONE_SPAN_MS),
+        },
+    }
+}
+
+/// A list read for a record with a name and no ID (`None` when it wasn't whole). Listed: [`DeleteOutcome::Found`] at
+/// any time. Not listed: it counts only from [`GONE_SPAN_MS`] after the record's create, if one was sent
+/// (`create_sent_at`), so a create still landing isn't missed; then as two reads of gone at least [`GONE_SPAN_MS`]
+/// apart, the first noted. A record whose create was settled as having made nothing (`create_sent_at` null) counts at
+/// once. A note from before the create's span is no first that counted.
+pub fn after_list(
+    list: Option<&[(String, String)]>,
+    name: &str,
+    create_sent_at: Option<i64>,
+    first_gone_at: Option<i64>,
+    now: i64,
+) -> DeleteOutcome {
+    let Some(list) = list else {
+        return DeleteOutcome::Unknown;
+    };
+    if let Some((id, _)) = list.iter().find(|(_, listed)| listed == name) {
+        return DeleteOutcome::Found(id.clone());
+    }
+    let earliest = create_sent_at.map_or(i64::MIN, |sent| sent.saturating_add(GONE_SPAN_MS));
+    if now < earliest {
+        return DeleteOutcome::TooSoon { at: earliest };
+    }
+    gone_again(first_gone_at.filter(|first| *first >= earliest), now)
+}
+
+/// **Proposed.** The wait before the deletion job's next try after one that decided nothing: 5 seconds, doubling, to 5
+/// minutes at most, as a script's delete waits. It never gives up.
+pub fn delete_wait_ms(attempts: i64) -> i64 {
+    const FIRST: i64 = 5_000;
+    const LONGEST: i64 = 5 * 60 * 1000;
+    FIRST
+        .saturating_mul(1_i64 << attempts.clamp(0, 6) as u32)
+        .min(LONGEST)
 }

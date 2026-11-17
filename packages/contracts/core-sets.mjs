@@ -59,7 +59,14 @@ export function coreSets(root) {
   const claimStates = enumNames(requests, "HostnameClaimState", "name");
   // A task's release status says the room's states in its own words (M6 step 7): `live` is never one of them.
   const releaseStatusStates = enumNames(read(root, "crates/core/src/release_status.rs"), "ReleaseStatusState", "name");
+  // An app's data deleted (S4 of the store plan): why it is owed, what the commands answer of it, and the owner's words.
+  const appStore = readFileSync(new URL("crates/core/src/app_store.rs", root), "utf8");
+  const notice = appStore.match(/pub const DATA_DELETED_NOTICE: &str = "([^"\\]+)";/)?.[1];
+  if (notice === undefined) throw new Error("DATA_DELETED_NOTICE: no such constant, as one plain literal");
   return {
+    deleteCauses: enumNames(read(root, "crates/core/src/app_store.rs"), "DeleteCause", "code"),
+    dataStates: enumNames(read(root, "crates/core/src/app_store.rs"), "DataState", "code"),
+    dataDeletedNotice: notice,
     releaseStates,
     releaseStatusStates,
     servingReleaseStates: subset(release, "ReleaseState", "serves", releaseStates),

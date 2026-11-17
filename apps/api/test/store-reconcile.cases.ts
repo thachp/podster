@@ -228,6 +228,12 @@ export function storeReconcileCases(h: Helpers) {
       expect(await told()).toEqual([`store_name_reappeared ${cleared}`]);
       // Asked directly to settle it, the room records nothing either.
       expect(await ask(a.room, { label: a.label, settle: { name: cleared, id: ids[cleared] } })).toMatchObject({ known: true, settled: false, store: { id: null } });
+      // A later release asks for the store and sends its create again under the same name: the list then settles it,
+      // and the reappeared finding is taken away (the deep re-review of PR #423, a low item).
+      await h.inRoom(a.room, (sql) => sql.exec("UPDATE app_store SET create_sent_at = 5 WHERE label = ?", a.label));
+      expect(await pass()).toMatchObject({ settled: 1, reappeared: 0 });
+      expect(await rowOf(a.room, a.label)).toMatchObject({ store_id: ids[cleared] });
+      expect(await told()).toEqual([`store_id_settled ${cleared}`]);
     });
 
     it("answers settled only when this answer recorded the ID", async () => {

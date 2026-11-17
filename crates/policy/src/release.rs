@@ -304,6 +304,25 @@ pub fn authorize_custom_hostname(
     authorize_release_config(caller, authority_holds, room, config)
 }
 
+/// Who may delete the room's app's data, in the room (M6 stage 1, S4 of the store plan; ADR 0010's revision, row 7 of its
+/// summary and section 10): **the room's owner alone, as a person,** while their authority holds (still in the
+/// organization the room is held in). Not an admin, a member or any agent, whatever role is stored for it. The data
+/// can't be got back by Podster, so the narrowest who of any release command. It only takes away, so no fact about the
+/// room refuses it: archived, private, suspended or with release off, the owner may still delete. A Podster operator
+/// deletes through the operators' own route, which isn't a room participant's and isn't decided here.
+pub fn authorize_app_data_delete(
+    caller: &Caller,
+    authority_holds: bool,
+) -> Result<(), ReleaseDenial> {
+    if caller.role == Role::None {
+        return Err(ReleaseDenial::NotParticipant);
+    }
+    if caller.kind != PrincipalKind::Person || caller.role != Role::Owner || !authority_holds {
+        return Err(ReleaseDenial::NotAllowed);
+    }
+    Ok(())
+}
+
 /// The room's own facts the custom hostname's proof job reads before each look in DNS and each ask of the hostname's
 /// object (M6 step 8): those asking checked that only the room's rows can say, read again now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -26,8 +26,9 @@
 //!   may have met is settled by the list before another is sent. A conflict, or D1 saying the name is taken
 //!   (`D1_NAME_TAKEN`, **Proposed**), is no refusal: it may be an earlier create of this very name, so it is settled by
 //!   the list too.
-//! - **Only this module writes `app_store`** (a test reads every source for it), since while a create is outstanding
-//!   its `updated_at` is when the first counted list without it was read. S4's schema step adds `first_gone_at`.
+//! - **Only this module writes `app_store`** (a test reads every source for it). Since S4's schema step the first
+//!   counted list without the name is the record's own `first_gone_at`, which S2 kept in `updated_at`; every write of
+//!   it sets `updated_at` too. S4's deletion writes the record here as well ([`owe_delete`], [`delete_write`]).
 //! - **A create recorded and never sent:** if the alarm can't be set after the record's transaction commits (`arm`),
 //!   or the step dies before sending, the record says a create is outstanding that never went out. It settles like a
 //!   lost one, created again after two lists about twenty minutes on. **So D1 and the room may each hold a name with
@@ -51,18 +52,23 @@ use podster_core::app_store::{
 
 /// The room's record of one label's store, as its row holds it.
 pub(super) struct Kept {
-    kind: Option<String>,
-    name: Option<String>,
-    id: Option<String>,
-    made_at: Option<i64>,
-    create_sent_at: Option<i64>,
-    delete_owed_at: Option<i64>,
-    gone_at: Option<i64>,
-    updated_at: i64,
+    pub(super) kind: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) id: Option<String>,
+    pub(super) made_at: Option<i64>,
+    pub(super) create_sent_at: Option<i64>,
+    pub(super) delete_owed_at: Option<i64>,
+    pub(super) delete_cause: Option<String>,
+    pub(super) gone_at: Option<i64>,
+    /// The first counted read of gone (S4's schema step): while a create is outstanding, the first whole list without
+    /// its name that counted; while a deletion is owed, the first read of D1's own not-found (or, for a name with no
+    /// ID, the first whole list without it that counted).
+    pub(super) first_gone_at: Option<i64>,
+    pub(super) delete_attempts: i64,
 }
 
 impl Kept {
-    fn record(&self) -> StoreRecord<'_> {
+    pub(super) fn record(&self) -> StoreRecord<'_> {
         StoreRecord {
             kind: self.kind.as_deref(),
             name: self.name.as_deref(),
@@ -75,10 +81,11 @@ impl Kept {
 }
 
 /// The record of `label`'s store, or `None` when the room holds none.
-fn kept(sql: &SqlStorage, label: &str) -> R<Option<Kept>> {
+pub(super) fn kept(sql: &SqlStorage, label: &str) -> R<Option<Kept>> {
     Ok(rows(
         sql,
-        "SELECT kind, store_name, store_id, made_at, create_sent_at, delete_owed_at, gone_at, updated_at FROM app_store WHERE label = ?",
+        "SELECT kind, store_name, store_id, made_at, create_sent_at, delete_owed_at, delete_cause, gone_at, first_gone_at, delete_attempts
+           FROM app_store WHERE label = ?",
         vec![label.into()],
     )?
     .first()
@@ -89,9 +96,120 @@ fn kept(sql: &SqlStorage, label: &str) -> R<Option<Kept>> {
         made_at: row["made_at"].as_i64(),
         create_sent_at: row["create_sent_at"].as_i64(),
         delete_owed_at: row["delete_owed_at"].as_i64(),
+        delete_cause: text(&row["delete_cause"]),
         gone_at: row["gone_at"].as_i64(),
-        updated_at: int(&row["updated_at"]),
+        first_gone_at: row["first_gone_at"].as_i64(),
+        delete_attempts: int(&row["delete_attempts"]),
     }))
+}
+
+// --- Deleting the store (S4 of the store plan) -----------------------------------------------------------------------
+//
+// The deletion's commands and its job (`store_delete.rs`) decide by core's rules; every write of the record they make
+// is here, so this module stays the only writer of `app_store`. Each write is made only while the record is still owed
+// a deletion, not gone, and holds the ID the step read (`store_id IS ?`), so nothing a step read before an await can be
+// written over what changed meanwhile.
+
+/// Marks `label`'s store owed a deletion now, for `cause`, due to the job at once, in the caller's transaction. Only a
+/// record owed nothing and not gone is marked: asking again changes nothing, and the first cause stands
+/// (`podster_core::app_store::owe`). Whether this call marked it.
+pub(super) fn owe_delete(
+    sql: &SqlStorage,
+    label: &str,
+    cause: podster_core::app_store::DeleteCause,
+    now: i64,
+) -> R<bool> {
+    let before = kept(sql, label)?.and_then(|kept| kept.delete_owed_at);
+    exec(
+        sql,
+        "UPDATE app_store SET delete_owed_at = ?1, delete_cause = ?2, delete_next_at = ?1, delete_attempts = 0, updated_at = ?1
+           WHERE label = ?3 AND delete_owed_at IS NULL AND gone_at IS NULL",
+        vec![now.into(), cause.code().into(), label.into()],
+    )?;
+    Ok(before.is_none() && kept(sql, label)?.is_some_and(|kept| kept.delete_owed_at == Some(now)))
+}
+
+/// What one step of the deletion job writes to the record.
+pub(super) enum DeleteWrite {
+    /// The first read of gone that counts: noted now, read again at the time given.
+    NoteGone { next: i64 },
+    /// Read again at the time given, nothing else changed: gone too soon after the first, or a list too soon after
+    /// the create.
+    Until { next: i64 },
+    /// Gone, by two reads: `gone_at` now, and nothing more is due.
+    Gone,
+    /// The store is still there: any note of gone forgotten, deleted again after a wait that grows.
+    Present { next: i64 },
+    /// Nothing to go on: tried again after a wait that grows, the note kept.
+    Retry { next: i64 },
+    /// The record's name was listed under this ID: recorded made by it, and deleted at once. D1 holds a store of the
+    /// name, so a create was sent: one settling had cleared is set to now.
+    Found { id: String },
+}
+
+/// One step's write to `label`'s record, made only while it is owed a deletion, not gone, and holds the ID the step read
+/// (`read_id`). Whether it was written.
+pub(super) fn delete_write(
+    sql: &SqlStorage,
+    label: &str,
+    read_id: Option<&str>,
+    write: &DeleteWrite,
+    now: i64,
+) -> R<bool> {
+    let still = |sql: &SqlStorage| -> R<bool> {
+        Ok(!rows(
+            sql,
+            "SELECT 1 AS c FROM app_store WHERE label = ? AND delete_owed_at IS NOT NULL AND gone_at IS NULL AND store_id IS ?",
+            vec![label.into(), read_id.into()],
+        )?
+        .is_empty())
+    };
+    if !still(sql)? {
+        return Ok(false);
+    }
+    let (assignments, value): (&str, V) = match write {
+        DeleteWrite::NoteGone { next } => (
+            "first_gone_at = ?1, delete_next_at = ?2, delete_attempts = 0, updated_at = ?1",
+            (*next).into(),
+        ),
+        DeleteWrite::Until { next } => ("delete_next_at = ?2, updated_at = ?1", (*next).into()),
+        DeleteWrite::Gone => (
+            "gone_at = ?1, delete_next_at = NULL, updated_at = ?1",
+            V::Null,
+        ),
+        DeleteWrite::Present { next } => (
+            "first_gone_at = NULL, delete_next_at = ?2, delete_attempts = delete_attempts + 1, updated_at = ?1",
+            (*next).into(),
+        ),
+        DeleteWrite::Retry { next } => (
+            "delete_next_at = ?2, delete_attempts = delete_attempts + 1, updated_at = ?1",
+            (*next).into(),
+        ),
+        DeleteWrite::Found { id } => {
+            if !podster_core::app_store::d1_id_form(id)
+                || !rows(
+                    sql,
+                    "SELECT 1 AS taken FROM app_store WHERE store_id = ?",
+                    vec![id.as_str().into()],
+                )?
+                .is_empty()
+            {
+                return Ok(false);
+            }
+            (
+                "store_id = ?2, made_at = ?1, create_sent_at = coalesce(create_sent_at, ?1), first_gone_at = NULL, delete_next_at = ?1, delete_attempts = 0, updated_at = ?1",
+                id.as_str().into(),
+            )
+        }
+    };
+    exec(
+        sql,
+        &format!(
+            "UPDATE app_store SET {assignments} WHERE label = ?3 AND delete_owed_at IS NOT NULL AND gone_at IS NULL AND store_id IS ?4"
+        ),
+        vec![now.into(), value, label.into(), read_id.into()],
+    )?;
+    Ok(true)
 }
 
 fn label_of(sql: &SqlStorage, release_id: &str) -> R<Option<String>> {
@@ -221,7 +339,7 @@ pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Valu
         {
             exec(
                 sql,
-                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?
+                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?, first_gone_at = NULL
                    WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL AND delete_owed_at IS NULL AND gone_at IS NULL",
                 vec![id.into(), now.into(), now.into(), label.into(), name.into()],
             )?;
@@ -295,11 +413,11 @@ impl Workspace {
         let due = kept(&sql, label)?.and_then(|kept| {
             let due = settles_first(Some(&kept.record()), kept.create_sent_at, last.as_deref());
             match (due, kept.create_sent_at, kept.name.clone()) {
-                (true, Some(sent), Some(name)) => Some((name, sent, kept.updated_at)),
+                (true, Some(sent), Some(name)) => Some((name, sent, kept.first_gone_at)),
                 _ => None,
             }
         });
-        let Some((name, sent, last_change)) = due else {
+        let Some((name, sent, first_gone)) = due else {
             // The lease took no slot because settling was due when it was taken: nothing is read without one.
             if lease.is_some() && !lease_took_slot(&sql, release_id)? {
                 log(&sql, release_id, STORE_SLOT_NEEDED);
@@ -308,7 +426,7 @@ impl Workspace {
             return Ok(None);
         };
         let outcome = self
-            .settle_store(release_id, label, &name, sent, last_change, lease)
+            .settle_store(release_id, label, &name, sent, first_gone, lease)
             .await?;
         // Found and recorded made: the upload is the next step's, with its own upload slot.
         Ok(Some(match outcome {
@@ -349,7 +467,7 @@ impl Workspace {
                     return Err(ApiError::internal("a store to settle with no create"));
                 };
                 match self
-                    .settle_store(release_id, label, &name, sent, kept.updated_at, lease)
+                    .settle_store(release_id, label, &name, sent, kept.first_gone_at, lease)
                     .await?
                 {
                     StoreOutcome::Wait(STORE_CREATE_OWED, _) => {
@@ -426,7 +544,7 @@ impl Workspace {
                 Some(name) => {
                     exec(
                         &store,
-                        "UPDATE app_store SET create_sent_at = ?, updated_at = ? WHERE label = ? AND store_id IS NULL AND create_sent_at IS NULL",
+                        "UPDATE app_store SET create_sent_at = ?, updated_at = ?, first_gone_at = NULL WHERE label = ? AND store_id IS NULL AND create_sent_at IS NULL",
                         vec![now.into(), now.into(), label_owned.as_str().into()],
                     )?;
                     name
@@ -471,7 +589,7 @@ impl Workspace {
                 log(&sql, release_id, STORE_CREATE_UNANSWERED);
                 // The list may find it already; anything short of that waits, under the create's code.
                 match self
-                    .settle_store(release_id, label, &name, sent, sent, lease)
+                    .settle_store(release_id, label, &name, sent, None, lease)
                     .await?
                 {
                     StoreOutcome::Wait(code, at)
@@ -498,7 +616,7 @@ impl Workspace {
             let now = release_now(&store);
             exec(
                 &store,
-                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ? WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL",
+                "UPDATE app_store SET store_id = ?, made_at = ?, updated_at = ?, first_gone_at = NULL WHERE label = ? AND store_name = ? AND store_id IS NULL AND create_sent_at IS NOT NULL",
                 vec![
                     store_id.into(),
                     now.into(),
@@ -510,16 +628,16 @@ impl Workspace {
         })
     }
 
-    /// One whole list, read for a create of `name` sent at `sent`, whose record last changed at `last_change`: found,
-    /// recorded made ([`StoreOutcome::Go`]); otherwise a wait, the first list without it that counts noted, or, on the
-    /// second, the create no longer outstanding.
+    /// One whole list, read for a create of `name` sent at `sent`, whose first counted list without it was read at
+    /// `first_gone`, if one was: found, recorded made ([`StoreOutcome::Go`]); otherwise a wait, the first list without it
+    /// that counts noted, or, on the second, the create no longer outstanding.
     async fn settle_store(
         &self,
         release_id: &str,
         label: &str,
         name: &str,
         sent: i64,
-        last_change: i64,
+        first_gone: Option<i64>,
         lease: Option<&release_driver::StepLease>,
     ) -> R<StoreOutcome> {
         let sql = self.state.storage().sql();
@@ -532,7 +650,7 @@ impl Workspace {
         }
         let list = provider.list().await;
         let now = release_now(&sql);
-        let settled = settle(list.as_deref(), name, sent, last_change, now);
+        let settled = settle(list.as_deref(), name, sent, first_gone, now);
         // Test builds only: a test changes the room between the list and what is written of it.
         #[cfg(feature = "failpoints")]
         release_driver::test_at(&sql, "store_listed");
@@ -546,7 +664,14 @@ impl Workspace {
             Settle::Wait { at, note_gone } => {
                 // A first list that counts and can't be noted (the lease ran out) counts for nothing: the step says so.
                 if note_gone
-                    && !self.unsettled_write(label, name, sent, lease, "updated_at = ?", now)?
+                    && !self.unsettled_write(
+                        label,
+                        name,
+                        sent,
+                        lease,
+                        "first_gone_at = ?1, updated_at = ?1",
+                        now,
+                    )?
                 {
                     return Ok(StoreOutcome::Wait(release_driver::LEASE_LOST, None));
                 }
@@ -558,7 +683,7 @@ impl Workspace {
                     name,
                     sent,
                     lease,
-                    "create_sent_at = NULL, updated_at = ?",
+                    "create_sent_at = NULL, first_gone_at = NULL, updated_at = ?1",
                     now,
                 )? {
                     return Ok(StoreOutcome::Wait(release_driver::LEASE_LOST, None));
@@ -604,7 +729,7 @@ impl Workspace {
             if still {
                 exec(
                     &store,
-                    &format!("UPDATE app_store SET {assignments} WHERE label = ?"),
+                    &format!("UPDATE app_store SET {assignments} WHERE label = ?2"),
                     vec![now.into(), label.as_str().into()],
                 )?;
                 *slot.borrow_mut() = true;

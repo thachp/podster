@@ -51,8 +51,11 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
             Some(Audience::Person)
         }
         ["v1", "workspaces", _, "app-hostname"] if get || put || delete => Some(Audience::Person),
+        ["v1", "workspaces", _, "apps", _, "delete-data"] if post => Some(Audience::Person),
         ["v1", "app-reports"] if post => Some(Audience::Person),
-        ["v1", "moderation", "apps", _, "suspend" | "lift"] if post => Some(Audience::Operator),
+        ["v1", "moderation", "apps", _, "suspend" | "lift" | "delete-data"] if post => {
+            Some(Audience::Operator)
+        }
         ["v1", "moderation", "app-hosts", _, "suspend" | "lift"] if post => {
             Some(Audience::Operator)
         }
@@ -86,7 +89,7 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
             "releases",
             _,
             "approve" | "decline" | "rollback"
-        ]
+        ] | ["v1", "workspaces", _, "apps", _, "delete-data"]
     )
 }
 
@@ -204,6 +207,38 @@ async fn app_suspension(
     .await
 }
 
+/// An operator deletes an app's data, by its label (S4 of the store plan). The operator was checked before this. The
+/// room suspends the app, then owes its store a deletion, and its own job deletes it. Recorded in the operators' log as
+/// the action `delete_data`, intent first and outcome after, as a suspension is. An unknown label is `not_found`, and
+/// so is one the lookup table names for a room that says it isn't its own.
+async fn app_data_delete(
+    env: &Env,
+    caller: &Caller,
+    label: &str,
+    body: Option<&str>,
+) -> R<std::result::Result<Value, Response>> {
+    let reason = moderation::reason_of(body)?;
+    if !is_label(label) {
+        return Err(ApiError::not_found());
+    }
+    let Some(workspace) = room_for_label(env, label).await? else {
+        return Err(ApiError::not_found());
+    };
+    let request = json!({ "label": label, "reason": reason.name() });
+    moderation::room_action_named(
+        env,
+        &caller.id,
+        &workspace,
+        crate::workspace::INTERNAL_APP_DATA_DELETE,
+        request,
+        "app",
+        label,
+        "delete_data",
+        reason,
+    )
+    .await
+}
+
 /// An operator suspends a custom hostname, or lifts that (M6 step 4(a)). The operator was checked before this. The
 /// name comes normalized, so two spellings are one name. Anything on the content domain that isn't an app's
 /// default host, and anything on Podster's own domain, is nobody's hostname: `not_found`. The suspension is the
@@ -302,6 +337,10 @@ pub(crate) async fn answer(
         // A report that names an app by its address (step 9). It needs no content domain: any well-formed host is kept,
         // and nothing says whether it is served.
         ["v1", "app-reports"] => return moderation::app_report(env, caller, body, req).await,
+        // An operator deletes an app's data (S4 of the store plan), which suspends it first.
+        ["v1", "moderation", "apps", label, "delete-data"] => {
+            app_data_delete(env, caller, label, body).await?
+        }
         ["v1", "moderation", "apps", label, verb] => {
             app_suspension(env, caller, label, *verb == "suspend", body).await?
         }

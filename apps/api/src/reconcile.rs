@@ -804,9 +804,15 @@ fn keep_slot(sql: &SqlStorage, id: &str, (seq, at): (i64, i64)) -> R<()> {
     )
 }
 
+/// **Proposed.** How far the room's clock may run behind this object's when a kept slot is settled (the deep re-review
+/// of PR #423, a low item): the room stamps its suspension with its own clock, this object stamped the slot with its
+/// own, and two objects' clocks need not agree. A suspension stamped up to this long before the slot still keeps it,
+/// the safe side: at worst a slot an operator's earlier suspension explains is kept for its hour.
+const SLOT_SKEW_MS: i64 = 60_000;
+
 /// The script's room answered again: each slot kept for a lost answer about it is freed unless the room reports one of
-/// its labels suspended at or after the slot's time (`suspended_since`), and either way no longer waits. A report that
-/// is missing frees nothing.
+/// its labels suspended at or after the slot's time, less [`SLOT_SKEW_MS`] (`suspended_since`), and either way no
+/// longer waits. A report that is missing frees nothing.
 fn settle_kept_slots(sql: &SqlStorage, id: &str, judged: &Value) -> R<()> {
     let Some(since) = judged.get("suspended_since") else {
         return Ok(());
@@ -817,7 +823,9 @@ fn settle_kept_slots(sql: &SqlStorage, id: &str, judged: &Value) -> R<()> {
         vec![id.into()],
     )? {
         let (seq, at) = (int(&row["seq"]), int(&row["at"]));
-        let suspended_then = since.as_i64().is_some_and(|since| since >= at);
+        let suspended_then = since
+            .as_i64()
+            .is_some_and(|since| since >= at.saturating_sub(SLOT_SKEW_MS));
         if !suspended_then {
             exec(
                 sql,
@@ -890,6 +898,9 @@ async fn one_script(
                 "bindings": bindings, "bindings_oversized": oversized,
                 "serve_entries": provider.serve_entries_namespace(),
                 "may_suspend": reserved.is_some(),
+                // Whether the ceiling was asked for this script at all: one asked without a slot, only because its
+                // bindings need the room's record to judge, isn't held by the ceiling, and is asked again with one.
+                "offered": offer,
             }),
         )
         .await

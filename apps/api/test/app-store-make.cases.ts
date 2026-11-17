@@ -164,6 +164,8 @@ const upload = (room: string, release = REL): Promise<Answer> =>
 const brief = (answer: Answer) => [answer.status, answer.body.state, answer.body.uploaded, answer.body.waiting ?? null, answer.body.reason ?? null];
 const at = (room: string, now: number) => inRoom(room, (sql) => void sql.exec("UPDATE test_release_clock SET now = ?", now));
 const record = (room: string) => inRoom(room, (sql) => sql.exec("SELECT label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at FROM app_store").toArray() as any[]);
+/** The record's first counted list without its name (S4's schema step), which S2 kept in `updated_at`. */
+const firstGone = (room: string) => inRoom(room, (sql) => sql.exec("SELECT first_gone_at FROM app_store").one().first_gone_at as number | null);
 const failure = (room: string, release = REL) => inRoom(room, (sql) => sql.exec("SELECT state, failure_code FROM release WHERE id = ?", release).one());
 /** Another release of the same label, uploading under its own script. */
 const another = (r: Room) => inRoom(r.room, (sql) => sql.exec(
@@ -303,8 +305,13 @@ export function appStoreMakeCases() {
       // A second within ten minutes of the first counts for nothing.
       expect(await step(T + 20 * MINUTE - 1)).toEqual(["store_unsettled", T + 20 * MINUTE]);
       expect((await creates()).length).toBe(1);
-      // The first counted list is noted as the record's last change.
+      // The first counted list is noted in the record's own column (S4's schema step), and as its last change.
       expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T, create_sent_at: T, made_at: null, updated_at: T + 10 * MINUTE }]);
+      expect(await firstGone(r.room)).toBe(T + 10 * MINUTE);
+      // Only that column counts: a later change to `updated_at` alone, as S2 read it, moves nothing.
+      await inRoom(r.room, (sql) => sql.exec("UPDATE app_store SET updated_at = ?", T + 19 * MINUTE));
+      expect(await step(T + 20 * MINUTE - 1)).toEqual(["store_unsettled", T + 20 * MINUTE]);
+      expect((await creates()).length).toBe(1);
       // The second: the create made nothing, so it is created again at once, under the same name, recorded first
       // again, and the upload goes on.
       await at(r.room, T + 20 * MINUTE);
@@ -312,6 +319,7 @@ export function appStoreMakeCases() {
       const [row] = await record(r.room);
       expect(row).toEqual({ label: r.label, kind: "d1", store_name: name, store_id: row.store_id, recorded_at: T, create_sent_at: T + 20 * MINUTE, made_at: T + 20 * MINUTE, updated_at: T + 20 * MINUTE });
       expect(row.store_id).toMatch(UUID);
+      expect(await firstGone(r.room)).toBeNull();
       expect((await creates()).map((call) => call.key)).toEqual([name, name]);
       expect((await storeState()).databases).toEqual([{ uuid: row.store_id, name }]);
     });

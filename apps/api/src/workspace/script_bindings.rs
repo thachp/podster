@@ -131,10 +131,15 @@ pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option
         ));
     }
     if body["may_suspend"] != true {
-        console_error!(
-            "takedown: a script holds a binding it may not, and the ceiling held the suspension: code={}",
-            found.code()
-        );
+        // Logged as held only when the ceiling was asked and said no (`offered`): a first ask with no slot offered is
+        // asked again with one, which may suspend, so saying the ceiling held it then would be wrong (the deep
+        // re-review of PR #423, a low item). A question that doesn't say is logged as held, as before.
+        if body["offered"] != false {
+            console_error!(
+                "takedown: a script holds a binding it may not, and the ceiling held the suspension: code={}",
+                found.code()
+            );
+        }
         return Ok(Some(
             json!({ "verdict": "foreign", "foreign": found.code(), "suspended": false, "held": true }),
         ));

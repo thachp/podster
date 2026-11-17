@@ -12,7 +12,8 @@
 //! **Nothing is configured anywhere.** The release job makes a store through [`StoreProvider::create`] and settles a
 //! lost create through [`StoreProvider::list`] (`workspace/release_store.rs`, S2 of the store plan); the `Moderation`
 //! object's store reconcile lists and reads ([`StoreProvider::for_reconcile`], S5's second PR) and never deletes; the
-//! delete waits for S4 and is reached only by a test-only route. [`StoreProvider::from_env`] answers `None` unless both
+//! room's deletion job (`workspace/store_delete.rs`, S4) deletes, reads and lists, and only a store its own record
+//! names. [`StoreProvider::from_env`] answers `None` unless both
 //! settings are bound and well-formed, and no environment binds `CONTENT_STORE_TOKEN`.
 //!
 //! **What was seen and what is assumed.** The store spike (`spikes/m6-store`) saw a create (`POST`, `{"name": …}`,
@@ -229,7 +230,8 @@ impl StoreProvider {
     }
 
     /// Reads the database with this ID, which the room recorded under this name: the store reconcile's read of a made
-    /// store its list didn't show (S5's second PR), and the test-only route's.
+    /// store its list didn't show (S5's second PR), the deletion job's read after its delete (S4), and the test-only
+    /// route's.
     pub(crate) async fn read(&self, id: &str, name: &str) -> StoreRead {
         if !d1_id_form(id) || !is_store_name(name) {
             return StoreRead::Unknown;
@@ -252,9 +254,8 @@ impl StoreProvider {
         )
     }
 
-    /// Deletes the database with this ID. Its answer isn't trusted: only a read says gone. Only the test-only route
-    /// deletes one until S4.
-    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
+    /// Deletes the database with this ID. Its answer isn't trusted: only a read says gone. The room's deletion job
+    /// (`workspace/store_delete.rs`, S4 of the store plan) is the only caller but the test-only route.
     pub(crate) async fn delete(&self, id: &str) {
         if !d1_id_form(id) {
             return;

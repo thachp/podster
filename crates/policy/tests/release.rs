@@ -156,6 +156,42 @@ fn only_the_rooms_owner_and_admins_as_people_configure_and_approve() {
 }
 
 #[test]
+fn only_the_rooms_owner_as_a_person_deletes_its_apps_data() {
+    // S4 of the store plan: the owner alone, while their authority holds. An admin, who may configure release and
+    // approve, may not; nor may any agent, whatever role is stored for it.
+    let mut allowed = Vec::new();
+    for kind in [Person, Agent] {
+        for role in Role::ALL {
+            for holds in [true, false] {
+                let got = authorize_app_data_delete(&caller("x", kind, role), holds);
+                let expected = if role == Role::None {
+                    Err(ReleaseDenial::NotParticipant)
+                } else if kind == Person && role == Role::Owner && holds {
+                    Ok(())
+                } else {
+                    Err(ReleaseDenial::NotAllowed)
+                };
+                assert_eq!(got, expected, "{kind:?} {role:?} {holds}");
+                if got.is_ok() {
+                    allowed.push((kind, role, holds));
+                }
+            }
+        }
+    }
+    assert_eq!(allowed, [(Person, Role::Owner, true)]);
+    // The control: an admin may configure release, so the narrowing is this rule's own.
+    assert_eq!(
+        authorize_release_config(
+            &caller("x", Person, Role::Admin),
+            true,
+            &ReleaseRoom::OPEN,
+            ConfigChange::TurnOff
+        ),
+        Ok(())
+    );
+}
+
+#[test]
 fn only_those_who_configure_release_map_a_custom_hostname_and_only_where_release_may_happen() {
     // M6 step 8: asking to map a name is a change to the release configuration, so it needs everything a change
     // needs, release switched on in the room among them. Removing one only takes down, so it is always theirs.

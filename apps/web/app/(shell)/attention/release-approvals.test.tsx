@@ -6,7 +6,7 @@ import { routerCalls, setUrl } from "@/test/next-navigation";
 import { WHAT_AN_APP_IS } from "../w/[id]/settings/release-model";
 import type { ApprovalItem } from "./attention-model";
 import type { Approvals } from "./load-attention";
-import { APPROVALS_UNAVAILABLE, explainApprovalRefusal, ReleaseApprovals } from "./release-approvals";
+import { APPROVAL_ENDED, APPROVALS_UNAVAILABLE, explainApprovalRefusal, ReleaseApprovals } from "./release-approvals";
 
 // M6 step 10(b): release approvals in Needs attention, wired to approveRelease and declineRelease.
 
@@ -92,6 +92,18 @@ describe("release approvals in Needs attention", () => {
     expect(sent).toHaveLength(2);
     expect(sent[0].key).toBe(sent[1].key);
     expect(routerCalls.refresh).toBe(0);
+  });
+
+  it("says so when the approval's recheck ended the release, and keeps the row until a reload", async () => {
+    const user = userEvent.setup();
+    reply = () => new Response(JSON.stringify({ id: REL, state: "failed", failure_code: "requester_lost_authority" }), { status: 200 });
+    show(read([item()]));
+    await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Approve" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(APPROVAL_ENDED);
+    expect(routerCalls.refresh).toBe(0);
+    expect(explainApprovalRefusal("invalid_transition", 409)).toMatch(/isn't waiting for approval any more\. .*Nothing changed/);
+    expect(explainApprovalRefusal("release_address_pending", 503)).toMatch(/Nothing changed\. Try again/);
   });
 
   it("says when it couldn't check every room, and never calls a partial list empty", () => {

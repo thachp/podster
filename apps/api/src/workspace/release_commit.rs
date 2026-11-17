@@ -251,7 +251,27 @@ pub(super) fn fail(
     under: Option<i64>,
     now: i64,
 ) -> R<()> {
-    end_failed(sql, release_id, reason, None, under, now)
+    end_failed(sql, release_id, reason, None, under, None, now)
+}
+
+/// [`fail_because`], told to `told` instead of the room's managers: a release a person's approval found failing
+/// (`release_approval`), whose news goes to people only, those who may approve and whoever asked.
+pub(super) fn fail_told(
+    sql: &SqlStorage,
+    release_id: &str,
+    failure: RecheckFailure,
+    told: Vec<String>,
+    now: i64,
+) -> R<()> {
+    end_failed(
+        sql,
+        release_id,
+        failure.code(),
+        failure.not_delegated_cause().map(|cause| cause.code()),
+        None,
+        Some(told),
+        now,
+    )
 }
 
 /// [`fail`], for core's recheck failure: its code, and, for `release_not_delegated`, which of the organization's two
@@ -270,16 +290,19 @@ pub(super) fn fail_because(
         failure.code(),
         failure.not_delegated_cause().map(|cause| cause.code()),
         under,
+        None,
         now,
     )
 }
 
+/// `told` is who hears of it; `None` is the room's managers, as for every failure but one at a person's approval.
 fn end_failed(
     sql: &SqlStorage,
     release_id: &str,
     reason: &str,
     cause: Option<&str>,
     under: Option<i64>,
+    told: Option<Vec<String>>,
     now: i64,
 ) -> R<()> {
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
@@ -343,7 +366,10 @@ fn end_failed(
             reason: Some(reason),
             ..Transition::NONE
         },
-        roles::room_managers(sql, moderation::PODSTER)?,
+        match told {
+            Some(told) => told,
+            None => roles::room_managers(sql, moderation::PODSTER)?,
+        },
         now,
     )
 }

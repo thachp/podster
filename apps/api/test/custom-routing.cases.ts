@@ -439,7 +439,8 @@ export function customRoutingCases() {
         await fresh();
         const c = await routed("org_cr_reconcile");
         await inRoom(c.r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() + 24 * 3600_000));
-        await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(c.r.label, c.r.room).run();
+        // The room's own alarm may have written its row already (M6 step 6, 6f: the label's upkeep).
+        await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1) ON CONFLICT (label) DO NOTHING").bind(c.r.label, c.r.room).run();
         expect(await reconcile()).toMatchObject({ code: "ok", changed: 0, unanswered: 0 });
         expect((await held()).entries[c.name]).toBe(`${c.r.script}@${c.name}`);
         // The object's claim is ending: the room forgets it applied the host, and its applier, asking the object again,

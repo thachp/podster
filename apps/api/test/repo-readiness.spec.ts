@@ -152,7 +152,9 @@ async function withApp(id: string, opts: { up?: boolean } = {}) {
   const script = `${label}.${served}`;
   await inRoom(id, (sql) => {
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-    sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
+    // Marked as indexed, so the room's alarm doesn't write it to the lookup table, whose rooms this file counts itself
+    // (`roomsWithApps`).
+    sql.exec("INSERT INTO app_label (label, current, created_at, indexed_at) VALUES (?, 1, 1, 1)", label);
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
     if (opts.up === false) return;

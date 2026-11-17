@@ -150,7 +150,7 @@ describe("asking for a release (M6 step 6)", () => {
     expect((await all(r.room, "SELECT recipient_principal_id AS who FROM outbox WHERE event_id = ? ORDER BY who", event.id)).map((o: any) => o.who)).toEqual([r.admin.id, r.owner.id].sort());
   });
 
-  it("starts nothing: the room's job leaves it awaiting approval, and approving it still isn't built", async () => {
+  it("starts nothing: the room's job leaves it awaiting approval until a person approves it", async () => {
     const r = await room();
     const id = (await switchedOn(() => ask(r))).body.id;
     // The room's alarm runs its job twice, with release on: a release nobody approved is not the job's.
@@ -160,9 +160,9 @@ describe("asking for a release (M6 step 6)", () => {
     });
     expect(await all(r.room, "SELECT state, approved_by, upload_started_at, script_name FROM release WHERE id = ?", id)).toEqual([{ state: "awaiting_approval", approved_by: null, upload_started_at: null, script_name: null }]);
     expect(await all(r.room, "SELECT * FROM release_job")).toEqual([]);
-    // Approving is the next PR's: until then the Worker answers it as a route that isn't built.
+    // Only a person's approval queues it (`release-approval.spec.ts`).
     const approve = await switchedOn(() => api(r.owner, "POST", `${path(r)}/${id}/approve`, {}));
-    expect(refused(approve)).toEqual([409, "release_not_available"]);
+    expect([approve.status, approve.body?.state], approve.text).toEqual([200, "queued"]);
   });
 
   it("answers a retry with the same key as the first time, and refuses a second ask for a commit already waiting", async () => {

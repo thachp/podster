@@ -89,6 +89,7 @@ mod provisioning;
 mod public;
 mod public_claims;
 mod readiness_upkeep;
+mod release_approval;
 mod release_approvals;
 mod release_commit;
 mod release_config;
@@ -3758,6 +3759,7 @@ impl Workspace {
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
             || (migrated && visibility::public_index_due(&sql)?)
             || (migrated && repositories::index_due(&sql)?)
+            || (migrated && release_approval::label_index_due(&sql)?)
         {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
@@ -4459,10 +4461,14 @@ impl Workspace {
         // The room's release configuration (M6 step 6) is there only while the deployment's setting is on, as every M6
         // route. Otherwise it answers as a route that doesn't exist.
         // So is the room's custom hostname (M6 step 8), its releases awaiting approval (M6 step 10(b)), and asking for a
-        // release (M6 step 6).
+        // release, approving and declining one (M6 step 6).
         let release_route_on = matches!(
             tail,
-            ["release-config"] | ["app-hostname"] | ["release-approvals"] | ["releases"]
+            ["release-config"]
+                | ["app-hostname"]
+                | ["release-approvals"]
+                | ["releases"]
+                | ["releases", _, "approve" | "decline"]
         ) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
@@ -4484,6 +4490,9 @@ impl Workspace {
                 // Removing a custom hostname only takes down. Asking for one in an archived room is refused by
                 // `podster_policy::release::authorize_custom_hostname`.
                 | (Method::Delete, ["app-hostname"])
+                // Declining only takes away. Approving in an archived room is refused by core's recheck, by its own
+                // code, which ends the release.
+                | (Method::Post, ["releases", _, "approve" | "decline"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -5311,6 +5320,45 @@ impl Workspace {
                     move |sql, who, _| release_request::handle(sql, who, &body, &reads),
                 )
             }
+            // Approving or declining a release (M6 step 6, 6f): who first, by the room's rows; then, to approve, the
+            // gate and every outside fact read afresh; and the standing again on every attempt, a replay included.
+            (Method::Post, ["releases", release, verb @ ("approve" | "decline")])
+                if release_route_on =>
+            {
+                release_approval::may_decide(&who)?;
+                let release = release_approval::named(release)?;
+                if *verb == "approve" {
+                    let reads = Rc::new(self.approval_reads(&release, &identity.id).await?);
+                    let again = reads.clone();
+                    let domain = crate::content_provider::content_domain(&self.env);
+                    self.command_checked(
+                        &identity,
+                        key,
+                        hash,
+                        stops_when_archived,
+                        test_fail,
+                        move |sql: &SqlStorage, who: &Participant| {
+                            release_approval::approve_standing(sql, who, &again)
+                        },
+                        move |sql, who, _| {
+                            release_approval::approve(sql, who, &release, &reads, domain.as_deref())
+                        },
+                    )
+                } else {
+                    let reads = self.decline_reads(&identity.id).await?;
+                    self.command_checked(
+                        &identity,
+                        key,
+                        hash,
+                        stops_when_archived,
+                        test_fail,
+                        move |sql: &SqlStorage, who: &Participant| {
+                            release_approval::decline_standing(sql, who, &reads)
+                        },
+                        move |sql, who, _| release_approval::decline(sql, who, &release),
+                    )
+                }
+            }
             _ => Err(ApiError::not_found()),
         }
     }
@@ -5459,6 +5507,14 @@ impl DurableObject for Workspace {
         }
         // The job keeps its own wait, so its failure doesn't bring the alarm back in five seconds.
         let repo_index = self.repository_upkeep(&sql).await;
+        // Each app label not yet in D1's lookup table (M6 step 6, 6f), labels from before approval existed included.
+        let label_index = self.label_index_upkeep(&sql).await;
+        if let Err(error) = &label_index {
+            console_error!(
+                "release: label index failed: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
         // A merge that was asked for is carried out, one recorded step at a time.
         if let Err(error) = self.merge_upkeep().await {
             console_error!("merge upkeep failed: {:?}", error.code());
@@ -5525,7 +5581,10 @@ impl DurableObject for Workspace {
         }
         if let Err(error) = self
             .arm(
-                index.is_err() || public_index.is_err() || repo_index.is_err(),
+                index.is_err()
+                    || public_index.is_err()
+                    || repo_index.is_err()
+                    || label_index.is_err(),
                 outbox.is_err(),
             )
             .await

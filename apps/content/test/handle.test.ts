@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS } from "../src/handle";
-import { customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
+import { CODE_MARK, customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
 
 // The content Worker's handler, against stand-ins for its two bindings (M6 step 4(b), ADR 0010). Nothing here reaches
@@ -24,12 +24,10 @@ type World = {
   apps: Map<string, (request: Request) => Response | Promise<Response>>;
   clock: { now: number };
   failReads: { all: boolean; keys: Set<string> };
-  /** The scripts whose release carries code. Every other script is static. */
-  codeScripts: Set<string>;
 };
 
 function world(): World {
-  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, codeScripts: new Set(), deps: undefined as unknown as Deps };
+  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, deps: undefined as unknown as Deps };
   w.apps.set(SCRIPT, () => new Response("<h1>app</h1>", { headers: { "content-type": "text/html" } }));
   w.deps = {
     entries: {
@@ -54,7 +52,6 @@ function world(): World {
     now: () => w.clock.now,
     stop: { read: null },
     domain: DOMAIN,
-    hostKind: (script) => (w.codeScripts.has(script) ? "code" : "static"),
     codeApps: false,
   };
   return w;
@@ -283,6 +280,40 @@ describe("the serve entry", () => {
     w.apps.set(others[0], () => new Response("its own files"));
     expect([(await get(w, "/", {}, `other.${DOMAIN}`)).status, w.sent.map((sent) => sent.script)]).toEqual([200, [others[0]]]);
   });
+
+  it("learns a host's kind from the mark on its entry, by the fixture's vectors: with the switch off, code serves nothing", async () => {
+    expect(fixture.valid_code_entries.length).toBeGreaterThanOrEqual(4);
+    for (const value of fixture.valid_code_entries) {
+      const script = value.slice(CODE_MARK.length);
+      const host = `${script.slice(0, script.indexOf("."))}.${DOMAIN}`;
+      const w = world();
+      w.kv.set(host, value);
+      w.apps.set(script, () => new Response("its code"));
+      const answer = await get(w, "/", {}, host);
+      // Exactly today's answer for a host with code while the switch is off: its own refusal, and no app asked.
+      expect([answer.status, await answer.text(), answer.headers.get("access-control-allow-origin"), w.sent.length], value).toEqual([503, "code_apps_off\n", "null", 0]);
+      // And on another label's host, nothing at all.
+      const other = world();
+      other.kv.set(HOST, value);
+      if (!value.includes("k3v9q2.")) expect([(await get(other)).status, other.sent.length], value).toEqual([404, 0]);
+    }
+    // A malformed or ambiguous mark is no entry: not-found, as for any value that isn't one.
+    expect(fixture.invalid_code_entries.length).toBeGreaterThanOrEqual(20);
+    for (const value of fixture.invalid_code_entries) {
+      const w = world();
+      w.kv.set(HOST, value);
+      const answer = await get(w);
+      expect([answer.status, headersOf(answer), w.sent.length], JSON.stringify(value)).toEqual([404, NOT_FOUND, 0]);
+    }
+    // A static name that only begins with the mark's word is static, served as always.
+    for (const value of fixture.static_entries_not_marked) {
+      const host = `${value.slice(0, value.indexOf("."))}.${DOMAIN}`;
+      const w = world();
+      w.kv.set(host, value);
+      w.apps.set(value, () => new Response("ok"));
+      expect([(await get(w, "/", {}, host)).status, w.sent.map((sent) => sent.script)], value).toEqual([200, [value]]);
+    }
+  });
 });
 
 describe("a custom hostname (M6 step 8c)", () => {
@@ -332,6 +363,24 @@ describe("a custom hostname (M6 step 8c)", () => {
     }
   });
 
+  it("learns its kind from the mark on its entry, by the fixture's vectors: with the switch off, code serves nothing", async () => {
+    const host = fixture.custom_entry_host;
+    for (const value of fixture.valid_code_custom_entries) {
+      const w = world();
+      w.kv.set(host, value);
+      w.apps.set(value.slice(CODE_MARK.length, value.indexOf("@")), () => new Response("its code"));
+      const answer = await get(w, "/", {}, host);
+      expect([answer.status, await answer.text(), w.sent.length], value).toEqual([503, "code_apps_off\n", 0]);
+    }
+    expect(fixture.invalid_code_custom_entries.length).toBeGreaterThanOrEqual(20);
+    for (const value of [...fixture.invalid_code_custom_entries, ...fixture.valid_code_entries]) {
+      const w = world();
+      w.kv.set(host, value);
+      const answer = await get(w, "/", {}, host);
+      expect([answer.status, w.sent.length], JSON.stringify(value)).toEqual([404, 0]);
+    }
+  });
+
   it("reads no entry for a host Rust never writes, and reads a formed host as core does, by the fixture's vectors", async () => {
     expect(fixture.custom_entry_refused_hosts.length).toBeGreaterThanOrEqual(10);
     for (const host of fixture.custom_entry_refused_hosts) {
@@ -373,7 +422,8 @@ describe("a custom hostname (M6 step 8c)", () => {
 
   it("meets the same rules as a default host for its kind: a host with code serves nothing while the switch is off", async () => {
     const w = custom();
-    w.codeScripts.add(SCRIPT);
+    // The entry carries the mark that its script has code, before the custom form.
+    w.kv.set(CUSTOM, `${CODE_MARK}${ENTRY}`);
     const answer = await get(w, "/", {}, CUSTOM);
     expect([answer.status, await answer.text(), w.sent.length]).toEqual([503, "code_apps_off\n", 0]);
     expect((await get(w, "/", { method: "POST" }, CUSTOM)).status).toBe(405);
@@ -594,7 +644,8 @@ const JSON_HEADERS = { "content-type": "application/json" };
 /** A world whose one app's release carries code, with the switch on through the test's seam unless said otherwise. */
 function codeWorld(codeApps = true): World {
   const w = world();
-  w.codeScripts.add(SCRIPT);
+  // The entry carries the mark that its script has code (`podster_core::serve_entry`).
+  w.kv.set(HOST, `${CODE_MARK}${SCRIPT}`);
   w.deps.codeApps = codeApps;
   return w;
 }
@@ -631,7 +682,7 @@ describe("a host whose release carries code", () => {
     }
     expect(w.sent).toEqual([]);
     // The same request to a static host is served, as it always was.
-    w.codeScripts.clear();
+    w.kv.set(HOST, SCRIPT);
     expect((await get(w)).status).toBe(200);
     }
   });
@@ -644,7 +695,8 @@ describe("a host whose release carries code", () => {
     // Before the kind is known, the same error is answered as it always was.
     const s = world();
     s.deps.stop.read = { at: s.clock.now, stopped: false };
-    s.deps.hostKind = () => { throw new Error("unexpected"); };
+    // The entry's read answers something that isn't a string, so reading it throws before any kind is learned.
+    s.deps.entries = { get: async () => 42 as unknown as string };
     expect(await answerOf(await get(s))).toEqual([502, OWN, "error\n"]);
   });
 

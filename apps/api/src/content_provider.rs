@@ -29,7 +29,11 @@
 //! this module: no host, no script, no ID of the account or the namespaces, and no token.
 use crate::{setting, Setting};
 use futures_util::future::{select, Either};
+use podster_core::app_requests::HostKind;
 use podster_core::release::{is_label, script_owner, ScriptAnswer, ScriptOwner};
+use podster_core::serve_entry::{
+    custom_entry_script_kind, custom_entry_value_kind, default_entry_script, default_entry_value,
+};
 use serde_json::Value;
 use std::time::Duration;
 use worker::*;
@@ -145,8 +149,11 @@ pub(crate) fn on_domain(domain: &str, host: &str) -> bool {
 /// What a read of a serve entry found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Entry {
-    /// The host's entry names this script.
+    /// The host's entry names this script, with no mark: a static release's, the only kind written today.
     Present(String),
+    /// The host's entry names this script, marked as carrying code (`podster_core::serve_entry`, M6 stage 1). Nothing
+    /// writes one yet, so an applier that wrote a static entry reads this back as differing.
+    Code(String),
     /// The provider said, in so many words, that the host has no entry.
     Absent,
     /// The provider answered with a value, and it isn't a script's name Rust made. Something else wrote it.
@@ -516,22 +523,34 @@ impl Provider {
     /// What a host's serve entry holds for one script: on the content domain, an app's default host, the script's name
     /// alone; anywhere else, a custom hostname, the script's name and the host it is written under
     /// (`podster_core::hostnames::custom_entry_value`, M6 step 8c), so a value under any other key serves nothing.
+    /// Either is after the mark that the script carries code when `kind` says so (`podster_core::serve_entry`).
     /// `None` for a script that isn't a name Podster makes, or a host on the content domain that isn't that script's
     /// app's default host: a host there takes only its own app's scripts, and a host two labels deep is nobody's.
-    fn entry_value(&self, host: &str, script: &str) -> Option<String> {
+    fn entry_value(&self, host: &str, script: &str, kind: HostKind) -> Option<String> {
         let ScriptOwner::Podster { label, .. } = script_owner(script) else {
             return None;
         };
         if self.on_content_domain(host) {
-            return (self.default_host_label(host) == Some(label)).then(|| script.to_owned());
+            return if self.default_host_label(host) == Some(label) {
+                default_entry_value(kind, script)
+            } else {
+                None
+            };
         }
-        podster_core::hostnames::custom_entry_value(host, script)
+        custom_entry_value_kind(kind, host, script)
     }
 
-    /// Writes a host's serve entry, naming one script, in the form [`Provider::entry_value`] gives. `true` only when
-    /// the provider said it was written.
+    /// Writes a host's serve entry, naming one script, as a static release's: with no mark, exactly as every entry has
+    /// been written. Nothing tells the applier yet that a release carries code.
     pub(crate) async fn write_entry(&self, host: &str, script: &str) -> bool {
-        let Some(value) = self.entry_value(host, script) else {
+        self.write_entry_as(host, script, HostKind::Static).await
+    }
+
+    /// Writes a host's serve entry, naming one script of `kind`, in the form [`Provider::entry_value`] gives. `true`
+    /// only when the provider said it was written. Only a test build's route calls it with anything but static.
+    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
+    pub(crate) async fn write_entry_as(&self, host: &str, script: &str, kind: HostKind) -> bool {
+        let Some(value) = self.entry_value(host, script, kind) else {
             return false;
         };
         let Some(url) = self.entry_url(host) else {
@@ -563,18 +582,58 @@ impl Provider {
         };
         match answer.status {
             // Read in the form written for this host: a default host's script alone, a custom hostname's naming that
-            // very host. Anything else there is foreign, a value in the other form among it.
+            // very host, either after the mark that it carries code. Anything else there is foreign, a value in the
+            // other form among it, and so is anything that looks like a mark but isn't exactly it.
             200 => match String::from_utf8(answer.body) {
-                Ok(value) if self.on_content_domain(host) => match script_owner(&value) {
-                    ScriptOwner::Podster { .. } => Entry::Present(value),
-                    ScriptOwner::Foreign => Entry::Foreign,
-                },
-                Ok(value) => podster_core::hostnames::custom_entry_script(host, &value)
-                    .map_or(Entry::Foreign, |script| Entry::Present(script.to_owned())),
+                Ok(value) => {
+                    let read = if self.on_content_domain(host) {
+                        default_entry_script(&value)
+                    } else {
+                        custom_entry_script_kind(host, &value)
+                    };
+                    match read {
+                        Some((HostKind::Static, script)) => Entry::Present(script.to_owned()),
+                        Some((HostKind::Code, script)) => Entry::Code(script.to_owned()),
+                        None => Entry::Foreign,
+                    }
+                }
                 Err(_) => Entry::Foreign,
             },
             404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => Entry::Absent,
             _ => Entry::Unknown,
         }
     }
+}
+
+/// Test builds only: one write or read of a serve entry by the provider, against the stand-in, since nothing tells the
+/// applier yet that a release carries code (M6 stage 1). The answers are the stand-in's.
+#[cfg(feature = "failpoints")]
+pub(crate) async fn test_route(env: &Env, body: Value) -> Result<Response> {
+    let Some(provider) = Provider::from_env(env) else {
+        return Response::from_json(&serde_json::json!({ "configured": false }));
+    };
+    let host = body["host"].as_str().unwrap_or_default();
+    let answer = match body["op"].as_str() {
+        Some("write") => {
+            let kind = if body["code"] == true {
+                HostKind::Code
+            } else {
+                HostKind::Static
+            };
+            let script = body["script"].as_str().unwrap_or_default();
+            serde_json::json!({ "written": provider.write_entry_as(host, script, kind).await })
+        }
+        Some("read") => {
+            let (entry, script) = match provider.read_entry(host).await {
+                Entry::Present(script) => ("present", Some(script)),
+                Entry::Code(script) => ("code", Some(script)),
+                Entry::Absent => ("absent", None),
+                Entry::Foreign => ("foreign", None),
+                Entry::Unknown => ("unknown", None),
+            };
+            serde_json::json!({ "entry": entry, "script": script })
+        }
+        _ => return Response::error("unknown op", 400),
+    };
+    Response::from_json(&answer)
 }

@@ -682,6 +682,7 @@ impl Moderation {
         exec(&sql, content_stop::SCHEMA, vec![])?;
         exec(&sql, reconcile::SCHEMA, vec![])?;
         exec(&sql, crate::repo_ceiling::SCHEMA, vec![])?;
+        exec(&sql, crate::store_reconcile::SCHEMA, vec![])?;
         match (req.method(), req.path().as_str()) {
             // A room asks before it unpublishes for its repository's link (M6 step 6, the architect's ruling of
             // 2026-11-14): the ceiling decides in one transaction here. Rooms with apps are counted first, outside it.

@@ -31,7 +31,10 @@ use crate::content_stop;
 use crate::error::ApiError;
 use crate::forward;
 use crate::store::{exec, int, rows, text};
-use podster_core::app_bindings::{suspension_permit, unread_told, SuspensionPermit};
+use podster_core::app_bindings::{
+    check as judge_bindings, suspension_permit, unread_told, OwnStore, Read, ReadBinding,
+    SuspensionPermit, Verdict,
+};
 use podster_core::app_requests::HostKind;
 use podster_core::release::{reconcile_script, RoomClaim, ScriptReconcile};
 use podster_core::serve_entry::kind_name;
@@ -52,7 +55,9 @@ pub(crate) const FINDINGS_PATH: &str = "/takedown-findings";
 pub(crate) const FINDING_OPEN_PATH: &str = "/takedown-finding-open";
 
 /// Since S5 of the store plan (rule 3(b)), forward-only and safe to run again like the rest: `binding_suspension`,
-/// when each of the bindings check's suspensions was made, for its ceiling's rolling hour; `binding_unread`, how many
+/// when each of the bindings check's suspensions was made, or a slot for one was reserved, for its ceiling's rolling
+/// hour; `binding_slot_kept`, a reserved slot whose room's answer was lost, by the script, until that room answers again
+/// (S5's second PR); `binding_unread`, how many
 /// passes in a row each script's bindings couldn't be judged.
 ///
 /// `takedown_finding`: what an operator should know, one row for each code and subject, counted and dated each time
@@ -69,6 +74,8 @@ CREATE TABLE IF NOT EXISTS reconcile_failure (kind TEXT NOT NULL CHECK (kind IN 
   failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1), last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
   last_at INTEGER NOT NULL, PRIMARY KEY (kind, subject)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS binding_suspension (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE TABLE IF NOT EXISTS binding_slot_kept (seq INTEGER PRIMARY KEY, script TEXT NOT NULL CHECK (length(script) BETWEEN 1 AND 253),
+  at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
 CREATE TABLE IF NOT EXISTS binding_unread (script TEXT PRIMARY KEY CHECK (length(script) BETWEEN 1 AND 253),
   passes INTEGER NOT NULL CHECK (typeof(passes) = 'integer' AND passes >= 1), last_at INTEGER NOT NULL CHECK (typeof(last_at) = 'integer')) WITHOUT ROWID;
 ";
@@ -80,8 +87,16 @@ const MAX_FAILING: i64 = 1000;
 /// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
 /// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
 /// that writes a thousand keys that keep failing among it, can't keep one of these out.
-const OWN_ROOM: [&str; 10] = [
+const OWN_ROOM: [&str; 15] = [
     "script_delete_queued",
+    // The store reconcile (S5's second PR): a Podster-named store no room records, a room's made store read gone, and a
+    // name the list settled. One row for each store at most.
+    podster_core::store_reconcile::STORE_ORPHAN,
+    podster_core::store_reconcile::STORE_MADE_GONE,
+    podster_core::store_reconcile::STORE_ID_SETTLED,
+    podster_core::store_reconcile::STORE_NAME_REAPPEARED,
+    // One row for each label whose room keeps not answering the walk.
+    podster_core::store_reconcile::STORE_WALK_UNWHOLE,
     // Rule 3(b) (S5 of the store plan): a script with a binding it may not hold; one whose app the ceiling kept up; and
     // one whose bindings kept reading unknown.
     podster_core::app_bindings::BINDING_FOREIGN,
@@ -120,7 +135,7 @@ type Step = std::result::Result<(), Stopped>;
 
 /// How long a pass may go on starting new steps over its list, and how long the walk may. Test builds also read a
 /// table a test makes in the object, `test_reconcile_budget`, so each bound can be shown without waiting it out.
-fn budget(sql: &SqlStorage, name: &str, default: i64) -> i64 {
+pub(crate) fn budget(sql: &SqlStorage, name: &str, default: i64) -> i64 {
     #[cfg(feature = "failpoints")]
     if let Ok(found) = rows(
         sql,
@@ -319,7 +334,7 @@ fn set_pass(sql: &SqlStorage, name: &str, at: &Pass, code: Option<&str>, now: i6
 }
 
 /// Asks one room the reconcile's question. `None` when the room gave no answer to read.
-async fn ask_room(env: &Env, room: &str, question: Value) -> Option<Value> {
+pub(crate) async fn ask_room(env: &Env, room: &str, question: Value) -> Option<Value> {
     let asked = async {
         let stub = env
             .durable_object("WORKSPACE")?
@@ -732,6 +747,93 @@ fn permit(sql: &SqlStorage, ceiling: &Ceiling, now: i64) -> R<SuspensionPermit> 
     Ok(suspension_permit(&made, ceiling.rooms_with_apps, now))
 }
 
+/// **Reserve, then confirm** (the deep review of PR #420, items a and b): a slot of the ceiling's hour is taken when a
+/// room is asked with `may_suspend`, in the same turn as [`permit`] allowed it, with no wait between, so a second pass
+/// running at once sees it taken and can't overshoot the ceiling. The room's answer then confirms it (the app was
+/// suspended) or gives it back (anything else it said). **An answer that was lost keeps it:** the room may have
+/// suspended, so the slot counts for the hour.
+///
+/// **Only a script core reads as foreign is offered a slot** (the review of PR #423, 2): one whose read holds something
+/// foreign whatever the room's record says ([`foreign_whatever_recorded`]). A script whose only store bindings the room's
+/// record must judge, an ordinary app's own `STORE` among them, is asked without one; only if its room then finds it
+/// foreign and held for want of a slot is it asked again with one.
+fn reserve(sql: &SqlStorage, now: i64) -> R<(i64, i64)> {
+    rows(
+        sql,
+        "INSERT INTO binding_suspension (at) VALUES (?) RETURNING seq",
+        vec![now.into()],
+    )?
+    .first()
+    .map(|row| (int(&row["seq"]), now))
+    .ok_or_else(|| ApiError::internal("no slot was reserved"))
+}
+
+/// Whether core reads the script's bindings as foreign whatever the room's record of its store says: oversized, or a
+/// binding of another kind, under another name, or naming the write counter. A list whose only store bindings are under
+/// `STORE` can't be told without the room's record.
+fn foreign_whatever_recorded(bindings: &Value, oversized: bool, serve_entries: &str) -> bool {
+    if oversized {
+        return true;
+    }
+    let Some(list) = bindings.as_array() else {
+        return false;
+    };
+    let read: Vec<ReadBinding<'_>> = list
+        .iter()
+        .map(|entry| ReadBinding {
+            kind: entry["type"].as_str(),
+            name: entry["name"].as_str(),
+            id: entry["id"].as_str(),
+            namespace_id: entry["namespace_id"].as_str(),
+            class_name: entry["class_name"].as_str(),
+        })
+        .collect();
+    matches!(
+        judge_bindings(Read::List(&read), OwnStore::Unreadable, Some(serve_entries)),
+        Verdict::Foreign(_)
+    )
+}
+
+/// A slot reserved for a question whose answer was lost: kept, and counted for the hour, until that script's room
+/// answers again.
+fn keep_slot(sql: &SqlStorage, id: &str, (seq, at): (i64, i64)) -> R<()> {
+    exec(
+        sql,
+        "INSERT INTO binding_slot_kept (seq, script, at) VALUES (?, ?, ?) ON CONFLICT (seq) DO NOTHING",
+        vec![seq.into(), id.into(), at.into()],
+    )
+}
+
+/// The script's room answered again: each slot kept for a lost answer about it is freed unless the room reports one of
+/// its labels suspended at or after the slot's time (`suspended_since`), and either way no longer waits. A report that
+/// is missing frees nothing.
+fn settle_kept_slots(sql: &SqlStorage, id: &str, judged: &Value) -> R<()> {
+    let Some(since) = judged.get("suspended_since") else {
+        return Ok(());
+    };
+    for row in rows(
+        sql,
+        "SELECT seq, at FROM binding_slot_kept WHERE script = ?",
+        vec![id.into()],
+    )? {
+        let (seq, at) = (int(&row["seq"]), int(&row["at"]));
+        let suspended_then = since.as_i64().is_some_and(|since| since >= at);
+        if !suspended_then {
+            exec(
+                sql,
+                "DELETE FROM binding_suspension WHERE seq = ?",
+                vec![seq.into()],
+            )?;
+        }
+        exec(
+            sql,
+            "DELETE FROM binding_slot_kept WHERE seq = ?",
+            vec![seq.into()],
+        )?;
+    }
+    Ok(())
+}
+
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
 ///
@@ -766,40 +868,83 @@ async fn one_script(
         Bindings::Oversized => (Value::Null, true),
         Bindings::Unread => (Value::Null, false),
     };
-    let allowed = permit(sql, ceiling, now_ms())?;
-    match ask_room(
-        env,
-        &room,
-        json!({
-            "kind": "script", "script": id, "listed_at": listed_at,
-            "bindings": bindings, "bindings_oversized": oversized,
-            "serve_entries": provider.serve_entries_namespace(),
-            "may_suspend": allowed == SuspensionPermit::Allowed,
-        }),
-    )
-    .await
-    {
-        Some(answer) => {
-            bound(sql, id, &answer["bindings"], allowed, counts)?;
-            // A step after the bindings' check failed in the room: its verdict has been taken, and the script's step
-            // is counted failed, as a room's failure always is.
-            if let Some(code) = answer["failed"].as_str() {
-                console_error!(
-                    "reconcile: a room's step after the bindings' check failed: code={}",
-                    code_form(code)
-                );
-                return Err(Stopped::Failed(ApiError::internal(
-                    "a room's takedown check failed after its bindings' check",
-                )));
+    let mut offer =
+        foreign_whatever_recorded(&bindings, oversized, provider.serve_entries_namespace());
+    loop {
+        // Decided and, for a script offered one, reserved in one turn: no other pass's step can run between the two.
+        let allowed = if offer {
+            permit(sql, ceiling, now_ms())?
+        } else {
+            SuspensionPermit::Ceiling
+        };
+        let reserved = if offer && allowed == SuspensionPermit::Allowed {
+            Some(reserve(sql, now_ms())?)
+        } else {
+            None
+        };
+        let Some(answer) = ask_room(
+            env,
+            &room,
+            json!({
+                "kind": "script", "script": id, "listed_at": listed_at,
+                "bindings": bindings, "bindings_oversized": oversized,
+                "serve_entries": provider.serve_entries_namespace(),
+                "may_suspend": reserved.is_some(),
+            }),
+        )
+        .await
+        else {
+            // The slot reserved for it, if any, is kept: the room may have suspended the app before its answer was
+            // lost. It is freed when the room next answers that nothing was suspended since.
+            if let Some(slot) = reserved {
+                keep_slot(sql, id, slot)?;
             }
-            counts.take(sql, &answer, now_ms())?;
-            if answer["known"] != true {
-                counts.finding(sql, "script_without_room", id, now_ms())?;
-            }
-            Ok(())
+            return Err(Stopped::Unanswered);
+        };
+        let judged = &answer["bindings"];
+        // Asked without a slot, found foreign by the room's record and held only for want of one: asked again, offered.
+        if !offer && judged["verdict"] == "foreign" && judged["held"] == true {
+            offer = true;
+            continue;
         }
-        None => Err(Stopped::Unanswered),
+        return answered(
+            sql,
+            id,
+            &answer,
+            allowed,
+            reserved.map(|(seq, _)| seq),
+            counts,
+        );
     }
+}
+
+/// The room's answer to one script's question.
+fn answered(
+    sql: &SqlStorage,
+    id: &str,
+    answer: &Value,
+    allowed: SuspensionPermit,
+    reserved: Option<i64>,
+    counts: &mut Counts,
+) -> Step {
+    settle_kept_slots(sql, id, &answer["bindings"])?;
+    bound(sql, id, &answer["bindings"], allowed, reserved, counts)?;
+    // A step after the bindings' check failed in the room: its verdict has been taken, and the script's step
+    // is counted failed, as a room's failure always is.
+    if let Some(code) = answer["failed"].as_str() {
+        console_error!(
+            "reconcile: a room's step after the bindings' check failed: code={}",
+            code_form(code)
+        );
+        return Err(Stopped::Failed(ApiError::internal(
+            "a room's takedown check failed after its bindings' check",
+        )));
+    }
+    counts.take(sql, answer, now_ms())?;
+    if answer["known"] != true {
+        counts.finding(sql, "script_without_room", id, now_ms())?;
+    }
+    Ok(())
 }
 
 /// A code from a room, as a log line may carry it: lower-case letters, digits and `_`, or `other`.
@@ -816,8 +961,8 @@ fn code_form(code: &str) -> &str {
 }
 
 /// What the room said of a script's bindings (rule 3(b)). A binding it may not hold is told to operators by the
-/// script's name with the room's code in `detail`; a suspension it made is counted as a change and against the
-/// ceiling's hour; one the ceiling held is told by `script_binding_held`, with why. A script the room judged unknown is
+/// script's name with the room's code in `detail`; a suspension it made is counted as a change and keeps the slot
+/// [`reserve`] took for it in the ceiling's hour, and any other answer gives that slot back; one the ceiling held is told by `script_binding_held`, with why. A script the room judged unknown is
 /// counted unread for the pass and for itself, told by name from its third pass in a row; any judged verdict forgets
 /// that count. A room that answered nothing about it holds no such label, and is told as `script_without_room` by the
 /// caller.
@@ -826,20 +971,32 @@ fn bound(
     id: &str,
     judged: &Value,
     allowed: SuspensionPermit,
+    reserved: Option<i64>,
     counts: &mut Counts,
 ) -> R<()> {
     let now = now_ms();
+    let suspended = judged["verdict"] == "foreign" && judged["suspended"] == true;
+    match (reserved, suspended) {
+        // Asked with a slot and nothing came down: the slot is given back.
+        (Some(seq), false) => exec(
+            sql,
+            "DELETE FROM binding_suspension WHERE seq = ?",
+            vec![seq.into()],
+        )?,
+        // A suspension no slot was reserved for (a room suspends only when asked with one): counted all the same.
+        (None, true) => exec(
+            sql,
+            "INSERT INTO binding_suspension (at) VALUES (?)",
+            vec![now.into()],
+        )?,
+        _ => {}
+    }
     match judged["verdict"].as_str() {
         None => return Ok(()),
         Some("clean") => {}
         Some("foreign") => {
-            if judged["suspended"] == true {
+            if suspended {
                 counts.changed += 1;
-                exec(
-                    sql,
-                    "INSERT INTO binding_suspension (at) VALUES (?)",
-                    vec![now.into()],
-                )?;
             }
             counts.found += 1;
             record(
@@ -1069,12 +1226,22 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         vec![(started - podster_core::release::REPO_UNPUBLISH_WINDOW_MS).into()],
     );
     counts.skipped(pruned);
+    let pruned = exec(
+        sql,
+        "DELETE FROM binding_slot_kept WHERE seq NOT IN (SELECT seq FROM binding_suspension)",
+        vec![],
+    );
+    counts.skipped(pruned);
     // Taken before the list is asked for: whatever the list holds, the provider read it after this.
     let listed_at = now_ms();
     let Some(list) = provider.list_scripts().await else {
         set_pass(sql, "scripts", &at, Some("list_failed"), now_ms())?;
+        let stores = crate::store_reconcile::pass(sql, env).await;
         let woken = wake(sql, env, &mut counts).await;
-        return Ok(summary("scripts", "list_failed", 0, &counts, woken));
+        return Ok(with_stores(
+            summary("scripts", "list_failed", 0, &counts, woken),
+            stores,
+        ));
     };
     let mut code = "ok";
     if !list.complete {
@@ -1121,9 +1288,23 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         counts.skipped(told);
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
+    // The store reconcile (S5's second PR), after every script's step, so a takedown never waits on it (review standard
+    // 4). It tells operators and fails nothing: its summary is its own.
+    let stores = crate::store_reconcile::pass(sql, env).await;
     let woken = wake(sql, env, &mut counts).await;
     let code = finish(sql, "scripts", code, &counts);
-    Ok(summary("scripts", code, ids.len(), &counts, woken))
+    Ok(with_stores(
+        summary("scripts", code, ids.len(), &counts, woken),
+        stores,
+    ))
+}
+
+/// The pass's summary with the store step's own beside it, as `stores`.
+fn with_stores(mut done: Value, stores: Value) -> Value {
+    if let Value::Object(fields) = &mut done {
+        fields.insert("stores".into(), stores);
+    }
+    done
 }
 
 /// The Worker's scheduled handler, on the two schedules in `wrangler.jsonc` (M6 step 6). **It runs whenever a

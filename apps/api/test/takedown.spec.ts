@@ -7,6 +7,7 @@ import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, nextAlarm, runAlarm, r
 import { customRoutingCases } from "./custom-routing.cases";
 import { scriptBindingsCases } from "./script-bindings.cases";
 import { serveEntryCases } from "./serve-entry.cases";
+import { storeReconcileCases } from "./store-reconcile.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
 // room unpublishes in one transaction, its applier removes the serve entries, and its delete job removes the scripts
@@ -2552,6 +2553,11 @@ serveEntryCases();
 // Rule 3(b)'s check of each app script's bindings (S5 of the store plan): here for the same reason, with this file's
 // helpers.
 scriptBindingsCases({
+  BINDINGS, FAKE, app, fresh, reconcile, fake, fault, held, found, findings, inRoom, inModeration, all, one, configRow, serveRows,
+  deleteRows, pass, lift: (label: string) => lift(label), switchedOn, stub,
+});
+// The store reconcile (S5's second PR), a step of the same hourly pass: here for the same reason.
+storeReconcileCases({
   BINDINGS, FAKE, app, fresh, reconcile, fake, fault, held, found, findings, inRoom, inModeration, all, one, configRow, serveRows,
   deleteRows, pass, lift: (label: string) => lift(label), switchedOn, stub,
 });

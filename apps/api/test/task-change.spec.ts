@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms, nextAlarm } from "./alarm.ts";
 import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 7a: a task's pull request. Linking it at submission, pinning the commit at review, and recording what Podster's
@@ -543,7 +543,7 @@ describe("the refresh job", () => {
     await afterPass(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(2));
     expect((await events(r.id)).map((e) => e.type)).toEqual(["task_change.linked"]);
     // The alarm is set for the next poll.
-    const next = await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm());
+    const next = await nextAlarm(stub(r.id));
     expect(next).not.toBeNull();
   });
 
@@ -558,7 +558,7 @@ describe("the refresh job", () => {
     expect((await reads()).length).toBe(before);
     expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD);
     // The alarm waits for the oldest read to be an hour old, not five seconds.
-    const next = (await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm())) as number | null;
+    const next = await nextAlarm(stub(r.id));
     expect(next === null || next > Date.now() + 30 * 60_000).toBe(true);
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_read SET at = ?", Date.now() - 3_600_001));
     await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));

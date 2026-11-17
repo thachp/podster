@@ -142,6 +142,14 @@ describe("asking for a release (M6 step 6)", () => {
     expect(offered.body).toEqual({ releases: [{ id, task_id: TASK, commit_sha: SHA, state: "awaiting_approval", requested_by: r.requester.id, requested_at: T }], more: false });
   });
 
+  it("tells people only: an agent holding the admin role hears nothing of a request it could never approve", async () => {
+    const r = await room();
+    await inRoom(r.room, (s) => void s.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'admin', ?, 1)", AGENT.id, AGENT.org, r.owner.id));
+    const id = (await switchedOn(() => ask(r))).body.id;
+    const [event] = await all(r.room, "SELECT id FROM event WHERE type = 'release.requested' AND subject_id = ?", id);
+    expect((await all(r.room, "SELECT recipient_principal_id AS who FROM outbox WHERE event_id = ? ORDER BY who", event.id)).map((o: any) => o.who)).toEqual([r.admin.id, r.owner.id].sort());
+  });
+
   it("starts nothing: the room's job leaves it awaiting approval, and approving it still isn't built", async () => {
     const r = await room();
     const id = (await switchedOn(() => ask(r))).body.id;
@@ -235,12 +243,55 @@ describe("who may ask (podster_policy::release::authorize_release_request)", () 
   it("not a person who has left the organization their place here is held in", async () => {
     const r = await room();
     expect((await api({ ...r.requester, departure: { person: r.requester.id, org: r.org, left_at: Date.now() } }, "POST", "/v1/org-departures", {})).status).toBeLessThan(500);
+    // Their own `Principal` now answers that they left, while the room still holds their place: nothing has swept it.
+    // So the only fact that refuses is their own record's (`requester_holds` false), answered `not_allowed`.
+    expect(await all(r.room, "SELECT revoked_at FROM member WHERE principal_id = ?", r.requester.id)).toEqual([{ revoked_at: null }]);
     const before = await everything(r);
-    // The departure ends their place here, which the room records: they are refused as someone no longer in it, or,
-    // with a place kept, as not allowed. Either way nothing is written.
-    const answer = await switchedOn(() => ask(r));
-    expect([[403, "not_allowed"], [403, "access_revoked"]]).toContainEqual(refused(answer));
+    expect(refused(await switchedOn(() => ask(r)))).toEqual([403, "not_allowed"]);
     expect(await everything(r)).toBe(before);
+    // Once the room has recorded their place ended, they are refused as someone no longer in it.
+    await inRoom(r.room, (s) => void s.exec("UPDATE member SET revoked_at = 1 WHERE principal_id = ?", r.requester.id));
+    const after = await everything(r);
+    expect(refused(await switchedOn(() => ask(r)))).toEqual([403, "access_revoked"]);
+    expect(await everything(r)).toBe(after);
+  });
+
+  it("refuses on a fact that was read before a task's name, and before an unread fact", async () => {
+    // A member with no grant naming a task that isn't there: who is asking is settled first.
+    const r = await room();
+    await inRoom(r.room, (s) => void s.exec("DELETE FROM provider_grant"));
+    const before = await everything(r);
+    expect(refused(await switchedOn(() => ask(r, { task_id: "tsk_rq_none", commit_sha: SHA })))).toEqual([403, "grant_required"]);
+    expect(await everything(r)).toBe(before);
+    // A private room whose organization's release switch and delegation can't be read (test builds: an organization
+    // whose ID has this prefix doesn't answer): the private room was read, and refuses by its own code.
+    const quiet = await room({ org: `org_unavailable_rq_${rooms + 1}` });
+    await inRoom(quiet.room, (s) => void s.exec("UPDATE workspace SET visibility = 'private'"));
+    const quietBefore = await everything(quiet);
+    expect(refused(await switchedOn(() => ask(quiet)))).toEqual([409, "release_needs_public_room"]);
+    // The control: public again, nothing read fails, and the unread facts decide: nothing is written on them.
+    await inRoom(quiet.room, (s) => void s.exec("UPDATE workspace SET visibility = 'public'"));
+    expect(refused(await switchedOn(() => ask(quiet)))).toEqual([503, "standing_unknown"]);
+    expect(await everything(quiet)).toBe(quietBefore);
+  });
+
+  it("gives a stored answer back only to someone who may still ask, by the code that holds now", async () => {
+    const r = await room();
+    const first = await switchedOn(() => ask(r, undefined, r.requester, "rq-replay"));
+    expect(first.status, first.text).toBe(200);
+    // The grant revoked, then the same request again under the same key.
+    await inRoom(r.room, (s) => void s.exec("UPDATE provider_grant SET revoked_at = 1"));
+    const before = await everything(r);
+    const replay = await switchedOn(() => ask(r, undefined, r.requester, "rq-replay"));
+    expect(refused(replay)).toEqual([403, "grant_required"]);
+    expect(replay.text).not.toContain(first.body.id);
+    expect(await everything(r)).toBe(before);
+    // The room made private: the same key is refused by that, too.
+    await inRoom(r.room, (s) => { s.exec("UPDATE provider_grant SET revoked_at = NULL"); s.exec("UPDATE workspace SET visibility = 'private'"); });
+    expect(refused(await switchedOn(() => ask(r, undefined, r.requester, "rq-replay")))).toEqual([409, "release_needs_public_room"]);
+    // With everything holding again, the stored answer comes back as it was.
+    await inRoom(r.room, (s) => void s.exec("UPDATE workspace SET visibility = 'public'"));
+    expect((await switchedOn(() => ask(r, undefined, r.requester, "rq-replay"))).body).toEqual(first.body);
   });
 
   it("decides nothing, and writes nothing, when the requester's or the grant giver's own record can't answer", async () => {

@@ -31,6 +31,38 @@ pub(super) fn room_managers(sql: &SqlStorage, except: &str) -> R<Vec<String>> {
     Ok(managers)
 }
 
+/// [`room_managers`], people only: who hears of something for a person to approve or decline, such as a release asked
+/// for (M6 step 6). An admin row whose principal is an agent is left out, whatever role is stored for it, since an agent
+/// never approves (`podster_policy::release::holds_release_authority`, decision 215). The owner is always a person.
+pub(super) fn room_approvers(sql: &SqlStorage, except: &str) -> R<Vec<String>> {
+    let mut approvers: Vec<String> = rows(
+        sql,
+        "SELECT principal_id, kind FROM member WHERE role = 'admin' AND revoked_at IS NULL",
+        vec![],
+    )?
+    .iter()
+    .filter(|member| {
+        podster_policy::release::holds_release_authority(
+            parse_kind(member["kind"].as_str().unwrap_or_default()),
+            Role::Admin,
+            true,
+        )
+    })
+    .filter_map(|member| text(&member["principal_id"]))
+    .collect();
+    approvers.extend(
+        rows(
+            sql,
+            "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
+            vec![],
+        )?
+        .iter()
+        .filter_map(|room| text(&room["owner_person_id"])),
+    );
+    approvers.retain(|principal| principal != except);
+    Ok(approvers)
+}
+
 fn open_role(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,

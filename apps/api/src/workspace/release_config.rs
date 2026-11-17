@@ -231,21 +231,38 @@ pub(super) fn on_room(sql: &SqlStorage, reads: &ConfigReads) -> R<ReleaseRoom> {
 /// [`on_room`], from the facts alone.
 pub(super) fn room_from(sql: &SqlStorage, on: Option<&OnReads>) -> R<ReleaseRoom> {
     let on = on.ok_or_else(standing_unknown)?;
+    match room_assuming(sql, on)? {
+        (room, false) => Ok(room),
+        (_, true) => Err(standing_unknown()),
+    }
+}
+
+/// The room as [`room_from`] reads it, except that **an outside fact that couldn't be read is taken as holding, and
+/// remembered** (the second value): so a refusal policy then finds comes only from a fact that was read, and the caller
+/// answers `standing_unknown` only when nothing read fails (`release_request`).
+pub(super) fn room_assuming(sql: &SqlStorage, on: &OnReads) -> R<(ReleaseRoom, bool)> {
     let org = room_owner_org(sql)?;
     let provider = super::release_recheck::linked_provider(sql)?;
     let about_this_org = on.org == org;
+    let mut unknown = false;
     let org_may_release = release_switch_now(
         super::release_switch::applied(sql)?,
         on.org_release.filter(|_| about_this_org),
     )
     .map(|switch| switch.granted)
-    .ok_or_else(standing_unknown)?;
+    .unwrap_or_else(|| {
+        unknown = true;
+        true
+    });
     let org_may_provision = on
         .org_may_provision
         .filter(|_| about_this_org && on.provider == provider)
-        .ok_or_else(standing_unknown)?;
+        .unwrap_or_else(|| {
+            unknown = true;
+            true
+        });
     let facts = super::release_recheck::room_facts(sql, on.deployment_on, org_may_release)?;
-    Ok(ReleaseRoom {
+    let room = ReleaseRoom {
         deployment_allows_release: facts.deployment_allows_release,
         organization_may_release: facts.organization_may_release,
         organization_may_provision: org_may_provision,
@@ -257,7 +274,8 @@ pub(super) fn room_from(sql: &SqlStorage, on: Option<&OnReads>) -> R<ReleaseRoom
         deleted: facts.deleted,
         organization_exists: facts.organization_exists,
         repository_ready: facts.repository_ready,
-    })
+    };
+    Ok((room, unknown))
 }
 
 impl Workspace {

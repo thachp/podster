@@ -123,7 +123,7 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 8's first PR built the room's custom hostname, read, asked for and removed, which the room itself answers.
     // Step 10(b) built the room's list of releases awaiting approval, which the room itself answers.
     // Step 6 built a person's request for a release, which the room itself answers.
-    const built = ["requestRelease", "listReleaseApprovals","suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
+    const built = ["requestRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
     // and a provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a

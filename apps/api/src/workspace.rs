@@ -2947,7 +2947,8 @@ impl Workspace {
     }
 
     /// The same, with `recheck` run before a stored answer is replayed, for a command whose own authority goes past being in the
-    /// room. A stored answer then can't reach someone who has since lost it. Removal and setting a task's output use it.
+    /// room. A stored answer then can't reach someone who has since lost it. Removal, setting a task's output, the release
+    /// configuration, a custom hostname and asking for a release use it. `recheck` runs on every attempt, a first one too.
     #[allow(clippy::too_many_arguments)]
     fn command_checked(
         &self,
@@ -5294,14 +5295,19 @@ impl Workspace {
             // release path's gate and what it needs from outside, and the transaction decides again.
             (Method::Post, ["releases"]) if release_route_on => {
                 release_request::may_ask(&who)?;
-                let reads = self.release_request_reads(&identity.id).await?;
+                let reads = Rc::new(self.release_request_reads(&identity.id).await?);
+                let again = reads.clone();
                 self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |_: &SqlStorage, who: &Participant| release_request::may_ask(who),
+                    // Who may ask, and where, on every attempt before anything else: a first request's, and a stored
+                    // answer's, which goes only to someone who may still ask, on what was read for this retry.
+                    move |sql: &SqlStorage, who: &Participant| {
+                        release_request::standing(sql, who, &again)
+                    },
                     move |sql, who, _| release_request::handle(sql, who, &body, &reads),
                 )
             }

@@ -115,8 +115,9 @@ pub(super) fn enabled(sql: &SqlStorage, from_alarm: bool) -> bool {
 
 /// Test builds only: a test changes the room at a named point of a step, by leaving statements for the room to run
 /// there, in `test_release_at (point, statement)`: `reserved` (an upload's tree reads reserved, before GitHub's token
-/// is asked for), `opened` (the token minted, before the trees are read) and `staged` (a commit staged, before its
-/// outside reads). Each runs once. A statement that fails is logged by its code, and the step goes on.
+/// is asked for), `opened` (the token minted, before the trees are read), `staged` (a commit staged, before its
+/// outside reads), `store_first` (an upload's recheck held, before its store's settle-first reads the record) and
+/// `store_listed` (a store's list read, before anything of it is written). Each runs once. A statement that fails is logged by its code, and the step goes on.
 #[cfg(feature = "failpoints")]
 pub(super) fn test_at(sql: &SqlStorage, point: &str) {
     let found = rows(

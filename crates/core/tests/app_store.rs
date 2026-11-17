@@ -845,27 +845,54 @@ fn the_job_makes_a_store_only_for_a_release_that_asks_and_never_a_second_for_one
 }
 
 #[test]
-fn only_a_create_outstanding_is_settled_first_by_the_list() {
+fn only_a_create_outstanding_is_settled_first_and_only_for_a_release_that_waited_on_its_store() {
     let n = name();
-    assert!(settles_first(Some(&asked(&n)), Some(2)));
-    assert!(!settles_first(Some(&asked(&n)), None));
-    assert!(!settles_first(None, Some(2)));
+    let waited = Some(STORE_UNSETTLED);
+    // A release whose own last step waited on its store: it asked for one.
+    for code in STORE_WAITS {
+        assert!(
+            settles_first(Some(&asked(&n)), Some(2), Some(code)),
+            "{code}"
+        );
+    }
+    assert_eq!(
+        STORE_WAITS,
+        [
+            STORE_CREATE_UNANSWERED,
+            STORE_UNSETTLED,
+            STORE_LIST_UNKNOWN,
+            STORE_PROVIDER_MISSING
+        ]
+    );
+    // A release not known to ask (a static one among them) is never held by a label's create outstanding.
+    for code in [
+        None,
+        Some("release_drive_lease_lost"),
+        Some(STORE_SETTLED),
+        Some(STORE_CREATE_OWED),
+        Some(STORE_CREATE_INCOMPLETE),
+        Some("release_upload_unavailable"),
+    ] {
+        assert!(!settles_first(Some(&asked(&n)), Some(2), code), "{code:?}");
+    }
+    assert!(!settles_first(Some(&asked(&n)), None, waited));
+    assert!(!settles_first(None, Some(2), waited));
     let made = StoreRecord {
         id: Some(ID),
         made_at: Some(3),
         ..asked(&n)
     };
-    assert!(!settles_first(Some(&made), Some(2)));
+    assert!(!settles_first(Some(&made), Some(2), waited));
     let owed = StoreRecord {
         delete_owed_at: Some(9),
         ..asked(&n)
     };
-    assert!(!settles_first(Some(&owed), Some(2)));
+    assert!(!settles_first(Some(&owed), Some(2), waited));
     let malformed = StoreRecord {
         name: Some("my-database"),
         ..asked(&n)
     };
-    assert!(!settles_first(Some(&malformed), Some(2)));
+    assert!(!settles_first(Some(&malformed), Some(2), waited));
 }
 
 fn env(status: u16, success: Option<bool>, errors: Option<Vec<i64>>) -> Envelope {
@@ -919,6 +946,16 @@ fn a_create_is_made_refused_or_unknown_and_only_a_definite_refusal_refuses() {
             create_answer(&env(status, success, errors.clone()), &none, &n),
             CreateAnswer::Unknown,
             "{status} {success:?} {errors:?}"
+        );
+    }
+    // A refusal that says the name is taken may be an earlier create of this very name that landed: unknown, so the
+    // list settles it (Proposed until the second account's spike records D1's own answer).
+    assert_eq!(D1_NAME_TAKEN, &[7502]);
+    for errors in [vec![7502], vec![10000, 7502]] {
+        assert_eq!(
+            create_answer(&env(400, Some(false), Some(errors.clone())), &none, &n),
+            CreateAnswer::Unknown,
+            "{errors:?}"
         );
     }
     // A name that isn't a store's is never made or refused.

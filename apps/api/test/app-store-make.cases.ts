@@ -92,6 +92,15 @@ const creates = async () => (await storeState()).calls.filter((call) => call.op 
 // --- the content provider's upload stand-in --------------------------------------------------------------------------
 const uploadCalls = async (script: string) =>
   ((await (await fetch(`https://content-fake.example.com/upload-state?script=${script}`)).json()) as { calls: { op: string }[] }).calls.map((call) => call.op);
+/** Holds the provider's next call of one kind for this script until the test lets it go: no clock. */
+async function providerGate(script: string, op: "session" | "script") {
+  const at = (path: string, id?: number) => `https://content-fake.example.com/${path}?script=${script}${id === undefined ? "" : `&id=${id}`}`;
+  const { id } = (await (await fetch(at("upload-gate"), { method: "POST", body: JSON.stringify({ op }) })).json()) as { id: number };
+  return {
+    arrived: async () => { await (await fetch(at("upload-arrived", id))).json(); },
+    release: async () => { await (await fetch(at("upload-release", id))).json(); },
+  };
+}
 
 // --- a room whose release is uploading --------------------------------------------------------------------------------
 const REL = `rel_${"5a".repeat(16)}`;
@@ -179,15 +188,19 @@ export function appStoreMakeCases() {
     it("makes one store for a release that asks, recording its name and the create's time before its ID, and no second for the label", async () => {
       await github("/seed", repository(app(true)));
       const r = await uploading();
-      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      // The content provider's first call, the upload session, is held: by then the store is made and recorded.
+      const gate = await providerGate(r.script, "session");
+      const uploaded = upload(r.room);
+      await gate.arrived();
+      const [held] = await record(r.room);
+      expect(held.store_id).toMatch(UUID);
+      expect((await storeState()).databases).toEqual([{ uuid: held.store_id, name: held.store_name }]);
+      await gate.release();
+      expect(brief(await uploaded)).toEqual([200, "uploading", true, null, null]);
       const [row] = await record(r.room);
-      const { databases } = await storeState();
-      expect(databases).toEqual([{ uuid: row.store_id, name: row.store_name }]);
-      expect(row).toMatchObject({ label: r.label, kind: "d1", recorded_at: T, create_sent_at: T, made_at: T });
+      expect(row).toEqual({ label: r.label, kind: "d1", store_name: held.store_name, store_id: held.store_id, recorded_at: T, create_sent_at: T, made_at: T, updated_at: T });
       expect(row.store_name).toMatch(NAME);
-      expect(row.store_id).toMatch(UUID);
       expect((await creates()).map((call) => [call.token, call.key])).toEqual([["store", row.store_name]]);
-      // The store is made before anything is sent to the content provider; the files are sent after it.
       expect(await uploadCalls(r.script)).toContain("session");
       // A second release of the label that asks again makes none: its store is made.
       await another(r);
@@ -251,16 +264,13 @@ export function appStoreMakeCases() {
       // The create went out and made it; the room holds the name it was sent under, and no ID.
       const { databases } = await storeState();
       expect(databases.length).toBe(1);
-      expect(await record(r.room)).toEqual([expect.objectContaining({ store_name: databases[0].name, create_sent_at: T, store_id: null, made_at: null })]);
+      const name = databases[0].name;
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T, create_sent_at: T, made_at: null, updated_at: T }]);
       expect(await uploadCalls(r.script)).toEqual([]);
-      // The next step settles it first, by the list, reading nothing from GitHub and sending nothing.
+      // The next step, after its read, settles it by the list, finds it by the name, and uploads, with no second create.
       await at(r.room, T + MINUTE);
-      const before = await githubCalls();
-      expect(brief(await upload(r.room))).toEqual([200, "uploading", false, "store_settled", null]);
-      expect(await githubCalls()).toBe(before);
-      expect(await record(r.room)).toEqual([expect.objectContaining({ store_id: databases[0].uuid, made_at: T + MINUTE })]);
-      // Then the upload, with no second create.
       expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: databases[0].uuid, recorded_at: T, create_sent_at: T, made_at: T + MINUTE, updated_at: T + MINUTE }]);
       expect((await creates()).length).toBe(1);
       expect((await storeState()).databases.length).toBe(1);
     });
@@ -285,15 +295,15 @@ export function appStoreMakeCases() {
       // A second within ten minutes of the first counts for nothing.
       expect(await step(T + 20 * MINUTE - 1)).toEqual(["store_unsettled", T + 20 * MINUTE]);
       expect((await creates()).length).toBe(1);
-      expect(await record(r.room)).toEqual([expect.objectContaining({ create_sent_at: T, store_id: null })]);
-      // The second: the create made nothing, and is owed again.
-      expect(await step(T + 20 * MINUTE)).toEqual(["store_create_owed", null]);
-      expect(await record(r.room)).toEqual([expect.objectContaining({ store_name: name, create_sent_at: null, store_id: null })]);
-      // The next step creates it again, under the same name, recording it first, and uploads.
-      await at(r.room, T + 21 * MINUTE);
+      // The first counted list is noted as the record's last change.
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T, create_sent_at: T, made_at: null, updated_at: T + 10 * MINUTE }]);
+      // The second: the create made nothing, so it is created again at once, under the same name, recorded first
+      // again, and the upload goes on.
+      await at(r.room, T + 20 * MINUTE);
       expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
       const [row] = await record(r.room);
-      expect(row).toMatchObject({ store_name: name, create_sent_at: T + 21 * MINUTE, made_at: T + 21 * MINUTE });
+      expect(row).toEqual({ label: r.label, kind: "d1", store_name: name, store_id: row.store_id, recorded_at: T, create_sent_at: T + 20 * MINUTE, made_at: T + 20 * MINUTE, updated_at: T + 20 * MINUTE });
+      expect(row.store_id).toMatch(UUID);
       expect((await creates()).map((call) => call.key)).toEqual([name, name]);
       expect((await storeState()).databases).toEqual([{ uuid: row.store_id, name }]);
     });
@@ -306,17 +316,77 @@ export function appStoreMakeCases() {
       expect([answer.status, answer.body.state, answer.body.uploaded]).toEqual([200, "failed", false]);
       expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "store_create_refused" });
       expect((await storeState()).databases).toEqual([]);
-      expect(await record(r.room)).toEqual([expect.objectContaining({ create_sent_at: T, store_id: null })]);
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: expect.stringMatching(NAME), store_id: null, recorded_at: T, create_sent_at: T, made_at: null, updated_at: T }]);
       expect(await uploadCalls(r.script)).toEqual([]);
     });
 
-    it("settles a create outstanding first, taking no upload slot and reading nothing from GitHub, through the driver", async () => {
+    it("reads D1's answer that the name is taken as unknown, and settles it by the list: the store is recorded and the release goes on", async () => {
+      await github("/seed", repository(app(true)));
+      const r = await uploading();
+      // A create settled as having made nothing, whose store a list didn't show yet: the name is held at D1.
+      const name = `podster-store-${crypto.randomUUID().replace(/-/g, "").slice(0, 31)}0`;
+      await inRoom(r.room, (sql) => sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, updated_at) VALUES (?, 'd1', ?, ?, ?)", r.label, name, T - 30 * MINUTE, T - 30 * MINUTE));
+      await stores("/seed", { count: 1, prefix: name.slice(0, -1) });
+      const [held] = (await storeState()).databases;
+      expect(held.name).toBe(name);
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+      expect(await failure(r.room)).toEqual({ state: "uploading", failure_code: null });
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: held.uuid, recorded_at: T - 30 * MINUTE, create_sent_at: T, made_at: T, updated_at: T }]);
+      expect((await storeState()).calls.map((call) => call.op)).toEqual(["create", "list"]);
+      expect((await storeState()).databases).toEqual([held]);
+    });
+
+    it("never holds a release that asks for no store, while its label's create is outstanding and can't be settled", async () => {
+      for (const why of ["list lost", "no store provider"]) {
+        await github("/reset", {});
+        await github("/seed", repository(STATIC));
+        const r = await uploading({ driver: true });
+        const name = `podster-store-${crypto.randomUUID().replace(/-/g, "")}`;
+        await inRoom(r.room, (sql) => {
+          sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, create_sent_at, updated_at) VALUES (?, 'd1', ?, ?, ?, ?)", r.label, name, T - 30 * MINUTE, T - 30 * MINUTE, T - 30 * MINUTE);
+          if (why === "no store provider") sql.exec("CREATE TABLE test_app_store_provider_off (x INTEGER)");
+        });
+        if (why === "list lost") await storeFault("list", "lost", 10);
+        const slots = () => inRoom(r.room, (sql) => sql.exec("SELECT COUNT(*) AS n FROM release_upload_attempt").one().n);
+        // Through the driver: a slot, the read, and the upload, with nothing asked of D1.
+        const passed = await switchedOn(() => stub(r.room).fetch("https://do/internal/test-release-drive", { method: "POST", body: "{}" }).then((res: Response) => res.json() as Promise<any>));
+        expect([passed.outcome, passed.code], why).toEqual(["next", null]);
+        expect(await slots(), why).toBe(1);
+        expect(await inRoom(r.room, (sql) => sql.exec("SELECT COUNT(*) AS n FROM release_upload").one().n), why).toBe(1);
+        // The record is as it was: the create stays outstanding for a release that asks.
+        expect(await record(r.room), why).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T - 30 * MINUTE, create_sent_at: T - 30 * MINUTE, made_at: null, updated_at: T - 30 * MINUTE }]);
+        // And by the command alone, for another static release of the label.
+        await another(r);
+        expect(brief(await upload(r.room, NEXT)), why).toEqual([200, "uploading", true, null, null]);
+        expect((await storeState()).calls, why).toEqual([]);
+        await stores("/reset");
+      }
+    });
+
+    /**
+     * A driven room whose release asked for its store and last waited on it (`last_code`), with its label's create
+     * outstanding, sent `ago` before `T`.
+     */
+    async function waitingOnStore(ago: number, lastCode = "store_unsettled") {
       await github("/seed", repository(app(true)));
       const r = await uploading({ driver: true });
       const name = `podster-store-${crypto.randomUUID().replace(/-/g, "")}`;
-      await inRoom(r.room, (sql) => sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, create_sent_at, updated_at) VALUES (?, 'd1', ?, ?, ?, ?)", r.label, name, T - 5 * MINUTE, T - 5 * MINUTE, T - 5 * MINUTE));
+      await inRoom(r.room, (sql) => {
+        sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, create_sent_at, updated_at) VALUES (?, 'd1', ?, ?, ?, ?)", r.label, name, T - ago, T - ago, T - ago);
+        sql.exec("INSERT INTO release_job (release_id, next_attempt_at, last_code, updated_at) VALUES (?, ?, ?, ?)", REL, T, lastCode, T - ago);
+      });
       const slots = () => inRoom(r.room, (sql) => sql.exec("SELECT COUNT(*) AS n FROM release_upload_attempt").one().n);
       const pass = () => switchedOn(() => stub(r.room).fetch("https://do/internal/test-release-drive", { method: "POST", body: "{}" }).then((res: Response) => res.json() as Promise<any>));
+      /** Statements the room runs once at a named point of the step. */
+      const atPoint = (point: string, statement: string) => inRoom(r.room, (sql) => {
+        sql.exec("CREATE TABLE IF NOT EXISTS test_release_at (point TEXT, statement TEXT)");
+        sql.exec("INSERT INTO test_release_at (point, statement) VALUES (?, ?)", point, statement);
+      });
+      return { r, name, slots, pass, atPoint };
+    }
+
+    it("settles a create outstanding first, taking no upload slot and reading nothing from GitHub, through the driver", async () => {
+      const { r, name, slots, pass } = await waitingOnStore(5 * MINUTE);
       const settling = await pass();
       expect([settling.outcome, settling.code, settling.next_attempt_at]).toEqual(["retry", "store_unsettled", T + 5 * MINUTE]);
       expect(await slots()).toBe(0);
@@ -330,6 +400,46 @@ export function appStoreMakeCases() {
       expect(await slots()).toBe(1);
       expect(await githubCalls()).toBeGreaterThan(0);
       expect((await creates()).map((call) => call.key)).toEqual([name]);
+    });
+
+    it("reads nothing without an upload slot when settling is no longer due by the time the step reads the record", async () => {
+      const { r, slots, pass, atPoint } = await waitingOnStore(5 * MINUTE);
+      // Between the lease, which took no slot to settle, and the step's own read, the create stops being outstanding.
+      await atPoint("store_first", "UPDATE app_store SET create_sent_at = NULL");
+      const ended = await pass();
+      expect([ended.outcome, ended.code]).toEqual(["retry", "store_upload_slot_needed"]);
+      expect(await slots()).toBe(0);
+      expect(await githubCalls()).toBe(0);
+      expect((await storeState()).calls).toEqual([]);
+      // The next lease takes a slot, and the step reads and uploads.
+      await at(r.room, ended.next_attempt_at);
+      const uploaded = await pass();
+      expect(uploaded.outcome).toBe("next");
+      expect(await slots()).toBe(1);
+      expect(await githubCalls()).toBeGreaterThan(0);
+    });
+
+    it("answers the lease lost when the first counted list can't be noted, and notes nothing", async () => {
+      const { r, name, pass, atPoint } = await waitingOnStore(15 * MINUTE);
+      // After the list, before what is written of it, the step's lease runs out.
+      await atPoint("store_listed", "UPDATE test_release_clock SET now = (SELECT next_attempt_at FROM release_job)");
+      const lost = await pass();
+      expect([lost.outcome, lost.code]).toEqual(["retry", "release_drive_lease_lost"]);
+      expect(await record(r.room)).toEqual([{ label: r.label, kind: "d1", store_name: name, store_id: null, recorded_at: T - 15 * MINUTE, create_sent_at: T - 15 * MINUTE, made_at: null, updated_at: T - 15 * MINUTE }]);
+      // The control: the same list with the lease holding is noted.
+      await inRoom(r.room, (sql) => sql.exec("UPDATE test_release_clock SET now = ?", lost.next_attempt_at));
+      const noted = await pass();
+      expect([noted.outcome, noted.code]).toEqual(["retry", "store_unsettled"]);
+      expect((await record(r.room))[0].updated_at).toBe(lost.next_attempt_at);
+    });
+
+    it("lets no file but the store's own module write the room's record of its store", () => {
+      const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+      // While a create is outstanding, the record's `updated_at` is when the first counted list without it was read:
+      // any other writer would move it. S4's schema step adds `first_gone_at`.
+      const writes = /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+app_store\b/i;
+      const writers = Object.entries(sources).filter(([, source]) => writes.test(source)).map(([path]) => path);
+      expect(writers).toEqual(["workspace/release_store.rs"]);
     });
 
     it("is gated by the release path's constant alone, and logs only IDs and codes", () => {

@@ -1,8 +1,9 @@
 //! Reading a release's files and uploading them as its own script (M6 step 5; ADR 0010's "The release job", steps 1
 //! to 4). **Static files only:** no Worker code and no binding is ever uploaded here. *Since S2 of the store plan
 //! (2026-11-17):* a release whose manifest asks for its app's store has the store made after the first pass of its
-//! read and before anything is sent to the provider, and a store create outstanding for its label is settled before
-//! anything is read (`release_store`). Nothing binds the store yet: that is S3's.
+//! read and before anything is sent to the provider; and a release whose own last step waited on its store settles
+//! its label's create outstanding before anything is read (`release_store`). A release that asks for no store is
+//! never held by one. Nothing binds the store yet: that is S3's.
 //!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
@@ -494,8 +495,8 @@ impl Workspace {
                     commit_sha,
                 } => (script, repo_id, commit_sha),
             };
-        // The app's store first: a create outstanding for its label is settled by the list, and nothing is read from
-        // GitHub in this step (`release_store`).
+        // The app's store first, for a release whose last step waited on it: its label's create outstanding is settled
+        // by the list, and nothing is read from GitHub in this step (`release_store`).
         let label = text(&release["label"]).unwrap_or_default();
         if let Some(outcome) = self.store_settle_first(&release_id, &label, lease).await? {
             return self.store_answer(&release_id, outcome).await;

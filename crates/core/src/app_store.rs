@@ -218,10 +218,17 @@ pub enum CreateAnswer {
     Unknown,
 }
 
+/// **Proposed, until the second account's repeat of the spike records D1's own answer to a create of a name it holds.**
+/// The error codes read as "a database of this name exists". Only the stand-in's assumption, `7502`, is known. Such an
+/// answer may be an earlier create of this very name that landed and that a list didn't show yet, so it is never a
+/// refusal: the list settles it (the deep review of PR #416, item 4).
+pub const D1_NAME_TAKEN: &[i64] = &[7502];
+
 /// A create's answer, read strictly. Made only as [`created`] allows. **Refused** only on a `4xx` that says it failed
-/// (`"success": false`) and why (at least one error code), and never on `408`, `409` or `429`: a timeout or a limit may
-/// still be followed by the database, and a conflict may be an earlier create of this very name that landed, so each
-/// is settled by the list. Everything else is [`CreateAnswer::Unknown`].
+/// (`"success": false`) and why (at least one error code, none of them [`D1_NAME_TAKEN`]), and never on `408`, `409`
+/// or `429`: a timeout or a limit may still be followed by the database, and a conflict or a name taken may be an
+/// earlier create of this very name that landed, so each is settled by the list. Everything else is
+/// [`CreateAnswer::Unknown`].
 pub fn create_answer(envelope: &Envelope, result: &Described<'_>, asked: &str) -> CreateAnswer {
     if let Some(id) = created(envelope, result, asked) {
         return CreateAnswer::Made(id);
@@ -230,10 +237,9 @@ pub fn create_answer(envelope: &Envelope, result: &Described<'_>, asked: &str) -
         && (400..500).contains(&envelope.status)
         && !matches!(envelope.status, 408 | 409 | 429)
         && envelope.success == Some(false)
-        && envelope
-            .errors
-            .as_ref()
-            .is_some_and(|codes| !codes.is_empty());
+        && envelope.errors.as_ref().is_some_and(|codes| {
+            !codes.is_empty() && !codes.iter().any(|code| D1_NAME_TAKEN.contains(code))
+        });
     if refused {
         CreateAnswer::Refused
     } else {
@@ -433,11 +439,33 @@ pub fn make_step(
     }
 }
 
-/// Whether the record holds a create outstanding, which the job settles by the list before anything else for this
-/// release, reading nothing from GitHub and taking no upload slot. Whatever the release asks for: settling a create the
-/// label already sent makes nothing.
-pub fn settles_first(record: Option<&StoreRecord<'_>>, create_sent_at: Option<i64>) -> bool {
-    record.is_some() && create_sent_at.is_some() && binding(record) == Err(NoBinding::NotMade)
+/// The waits a release's upload step answers only after its manifest was read and asked for its store, while its
+/// label's create is outstanding. A release whose own last step answered one of these asked for its store.
+pub const STORE_WAITS: [&str; 4] = [
+    STORE_CREATE_UNANSWERED,
+    STORE_UNSETTLED,
+    STORE_LIST_UNKNOWN,
+    STORE_PROVIDER_MISSING,
+];
+
+/// A release waits one step: its lease took no upload slot, to settle its store first, and the record changed before
+/// the step read it, so nothing is read without a slot; the next lease takes one.
+pub const STORE_SLOT_NEEDED: &str = "store_upload_slot_needed";
+
+/// Whether the release's upload step settles its label's create outstanding by the list before anything else, reading
+/// nothing from GitHub and taking no upload slot: the record holds a create outstanding, **and the release's own last
+/// step (`last_code`) waited on its store** ([`STORE_WAITS`]), which it does only once its manifest asked for one. A
+/// release not known to ask, a static one among them, is never held by a create outstanding: it reads as before, and a
+/// release that asks settles it after its read (the deep review of PR #416, item 1).
+pub fn settles_first(
+    record: Option<&StoreRecord<'_>>,
+    create_sent_at: Option<i64>,
+    last_code: Option<&str>,
+) -> bool {
+    record.is_some()
+        && create_sent_at.is_some()
+        && binding(record) == Err(NoBinding::NotMade)
+        && last_code.is_some_and(|code| STORE_WAITS.contains(&code))
 }
 
 /// What a whole list says of a create outstanding.

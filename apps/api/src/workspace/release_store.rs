@@ -16,10 +16,26 @@
 //! - **A lost answer is settled by a whole list read by the name.** Found: its ID is recorded made. Not found on two
 //!   whole lists at least ten minutes apart, the first ten minutes after the create: the create is no longer
 //!   outstanding, and the next release step that asks for the store creates it again, under the same name. A list that
-//!   isn't whole decides nothing. **A create outstanding is settled before anything else the step does,** reading
-//!   nothing from GitHub, and the driver's lease takes no upload slot for it (`release_driver::lease`).
+//!   isn't whole decides nothing. **Only a release that asks for its store is held by a create outstanding** (the deep
+//!   review of PR #416, item 1): a release that asks for none, a static one among them, uploads as before. A release
+//!   that asks settles it after its read; and, once its own last step waited on its store (`STORE_WAITS`), before
+//!   anything else its next step does, reading nothing from GitHub, with no upload slot taken by the driver's lease
+//!   (`release_driver::lease`). If the record changed between that lease and the step, so settling is no longer due,
+//!   the step reads nothing without a slot and ends (`store_upload_slot_needed`).
 //! - **A definite refusal fails the release** by `store_create_refused`. The create stays outstanding, so whatever it
-//!   may have met (a conflict on the name among them) is settled by the list before another is sent.
+//!   may have met is settled by the list before another is sent. A conflict, or D1 saying the name is taken
+//!   (`D1_NAME_TAKEN`, **Proposed**), is no refusal: it may be an earlier create of this very name, so it is settled by
+//!   the list too.
+//! - **Only this module writes `app_store`** (a test reads every source for it), since while a create is outstanding
+//!   its `updated_at` is when the first counted list without it was read. S4's schema step adds `first_gone_at`.
+//! - **A create recorded and never sent:** if the alarm can't be set after the record's transaction commits (`arm`),
+//!   or the step dies before sending, the record says a create is outstanding that never went out. It settles like a
+//!   lost one, created again after two lists about twenty minutes on. **So D1 and the room may each hold a name with
+//!   no ID:** S4 and S5 must resolve every such record by listing by its name, never by its ID alone.
+//! - **The list's reach:** it counts every D1 database in the account, up to `MAX_LIST_PAGES` pages of `LIST_PAGE`.
+//!   Past that it is no list, and settling can't decide; S5 must use a list filtered by name, or raise the bound,
+//!   before about a thousand apps. A list is sent only for a create recorded, but many rooms settling at once could
+//!   press on the account's API rate limit.
 //!
 //! Logs carry the room's and the release's IDs and codes: never a store's name, its ID or a token.
 use super::release_commit::{upload_ready, UploadReady};
@@ -29,7 +45,7 @@ use crate::app_stores::StoreProvider;
 use podster_core::app_store::{
     make_step, settle, settles_first, store_name, CreateAnswer, MakeStep, Settle, StoreRecord,
     STORE_CREATE_INCOMPLETE, STORE_CREATE_OWED, STORE_CREATE_REFUSED, STORE_CREATE_UNANSWERED,
-    STORE_LIST_UNKNOWN, STORE_PROVIDER_MISSING, STORE_SETTLED, STORE_UNSETTLED,
+    STORE_LIST_UNKNOWN, STORE_PROVIDER_MISSING, STORE_SETTLED, STORE_SLOT_NEEDED, STORE_UNSETTLED,
 };
 
 /// The room's record of one label's store, as its row holds it.
@@ -87,14 +103,39 @@ fn label_of(sql: &SqlStorage, release_id: &str) -> R<Option<String>> {
     .and_then(|row| text(&row["label"])))
 }
 
-/// Whether the release's label holds a create outstanding, which its upload step settles first, reading nothing from
-/// GitHub (`podster_core::app_store::settles_first`). The driver's lease takes no upload slot for such a step.
+/// What the release's own last step answered, as the driver's job recorded it.
+fn last_code(sql: &SqlStorage, release_id: &str) -> R<Option<String>> {
+    Ok(rows(
+        sql,
+        "SELECT last_code FROM release_job WHERE release_id = ?",
+        vec![release_id.into()],
+    )?
+    .first()
+    .and_then(|row| text(&row["last_code"])))
+}
+
+/// Whether the release's upload step settles its label's create outstanding first, reading nothing from GitHub
+/// (`podster_core::app_store::settles_first`): only for a release whose own last step waited on its store. The
+/// driver's lease takes no upload slot for such a step.
 pub(super) fn settles_first_for(sql: &SqlStorage, release_id: &str) -> R<bool> {
     let Some(label) = label_of(sql, release_id)? else {
         return Ok(false);
     };
-    Ok(kept(sql, &label)?
-        .is_some_and(|kept| settles_first(Some(&kept.record()), kept.create_sent_at)))
+    let last = last_code(sql, release_id)?;
+    Ok(kept(sql, &label)?.is_some_and(|kept| {
+        settles_first(Some(&kept.record()), kept.create_sent_at, last.as_deref())
+    }))
+}
+
+/// Whether the lease the step holds took an upload slot: the room's upload attempt recorded at the lease's own time.
+fn lease_took_slot(sql: &SqlStorage, release_id: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS c FROM release_upload_attempt a JOIN release_job j ON j.release_id = a.release_id
+           WHERE a.release_id = ? AND a.at = j.updated_at AND j.leased_step IS NOT NULL",
+        vec![release_id.into()],
+    )?
+    .is_empty())
 }
 
 /// What the store step came to, for the upload that called it.
@@ -158,9 +199,10 @@ impl Workspace {
         StoreProvider::from_env(&self.env)
     }
 
-    /// **Before anything else of the upload,** once its recheck holds: a create outstanding for the release's label is
-    /// settled by the list, and the step ends there, reading nothing from GitHub. `None` when the label holds no create
-    /// outstanding, and the upload goes on. Settling makes nothing, so it runs whatever the release asks for.
+    /// **Before anything else of the upload,** once its recheck holds, for a release whose own last step waited on its
+    /// store: its label's create outstanding is settled by the list, and the step ends there, reading nothing from
+    /// GitHub. A driven step whose lease took no upload slot for that, and which finds settling no longer due, ends too,
+    /// reading nothing ([`STORE_SLOT_NEEDED`]). `None` when the upload goes on.
     pub(super) async fn store_settle_first(
         &self,
         release_id: &str,
@@ -168,17 +210,26 @@ impl Workspace {
         lease: Option<&release_driver::StepLease>,
     ) -> R<Option<StoreOutcome>> {
         let sql = self.state.storage().sql();
-        let Some(kept) = kept(&sql, label)? else {
+        #[cfg(feature = "failpoints")]
+        release_driver::test_at(&sql, "store_first");
+        let last = last_code(&sql, release_id)?;
+        let due = kept(&sql, label)?.and_then(|kept| {
+            let due = settles_first(Some(&kept.record()), kept.create_sent_at, last.as_deref());
+            match (due, kept.create_sent_at, kept.name.clone()) {
+                (true, Some(sent), Some(name)) => Some((name, sent, kept.updated_at)),
+                _ => None,
+            }
+        });
+        let Some((name, sent, last_change)) = due else {
+            // The lease took no slot because settling was due when it was taken: nothing is read without one.
+            if lease.is_some() && !lease_took_slot(&sql, release_id)? {
+                log(&sql, release_id, STORE_SLOT_NEEDED);
+                return Ok(Some(StoreOutcome::Wait(STORE_SLOT_NEEDED, None)));
+            }
             return Ok(None);
         };
-        let (Some(sent), Some(name)) = (kept.create_sent_at, kept.name.clone()) else {
-            return Ok(None);
-        };
-        if !settles_first(Some(&kept.record()), kept.create_sent_at) {
-            return Ok(None);
-        }
         let outcome = self
-            .settle_store(release_id, label, &name, sent, kept.updated_at, lease)
+            .settle_store(release_id, label, &name, sent, last_change, lease)
             .await?;
         // Found and recorded made: the upload is the next step's, with its own upload slot.
         Ok(Some(match outcome {
@@ -209,8 +260,25 @@ impl Workspace {
                 log(&sql, release_id, why.code());
                 Ok(StoreOutcome::Fail(why.code()))
             }
-            // Settled first, on the step's next attempt.
-            MakeStep::Settle => Ok(StoreOutcome::Wait(STORE_UNSETTLED, None)),
+            // A create outstanding, for a release that asks: settled by the list now, after its read. Found, the upload
+            // goes on; settled as having made nothing, it is created again at once.
+            MakeStep::Settle => {
+                let Some(kept) = kept else {
+                    return Err(ApiError::internal("a store to settle with no record"));
+                };
+                let (Some(name), Some(sent)) = (kept.name.clone(), kept.create_sent_at) else {
+                    return Err(ApiError::internal("a store to settle with no create"));
+                };
+                match self
+                    .settle_store(release_id, label, &name, sent, kept.updated_at, lease)
+                    .await?
+                {
+                    StoreOutcome::Wait(STORE_CREATE_OWED, _) => {
+                        self.create_store(release_id, label, lease).await
+                    }
+                    other => Ok(other),
+                }
+            }
             MakeStep::Create => self.create_store(release_id, label, lease).await,
         }
     }
@@ -386,6 +454,9 @@ impl Workspace {
         let list = provider.list().await;
         let now = release_now(&sql);
         let settled = settle(list.as_deref(), name, sent, last_change, now);
+        // Test builds only: a test changes the room between the list and what is written of it.
+        #[cfg(feature = "failpoints")]
+        release_driver::test_at(&sql, "store_listed");
         let outcome = match settled {
             Settle::Found(store_id) => {
                 self.record_made(label, name, &store_id)?;
@@ -394,8 +465,11 @@ impl Workspace {
             }
             Settle::Unknown => StoreOutcome::Wait(STORE_LIST_UNKNOWN, None),
             Settle::Wait { at, note_gone } => {
-                if note_gone {
-                    self.unsettled_write(label, name, sent, lease, "updated_at = ?", now)?;
+                // A first list that counts and can't be noted (the lease ran out) counts for nothing: the step says so.
+                if note_gone
+                    && !self.unsettled_write(label, name, sent, lease, "updated_at = ?", now)?
+                {
+                    return Ok(StoreOutcome::Wait(release_driver::LEASE_LOST, None));
                 }
                 StoreOutcome::Wait(STORE_UNSETTLED, Some(at))
             }

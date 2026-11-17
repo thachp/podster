@@ -62,6 +62,7 @@ fn host() -> HostHeld<'static> {
         default_script: Some(SCRIPT),
         held: false,
         app_suspended: false,
+        room_public: true,
         stop: StopSeen::Clear,
     }
 }
@@ -173,6 +174,11 @@ fn never_served_unless_the_marker_said_so_and_the_host_still_serves_it() {
         },
         HostHeld {
             app_suspended: true,
+            ..host()
+        },
+        // A room made private serves nothing, whether or not its unpublish has run.
+        HostHeld {
+            room_public: false,
             ..host()
         },
         HostHeld {

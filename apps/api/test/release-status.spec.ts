@@ -258,6 +258,13 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     // The whole content domain stopped.
     expect(await withStop(() => shown(r.room))).toEqual(no);
     expect(await shown(r.room)).toEqual(yes);
+    // The room just made private, before its unpublish has run (the room's alarms are the test's, so it doesn't):
+    // the host is still set to the release, and it isn't served.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE workspace SET visibility = 'private'"));
+    expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state WHERE kind = 'default'").one().script_name)).toBe(r.script);
+    expect(await shown(r.room)).toEqual(no);
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    expect(await shown(r.room)).toEqual(yes);
   });
 
   it("says nothing of a release while release is off for the deployment or the room, or of another commit's", async () => {
@@ -297,11 +304,20 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
       expect([refused.status, refused.body.error.code]).toEqual([403, "not_allowed"]);
       // Someone outside the room: refused, nothing asked.
       const outside = await read({ id: "per_rs_outsider", org: ORG });
-      expect(outside.status).toBeGreaterThanOrEqual(400);
+      expect([outside.status, outside.body.error.code]).toEqual([404, "workspace_not_found"]);
       // Given the merge alone: answered, with no release, and nothing asked.
       await inRoom(r.room, (sql) => void sql.exec("UPDATE task_change SET merge_requested_by = ?", MERGER.id));
       const merged = await read(MERGER);
       expect([merged.status, merged.body.release]).toEqual([200, null]);
+      expect(await reads()).toBe(before + 1);
+      // The owner again, with the room's release off: nothing could be served, and nothing is asked.
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE release_config SET enabled = 0"));
+      expect((await read(OWNER)).body.release).toEqual({ exists: false });
+      expect(await reads()).toBe(before + 1);
+      // And with it on but the room made private: not served, and nothing is asked.
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE release_config SET enabled = 1"));
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE workspace SET visibility = 'private'"));
+      expect((await read(OWNER)).body.release).toMatchObject({ state: "served", served: false, result_url: null });
       expect(await reads()).toBe(before + 1);
     } finally {
       await inModeration((sql) => void sql.exec("DROP TABLE IF EXISTS test_stop_reads"));

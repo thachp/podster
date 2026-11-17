@@ -1183,7 +1183,12 @@ impl Workspace {
         let switched_on = crate::releases::switched_on(&self.env).await;
         // A row that can't be read here is read again by the status itself, which then refuses; the stop is asked
         // anyway, so nothing is shown served on a guess.
-        let candidate = whole && switched_on && served_attempt(sql, task_id).unwrap_or(true);
+        // Nothing can be shown served while the room's release is off or the room isn't public, so the stop isn't asked.
+        let candidate = whole
+            && switched_on
+            && room_release_on(sql).unwrap_or(true)
+            && room_public(sql).unwrap_or(true)
+            && served_attempt(sql, task_id).unwrap_or(true);
         let stop = if candidate {
             match crate::content_stop::read_from(&self.env).await {
                 crate::content_stop::Stop::Clear => StopSeen::Clear,
@@ -1206,6 +1211,20 @@ fn merged_commit(sql: &SqlStorage, task_id: &str) -> R<Option<String>> {
     Ok(change_row(sql, task_id)?.and_then(|row| text(&row["merge_sha"])))
 }
 
+/// Whether the room's own release setting is on.
+fn room_release_on(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT enabled FROM release_config", vec![])?
+        .first()
+        .is_some_and(|row| int(&row["enabled"]) == 1))
+}
+
+/// Whether the room is public now, by its own row. Only a public room's app is served.
+fn room_public(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|row| row["visibility"].as_str() == Some("public")))
+}
+
 /// Whether any release of the task's merged commit is recorded `served`.
 fn served_attempt(sql: &SqlStorage, task_id: &str) -> R<bool> {
     let Some(commit) = merged_commit(sql, task_id)? else {
@@ -1226,9 +1245,7 @@ fn served_attempt(sql: &SqlStorage, task_id: &str) -> R<bool> {
 /// while it is off the same `{ exists: false }` as everyone, which is what every caller was answered before M6.
 fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bool) -> R<Value> {
     let none = json!({ "exists": false });
-    let room_on = rows(sql, "SELECT enabled FROM release_config", vec![])?
-        .first()
-        .is_some_and(|row| int(&row["enabled"]) == 1);
+    let room_on = room_release_on(sql)?;
     if !whole {
         return Ok(if facts.switched_on && room_on {
             Value::Null
@@ -1274,6 +1291,7 @@ fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bo
         default_script: host.and_then(|row| row["script_name"].as_str()),
         held,
         app_suspended,
+        room_public: room_public(sql)?,
         stop: facts.stop,
     };
     // A stored state the room doesn't recognise refuses the read: it is never guessed at, and never served.

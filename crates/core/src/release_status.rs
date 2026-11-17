@@ -287,6 +287,9 @@ pub struct HostHeld<'a> {
     pub held: bool,
     /// An operator suspended the app.
     pub app_suspended: bool,
+    /// The room is public now. Only a public room's app is served, so a room made private serves nothing, whether or
+    /// not its unpublish has run yet.
+    pub room_public: bool,
     pub stop: StopSeen,
 }
 
@@ -331,7 +334,8 @@ pub fn release_report<'a>(
     let Some((latest, &state)) = attempts.last().zip(states.last()) else {
         return Ok(ReleaseReport::NoRelease);
     };
-    let hosts_serve = !host.held && !host.app_suspended && host.stop == StopSeen::Clear;
+    let hosts_serve =
+        host.room_public && !host.held && !host.app_suspended && host.stop == StopSeen::Clear;
     let served = hosts_serve
         && attempts.iter().zip(&states).any(|(attempt, &state)| {
             state == ReleaseState::Served

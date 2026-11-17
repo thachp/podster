@@ -36,8 +36,8 @@ pub(super) struct ConfigReads {
     on: Option<OnReads>,
 }
 
-/// The facts only switching on needs.
-struct OnReads {
+/// The facts only switching on needs, and asking for a release (`release_request`).
+pub(super) struct OnReads {
     deployment_on: bool,
     /// The organization these were read for, so an answer about another says nothing here.
     org: String,
@@ -225,22 +225,44 @@ pub(super) fn handle_set(
 /// The room as switching on sees it: its own rows now, and what was read outside, each answer counting only if it is
 /// about the organization and repository the rows name now. An unread fact refuses with `standing_unknown`.
 pub(super) fn on_room(sql: &SqlStorage, reads: &ConfigReads) -> R<ReleaseRoom> {
-    let on = reads.on.as_ref().ok_or_else(standing_unknown)?;
+    room_from(sql, reads.on.as_ref())
+}
+
+/// [`on_room`], from the facts alone.
+pub(super) fn room_from(sql: &SqlStorage, on: Option<&OnReads>) -> R<ReleaseRoom> {
+    let on = on.ok_or_else(standing_unknown)?;
+    match room_assuming(sql, on)? {
+        (room, false) => Ok(room),
+        (_, true) => Err(standing_unknown()),
+    }
+}
+
+/// The room as [`room_from`] reads it, except that **an outside fact that couldn't be read is taken as holding, and
+/// remembered** (the second value): so a refusal policy then finds comes only from a fact that was read, and the caller
+/// answers `standing_unknown` only when nothing read fails (`release_request`).
+pub(super) fn room_assuming(sql: &SqlStorage, on: &OnReads) -> R<(ReleaseRoom, bool)> {
     let org = room_owner_org(sql)?;
     let provider = super::release_recheck::linked_provider(sql)?;
     let about_this_org = on.org == org;
+    let mut unknown = false;
     let org_may_release = release_switch_now(
         super::release_switch::applied(sql)?,
         on.org_release.filter(|_| about_this_org),
     )
     .map(|switch| switch.granted)
-    .ok_or_else(standing_unknown)?;
+    .unwrap_or_else(|| {
+        unknown = true;
+        true
+    });
     let org_may_provision = on
         .org_may_provision
         .filter(|_| about_this_org && on.provider == provider)
-        .ok_or_else(standing_unknown)?;
+        .unwrap_or_else(|| {
+            unknown = true;
+            true
+        });
     let facts = super::release_recheck::room_facts(sql, on.deployment_on, org_may_release)?;
-    Ok(ReleaseRoom {
+    let room = ReleaseRoom {
         deployment_allows_release: facts.deployment_allows_release,
         organization_may_release: facts.organization_may_release,
         organization_may_provision: org_may_provision,
@@ -252,7 +274,8 @@ pub(super) fn on_room(sql: &SqlStorage, reads: &ConfigReads) -> R<ReleaseRoom> {
         deleted: facts.deleted,
         organization_exists: facts.organization_exists,
         repository_ready: facts.repository_ready,
-    })
+    };
+    Ok((room, unknown))
 }
 
 impl Workspace {
@@ -265,33 +288,41 @@ impl Workspace {
     /// The same reads, for a change that needs everything switching on needs (`on`), such as asking to map a custom
     /// hostname (M6 step 8), or for one that only takes down.
     pub(super) async fn config_reads(&self, caller_id: &str, on: bool) -> R<ConfigReads> {
-        let sql = self.state.storage().sql();
         let on = if on {
             self.release_path_open().await?;
-            let deployment = crate::releases::setting(&self.env).await;
-            self.apply_deployment_switch(deployment).await;
-            let org = room_owner_org(&sql)?;
-            let provider = super::release_recheck::linked_provider(&sql)?;
-            let org_may_provision = match &provider {
-                Some(provider) => principal::org_delegation(&self.env, &org, provider)
-                    .await
-                    .ok()
-                    .and_then(|answer| answer["granted"].as_bool()),
-                None => Some(true),
-            };
-            let org_release = principal::org_release_switch(&self.env, &org).await;
-            self.apply_switch_read(org_release).await;
-            Some(OnReads {
-                deployment_on: deployment.allows_release(),
-                org,
-                provider,
-                org_may_provision,
-                org_release,
-            })
+            Some(self.on_reads().await?)
         } else {
             None
         };
         let caller = self.still_holds(Some(caller_id), true).await?;
         Ok(ConfigReads { caller, on })
+    }
+
+    /// The facts outside the room that everything release needs at all depends on: the deployment's setting, and the
+    /// organization's provisioning delegation and release switch, each read from its own object. The deployment's
+    /// setting and the organization's switch are applied as they are read, as at every release command. The caller
+    /// passes the release path's gate first.
+    pub(super) async fn on_reads(&self) -> R<OnReads> {
+        let sql = self.state.storage().sql();
+        let deployment = crate::releases::setting(&self.env).await;
+        self.apply_deployment_switch(deployment).await;
+        let org = room_owner_org(&sql)?;
+        let provider = super::release_recheck::linked_provider(&sql)?;
+        let org_may_provision = match &provider {
+            Some(provider) => principal::org_delegation(&self.env, &org, provider)
+                .await
+                .ok()
+                .and_then(|answer| answer["granted"].as_bool()),
+            None => Some(true),
+        };
+        let org_release = principal::org_release_switch(&self.env, &org).await;
+        self.apply_switch_read(org_release).await;
+        Ok(OnReads {
+            deployment_on: deployment.allows_release(),
+            org,
+            provider,
+            org_may_provision,
+            org_release,
+        })
     }
 }

@@ -135,6 +135,71 @@ There is one way to unpublish, and one way to wake.
 
 The flip list in `m6-plan.md` is updated in each PR for what it closes.
 
+## The rest of step 6: requests, approval and rollback
+
+**Proposed, 2026-11-16, by the architect's session.** Built on `main` at `0dbd963e`, after 6a–6d, the contract PR, the release job (step 5), release status (#407), the approvals list (#408) and the Release panel (#409). Every PR here is behind `RELEASES`, with `RELEASE_PATH_COMPLETE` false throughout: none flips it, and while it is false a deployment with release on and a provider configured refuses every one of these commands as a route that isn't built.
+
+**What is left.** ADR 0010's "a `deploy_release` command, then a person's approval", and rollback. Today nothing writes a release row but the tests, so the job (step 5), the status (step 7) and the screens (step 10) have nothing to act on outside a test. `approveRelease` and `declineRelease` answer `release_not_available`, and the web panel's buttons call them.
+
+**The order.** Each is one PR, in this order. Each that changes `packages/contracts` takes its own contract turn.
+
+| PR | What | Contract | Room schema step |
+| --- | --- | --- | --- |
+| **6e** | **A person asks for a release** of a task's merged commit: `requestRelease`, `POST /v1/workspaces/{ws}/releases`, person-only. It records one release `awaiting_approval`, with a label made if the room has none current, and starts nothing. *Built in this PR: [below](#what-6e-built).* | Yes: the route, its body, five error codes | No |
+| **6f** | **A person approves or declines** (`approveRelease`, `declineRelease`, already in the contract as not built). Approval: `authorize_approval`, then core's whole recheck on fresh outside reads (the stop, the deployment, the organization's switch and delegation, the approver's, the requester's and the giver's own records), then `Approve`, so the release is `queued` and the driver takes it. Decline: `authorize_decline`, then `Decline`, `declined`, nothing uploaded. **Also the app's address,** which nothing makes yet: the label's row in D1's lookup table (`app_label.indexed_at`, with an upkeep that retries), and the default host's serve row, both before a release can be queued. | Yes: both summaries say built | Probably none: `app_label.indexed_at` and `serve_state` exist |
+| **6g** | **An agent asks: the `deploy_release` capability.** The release keeps the person who controls the agent (`requester_person`), so the recheck can ask whether that person still holds and whether the agent is still connected; today it fails an agent's release as `requester_lost_authority`. The gateway's MCP tool and A2A skill. | Yes: the capability, and `check.mjs`'s rule that no capability reaches a release is narrowed to this one | Yes: `release.requester_person` |
+| **6h** | **Rollback.** A person asks to roll back to an earlier release of the room. Its own record, approved as any release is. If it is the kept release and Cloudflare's own read says its script still exists, approval leads to core's `rollback` switch, with no upload; otherwise it is a new release of that commit, uploaded again. | Yes: the route | Likely: the record of which release it rolls back to |
+
+**Open questions, each with the recommended answer, all Proposed.**
+
+1. **When is an app's label made?** *Recommended, and built in 6e:* at the request, in its transaction, when the room has no current label: the first request ever, or the first since an unpublish retired the last. A release row needs one (`release.label` is `NOT NULL`). A label made for a request nobody approves is never served, and its address is shown only to the room's owner and admins in the release configuration. **Its row in D1's lookup table and the default host's serve row are owed to 6f,** before anything can be queued: nothing is up under a label that isn't indexed, so no takedown can need it before then.
+2. **May an agent ask in 6e?** *Recommended, and built:* no. The rows keep who asked and not who controls them, so the job's recheck can't tell whether an agent's controlling person still holds, and fails the release at its first pass. Asking stays person-only, at the Worker and in the room (`authorize_release_request`), until 6g records that person. AC-17 holds meanwhile: no agent sees a deploy tool.
+3. **The same commit asked for twice.** *Recommended, and built:* refused `release_pending` (409) while a release of that commit is awaiting approval, queued, uploading or uncertain. Once it ends it may be asked for again. A commit that is live or served may be asked for again too; that is a re-upload, which nothing needs to forbid.
+4. **Does a request read the content domain's stop?** *Recommended, and built:* no. A request publishes nothing, and approval and every pass of the job read the stop. A stopped domain still lets a person ask; nothing they ask for can go further while it is stopped.
+5. **The daily cap.** *Recommended, and built:* core's existing rule, 20 asks a rolling day in the room, declined and failed ones included, counted from the room's own release rows, refused `release_limit` (429). The edge is pinned to the millisecond in core.
+6. **Who is told of a request.** *Recommended, and built:* the room's owner and its admins who are people, who are those who may approve (an agent holding the admin role isn't told), by the event `release.requested` about the release's ID; the requester by the answer. The task's other parties aren't told.
+7. **Does the owner or an admin need a grant to ask?** *Recommended, and built:* yes, as anyone does. ADR 0010 says who asks is whoever holds a live `deploy` grant; approving needs no grant. Self-approval stays allowed (decided on the review of PR #309, for the owner to review).
+8. **Approving a release whose request is now stale** (6f). *Recommended:* approval runs core's whole recheck on fresh reads first. A fact that was read and fails ends the release `failed` with its code, as the job would, and answers it; an unread fact is `standing_unknown` and writes nothing. Nothing doomed is queued.
+9. **Rollback's route** (6h). *Recommended:* its own, `POST /v1/workspaces/{ws}/releases/{release}/rollback`, person-only, since its checks differ (the kept script's read), and its record names the release it rolls back to.
+10. **When `deploy_release` is listed to agents** (6g). *Recommended:* only while the API answers the release routes, that is with `RELEASES` exactly `true`, read by the gateway from the API rather than from a variable of its own, so the two can't disagree. Until `RELEASE_PATH_COMPLETE` flips, a deployment that lists it answers `release_not_available`.
+
+**Required of the later PRs, from the deep security review of 6e (PR #410), 2026-11-16.** These are conditions on those PRs, not open questions.
+
+- **6f, approval:**
+  - it passes `release_path_open`;
+  - it reads every outside fact again: the stop, the deployment, the organization's switch and delegation, and the approver's, requester's and giver's records;
+  - it asserts the release's `release_epoch` and `config_version` are still the room's current ones.
+  - **It writes the D1 index row and the default host's serve row so that a failed or refused approval leaves them harmless:** an index row only routes a question, and a serve row with no script serves nothing.
+  - **Its indexing upkeep covers labels made before 6f.** 6e makes a label wherever `RELEASES` is on with no provider, which is test builds today, so a label may exist with `indexed_at` null.
+- **6g, an agent's request:** on every pass of the job, the agent's current linker and linker generation must equal the recorded `requester_person`. Anything else fails the release.
+- **6h, rollback:**
+  - the rollback's requester needs their own live `deploy` grant;
+  - the switch with no upload requires the room's current label, its current epoch, no suspension and no open takedown finding, core's `releasable_commit` and the reviewer rule, and a fresh read from Cloudflare at the switch;
+  - a re-upload counts toward the room's daily cap and the read budget.
+- **Events for a person to decide on go to people only.** 6e's `release.requested` uses `roles::room_approvers`, which leaves out an agent holding the admin role. `release.config_set` (step 6's contract PR) still uses the unfiltered `roles::room_managers`, and **should move to `room_approvers` in its own PR, with a test.**
+
+**For the owner, with no recommendation from the architect's session:**
+
+- **A one-person release.** Once 6g lets an agent ask, may the person who controls that agent approve its request? A person may already approve a release they asked for themselves (decided on the review of PR #309, for the owner to review). This would let one person both ask, through their agent, and approve: the release counterpart of AC-17's `self_review` for merges. **The owner's to decide.**
+
+**Recorded, not decided here:**
+
+- **`organization_exists` is hard-coded `true`,** inherited from `release_recheck::room_facts`. Nothing deletes an organization. Whatever first does owes that fact a source (ruling 4 above), and 6e's request reads it as the job does.
+- **A reverted commit stays releasable.** `releasable_commit` asks only whether Podster's merge put the commit on the default branch and confirmed it there. A later revert on that branch doesn't change that. Whether it should is **undecided**.
+
+### What 6e built
+
+**A person's request for a release,** built on 2026-11-16 as 6e above, behind `RELEASES`, with `RELEASE_PATH_COMPLETE` still false. One contract change, no room schema step and no D1 migration.
+
+- **The route:** `requestRelease`, `POST /v1/workspaces/{ws}/releases`, `{ task_id, commit_sha }` and optionally `environment: "production"`, and nothing else. Person-only in `capabilities.yaml`; no capability reaches it. It answers the contract's `Release`.
+- **Who:** `podster_policy::release::authorize_release_request`: `may_ask_for_release` (in the room, a person) on the room's rows before anything is read outside it, then `authorize_deploy_release` (where release may happen at all, a public room first, then the live `deploy` grant from someone who still holds authority, not through a public claim), then the requester's own `Principal` saying they are still in their organization. A task the caller can't see is `task_not_found`.
+- **What:** `podster_core::release_request::request_release`, in the order its module gives.
+- **Fail closed:** the deployment's setting, the organization's switch and delegation, the requester's and the giver's records are read before the transaction; a fact read and failing refuses, one that couldn't be read with nothing failing is `standing_unknown` and writes nothing. *From the reviews of #410:* who is asking and where (`release_request::standing`) is decided wholly before the task named is looked at and before an unread fact decides, so a member with no grant naming a missing task gets `grant_required`, and a private room whose organization can't be read gets `release_needs_public_room`. The same `standing` is the replay check, so a retry under the same key after the grant was revoked, or the room made private, is refused by the code that holds now and writes nothing.
+- **The gate:** the request passes `release_path_open` before it reads anything outside the room, so with release on and a provider configured it is `release_not_available` and writes nothing. A test shows it, and that the constant is still false.
+- **Nothing starts:** the release is `awaiting_approval`, which the driver never takes (`job_owns`). A test runs the room's job twice with release on and finds it untouched, and `approveRelease` still answers `release_not_available`.
+- **Written in one transaction with the idempotency record:** the release; a new label if none is current; the audit `release.requested`; the event `release.requested` to the owner and the admins who are people (`roles::room_approvers`). Logs: none beyond the gate's own line by its code.
+- **Tests:** `crates/core/tests/release_request.rs`, the policy's in `crates/policy/tests/release.rs`, and `apps/api/test/release-request.spec.ts`.
+
 ## Not settled here
 
 - **How long a room keeps serving after `RELEASES` goes off.** Up to one lap of the walk. That is ⌈L/50⌉ × 5 minutes at worst, sooner for rooms the entries pass asks about directly.

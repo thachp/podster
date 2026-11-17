@@ -6,6 +6,7 @@
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
 //! | Map a custom hostname, or remove one (M6 step 8) | The same people; asking only where release may happen at all, release switched on in the room among them; removing always ([`authorize_custom_hostname`]) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
+//! | Ask for a release through a person's route (`requestRelease`, M6 step 6) | The same, as a person still in their organization; an agent not yet ([`authorize_release_request`]) |
 //! | Approve a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed (decided by the architect, for the owner to review) |
 //! | Decline a release | The same people, wherever they may still act on the room: only a deleted room or organization refuses ([`authorize_decline`]) |
 //! | See the room's release configuration and every release | A human owner or admin |
@@ -514,6 +515,40 @@ pub fn authorize_deploy_release(
     }
     release_room_allows(room)?;
     may_release_now(&caller.id, caller.kind, caller.role, standing)
+}
+
+/// Who may ask for a release through a person's route (`requestRelease`, M6 step 6), and where: [`authorize_deploy_release`]
+/// for a person, whose own record also still says they belong to the organization their place here is held in
+/// (`requester_holds`, from their own `Principal`, as the job's recheck asks of a requester). **An agent is refused here,
+/// whatever it holds** (*Proposed*, by the architect on 2026-11-16, for the owner to review): the release a request records
+/// keeps who asked and not the person who controls them, so the job's recheck can't yet tell whether that person still
+/// holds, and an agent's release would fail at its first pass. An agent's request arrives with the `deploy_release`
+/// capability, in its own contract turn, which records the controlling person. Until then no agent may ask at all, so no
+/// agent sees a deploy tool before the release path exists (AC-17).
+pub fn authorize_release_request(
+    caller: &Caller,
+    room: &ReleaseRoom,
+    standing: &ReleaseStanding,
+    requester_holds: bool,
+) -> Result<(), ReleaseDenial> {
+    may_ask_for_release(caller)?;
+    authorize_deploy_release(caller, room, standing)?;
+    if !requester_holds {
+        return Err(ReleaseDenial::NotAllowed);
+    }
+    Ok(())
+}
+
+/// The part of [`authorize_release_request`] the room's rows alone answer, asked before anything is read outside the
+/// room, so nobody who could never ask makes the room ask anyone anything: someone in the room, and a person.
+pub fn may_ask_for_release(caller: &Caller) -> Result<(), ReleaseDenial> {
+    if caller.role == Role::None {
+        return Err(ReleaseDenial::NotParticipant);
+    }
+    if caller.kind != PrincipalKind::Person {
+        return Err(ReleaseDenial::NotAllowed);
+    }
+    Ok(())
 }
 
 /// Whether the room may have a release at all: only a public room releases. Asked at the command, at the approval, and

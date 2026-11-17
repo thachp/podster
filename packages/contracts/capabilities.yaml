@@ -86,6 +86,9 @@ person_only:
   - setReleaseConfig
   # M6 step 10(b): the room's releases awaiting approval, for a person's Needs attention. Person-only, as approving is.
   - listReleaseApprovals
+  # M6 step 6: a person asks for a release of a task's merged commit. Person-only until the `deploy_release` capability
+  # arrives in its own contract turn, recording an agent's controlling person, so no agent sees a deploy tool before then.
+  - requestRelease
   - approveRelease
   - declineRelease
   - getAppHostname

@@ -66,9 +66,8 @@ use super::release_recheck::{
 };
 use super::*;
 use podster_core::release::{
-    commit_live, next_state, script_name, script_owner, set_back, upload_expired,
-    CommitLiveRefusal, RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState,
-    UploadFailure,
+    commit_live, next_state, script_owner, set_back, upload_expired, CommitLiveRefusal,
+    RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState, UploadFailure,
 };
 use podster_core::release_uncertain::{
     commit_waits_on_uncertain, WriteOutcome, COMMIT_WAITS_UNCERTAIN,
@@ -96,7 +95,7 @@ pub(super) const MAX_READ_AGE_MS: i64 = 5_000;
 pub(super) const NOT_CONFIRMED: &str = "release_not_confirmed";
 
 /// Whether a label is the room's current one. Only a current label's script can be set on a host.
-fn label_current(sql: &SqlStorage, label: &str) -> R<bool> {
+pub(super) fn label_current(sql: &SqlStorage, label: &str) -> R<bool> {
     Ok(!rows(
         sql,
         "SELECT 1 AS current FROM app_label WHERE label = ? AND current = 1",
@@ -531,14 +530,14 @@ pub(super) fn record(
 }
 
 /// The answer after a failure, from the release's row as it now is.
-fn failed(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<Value> {
+pub(super) fn failed(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<Value> {
     fail(sql, release_id, reason, None, now)?;
     let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     Ok(answer(&after, true, Some(reason)))
 }
 
 /// [`failed`], for the recheck's own failure, with which fact refused kept in the audit record.
-fn rechecked_failed(
+pub(super) fn rechecked_failed(
     sql: &SqlStorage,
     release_id: &str,
     failure: RecheckFailure,
@@ -590,8 +589,8 @@ pub(super) fn start_upload(
         let reason = UploadFailure::LabelRetired.code();
         return Ok(with_script(failed(sql, release_id, reason, now)?, None));
     }
-    let script = script_name(&label, release_id)
-        .map_err(|_| ApiError::internal("a release whose script can't be named"))?;
+    // Its own script; or, for a rollback that may switch back by the room's rows now, the kept script it switches to.
+    let (script, named_after) = release_rollback::script_at_start(sql, release_id, &label)?;
     let uploading = next_state(state, ReleaseEvent::StartUpload)
         .map_err(|_| ApiError::internal("a queued release that can't start"))?;
     exec(
@@ -600,7 +599,7 @@ pub(super) fn start_upload(
         vec![
             uploading.name().into(),
             script.as_str().into(),
-            release_id.into(),
+            named_after.as_str().into(),
             now.into(),
             now.into(),
             release_id.into(),
@@ -618,8 +617,13 @@ pub(super) fn start_upload(
     Ok(with_script(answer(&after, true, None), Some(script)))
 }
 
-/// Whether the room has recorded this release's script as written whole (`record_uploaded`).
+/// Whether the room has recorded this release's script as written whole (`record_uploaded`). A rollback switching back
+/// to the kept script has nothing of its own to upload: that script was written whole by its own release, and the
+/// switch reads Cloudflare's answer for it again (`release_rollback`).
 pub(super) fn uploaded(sql: &SqlStorage, release_id: &str, script: &str) -> R<bool> {
+    if release_rollback::switches(sql, release_id, script)? {
+        return Ok(true);
+    }
     Ok(!rows(
         sql,
         "SELECT 1 AS uploaded FROM release_upload WHERE release_id = ? AND script_name = ?",
@@ -1123,6 +1127,23 @@ impl Workspace {
             // after every command it is sent, this one included, whatever the command answers (`Workspace::fetch`).
             return Ok(answer(&release, false, None));
         }
+        // A rollback switching back to the kept script reads Cloudflare's answer for it, and the operators' record,
+        // afresh for this attempt, before its stage (`release_rollback`).
+        // Any other record naming another release's script is refused by the stage, and nothing changes.
+        let switching = match release["script_name"].as_str() {
+            Some(script) => {
+                release_rollback::switches(&self.state.storage().sql(), &release_id, script)?
+            }
+            None => false,
+        };
+        let switch = if switching {
+            match self.switch_reads(&release_id, &release, lease).await? {
+                Ok(reads) => Some(reads),
+                Err(answer) => return Ok(answer),
+            }
+        } else {
+            None
+        };
         let staged: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = staged.clone();
         let id = release_id.clone();
@@ -1132,7 +1153,12 @@ impl Workspace {
                 *slot.borrow_mut() = Some(lease_lost(sql, &id)?);
                 return Ok(Value::Null);
             }
-            if let Staged::Answer(answer) = stage(sql, &id, release_now(sql))? {
+            let now = release_now(sql);
+            let outcome = match &switch {
+                Some(reads) => release_rollback::stage(sql, &id, reads, now)?,
+                None => stage(sql, &id, now)?,
+            };
+            if let Staged::Answer(answer) = outcome {
                 *slot.borrow_mut() = Some(answer);
             }
             Ok(Value::Null)

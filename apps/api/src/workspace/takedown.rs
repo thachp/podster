@@ -1362,11 +1362,16 @@ async fn stale_taken_down(
     wanted: &str,
 ) -> R<CustomFail> {
     let state = load(sql)?.map(|loaded| loaded.state);
+    // A rollback's flight, switched back or uploaded again, keeps nothing it rolls away from (the review of #412, S1).
+    let rollback = match state.as_ref().and_then(|state| state.in_flight.as_ref()) {
+        Some(flight) => super::release_rollback::target_of(sql, &flight.release_id)?.is_some(),
+        None => false,
+    };
     match provider.read_entry(host).await {
         Entry::Absent => return Ok(CustomFail::Retry("release_not_served")),
         Entry::Present(found)
             if state.as_ref().is_some_and(|state| {
-                podster_core::release::waiting_entry_keeps(state, wanted, &found)
+                podster_core::release::waiting_entry_keeps(state, wanted, &found, rollback)
             }) =>
         {
             return Ok(CustomFail::Retry("release_not_served"))

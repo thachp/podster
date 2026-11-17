@@ -145,7 +145,8 @@ fn parse(body: &Value) -> R<Named> {
     })
 }
 
-/// A release as the contract's `Release` gives it. `result_url` is never set by a request.
+/// A release as the contract's `Release` gives it. `result_url` is never set by a request. `rollback_to` names the
+/// earlier release a rollback rolls back to, and is null for any other release.
 pub(super) fn view(release: &Value) -> Value {
     json!({
         "id": release["id"],
@@ -161,6 +162,7 @@ pub(super) fn view(release: &Value) -> Value {
         "result_url": Value::Null,
         "failure_code": release["failure_code"],
         "finished_at": release["finished_at"],
+        "rollback_to": release["rollback_to"],
     })
 }
 
@@ -305,18 +307,51 @@ pub(super) fn handle(
     // Release bookkeeping first, as at the start of every release command: a release left from before an unpublish is
     // ended, so it neither holds its commit pending nor is offered for approval.
     release_commit::end_stale(sql, now)?;
-    let caller = &who.caller;
-    let asked = parse(body)?;
+    let named = parse(body)?;
     // The task, as the caller may see it: one they can't see is one that isn't there.
-    let task = load_task(sql, &asked.task_id)?
-        .filter(|task| can_see_task(caller, task))
+    let task = load_task(sql, &named.task_id)?
+        .filter(|task| can_see_task(&who.caller, task))
         .ok_or_else(ApiError::task_not_found)?;
+    let asked = AskedFor {
+        task_id: Some(&task.id),
+        commit_sha: &named.commit_sha,
+        environment: &named.environment,
+        rollback_to: None,
+    };
+    record(sql, who, &asked, reads, now)
+}
+
+/// What a request asks for, as the room records it: a task's commit in an environment, and, for a rollback
+/// (`release_rollback`), the earlier release it rolls back to.
+pub(super) struct AskedFor<'a> {
+    /// The task whose merged commit is asked for; `None` for a rollback to a release that names none, whose commit
+    /// can't then be releasable.
+    pub(super) task_id: Option<&'a str>,
+    pub(super) commit_sha: &'a str,
+    pub(super) environment: &'a str,
+    pub(super) rollback_to: Option<&'a str>,
+}
+
+/// Core's decision on what is asked, then the release recorded `awaiting_approval`, in the caller's transaction, with
+/// its audit record and its event. Shared by a request and a rollback, so both are counted and refused alike: a
+/// rollback is one of the room's 20 asks a rolling day, as any request is.
+pub(super) fn record(
+    sql: &SqlStorage,
+    who: &Participant,
+    asked: &AskedFor,
+    reads: &RequestReads,
+    now: i64,
+) -> R<Value> {
+    let caller = &who.caller;
     let link_repo_id = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
         .first()
         .map_or(0, |link| int(&link["provider_repo_id"]));
 
     // What, on the room's own rows.
-    let (commit, reviewer_rule_holds) = commit_of(sql, &task.id)?;
+    let (commit, reviewer_rule_holds) = match asked.task_id {
+        Some(task) => commit_of(sql, task)?,
+        None => (None, true),
+    };
     let record = commit.as_ref().map(|c| CommitRecord {
         sha: &c.0,
         provider_repo_id: c.1,
@@ -327,7 +362,7 @@ pub(super) fn handle(
     let pending = rows(
         sql,
         "SELECT state FROM release WHERE commit_sha = ?",
-        vec![asked.commit_sha.as_str().into()],
+        vec![asked.commit_sha.into()],
     )?
     .iter()
     .filter_map(|row| row["state"].as_str())
@@ -345,8 +380,8 @@ pub(super) fn handle(
     .map(|row| int(&row["requested_at"]))
     .collect();
     request_release(&ReleaseRequest {
-        asked_sha: &asked.commit_sha,
-        environment: &asked.environment,
+        asked_sha: asked.commit_sha,
+        environment: asked.environment,
         commit: record.as_ref(),
         room_repo_id: link_repo_id,
         reviewer_rule_holds,
@@ -374,8 +409,8 @@ pub(super) fn handle(
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             id.as_str().into(),
-            asked.commit_sha.as_str().into(),
-            task.id.as_str().into(),
+            asked.commit_sha.into(),
+            asked.task_id.map_or(V::Null, V::from),
             REQUESTED_STATE.name().into(),
             label.as_str().into(),
             int(&config["version"]).into(),
@@ -385,16 +420,22 @@ pub(super) fn handle(
             now.into(),
         ],
     )?;
+    let mut trail = json!({ "state": REQUESTED_STATE.name(), "task_id": asked.task_id, "commit_sha": asked.commit_sha });
+    if let Some(target) = asked.rollback_to {
+        exec(
+            sql,
+            "INSERT INTO release_rollback (release_id, rollback_to) VALUES (?, ?)",
+            vec![id.as_str().into(), target.into()],
+        )?;
+        trail["rollback_to"] = target.into();
+    }
     audit(
         sql,
         caller,
         "release.requested",
         &id,
         None,
-        Some(
-            json!({ "state": REQUESTED_STATE.name(), "task_id": task.id, "commit_sha": asked.commit_sha })
-                .to_string(),
-        ),
+        Some(trail.to_string()),
         now,
     )?;
     // About the release, by its ID, to those who may approve it.
@@ -415,7 +456,8 @@ pub(super) fn handle(
 pub(super) fn full_row(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,
-        &format!("SELECT {RELEASE_COLUMNS}, environment, requested_by, requested_at, approved_by, approved_at, declined_by, declined_at, finished_at FROM release WHERE id = ?"),
+        &format!("SELECT {RELEASE_COLUMNS}, environment, requested_by, requested_at, approved_by, approved_at, declined_by, declined_at, finished_at,
+               (SELECT rollback_to FROM release_rollback WHERE release_id = release.id) AS rollback_to FROM release WHERE id = ?"),
         vec![id.into()],
     )?
     .into_iter()

@@ -51,6 +51,7 @@ use podster_core::release_marker::{
     marker_outcome, marker_plan, marker_seen, marker_switched, MarkerOutcome, MarkerPlan,
     AWAITING_MARKER, MARKER_LEASE_MS,
 };
+use podster_core::release_rollback::marker_release;
 
 /// The release the room's flight is for, while it is `live`: the marker's job.
 pub(super) struct Flight {
@@ -294,17 +295,26 @@ pub(super) fn lease(
     }
 }
 
-/// Where to fetch a live release's marker, and the commit it must name: the room's default host, if it is this
-/// release's label's host on the deployment's content domain. `None` otherwise, and nothing is fetched.
-fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, String)>> {
+/// Where to fetch a live release's marker, the commit it must name, and the release it must name: the room's default
+/// host, if it is this release's label's host on the deployment's content domain. The release named is the one its
+/// script is named after (`podster_core::release_rollback::marker_release`): the release itself, or, for a rollback
+/// switched back to the kept script, the release that script was uploaded for. `None` otherwise, and nothing is
+/// fetched.
+fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, String, String)>> {
     let Some(release) = release_row(sql, release_id)? else {
         return Ok(None);
     };
     if state_of(&release)? != ReleaseState::Live {
         return Ok(None);
     }
-    let (Some(label), Some(commit)) = (text(&release["label"]), text(&release["commit_sha"]))
-    else {
+    let (Some(label), Some(commit), Some(script)) = (
+        text(&release["label"]),
+        text(&release["commit_sha"]),
+        text(&release["script_name"]),
+    ) else {
+        return Ok(None);
+    };
+    let Some(marked) = marker_release(&script).map(str::to_owned) else {
         return Ok(None);
     };
     let host = rows(
@@ -321,7 +331,7 @@ fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, St
         .filter(|host| {
             crate::content_provider::default_host_label_on(&domain, host) == Some(label.as_str())
         })
-        .map(|host| (host, commit)))
+        .map(|host| (host, commit, marked)))
 }
 
 /// The answer for a step whose lease is no longer the job's: nothing is kept of it. If the release was set back
@@ -442,13 +452,13 @@ impl Workspace {
             crate::content_stop::Stop::Stopped
         );
         let seen = match target(&sql, &self.env, release_id)? {
-            Some((host, commit)) if !stopped && lease.holds(&sql) => {
+            Some((host, commit, marked)) if !stopped && lease.holds(&sql) => {
                 let fetched = crate::content_provider::fetch_marker(&host).await;
                 marker_seen(
                     fetched
                         .as_ref()
                         .map(|(status, body)| (*status, body.as_slice())),
-                    release_id,
+                    &marked,
                     &commit,
                 )
             }

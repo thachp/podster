@@ -97,6 +97,7 @@ mod release_driver;
 mod release_marker;
 mod release_recheck;
 mod release_request;
+mod release_rollback;
 mod release_settle;
 mod release_switch;
 mod release_upload;
@@ -4471,7 +4472,7 @@ impl Workspace {
                 | ["app-hostname"]
                 | ["release-approvals"]
                 | ["releases"]
-                | ["releases", _, "approve" | "decline"]
+                | ["releases", _, "approve" | "decline" | "rollback"]
         ) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
@@ -5321,6 +5322,25 @@ impl Workspace {
                         release_request::standing(sql, who, &again)
                     },
                     move |sql, who, _| release_request::handle(sql, who, &body, &reads),
+                )
+            }
+            // Asking to roll back to an earlier release (M6 step 6, 6h): a request, with the same standing and reads,
+            // naming the release it rolls back to.
+            (Method::Post, ["releases", target, "rollback"]) if release_route_on => {
+                release_request::may_ask(&who)?;
+                let target = release_approval::named(target)?;
+                let reads = Rc::new(self.release_request_reads(&identity.id).await?);
+                let again = reads.clone();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql: &SqlStorage, who: &Participant| {
+                        release_request::standing(sql, who, &again)
+                    },
+                    move |sql, who, _| release_rollback::handle(sql, who, &target, &reads),
                 )
             }
             // Approving or declining a release (M6 step 6, 6f): who first, by the room's rows; then, to approve, the

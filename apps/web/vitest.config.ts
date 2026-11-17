@@ -13,6 +13,8 @@ export default defineConfig({
       "next/navigation": at("./test/next-navigation.ts"),
       "next/link": at("./test/next-link.tsx"),
       "next/headers": at("./test/next-headers.ts"),
+      // vinext's own, so middleware's tests run what the Worker runs.
+      "next/server": at("./node_modules/vinext/dist/shims/server.js"),
     },
   },
   test: { environment: "jsdom", setupFiles: ["./test/setup.ts"], include: ["**/*.test.{ts,tsx}"], exclude: ["node_modules", "dist"] },

@@ -46,12 +46,21 @@ describe("ClaimForm", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Confirm ownership" })).toBeEnabled());
   });
 
-  it("sends nothing for Not now", async () => {
-    const fetcher = answer(200, {});
+  it("for Not now, sends only a decline, which clears the link's cookie, and connects nothing", async () => {
+    const fetcher = answer(200, { declined: true });
     vi.stubGlobal("fetch", fetcher);
     render(<ClaimForm choices={choices()} />);
     await userEvent.click(screen.getByRole("button", { name: "Not now" }));
-    expect(screen.getByRole("status")).toHaveTextContent("Nothing was connected");
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(await screen.findByRole("status")).toHaveTextContent("Nothing was connected");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe("/api/claim");
+    expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({ decision: "decline" });
+  });
+
+  it("says nothing was connected for Not now even if the decline couldn't be sent", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("offline"))));
+    render(<ClaimForm choices={choices()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Nothing was connected");
   });
 });

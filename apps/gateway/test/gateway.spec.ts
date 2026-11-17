@@ -48,6 +48,15 @@ async function registerAgent(previous?: { host: any; keypair: any }): Promise<Ag
 }
 const claim = async (who: Person, agent: AgentAuthAgent, extra: object = {}) =>
   post("/claim", { agent_id: agent.pluginId, user_code: agent.userCode, org_id: who.org, ...extra }, { cookie: who.cookie });
+/** What a browser keeps from opening an approval link: the cookie its agent and code moved into, before any page is read. */
+async function claimCookieFrom(path: string) {
+  const moved = await call(path);
+  expect(moved.status).toBe(303);
+  expect(moved.headers.get("location")).toBe("/claim");
+  return (moved.headers.get("set-cookie") ?? "").split(";")[0];
+}
+/** Opens an approval link as a browser does: moved first, then the bare page read with the person's session. */
+const openClaimLink = async (path: string, cookie: string) => call("/claim", { headers: { cookie: `${cookie}; ${await claimCookieFrom(path)}` } });
 const execute = async (agent: AgentAuthAgent, capability: string, args: unknown = {}) => {
   const jwt = await signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: [capability] });
   const res = await post("/api/auth/capability/execute", { capability, arguments: args }, { authorization: `Bearer ${jwt}` });
@@ -140,7 +149,7 @@ describe("people and organizations", () => {
         const person = await signUpDuringFailure();
         await allowPersonalOrgWrites();
         // 403 would be "you need to be an admin". 404 is the bad link, so the page found the organization it restored.
-        expect((await call("/claim?agent_id=x&code=y", { headers: { cookie: person.cookie } })).status).toBe(404);
+        expect((await openClaimLink("/claim?agent_id=x&code=y", person.cookie)).status).toBe(404);
       } finally {
         await allowPersonalOrgWrites();
       }
@@ -908,15 +917,55 @@ describe("hosts with more than one agent", () => {
     expect((await execute(two, "get_identity")).status).toBe(200);
   });
 
-  it("only the person who approved can finish a claim that stopped partway", async () => {
+  it("only the person who approved, with the code they approved, can finish a claim that stopped partway", async () => {
     const [owner, stranger] = [await signUp(), await signUp()];
     const agent = await registerAgent();
     // Approved, then the API or directory write failed: active, with no link and no Principal.
     const approved = await createAuth(e).api.approveCapability({ headers: new Headers({ cookie: owner.cookie }), body: { agent_id: agent.pluginId, user_code: agent.userCode, action: "approve" } }) as unknown as { status?: string };
     expect(approved.status).toBe("approved");
+    const links = () => e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first();
     expect((await claim(stranger, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(403);
+    expect((await claim(stranger, agent)).status).toBe(403);
+    // The same person's retry still needs the code: owning the agent in the plugin isn't proof they hold it.
+    expect((await claim(owner, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(403);
+    expect((await claim(owner, { ...agent, userCode: "" })).status).toBe(403);
+    expect(await links()).toEqual({ n: 0 });
+    const retried = await claim(owner, agent);
+    expect(retried.status).toBe(200);
+    const id = (await retried.json<any>()).agent_id;
+    // And once linked, the same request again is refused rather than linking twice, as before.
+    expect((await claim(owner, agent)).status).toBe(403);
+    expect(await links()).toEqual({ n: 1 });
+    expect((await execute(agent, "get_identity")).data.id).toBe(id);
+  });
+
+  it("an agent made a person's without any approval can't be linked by them, whatever code they send", async () => {
+    // What host enrollment would do: the plugin's agent is active and this person's, with no code ever approved.
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const ownerUser = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    await e.DB.prepare("UPDATE agent SET status = 'active', userId = ? WHERE id = ?").bind(ownerUser, agent.pluginId).run();
+    await e.DB.prepare("DELETE FROM approvalRequest WHERE agentId = ?").bind(agent.pluginId).run();
+    for (const userCode of ["AAAA-AAAA", "", agent.userCode]) expect((await claim(owner, { ...agent, userCode }))?.status, userCode).toBe(403);
     expect(await e.DB.prepare("SELECT count(*) AS n FROM identity_link WHERE external_id = ?").bind(agent.pluginId).first()).toEqual({ n: 0 });
-    expect((await claim(owner, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(200);
+  });
+
+  it("a code that was denied, or that expired unused, doesn't finish a retry", async () => {
+    const owner = await signUp();
+    const ownerUser = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
+    for (const status of ["denied", "expired"]) {
+      const agent = await registerAgent();
+      await e.DB.prepare("UPDATE agent SET status = 'active', userId = ? WHERE id = ?").bind(ownerUser, agent.pluginId).run();
+      await e.DB.prepare("UPDATE approvalRequest SET status = ? WHERE agentId = ?").bind(status, agent.pluginId).run();
+      expect((await claim(owner, agent)).status, status).toBe(403);
+    }
+  });
+});
+
+describe("the Worker's main module", () => {
+  it("exports only what workerd accepts, which these tests' runner doesn't check: a handler, a class or a function", async () => {
+    const exported = Object.entries(await import("../src/index")).filter(([, value]) => typeof value !== "function" && !(value && typeof value === "object" && "fetch" in value));
+    expect(exported.map(([name]) => name)).toEqual([]);
   });
 });
 
@@ -1584,7 +1633,8 @@ describe("rate limits", () => {
     const agent = await registerAgent();
     const sensitive = limiter((key) => key.startsWith("claim:"));
     const limits = { RL_SENSITIVE: sensitive.fake };
-    await expectLimited(await send(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: owner.cookie } }, limits));
+    const link = await claimCookieFrom(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`);
+    await expectLimited(await send("/claim", { headers: { cookie: `${owner.cookie}; ${link}` } }, limits));
     await expectLimited(await send("/claim", jsonPost({ agent_id: agent.pluginId, user_code: agent.userCode, org_id: owner.org }, { cookie: owner.cookie }), limits));
     const person = (await e.DB.prepare("SELECT userId FROM session WHERE token = ?").bind(decodeURIComponent(owner.cookie.split("=")[1]).split(".")[0]).first<{ userId: string }>())!.userId;
     expect(sensitive.keys).toEqual([`claim:${person}`, `claim:${person}`]);
@@ -1798,17 +1848,74 @@ describe("sign-in and claim pages", () => {
     expect((await form({ provider: "evil" })).status).toBe(400);
   });
 
-  it("sends a signed-out person to sign in and back to the claim", async () => {
-    const res = await call("/claim?agent_id=a&code=b");
+  it("sends a signed-out person to sign in and back to the claim, with the code left out of both", async () => {
+    const link = await claimCookieFrom("/claim?agent_id=a&code=SECRETCODE");
+    const res = await call("/claim", { headers: { cookie: link } });
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+    expect(res.headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim")}`);
+  });
+
+  it("moves an approval link's code out of the URL before anything else, into a cookie only the claim page gets", async () => {
+    const owner = await signUp();
+    for (const cookie of [undefined, owner.cookie]) {
+      const moved = await call("/claim?agent_id=plugin_1&code=ABCD-EFGH", { headers: cookie ? { cookie } : {} });
+      expect(moved.status).toBe(303);
+      expect(moved.headers.get("location")).toBe("/claim");
+      expect(moved.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(moved.headers.get("cache-control")).toBe("no-store");
+      const set = moved.headers.get("set-cookie") ?? "";
+      expect(set.split(";")[0]).toBe(`__Host-podster-claim=${encodeURIComponent("agent_id=plugin_1&code=ABCD-EFGH")}`);
+      expect(set.split("; ").slice(1).sort()).toEqual(["HttpOnly", "Max-Age=600", "Path=/", "SameSite=Lax", "Secure"]);
+    }
+    // Nothing that long is a real link: the bare page then says so, and the last link's cookie is cleared, so an older
+    // pending agent can't be shown in its place.
+    const huge = await call(`/claim?agent_id=a&code=${"x".repeat(1000)}`);
+    expect([huge.status, huge.headers.get("location")]).toEqual([303, "/claim"]);
+    expect(huge.headers.get("set-cookie")).toBe("__Host-podster-claim=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure");
+    // A link with no code isn't moved, and a junk cookie is no link.
+    expect((await call("/claim?agent_id=a", { headers: { cookie: owner.cookie } })).status).toBe(404);
+    expect((await call("/claim", { headers: { cookie: `${owner.cookie}; __Host-podster-claim=%E0%A4%A` } })).status).toBe(404);
+  });
+
+  it("reads only the __Host- cookie over HTTPS, and keeps a plain name for a browser on http://localhost alone", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const value = encodeURIComponent(new URLSearchParams({ agent_id: agent.pluginId, code: agent.userCode }).toString());
+    const page = (name: string) => call("/claim", { headers: { cookie: `${owner.cookie}; ${name}=${value}` } });
+    expect((await page("__Host-podster-claim")).status).toBe(200);
+    for (const name of ["podster-claim", "podster-claim-local"]) expect((await page(name)).status, name).toBe(404);
+
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+    // With an HTTP BASE_URL, as a local run has: an HTTPS deployment sends plain HTTP to HTTPS first.
+    const at = (url: string) => worker.fetch(new Request(url, { redirect: "manual" }), { ...e, BASE_URL: "http://localhost:8787" } as never, ctx);
+    for (const origin of ["http://localhost:8787", "http://app.localhost:3000", "http://127.0.0.1:8787"]) {
+      const local = await at(`${origin}/claim?agent_id=a&code=b`);
+      expect(local.status, origin).toBe(303);
+      expect(local.headers.get("set-cookie"), origin).toBe(`podster-claim-local=${encodeURIComponent("agent_id=a&code=b")}; Path=/; Max-Age=600; HttpOnly; SameSite=Lax`);
+    }
+    // Plain HTTP anywhere else gets no cookie at all: the code still leaves the URL, and the link just doesn't work there.
+    const plain = await at("http://gateway.test/claim?agent_id=a&code=b");
+    expect([plain.status, plain.headers.get("location"), plain.headers.get("set-cookie")]).toEqual([303, "/claim", null]);
+  });
+
+  it("clears the link's cookie once a claim succeeds, and not when it's refused", async () => {
+    const owner = await signUp();
+    const agent = await registerAgent();
+    const cleared = "__Host-podster-claim=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure";
+    expect((await claim(owner, { ...agent, userCode: "AAAA-AAAA" })).headers.get("set-cookie")).toBeNull();
+    const done = await claim(owner, agent);
+    expect(done.status).toBe(200);
+    expect(done.headers.get("set-cookie")).toBe(cleared);
+    const viaForm = await registerAgent();
+    const page = await form({ agent_id: viaForm.pluginId, user_code: viaForm.userCode, org_id: owner.org, link_agent_id: "" }, { cookie: owner.cookie }, "/claim");
+    expect([page.status, page.headers.get("set-cookie")]).toEqual([200, cleared]);
   });
 
   it("an agent's approval link leads to a page that connects it", async () => {
     const owner = await signUp();
     const agent = await registerAgent();
     const link = new URL(agent.registered.approval.verification_uri_complete);
-    const res = await call(link.pathname + link.search, { headers: { cookie: owner.cookie } });
+    const res = await openClaimLink(link.pathname + link.search, owner.cookie);
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain("<strong>agent</strong>");
@@ -1826,13 +1933,13 @@ describe("sign-in and claim pages", () => {
   it("the claim page reveals nothing without the right code, and escapes what it's given", async () => {
     const owner = await signUp();
     const agent = await registerAgent();
-    const wrong = await call(`/claim?agent_id=${agent.pluginId}&code=${encodeURIComponent("CALL 555-0100")}`, { headers: { cookie: owner.cookie } });
+    const wrong = await openClaimLink(`/claim?agent_id=${agent.pluginId}&code=${encodeURIComponent("CALL 555-0100")}`, owner.cookie);
     expect(wrong.status).toBe(404);
     const wrongHtml = await wrong.text();
     expect(wrongHtml).not.toContain("<strong>agent</strong>");
     expect(wrongHtml).not.toContain("555-0100");
     expect(wrongHtml).not.toContain("<form");
-    const hostile = await (await call(`/claim?agent_id=${encodeURIComponent(`"><script>x</script>`)}&code=${encodeURIComponent(`<script>y</script>`)}`, { headers: { cookie: owner.cookie } })).text();
+    const hostile = await (await openClaimLink(`/claim?agent_id=${encodeURIComponent(`"><script>x</script>`)}&code=${encodeURIComponent(`<script>y</script>`)}`, owner.cookie)).text();
     expect(hostile).not.toContain("<script>");
     const refused = await form({ agent_id: agent.pluginId, user_code: "AAAA-AAAA", org_id: owner.org }, { cookie: owner.cookie }, "/claim");
     expect(refused.status).toBe(403);
@@ -1926,7 +2033,7 @@ describe("sign-in and claim pages", () => {
     const me = await (await dashboard(member, "GET", "/v1/me")).json<any>();
     await e.DB.prepare("INSERT INTO org_member (org_id, person_id, role, created_at) VALUES (?, ?, 'member', ?)").bind(a.org, me.id, Date.now()).run();
     const agent = await registerAgent();
-    const page = () => call(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, { headers: { cookie: member.cookie } });
+    const page = () => openClaimLink(`/claim?agent_id=${agent.pluginId}&code=${agent.userCode}`, member.cookie);
     const html = await (await page()).text();
     expect(html).toContain(member.org);
     expect(html).not.toContain(a.org);
@@ -1946,7 +2053,7 @@ describe("sign-in and claim pages", () => {
     const registered = await (await post("/api/auth/agent/register", { name: "<b>Podster</b>", mode: "delegated", capabilities: ["get_identity"], preferred_method: "device_authorization" }, { authorization: `Bearer ${jwt}` })).json<any>();
     // The plugin cleans names when it stores them, so this checks our page doesn't rely on that.
     await e.DB.prepare("UPDATE agent SET name = ? WHERE id = ?").bind("<b>Podster</b>", registered.agent_id).run();
-    const html = await (await call(`/claim?agent_id=${registered.agent_id}&code=${registered.approval.user_code}`, { headers: { cookie: owner.cookie } })).text();
+    const html = await (await openClaimLink(`/claim?agent_id=${registered.agent_id}&code=${registered.approval.user_code}`, owner.cookie)).text();
     for (const raw of ["<u>org</u>", "<i>mine</i>", "<b>Podster</b>"]) expect(html, raw).not.toContain(raw);
     expect(html).toContain("&#60;u&#62;org");
     expect(html).toContain("&#60;i&#62;mine");
@@ -2033,6 +2140,8 @@ describe("the application host", () => {
       }
     });
 
+    // This host can't set the application host's cookie, so the code goes on in the query, and the application host's
+    // middleware moves it there (apps/web/lib/claim-link.ts).
     it("sends an agent's approval link on with its code", async () => {
       const res = await onGateway("/claim?agent_id=a&code=b");
       expect(res.status).toBe(302);
@@ -2099,7 +2208,7 @@ describe("the application host", () => {
     it("changes nothing with APP_URL unset", async () => {
       const { query } = await authorizeQuery();
       expect((await call(`/authorize${query}`)).headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent(`/authorize${query}`)}`);
-      expect((await call("/claim?agent_id=a&code=b")).headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim?agent_id=a&code=b")}`);
+      expect((await call("/claim")).headers.get("location")).toBe(`/sign-in?next=${encodeURIComponent("/claim")}`);
       expect((await call("/sign-in")).headers.get("content-type")).toContain("text/html");
     });
   });
@@ -2200,6 +2309,57 @@ describe("the application host", () => {
       const right = await read(a, agent.pluginId, agent.userCode);
       expect(right.status).toBe(200);
       expect(await right.json<any>()).toMatchObject({ agent_id: agent.pluginId, agent_name: "agent", code: agent.userCode, orgs: [{ id: a.org }] });
+    });
+
+    it("reads the link from the cookie the application host moved it into, so its page's read carries no code in its URL", async () => {
+      const a = await signUp();
+      const agent = await registerAgent();
+      const fromCookie = (agentId: string, code: string) => onApp("/api/claim", { headers: { cookie: `${a.cookie}; __Host-podster-claim=${encodeURIComponent(new URLSearchParams({ agent_id: agentId, code }).toString())}` } });
+      const right = await fromCookie(agent.pluginId, agent.userCode);
+      expect(right.status).toBe(200);
+      expect(await right.json<any>()).toMatchObject({ agent_id: agent.pluginId, code: agent.userCode, orgs: [{ id: a.org }] });
+      expect((await fromCookie(agent.pluginId, "AAAA-AAAA")).status).toBe(404);
+      expect((await onApp("/api/claim", { headers: { cookie: a.cookie } })).status).toBe(404);
+    });
+
+    it("a decline only clears the link's cookie, from this host, and a confirm clears it too", async () => {
+      const a = await signUp();
+      const agent = await registerAgent();
+      const cleared = "__Host-podster-claim=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure";
+      const declined = await decide(a, { decision: "decline" });
+      expect([declined.status, declined.headers.get("set-cookie")]).toEqual([200, cleared]);
+      expect(await declined.json()).toEqual({ declined: true });
+      const elsewhere = await decide(a, { decision: "decline" }, "https://evil.test");
+      expect([elsewhere.status, elsewhere.headers.get("set-cookie")]).toEqual([403, null]);
+      // A decline approves and links nothing: the agent still waits, and its code still works.
+      expect(await e.DB.prepare("SELECT status FROM agent WHERE id = ?").bind(agent.pluginId).first()).toEqual({ status: "pending" });
+      const confirmed = await decide(a, { agent_id: agent.pluginId, user_code: agent.userCode, org_id: a.org });
+      expect([confirmed.status, confirmed.headers.get("set-cookie")]).toEqual([200, cleared]);
+      // Reading the page doesn't clear it.
+      const read = await onApp("/api/claim", { headers: { cookie: a.cookie } });
+      expect(read.headers.get("set-cookie")).toBeNull();
+    });
+
+    it("never writes an approval code to the logs, from the link through to the claim", async () => {
+      const a = await signUp();
+      const agent = await registerAgent();
+      const logged: unknown[][] = [];
+      const spies = (["log", "info", "warn", "error", "debug"] as const).map((level) => vi.spyOn(console, level).mockImplementation((...args) => void logged.push(args)));
+      try {
+        const link = new URL(agent.registered.approval.verification_uri_complete);
+        const moved = await call(link.pathname + link.search);
+        const cookie = `${a.cookie}; ${(moved.headers.get("set-cookie") ?? "").split(";")[0]}`;
+        expect((await call("/claim", { headers: { cookie } })).status).toBe(200);
+        expect((await onApp("/api/claim", { headers: { cookie } })).status).toBe(200);
+        expect((await claim(a, { ...agent, userCode: "AAAA-AAAA" })).status).toBe(403);
+        expect((await claim(a, agent)).status).toBe(200);
+        // A control: the spy does see what's logged.
+        console.error("control", agent.userCode);
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+      const text = logged.map((args) => args.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg) ?? String(arg))).join(" "));
+      expect(text.filter((line) => line.includes(agent.userCode))).toEqual([`control ${agent.userCode}`]);
     });
 
     it("connects only from this host, with the right code", async () => {

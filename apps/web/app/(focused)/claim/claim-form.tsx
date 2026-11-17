@@ -26,6 +26,14 @@ export function ClaimForm({ choices }: { choices: ClaimChoices }) {
     else setFailure(result ? approvalFailure(result.status, result.code) : approvalFailure(500, "error"));
   }
 
+  /** Only clears the link's cookie, which the page can't reach itself. Nothing was connected whether or not it gets there. */
+  async function decline() {
+    setBusy(true);
+    await clientCommand("/api/claim", { decision: "decline" }).catch(() => null);
+    setBusy(false);
+    setOutcome("declined");
+  }
+
   if (outcome === "declined") return <p role="status">Nothing was connected. You can close this page, and the agent's request expires by itself.</p>;
   if (outcome)
     return (
@@ -60,7 +68,7 @@ export function ClaimForm({ choices }: { choices: ClaimChoices }) {
         <Button type="button" disabled={busy || !choice.org} onClick={confirm}>
           Confirm ownership
         </Button>
-        <Button type="button" variant="outline" disabled={busy} onClick={() => setOutcome("declined")}>
+        <Button type="button" variant="outline" disabled={busy} onClick={decline}>
           Not now
         </Button>
       </div>

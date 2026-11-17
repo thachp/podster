@@ -152,7 +152,8 @@ It refuses, before changing anything, unless:
   - apps/content/wrangler.jsonc names the Worker podster-content and holds the write counter in
     exactly the committed shape: the binding WRITE_COUNTER to this Worker's own class WriteCounter,
     the one migration v1 making it a SQLite-backed class, and WRITE_BUDGET_WRITES and
-    WRITE_BUDGET_WINDOW_MS as decimal strings (the window at least 1). The deploy carries those four
+    WRITE_BUDGET_WINDOW_MS as decimal strings the content Worker takes as a cap (writes 0 to
+    4294967295, the window 1 to 9223372036854775807). The deploy carries those four
     and nothing else from that file beyond the name, entry point and compatibility date.
   - Cloudflare's API says, read with the token, each answer in exactly the shape expected:
       the token is active
@@ -471,10 +472,13 @@ jq -e '.durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name":
   || refuse "apps/content/wrangler.jsonc's durable_objects isn't exactly the write counter, WRITE_COUNTER of this Worker's own class WriteCounter"
 jq -e '.migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}]' <<< "$committed" > /dev/null \
   || refuse "apps/content/wrangler.jsonc's migrations aren't exactly v1, making WriteCounter a SQLite-backed class"
-# A decimal count, as the content Worker reads it: no sign, no leading zero, at most 15 digits. The window is at least 1.
-jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,14})$"))
-  and (.window_ms | type == "string" and test("^[1-9][0-9]{0,14}$"))' <<< "$committed" > /dev/null \
-  || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings, the window at least 1"
+# Exactly what the content Worker's `capFromSettings` (apps/content/src/budget.ts) takes as a cap, and nothing it would
+# read as none: decimal strings with no sign and no leading zero; writes from 0 to 4294967295 (core's u32), the window
+# from 1 to 9223372036854775807 (core's i64). Compared as strings, by length and then digit by digit, never as jq's
+# floating-point numbers, which can't hold the bounds exactly.
+jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,9})$") and (length < 10 or . <= "4294967295"))
+  and (.window_ms | type == "string" and test("^[1-9][0-9]{0,18}$") and (length < 19 or . <= "9223372036854775807"))' <<< "$committed" > /dev/null \
+  || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings the content Worker takes as a cap: writes 0 to 4294967295, the window 1 to 9223372036854775807"
 writes=$(jq -r .writes <<< "$committed")
 window_ms=$(jq -r .window_ms <<< "$committed")
 route="*.$domain/*"

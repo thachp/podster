@@ -68,7 +68,7 @@ The committed file supplies only:
 - **the write counter** (M6 stage 1, S6): the binding `WRITE_COUNTER` to this Worker's own class `WriteCounter`, and the one migration, `v1`, which makes it a SQLite-backed class;
 - **the write cap's two settings,** `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS`, the owner's 300 writes per 600,000 ms.
 
-Each of these is taken only in exactly that shape: another binding, another class, a binding to another Worker's class, another migration, or a setting that isn't a decimal string (the window at least 1) is refused before anything changes. So the first deploy makes the counter's class on the second account, and the report run prints the cap it would deploy. Without the counter and its cap, every write to an app with code would be refused `503 write_budget_unknown`; while the code-apps switch is off, nothing writes at all.
+Each of these is taken only in exactly that shape: another binding, another class, a binding to another Worker's class, another migration, or a setting the content Worker wouldn't take as a cap (a decimal string, writes 0 to 4,294,967,295 and the window 1 to 9,223,372,036,854,775,807 ms, as `capFromSettings` reads them) is refused before anything changes. So the first deploy makes the counter's class on the second account, and the report run prints the cap it would deploy. Without the counter and its cap, every write to an app with code would be refused `503 write_budget_unknown`; while the code-apps switch is off, nothing writes at all.
 
 ## The token
 

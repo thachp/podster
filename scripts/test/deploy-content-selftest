@@ -660,7 +660,21 @@ committed_refused() { # committed_refused TITLE SED-EXPRESSION PATTERN-THE-EDIT-
 }
 committed_refused "a cap of writes that isn't a decimal" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "3e2"/' '"3e2"' "WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings"
 committed_refused "a cap of writes missing" 's/"WRITE_BUDGET_WRITES": "300", //' '"vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WINDOW_MS"' "WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings"
-committed_refused "a window of 0" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "0"/' '"WRITE_BUDGET_WINDOW_MS": "0"' "the window at least 1"
+committed_refused "a window of 0" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "0"/' '"WRITE_BUDGET_WINDOW_MS": "0"' "the window 1 to 9223372036854775807"
+# The bounds are the content Worker's own (apps/content/src/budget.ts, capFromSettings): past them it reads no cap.
+committed_refused "writes one past u32's maximum" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "4294967296"/' '"4294967296"' "writes 0 to 4294967295"
+committed_refused "writes of fifteen digits" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "100000000000000"/' '"100000000000000"' "writes 0 to 4294967295"
+committed_refused "writes with a leading zero" 's/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "0300"/' '"0300"' "must be decimal strings"
+committed_refused "a window one past i64's maximum" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "9223372036854775808"/' '"9223372036854775808"' "the window 1 to 9223372036854775807"
+committed_refused "a window of twenty digits" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": "10000000000000000000"/' '"10000000000000000000"' "the window 1 to 9223372036854775807"
+# Each bound itself is taken, and reported as the cap it would deploy.
+SEED_EDIT='s/"WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WRITES": "4294967295", "WRITE_BUDGET_WINDOW_MS": "9223372036854775807"/' fresh
+check "both caps at their bounds: the edit was committed" quiet grep -q -F '"WRITE_BUDGET_WRITES": "4294967295", "WRITE_BUDGET_WINDOW_MS": "9223372036854775807"' "$work/apps/content/wrangler.jsonc"
+dc 0 "${files[@]}" || true
+check "  taken: exit 0, with that cap reported" bash -c "[ $LAST -eq 0 ] && grep -q -F 'with a cap of 4294967295 writes per 9223372036854775807 ms for each app.' '$tmp/out'"
+SEED_EDIT='s/"WRITE_BUDGET_WRITES": "300"/"WRITE_BUDGET_WRITES": "0"/' fresh
+dc 0 "${files[@]}" || true
+check "a cap of 0 writes is taken, as the content Worker takes it (every write refused)" bash -c "[ $LAST -eq 0 ] && grep -q -F 'with a cap of 0 writes per 600000 ms' '$tmp/out'"
 committed_refused "a window that is a number, not a string" 's/"WRITE_BUDGET_WINDOW_MS": "600000"/"WRITE_BUDGET_WINDOW_MS": 600000/' '"WRITE_BUDGET_WINDOW_MS": 600000' "must be decimal strings"
 committed_refused "the counter bound to another Worker's class" 's/"class_name": "WriteCounter" }/"class_name": "WriteCounter", "script_name": "elsewhere" }/' '"script_name": "elsewhere"' "durable_objects isn't exactly the write counter"
 committed_refused "a second object bound" 's/"class_name": "WriteCounter" }\]/"class_name": "WriteCounter" }, { "name": "OTHER", "class_name": "Other" }]/' '"name": "OTHER"' "durable_objects isn't exactly the write counter"

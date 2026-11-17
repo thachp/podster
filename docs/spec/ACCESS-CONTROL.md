@@ -73,6 +73,16 @@ For each command, Rust must:
 
 If the web server gains a direct private binding later, it must use the same authenticated-principal contract and Rust policy path; it is not a privileged bypass. MCP and A2A adapters invoke the same commands. Protocol payloads, role labels, messages and artifacts never become permission instructions.
 
+### Claiming an Agent Auth agent: the approval code
+
+*Added 2026-11-17, from M7 spike A's findings.* Linking an Agent Auth key to a Podster agent (`/claim`, and `/api/claim` on the application host) always needs the approval code the agent showed, on every attempt. A retry by the person the plugin already recorded as the agent's owner passes only with a code this agent's approval took, or one still live. Owning the agent in the plugin isn't proof of holding the code, because host enrollment can make an agent a person's without one. A wrong code, an empty one, or one whose approval was denied or expired unused is refused `403 not_allowed`, the same as a stranger's. Once linked, the same claim again is refused, as before.
+
+The plugin builds the claim link as `/claim?agent_id=…&code=…`, and Podster can't change that. The first request carrying the code, on either host, moves both values into a cookie (`podster-claim`: `HttpOnly`, `SameSite=Lax`, `Path=/claim`, ten minutes, `Secure` on HTTPS) and answers `303` to the bare `/claim`, with `Referrer-Policy: no-referrer`. That happens before sign-in, so its `next` carries no code. The page's read sends the cookie, not a query, and the decision sends the code in the body. The gateway logs no URL; a test shows no console line holds the code. What this doesn't cover:
+
+- The first request's URL still holds the code. It goes to the gateway's host, then is redirected to the application host with the code in its query, because the gateway can't set that host's cookie. Anything recording either request's URL sees it: the browser's history may keep a redirected-from address, and Cloudflare would log it if Workers Logs, Logpush or a trace recorded URLs. Neither Worker's configuration turns those on, and `wrangler tail` shows it live to whoever runs it. No deployed check has looked yet.
+- The agent's operator sees the code, as before: the plugin returns the link and the code to the agent, which shows them to its person, and its own logs may keep them.
+- The code is short-lived (the plugin's five minutes) and binds nothing by itself: using it needs a signed-in admin of the organization, and the plugin takes it once.
+
 ### Revocation, withdrawal and asynchronous work
 
 A workroom revocation and an agent-owner withdrawal must prevent new authorized work from that agent in the affected room. Global disconnect prevents participation across all rooms. A workroom admin's later local grant must not override a current global disconnect.

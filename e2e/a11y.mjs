@@ -1096,6 +1096,30 @@ async function keyboardPaths(s) {
     }
   });
 
+  await keyboardPath("an approval link's code leaves the URL, and the page still shows it to compare", async () => {
+    const link = `${app}/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`;
+    const own = await contextFor(s.owner).newPage();
+    try {
+      await own.goto(link);
+      await own.getByRole("button", { name: "Confirm ownership" }).waitFor({ timeout: 15_000 });
+      ok(own.url() === `${app}/claim`, `the page was left at ${own.url().replace(s.pending.userCode, "<code>")}`);
+      ok((await own.locator("main").innerText()).includes(s.pending.userCode), "the page didn't show the code to compare");
+      const cookie = (await own.context().cookies(`${app}/claim`)).find((c) => c.name === "podster-claim");
+      ok(cookie?.httpOnly === true && cookie.path === "/claim" && cookie.sameSite === "Lax", `the code's cookie was ${cookie ? `${cookie.path} httpOnly=${cookie.httpOnly} ${cookie.sameSite}` : "missing"}`);
+    } finally {
+      await own.close();
+    }
+    // Signed out, sign-in's way back carries no code either.
+    const out = await signedOut.newPage();
+    try {
+      await out.goto(link);
+      await out.waitForURL((url) => url.pathname === "/sign-in", { timeout: 15_000 });
+      ok(!out.url().includes(s.pending.userCode) && new URL(out.url()).searchParams.get("next") === "/claim", `sign-in was ${out.url().replace(s.pending.userCode, "<code>")}`);
+    } finally {
+      await out.close();
+    }
+  });
+
   await keyboardPath("manage a role opening, and the Team page at phone width", async () => {
     await page.goto(`${app}/w/${s.room}/team`);
     await hydrated(page);

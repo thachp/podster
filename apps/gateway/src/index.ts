@@ -698,10 +698,45 @@ async function approverChoices(env: Env, adminOrgs: string[]) {
   return { orgs: orgs.results, agents: agents.results };
 }
 
+/**
+ * The Agent Auth plugin builds an approval link as `/claim?agent_id=…&code=…`, and can't be told otherwise. So the first
+ * request that carries the code moves it into this cookie, scoped to `/claim`, and sends the browser to the bare page: the
+ * code then isn't in the address bar, the history entry, a sign-in's `next`, a Referer, or any URL we fetch with it.
+ * apps/web/lib/claim-link.ts writes the same cookie on the application host.
+ */
+// Not exported: workerd refuses a main module's named export that isn't a handler, a class or a function.
+const CLAIM_COOKIE = "podster-claim";
+const CLAIM_COOKIE_SECONDS = 600;
+// A plugin's agent ID and code are far shorter. Anything longer isn't a real link, and a cookie that size could be dropped.
+const MAX_CLAIM_COOKIE_LENGTH = 512;
+
+export function claimLinkMoved(url: URL): Response | null {
+  if (url.pathname !== "/claim" || !url.searchParams.has("code")) return null;
+  const value = encodeURIComponent(new URLSearchParams({ agent_id: url.searchParams.get("agent_id") ?? "", code: url.searchParams.get("code") ?? "" }).toString());
+  const headers = new Headers({ location: "/claim", "referrer-policy": "no-referrer", "cache-control": "no-store" });
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  // Too long to be real: the bare page then says the link isn't valid, which it isn't.
+  if (value.length <= MAX_CLAIM_COOKIE_LENGTH) headers.set("set-cookie", `${CLAIM_COOKIE}=${value}; Path=/claim; Max-Age=${CLAIM_COOKIE_SECONDS}; HttpOnly; SameSite=Lax${secure}`);
+  return new Response(null, { status: 303, headers });
+}
+
+/** The link's agent and code: from the query if a caller still sends them there, or else from the cookie they moved into. */
+function claimLink(request: Request) {
+  const url = new URL(request.url);
+  if (url.searchParams.has("code")) return { agentId: url.searchParams.get("agent_id") ?? "", code: url.searchParams.get("code") ?? "" };
+  const raw = (request.headers.get("cookie") ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${CLAIM_COOKIE}=`))?.slice(CLAIM_COOKIE.length + 1);
+  let fields = new URLSearchParams();
+  try {
+    if (raw && raw.length <= MAX_CLAIM_COOKIE_LENGTH) fields = new URLSearchParams(decodeURIComponent(raw));
+  } catch {
+    // An unreadable cookie is no link.
+  }
+  return { agentId: fields.get("agent_id") ?? "", code: fields.get("code") ?? "" };
+}
+
 /** What an agent's approval link may show. It reveals nothing about the agent unless the code is right. */
-async function claimChoices(env: Env, url: URL, userId: string) {
-  const agentId = url.searchParams.get("agent_id") ?? "";
-  const code = url.searchParams.get("code") ?? "";
+async function claimChoices(env: Env, link: { agentId: string; code: string }, userId: string) {
+  const { agentId, code } = link;
   const { adminOrgs } = await memberships(env, personId(userId));
   if (adminOrgs.length === 0) return "not_admin" as const;
   const choices = await approverChoices(env, adminOrgs);
@@ -712,7 +747,7 @@ async function claimChoices(env: Env, url: URL, userId: string) {
 }
 
 async function claimPage(request: Request, env: Env, userId: string) {
-  const choices = await claimChoices(env, new URL(request.url), userId);
+  const choices = await claimChoices(env, claimLink(request), userId);
   if (choices === "not_admin") return page("Connect an agent", "<p>You need to be an admin of an organization to connect an agent.</p>", 403);
   if (choices === "invalid_link") return page("Connect an agent", "<p>This link isn't valid or has expired. Ask the agent for a new one.</p>", 404);
   const orgName = (id: string) => choices.orgs.find((o) => o.id === id)?.name ?? id;
@@ -890,7 +925,7 @@ async function handleClaimApi(request: Request, env: Env, userId: string): Promi
   if (request.method === "POST" && !sameOrigin(request, env)) return denied("not_allowed", 403);
   if (!(await withinLimit(env.RL_SENSITIVE, `claim:${userId}`))) return rateLimited();
   if (request.method === "POST") return claim(request, env, userId, await request.json<ClaimBody>().catch(() => null));
-  const choices = await claimChoices(env, new URL(request.url), userId);
+  const choices = await claimChoices(env, claimLink(request), userId);
   if (choices === "not_admin") return denied("not_allowed", 403);
   if (choices === "invalid_link") return denied("not_found", 404);
   return json(choices);
@@ -978,6 +1013,16 @@ export async function codeMatchesLiveApproval(env: Env, pluginAgent: string, cod
   return true;
 }
 
+/**
+ * For a retry by the person the plugin already recorded: the code must be one this agent's approval took, or a live one.
+ * An approved row has no expiry here, because the approval it records is done, and a partway claim must stay finishable.
+ */
+export async function codeMatchesApproval(env: Env, pluginAgent: string, code: string) {
+  const hash = await userCodeHash(code);
+  const approved = await env.DB.prepare(`SELECT 1 AS n FROM approvalRequest WHERE agentId = ? AND status = 'approved' AND userCodeHash = ?`).bind(pluginAgent, hash).first();
+  return approved !== null || (await codeMatchesLiveApproval(env, pluginAgent, code));
+}
+
 /** A form answers with a page, and anything else with JSON. */
 async function handleClaim(request: Request, env: Env, userId: string): Promise<Response> {
   if (!sameOrigin(request, env)) return denied("not_allowed", 403);
@@ -1009,7 +1054,11 @@ async function claim(request: Request, env: Env, userId: string, body: ClaimBody
   if (alreadyLinked) return denied("not_allowed", 403);
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
-  if (!(await claimedByThisPerson(env, pluginAgent, userId))) {
+  if (await claimedByThisPerson(env, pluginAgent, userId)) {
+    // A retry still needs the code. The plugin can make an agent this person's without one (host enrollment), so only a
+    // code this agent's approval took, or one still live, shows that this person is finishing the claim they started.
+    if (!(await codeMatchesApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
+  } else {
     // The code comes first, so only someone holding one can learn that a host is taken.
     if (!(await codeMatchesLiveApproval(env, pluginAgent, body.user_code))) return denied("not_allowed", 403);
     if (!(await claimHost(env, pluginAgent, userId))) return denied("host_owned_by_another_person", 403);
@@ -1158,6 +1207,9 @@ const appHandler = {
       return handleClaim(request, env, session.user.id);
     }
     if (url.pathname === "/claim" && request.method === "GET") {
+      // Before sign-in, so its `next` never carries the code either.
+      const moved = claimLinkMoved(url);
+      if (moved) return moved;
       if (!session) return signInRedirect(request);
       // The page checks the code, so guessing through it counts the same as posting.
       if (!(await withinLimit(env.RL_SENSITIVE, `claim:${session.user.id}`))) return rateLimited();

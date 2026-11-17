@@ -4,11 +4,13 @@
     clippy::panic,
     clippy::indexing_slicing
 )]
-//! Rule 3(b) (S5 of the store plan): what an app's script may be bound to. Each foreign kind is shown beside the one
-//! change that makes it the app's own store, so no assertion passes whatever the rule does (review standard 2).
+//! Rule 3(b) (S5 of the store plan): what an app's script may be bound to, the ceiling on what the check may suspend,
+//! and when a script that keeps reading unknown is told. Each foreign kind is shown beside the one change that makes
+//! it the app's own store, so no assertion passes whatever the rule does (review standard 2).
 
 use podster_core::app_bindings::*;
 use podster_core::app_store::{store_name, StoreRecord};
+use podster_core::release::REPO_UNPUBLISH_WINDOW_MS;
 
 const OWN: &str = "0123abcd-4567-89ef-0123-456789abcdef";
 const OTHER: &str = "fedcba98-7654-3210-fedc-ba9876543210";
@@ -24,49 +26,79 @@ fn store(id: &str) -> ReadBinding<'_> {
 }
 
 fn verdict(bindings: &[ReadBinding<'_>]) -> Verdict {
-    check(Some(bindings), OwnStore::Recorded(OWN), Some(SERVE))
+    check(Read::List(bindings), OwnStore::Recorded(OWN), Some(SERVE))
+}
+
+fn service() -> ReadBinding<'static> {
+    ReadBinding {
+        kind: Some("service"),
+        name: Some("API"),
+        ..ReadBinding::default()
+    }
 }
 
 #[test]
 fn a_script_with_nothing_or_its_own_store_alone_is_clean() {
     assert_eq!(verdict(&[]), Verdict::Clean);
     assert_eq!(verdict(&[store(OWN)]), Verdict::Clean);
-    // With no store recorded, nothing bound is still clean.
-    assert_eq!(check(Some(&[]), OwnStore::None, None), Verdict::Clean);
+    assert_eq!(check(Read::List(&[]), OwnStore::None, None), Verdict::Clean);
 }
 
 #[test]
-fn another_store_under_store_is_foreign_and_its_own_is_not() {
+fn another_store_is_foreign_and_its_own_is_not() {
     assert_eq!(
         verdict(&[store(OTHER)]),
         Verdict::Foreign(Foreign::OtherStore)
     );
     assert_eq!(
         check(
-            Some(&[store(OTHER)]),
+            Read::List(&[store(OTHER)]),
             OwnStore::Recorded(OTHER),
             Some(SERVE)
         ),
         Verdict::Clean
     );
-    // The app's own database under any other name is still not its `STORE`.
+    // Another database under another name.
+    let renamed_other = ReadBinding {
+        name: Some("DB"),
+        ..store(OTHER)
+    };
+    assert_eq!(
+        verdict(&[renamed_other.clone()]),
+        Verdict::Foreign(Foreign::OtherStore)
+    );
+    assert_eq!(
+        check(Read::List(&[renamed_other]), OwnStore::None, None),
+        Verdict::Foreign(Foreign::OtherStore)
+    );
+}
+
+#[test]
+fn its_own_store_a_second_time_under_another_name_has_its_own_code() {
     let renamed = ReadBinding {
         name: Some("DB"),
         ..store(OWN)
     };
-    assert_eq!(verdict(&[renamed]), Verdict::Foreign(Foreign::OtherStore));
+    assert_eq!(
+        verdict(&[store(OWN), renamed.clone()]),
+        Verdict::Foreign(Foreign::StoreOwnTwice)
+    );
+    assert_eq!(
+        verdict(&[renamed]),
+        Verdict::Foreign(Foreign::StoreOwnTwice)
+    );
 }
 
 #[test]
 fn a_store_bound_while_none_is_recorded_is_foreign() {
     assert_eq!(
-        check(Some(&[store(OWN)]), OwnStore::None, None),
+        check(Read::List(&[store(OWN)]), OwnStore::None, None),
         Verdict::Foreign(Foreign::StoreUnrecorded)
     );
 }
 
 #[test]
-fn the_write_counter_is_foreign_by_its_class_whatever_the_binding_says_it_is() {
+fn the_write_counter_is_foreign_by_its_class_on_any_entry() {
     let counter = ReadBinding {
         kind: Some("durable_object_namespace"),
         name: Some("COUNTER"),
@@ -85,7 +117,6 @@ fn the_write_counter_is_foreign_by_its_class_whatever_the_binding_says_it_is() {
         verdict(&[other_class]),
         Verdict::Foreign(Foreign::DurableObject)
     );
-    // Named even on a binding that calls itself the store: the class decides.
     let disguised = ReadBinding {
         class_name: Some("WriteCounter"),
         ..store(OWN)
@@ -94,7 +125,12 @@ fn the_write_counter_is_foreign_by_its_class_whatever_the_binding_says_it_is() {
         verdict(&[disguised]),
         Verdict::Foreign(Foreign::WriteCounter)
     );
-    // And it is told first, beside any other.
+    // With no type and no name at all, the class still says what it is.
+    let bare = ReadBinding {
+        class_name: Some("WriteCounter"),
+        ..ReadBinding::default()
+    };
+    assert_eq!(verdict(&[bare]), Verdict::Foreign(Foreign::WriteCounter));
     assert_eq!(
         verdict(&[store(OTHER), counter]),
         Verdict::Foreign(Foreign::WriteCounter)
@@ -117,19 +153,27 @@ fn the_serve_entries_namespace_is_told_apart_from_any_other_kv() {
         verdict(&[kv("aa".repeat(16).leak())]),
         Verdict::Foreign(Foreign::KvNamespace)
     );
-    // With the serve-entry namespace not known, it is still foreign: any KV binding is.
     assert_eq!(
-        check(Some(&[kv(SERVE)]), OwnStore::Recorded(OWN), None),
+        check(Read::List(&[kv(SERVE)]), OwnStore::Recorded(OWN), None),
         Verdict::Foreign(Foreign::KvNamespace)
     );
-    // A KV binding with no namespace never matches an unknown serve-entry namespace as `None == None`.
+    // No namespace never matches an unknown serve-entry namespace as `None == None`.
     let bare = ReadBinding {
         namespace_id: None,
         ..kv(SERVE)
     };
     assert_eq!(
-        check(Some(&[bare]), OwnStore::Recorded(OWN), None),
+        check(Read::List(&[bare]), OwnStore::Recorded(OWN), None),
         Verdict::Foreign(Foreign::KvNamespace)
+    );
+    // A KV binding with no name is still a KV binding.
+    let nameless = ReadBinding {
+        name: None,
+        ..kv(SERVE)
+    };
+    assert_eq!(
+        verdict(&[nameless]),
+        Verdict::Foreign(Foreign::ServeEntries)
     );
 }
 
@@ -159,7 +203,7 @@ fn every_other_kind_is_foreign() {
     }
     let durable = ReadBinding {
         kind: Some("durable_object_namespace"),
-        name: Some("X"),
+        name: None,
         class_name: Some("Other"),
         ..ReadBinding::default()
     };
@@ -170,7 +214,7 @@ fn every_other_kind_is_foreign() {
 }
 
 #[test]
-fn its_own_store_twice_is_foreign() {
+fn its_own_store_twice_under_store_is_foreign() {
     assert_eq!(
         verdict(&[store(OWN), store(OWN)]),
         Verdict::Foreign(Foreign::StoreTwice)
@@ -178,13 +222,23 @@ fn its_own_store_twice_is_foreign() {
 }
 
 #[test]
-fn unknown_decides_nothing() {
-    // No list.
+fn an_answer_longer_than_any_list_is_foreign() {
     assert_eq!(
-        check(None, OwnStore::Recorded(OWN), Some(SERVE)),
+        check(Read::Oversized, OwnStore::Recorded(OWN), Some(SERVE)),
+        Verdict::Foreign(Foreign::Oversized)
+    );
+    assert_eq!(
+        check(Read::Oversized, OwnStore::Unreadable, None),
+        Verdict::Foreign(Foreign::Oversized)
+    );
+}
+
+#[test]
+fn unknown_decides_nothing_only_when_nothing_foreign_was_read() {
+    assert_eq!(
+        check(Read::Unread, OwnStore::Recorded(OWN), Some(SERVE)),
         Verdict::Unknown
     );
-    // An entry with no type, or no name, makes the whole list unreadable, a foreign one beside it included.
     let no_type = ReadBinding {
         kind: None,
         ..store(OWN)
@@ -193,48 +247,71 @@ fn unknown_decides_nothing() {
         name: None,
         ..store(OWN)
     };
+    let not_an_object = ReadBinding::default();
     assert_eq!(verdict(std::slice::from_ref(&no_type)), Verdict::Unknown);
-    assert_eq!(verdict(&[no_name]), Verdict::Unknown);
-    assert_eq!(verdict(&[store(OTHER), no_type]), Verdict::Unknown);
-    // A store binding whose ID can't be read as one.
+    assert_eq!(verdict(std::slice::from_ref(&no_name)), Verdict::Unknown);
+    assert_eq!(
+        verdict(std::slice::from_ref(&not_an_object)),
+        Verdict::Unknown
+    );
+    // Beside its own store, an entry that can't be judged still leaves it unknown.
+    assert_eq!(
+        verdict(&[store(OWN), not_an_object.clone()]),
+        Verdict::Unknown
+    );
+    // But a foreign entry read anywhere in the list decides it, before or after the unreadable one.
+    assert_eq!(
+        verdict(&[no_type.clone(), store(OTHER)]),
+        Verdict::Foreign(Foreign::OtherStore)
+    );
+    assert_eq!(
+        verdict(&[store(OTHER), no_type]),
+        Verdict::Foreign(Foreign::OtherStore)
+    );
+    assert_eq!(
+        verdict(&[not_an_object, service(), no_name]),
+        Verdict::Foreign(Foreign::Other)
+    );
     for id in [
         None,
         Some("not-an-id"),
         Some("0123ABCD-4567-89EF-0123-456789ABCDEF"),
     ] {
         let unread = ReadBinding { id, ..store(OWN) };
-        assert_eq!(verdict(&[unread]), Verdict::Unknown, "{id:?}");
+        assert_eq!(
+            verdict(std::slice::from_ref(&unread)),
+            Verdict::Unknown,
+            "{id:?}"
+        );
+        assert_eq!(
+            verdict(&[unread, service()]),
+            Verdict::Foreign(Foreign::Other),
+            "{id:?}"
+        );
     }
-    // The room's record unreadable: its own store can't be told from another.
+    // The room's record unreadable: no store binding can be told, but other kinds still can.
     assert_eq!(
-        check(Some(&[store(OWN)]), OwnStore::Unreadable, Some(SERVE)),
+        check(Read::List(&[store(OWN)]), OwnStore::Unreadable, Some(SERVE)),
         Verdict::Unknown
     );
-    // But a binding read as foreign stays foreign beside one that can't be told.
-    let unread = ReadBinding {
-        id: None,
-        ..store(OWN)
-    };
-    let service = ReadBinding {
-        kind: Some("service"),
-        name: Some("API"),
-        ..ReadBinding::default()
-    };
     assert_eq!(
-        verdict(&[unread.clone(), service]),
+        check(
+            Read::List(&[store(OTHER), service()]),
+            OwnStore::Unreadable,
+            None
+        ),
         Verdict::Foreign(Foreign::Other)
-    );
-    // With the record unreadable, any store under `STORE` can't be told, but a database under another name can.
-    assert_eq!(
-        check(Some(&[unread, store(OTHER)]), OwnStore::Unreadable, None),
-        Verdict::Unknown
     );
     let renamed = ReadBinding {
         name: Some("DB"),
-        ..store(OTHER)
+        ..store(OWN)
     };
     assert_eq!(
-        check(Some(&[store(OTHER), renamed]), OwnStore::Unreadable, None),
+        check(
+            Read::List(&[store(OWN), renamed]),
+            OwnStore::Unreadable,
+            None
+        ),
         Verdict::Foreign(Foreign::OtherStore)
     );
 }
@@ -246,10 +323,12 @@ fn the_codes_are_each_distinct_and_of_a_findings_form() {
         Foreign::ServeEntries,
         Foreign::OtherStore,
         Foreign::StoreUnrecorded,
+        Foreign::StoreOwnTwice,
         Foreign::DurableObject,
         Foreign::KvNamespace,
         Foreign::StoreTwice,
         Foreign::Other,
+        Foreign::Oversized,
     ];
     let mut codes: Vec<&str> = all.iter().map(|f| f.code()).collect();
     for code in &codes {
@@ -259,11 +338,17 @@ fn the_codes_are_each_distinct_and_of_a_findings_form() {
     codes.sort_unstable();
     codes.dedup();
     assert_eq!(codes.len(), all.len());
-    assert_eq!(BINDING_FOREIGN, "script_binding_foreign");
-    assert_eq!(BINDINGS_UNREAD, "script_bindings_unread");
+    for code in [
+        BINDING_FOREIGN,
+        BINDING_HELD,
+        BINDINGS_UNREAD,
+        BINDINGS_KEEP_UNREAD,
+    ] {
+        assert!(code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
+    }
 }
 
-fn record<'a>(name: &'a str) -> StoreRecord<'a> {
+fn record(name: &str) -> StoreRecord<'_> {
     StoreRecord {
         kind: Some("d1"),
         name: Some(name),
@@ -289,7 +374,6 @@ fn the_own_store_is_the_records_id_while_it_is_owed_a_deletion_or_gone() {
         ..owed.clone()
     };
     assert_eq!(own_store(Some(&gone)), OwnStore::Recorded(OWN));
-    // A create outstanding, with no ID: nothing is the app's own yet.
     let outstanding = StoreRecord {
         id: None,
         made_at: None,
@@ -338,6 +422,69 @@ fn a_record_not_of_the_rooms_form_is_unreadable() {
     for case in &cases {
         assert_eq!(own_store(Some(case)), OwnStore::Unreadable, "{case:?}");
     }
+}
+
+#[test]
+fn the_ceiling_allows_the_repository_unpublishs_share_in_a_rolling_hour() {
+    let now = 10 * REPO_UNPUBLISH_WINDOW_MS;
+    // With 100 rooms with apps the ceiling is 5: four used allows one more, five doesn't.
+    let at = |n: usize| vec![now - 1; n];
+    assert_eq!(
+        suspension_permit(&at(4), Some(100), now),
+        SuspensionPermit::Allowed
+    );
+    assert_eq!(
+        suspension_permit(&at(5), Some(100), now),
+        SuspensionPermit::Ceiling
+    );
+    // 10% of 20 rooms is 2.
+    assert_eq!(
+        suspension_permit(&at(1), Some(20), now),
+        SuspensionPermit::Allowed
+    );
+    assert_eq!(
+        suspension_permit(&at(2), Some(20), now),
+        SuspensionPermit::Ceiling
+    );
+    // Never below one, even with no room counted.
+    assert_eq!(
+        suspension_permit(&[], Some(0), now),
+        SuspensionPermit::Allowed
+    );
+    assert_eq!(
+        suspension_permit(&at(1), Some(0), now),
+        SuspensionPermit::Ceiling
+    );
+    // Rooms not counted: nothing is suspended, and it is asked again.
+    assert_eq!(suspension_permit(&[], None, now), SuspensionPermit::Unknown);
+    // The hour's edge, to the millisecond: one made a whole window ago no longer counts; one a millisecond later does.
+    let edge = vec![now - REPO_UNPUBLISH_WINDOW_MS; 5];
+    assert_eq!(
+        suspension_permit(&edge, Some(100), now),
+        SuspensionPermit::Allowed
+    );
+    let inside = vec![now - REPO_UNPUBLISH_WINDOW_MS + 1; 5];
+    assert_eq!(
+        suspension_permit(&inside, Some(100), now),
+        SuspensionPermit::Ceiling
+    );
+    assert_eq!(SuspensionPermit::Allowed.held_code(), None);
+    assert_eq!(
+        SuspensionPermit::Ceiling.held_code(),
+        Some("ceiling_reached")
+    );
+    assert_eq!(
+        SuspensionPermit::Unknown.held_code(),
+        Some("ceiling_unread")
+    );
+}
+
+#[test]
+fn a_script_is_told_by_name_from_its_third_unread_pass() {
+    assert_eq!(UNREAD_PASSES_TOLD, 3);
+    assert!(!unread_told(2));
+    assert!(unread_told(3));
+    assert!(unread_told(4));
 }
 
 #[test]

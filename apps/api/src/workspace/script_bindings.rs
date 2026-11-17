@@ -8,6 +8,22 @@
 //! reconcile tells operators by the finding `script_binding_foreign`, by the script's name, with why in `detail`. Only
 //! an operator lifts it. Suspending an app already suspended changes nothing.
 //!
+//! **Any of the room's labels, current or retired** (the coordinator's ruling on PR #420's review): a script left
+//! under a label the room retired is still the room's, and a binding it may not hold suspends the room's app, the
+//! cautious side, as an operator's suspension of any label does (`takedown::app_suspended` reads every label). The
+//! suspension is recorded on the script's own label, which is the one the finding names, so an operator lifts that.
+//!
+//! **Within the deployment's ceiling** (`podster_core::app_bindings::suspension_permit`, decided in the `Moderation`
+//! object before it asks): the question says `may_suspend`, and without it a foreign verdict suspends nothing and is
+//! answered `held`, for operators to see.
+//!
+//! **What the suspension's unpublish does to the app's scripts** is what any operator's suspension does: every script
+//! the room's state named (served, kept, in flight) is queued for deletion, and the next hourly pass queues any other
+//! script under the room's labels that nothing claims, the offending one among them. So the offending script is
+//! deleted by the room's own delete job, and **a lift before it is gone is undone at the next pass, which reads it
+//! again.** The label and the app's store, and so its data, are kept: a wrongly suspended app is recovered by an
+//! operator's lift and a new release, which uploads its script again from the repository.
+//!
 //! **It runs first,** in a transaction of its own, before the room reads its organization's switch or does its
 //! release bookkeeping (review standard 4), so nothing slower can hold a takedown up or roll it back.
 //!
@@ -17,7 +33,7 @@
 //!
 //! Logs carry the room's ID and codes only: never a script's name, a store's ID or a binding.
 use super::*;
-use podster_core::app_bindings::{check, own_store, ReadBinding, Verdict};
+use podster_core::app_bindings::{check, own_store, Read, ReadBinding, Verdict};
 use podster_core::app_store::StoreRecord;
 use podster_core::release::{script_owner, ScriptOwner};
 
@@ -32,7 +48,8 @@ fn store_record(sql: &SqlStorage, label: &str) -> R<Option<Value>> {
     .next())
 }
 
-/// One entry of the provider's list, as core reads it: a field is there only as a string.
+/// One entry of the provider's list, as core reads it: a field is there only as a string, and an entry that isn't an
+/// object has none, which core judges unknown beside whatever else the list holds.
 fn read_binding(entry: &Value) -> ReadBinding<'_> {
     ReadBinding {
         kind: entry["type"].as_str(),
@@ -43,11 +60,23 @@ fn read_binding(entry: &Value) -> ReadBinding<'_> {
     }
 }
 
-/// `{ script, bindings, serve_entries }` from the reconcile, inside the caller's transaction: the verdict, and the
-/// app suspended if a binding is one the script may not hold. Answers `None` for a script that is no question for
-/// this room, and otherwise `{ verdict, foreign, suspended }`: `verdict` is `clean`, `foreign` or `unknown`,
-/// `foreign` is the code of what was found, and `suspended` whether this answer suspended the app.
+/// `{ script, bindings, bindings_oversized, serve_entries, may_suspend }` from the reconcile, inside the caller's
+/// transaction: the verdict, and the app suspended if the script holds what it may not and the ceiling allows. Answers
+/// `None` for a script that is no question for this room, and otherwise `{ verdict, foreign, suspended, held }`:
+/// `verdict` is `clean`, `foreign` or `unknown`, `foreign` the code of what was found, `suspended` whether this answer
+/// suspended the app, and `held` whether only the ceiling kept it from doing so.
 pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option<Value>> {
+    // Test builds only: a test makes the check itself fail, to show the rest of the reconcile's question still runs.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_bindings_check_fails'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Err(ApiError::internal("test: the bindings' check failed"));
+    }
     let Some(script) = body["script"].as_str() else {
         return Ok(None);
     };
@@ -72,14 +101,16 @@ pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option
         delete_owed_at: row["delete_owed_at"].as_i64(),
         gone_at: row["gone_at"].as_i64(),
     });
-    // Anything but an array of objects is no list: an entry that isn't an object is unreadable as a whole.
-    let bindings: Option<Vec<ReadBinding<'_>>> = body["bindings"].as_array().and_then(|list| {
-        list.iter()
-            .map(|entry| entry.is_object().then(|| read_binding(entry)))
-            .collect()
-    });
+    let bindings: Option<Vec<ReadBinding<'_>>> = body["bindings"]
+        .as_array()
+        .map(|list| list.iter().map(read_binding).collect());
+    let read = match (body["bindings_oversized"] == true, &bindings) {
+        (true, _) => Read::Oversized,
+        (false, Some(list)) => Read::List(list),
+        (false, None) => Read::Unread,
+    };
     let verdict = check(
-        bindings.as_deref(),
+        read,
         own_store(record.as_ref()),
         body["serve_entries"].as_str(),
     );
@@ -90,15 +121,24 @@ pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option
             "unknown"
         };
         return Ok(Some(
-            json!({ "verdict": name, "foreign": null, "suspended": false }),
+            json!({ "verdict": name, "foreign": null, "suspended": false, "held": false }),
         ));
     };
-    let was = !rows(
-        sql,
-        "SELECT label FROM app_label WHERE label = ? AND suspended_at IS NOT NULL",
-        vec![label.into()],
-    )?
-    .is_empty();
+    // Already down, by an operator or by an earlier pass: nothing more to do, and nothing of the ceiling is used.
+    if takedown::app_suspended(sql)? {
+        return Ok(Some(
+            json!({ "verdict": "foreign", "foreign": found.code(), "suspended": false, "held": false }),
+        ));
+    }
+    if body["may_suspend"] != true {
+        console_error!(
+            "takedown: a script holds a binding it may not, and the ceiling held the suspension: code={}",
+            found.code()
+        );
+        return Ok(Some(
+            json!({ "verdict": "foreign", "foreign": found.code(), "suspended": false, "held": true }),
+        ));
+    }
     // An operator's suspension, by Podster, on the script's own label: the label is kept, the app unpublished.
     takedown::set(
         sql,
@@ -112,6 +152,7 @@ pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option
     Ok(Some(json!({
         "verdict": "foreign",
         "foreign": found.code(),
-        "suspended": !was,
+        "suspended": true,
+        "held": false,
     })))
 }

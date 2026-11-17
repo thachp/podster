@@ -1772,24 +1772,87 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 ##### What S5's first PR built: rule 3(b)'s check of bindings
 
-**Built, 2026-11-17, in the hourly scripts pass, which runs only while a content provider is configured, which no environment is. `RELEASE_PATH_COMPLETE` is untouched. No schema step. A contract change: two finding codes added to `listTakedownFindings`'s documented list, so this is also the one contracts PR in flight.** S5 was split: rule 3(b) is a gate item, so it went first; the reconcile of stores and its `Moderation` schema step are the next PR.
+**Built, 2026-11-17, in the hourly scripts pass. That pass runs only while a content provider is configured, and no environment configures one.** `RELEASE_PATH_COMPLETE` is untouched. There is no room schema step. **The `Moderation` object has a schema step:** two tables, `binding_suspension` and `binding_unread`, created with `CREATE TABLE IF NOT EXISTS`, forward-only and safe to run again. **There is a contract change:** finding codes are added to `listTakedownFindings`'s documented list, so this PR is also the one contracts PR in flight.
 
-- **The rule is core's,** `podster_core::app_bindings::check`, pure. A script may hold nothing, or exactly `{"type":"d1","name":"STORE","id":…}` whose ID is the one the room recorded for the script's label (`own_store`: a record owed a deletion, or gone, still names its store, since a script written before is bound to it rightly; a create outstanding with no ID names none). **The ruling's "fixed ones" are none:** the upload writes no other binding, the assets configuration declares no assets binding, and the outbound Worker is named on the dispatch. Everything else is foreign, by a code: `write_counter` (any binding naming the content Worker's `WriteCounter` class, whose name a core test reads from `apps/content/src/counter.ts`), `serve_entries` (a KV binding to the serve entries' namespace), `store_foreign` (any D1 binding that isn't the app's own `STORE`, another app's store among them), `store_unrecorded` (a store under `STORE` while the room recorded none made), `durable_object`, `kv_namespace`, `store_twice` and `other_binding`. The most telling is reported when a script has several.
-- **Unknown decides nothing:** no list (no answer, a `404` as the read lags an upload, anything but a `200` with `"success": true` and an array), an entry that isn't an object with a string `type` and `name`, a store binding whose ID isn't of D1's form, or a room record not of the room's form. A binding read as foreign stays foreign beside an entry that can't be told. An empty list is clean (S5's question 2).
-- **The read** is `GET …/scripts/<name>/bindings` with the **scripts token** (S5's question 1: no read token with D1 Read is added), bounded and strict like the module's other reads (`content_provider::read_bindings`). It is sent with the reconcile's existing question about that script, with the serve entries' namespace ID; only scripts whose label's room is found are read.
-- **The room decides,** from its current record (`workspace/script_bindings.rs`), **first, in a transaction of its own,** before it reads its organization's switch or does its release bookkeeping (review standard 4). Foreign: `takedown::set` on the script's label, exactly an operator's suspension, by Podster, reason `other`: the label is kept and stays current, the app is unpublished (`app_suspended`), nothing is served, and only an operator lifts it. Again on a suspended app changes nothing.
-- **Operators are told** by `script_binding_foreign`, by the script's name, with the code in `detail`; it has 1,000 rows of its own, so nothing else can keep one out, and while it is kept `open_for` answers that script open, so a rollback never switches back to it. A pass with any script not judged tells `script_bindings_unread` once, with how many.
-- **Logs** carry the code alone: one line in the room, `takedown: a script holds a binding it may not, and the app was suspended: code=…`, checked by a test reading the source.
-- **Subjects, as chosen:** the script's name, as every script finding already is (review standard 5: operator-only stores). No store's name or ID goes into a finding, a log or an answer; the serve entries' namespace ID goes only to the room's check.
-- **Tests:** core, 12 (`crates/core/tests/app_bindings.rs`); the API, 11, in a `describe` of `takedown.spec.ts` (it shares the content provider's stand-in), against `fake-content.ts`'s new `…/bindings` route. *Mutation-checked, each put back after:* core, 19 mutants (each foreign kind allowed in turn, the class ignored, the own ID not compared, `None == None` on the namespace, unknown read as clean or as foreign, unknown winning over a foreign binding, the order of codes, and three of `own_store`'s checks); the API, 6 (no list sent, the namespace ID not sent, unknown not counted, a non-object entry dropped instead of making the list unknown, the finding not recorded, the suspension not made). Each failed its tests.
+S5 was split in two. Rule 3(b) is a gate item, so it went first. The reconcile of stores is the next PR. *Revised the same day in the fix round on PR #420's two reviews (the coordinator's rulings 1 to 10).*
+
+- **The rule is core's,** `podster_core::app_bindings::check`, and it is pure.
+  - A script may hold nothing, or exactly `{"type":"d1","name":"STORE","id":…}` whose ID is the one the room recorded for the script's label (`own_store`).
+  - A record owed a deletion, or gone, still names its store. A create outstanding with no ID names none.
+  - **The ruling's "fixed ones" are none.**
+  - Everything else is foreign, under one of these codes. A script with several is reported under the most telling.
+    - `write_counter`: the content Worker's `WriteCounter` class, on any entry. A core test reads that name from `apps/content/src/counter.ts`.
+    - `serve_entries`: the serve entries' KV namespace.
+    - `store_foreign`: any other D1 database.
+    - `store_unrecorded`: a store bound while none is recorded.
+    - `store_own_twice`: the app's own store bound a second time under another name (ruling 10).
+    - `durable_object`, `kv_namespace`, `store_twice`, `other_binding`.
+    - `bindings_oversized`: a `200` read longer than `MAX_BINDINGS_BYTES`, 256 KiB, so padding can't hide a binding (ruling 1).
+- **Every readable entry is judged before unknown is said** (ruling 2).
+  - An entry read as foreign anywhere in the list decides it.
+  - An entry that can't be judged makes the script unknown only when nothing foreign was read. That covers an entry that isn't an object, has no `type`, or is a store binding with no name or an ID not in D1's form.
+  - So does a room record not in the room's form, for store bindings under `STORE`.
+- **Unknown decides nothing:**
+  - Reads that count as unknown: no answer, a `404` while the read lags an upload, or a non-array.
+  - The pass tells `script_bindings_unread` once, with how many of the scripts **this pass reached**.
+  - A script that stays unknown three passes in a row (`UNREAD_PASSES_TOLD`, Proposed) is told by name, as `script_bindings_keep_unread`, with how many. Any judged verdict forgets the count (ruling 3).
+- **The read** is `GET …/scripts/<name>/bindings` with the **scripts token** (S5's question 1). It goes with the reconcile's existing question about that script, along with the serve entries' namespace ID.
+- **The ceiling** is ruling 4, Proposed: `podster_core::app_bindings::suspension_permit`.
+  - It is the repository unpublish's: at most 5 apps in a rolling hour, or 10% of the rooms with apps if fewer, never below one.
+  - The `Moderation` object decides before it asks, from `binding_suspension`, and sizes the ceiling once per pass from the lookup table.
+  - Past the ceiling, or with the rooms uncounted, the room suspends nothing. It answers `held`, and operators are told `script_binding_held` with `ceiling_reached` or `ceiling_unread`, beside the foreign finding.
+  - An app already suspended uses none of the ceiling.
+- **The room decides,** from its current record (`workspace/script_bindings.rs`), **first, in a transaction of its own** (review standard 4).
+  - Foreign, within the ceiling: `takedown::set` on the script's label, exactly an operator's suspension. It is made by Podster with reason `other`. The label is kept, the app is unpublished (`app_suspended`), and nothing is served.
+  - **Any of the room's labels, current or retired, counts** (ruling 5): a script left under a retired label suspends the room's app, recorded on that label, the one the finding names.
+  - A failure of the check itself is logged by its code and answered `unknown`, and the rest of the question still runs (ruling 6).
+  - A failure of a later step still answers with the verdict and the failure named. So the foreign finding reaches operators in this same pass, the reconcile counts the script's step as failed, and the room tries to set its alarm.
+- **What the suspension does to the app's scripts** (ruling 5's trace) is what any operator's suspension does.
+  - The unpublish queues every script the room's state named (served, kept, in flight) for deletion.
+  - The same question about the offending script queues it too, since nothing claims it.
+  - The current release's script is therefore deleted. **A false suspension is still recoverable:** the label and the app's store, and with them its data, are kept, and after a lift a new release uploads the script again from the repository. Keeping the old script would restore nothing, because a lift restores no serve state and the unpublish clears the kept script a rollback would use. The fix round was ruled to keep it, and didn't. Its question 4 below.
+  - **Runbook, for an operator clearing a binding suspension:**
+    1. Read the finding's script name.
+    2. Wait until the room's delete job has taken that script away. Its `script_delete_queued` finding reads `gone`, or the script is gone from the namespace's list.
+    3. Lift the label the finding names.
+  - **A lift while that script is still there is undone at the next hourly pass, which reads it again.**
+- **Operators are told** by `script_binding_foreign`, by the script's name, with the code in `detail`.
+  - It and `script_binding_held` and `script_bindings_keep_unread` each have 1,000 rows of their own.
+  - While it is kept, `open_for` answers that script open, so a rollback never switches back to it.
+- **Logs** carry the code alone: two lines in the room, checked by a test that reads the source. Subjects are the script's name, as every script finding already is (review standard 5). No store name or ID appears in a finding, a log or an answer.
+- **Tests:**
+  - Core: 16 tests, in `crates/core/tests/app_bindings.rs`.
+  - API: `apps/api/test/script-bindings.cases.ts`, run from `takedown.spec.ts` with its helpers (ruling 9), against `fake-content.ts`'s `…/bindings` route. It covers:
+    - each foreign code, with the second pass's exact `changed: 0` and the room's own answer `suspended: false` (ruling 8);
+    - a list judged before unknown;
+    - the three-pass streak;
+    - a seven-room misread against the ceiling, an hour on;
+    - a retired label's leftover script, a lift undone, then the lift standing once the script is gone;
+    - a later step's failure, with the suspension and its finding kept;
+    - the check's own failure, with the rest of the question run.
+
+  *Mutation-checked, each put back after:*
+  - First push: core 19 mutants, API 6.
+  - Fix round, core 10 mutants:
+    - oversized read as unknown;
+    - an unreadable entry deciding first;
+    - the class needing a type;
+    - own-twice read as another store;
+    - the streak told a pass early or late;
+    - uncounted rooms allowing;
+    - the ceiling off by one, ignoring its window, or absent.
+  - Fix round, API 9 mutants: listed in the PR.
+
+  Each failed its tests.
 
 **Open questions, each with the recommendation:**
 
-1. **What the bindings read answers for real** is assumed past `type` and `name`, which is all the store spike kept: a D1 binding's `id`, a KV binding's `namespace_id` and a Durable Object's `class_name` are the upload metadata's names. If the read names a D1 ID otherwise, every bound app reads unknown and nothing is decided, which shows as `script_bindings_unread`; if it lists a binding the upload didn't write (an assets binding, say), every app would be suspended at the first pass. *Recommended:* a gate item, beside the others for the second account's spike repeat: read a real static script's and a real code script's bindings, and pin the stand-in to what is seen, before a provider is configured.
-2. **Many apps suspended at once.** A wrong reading of the provider's answer would suspend every app in one pass, by design of fail-closed on what was read. *Recommended:* accept for stage 1, since lifting is an operator's act per label and no provider is configured; revisit a ceiling like the repository unpublish's if the first staging run shows any false finding.
-3. **The suspension's reason is `other`,** since `podster_policy::moderation::Reason` has no reason for it. *Recommended:* keep; the finding's code says why. A new reason would be a policy change of its own.
+1. **What the bindings read answers for real** is assumed past `type` and `name`. If it lists a binding the upload didn't write, every app reads foreign, and the ceiling then bounds the damage to 5 in an hour. *Recommended:* a gate item for the second account's spike repeat: read a real static script's and a real code script's bindings, and pin the stand-in to what is seen.
+2. **The ceiling's figures** are the repository unpublish's, Proposed. *Recommended:* keep them one figure for both until staging says otherwise.
+3. **The suspension's reason is `other`.** *Recommended:* keep it; the finding's code says why.
+4. **Keeping the current release's script after a binding suspension** (ruling 5) wasn't built. Nothing could serve from it: a lift restores no serve state, and the unpublish clears `kept_previous`. Keeping it would also need a room schema step for a record of what to keep. *Recommended:* the architect confirms recovery by lift and a new release, as for every operator suspension. If a restore on lift is wanted, it is its own ruling and PR.
 
-**Not covered, owed:** no real bindings read; no staging run; a script whose label finds no room is told as `script_without_room` and its bindings aren't read.
+**Not covered, owed:** no real bindings read; no staging run; the rooms' count unreadable (`ceiling_unread`) is shown in core only. A script whose label finds no room is told as `script_without_room`, and its bindings aren't read.
 
 #### Step 8: the build plan
 

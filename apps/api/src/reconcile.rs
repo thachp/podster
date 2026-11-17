@@ -25,11 +25,13 @@
 //!
 //! Logs carry codes and counts. Never a host, a label, a script's name or a room's ID. What operators read is state,
 //! in this object, and names the host or the script it is about.
+use crate::content_provider::Bindings;
 use crate::content_provider::{Entry, Provider};
 use crate::content_stop;
 use crate::error::ApiError;
 use crate::forward;
 use crate::store::{exec, int, rows, text};
+use podster_core::app_bindings::{suspension_permit, unread_told, SuspensionPermit};
 use podster_core::app_requests::HostKind;
 use podster_core::release::{reconcile_script, RoomClaim, ScriptReconcile};
 use podster_core::serve_entry::kind_name;
@@ -49,6 +51,10 @@ pub(crate) const FINDING_PATH: &str = "/takedown-finding";
 pub(crate) const FINDINGS_PATH: &str = "/takedown-findings";
 pub(crate) const FINDING_OPEN_PATH: &str = "/takedown-finding-open";
 
+/// Since S5 of the store plan (rule 3(b)), forward-only and safe to run again like the rest: `binding_suspension`,
+/// when each of the bindings check's suspensions was made, for its ceiling's rolling hour; `binding_unread`, how many
+/// passes in a row each script's bindings couldn't be judged.
+///
 /// `takedown_finding`: what an operator should know, one row for each code and subject, counted and dated each time
 /// it is seen again. The subject is a host, a script's name or a key, as the provider or a room gave it: data, never
 /// read as anything else. `reconcile_pass`: where each pass got to.
@@ -62,6 +68,9 @@ CREATE TABLE IF NOT EXISTS reconcile_pass (pass TEXT PRIMARY KEY CHECK (pass IN 
 CREATE TABLE IF NOT EXISTS reconcile_failure (kind TEXT NOT NULL CHECK (kind IN ('entry', 'script')), subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 253),
   failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1), last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
   last_at INTEGER NOT NULL, PRIMARY KEY (kind, subject)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS binding_suspension (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE TABLE IF NOT EXISTS binding_unread (script TEXT PRIMARY KEY CHECK (length(script) BETWEEN 1 AND 253),
+  passes INTEGER NOT NULL CHECK (typeof(passes) = 'integer' AND passes >= 1), last_at INTEGER NOT NULL CHECK (typeof(last_at) = 'integer')) WITHOUT ROWID;
 ";
 
 /// A key or a script whose step has failed this many passes in a row is told to operators, by its name.
@@ -71,10 +80,13 @@ const MAX_FAILING: i64 = 1000;
 /// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
 /// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
 /// that writes a thousand keys that keep failing among it, can't keep one of these out.
-const OWN_ROOM: [&str; 8] = [
+const OWN_ROOM: [&str; 10] = [
     "script_delete_queued",
-    // Rule 3(b): a script with a binding it may not hold, whose app was suspended for it (S5 of the store plan).
+    // Rule 3(b) (S5 of the store plan): a script with a binding it may not hold; one whose app the ceiling kept up; and
+    // one whose bindings kept reading unknown.
     podster_core::app_bindings::BINDING_FOREIGN,
+    podster_core::app_bindings::BINDING_HELD,
+    podster_core::app_bindings::BINDINGS_KEEP_UNREAD,
     "host_refused",
     "stop_key_differs",
     "stop_key_without_stop",
@@ -700,6 +712,26 @@ async fn one_key(
     }
 }
 
+/// What the hourly pass reads once for rule 3(b)'s ceiling: how many rooms have apps, or `None` when it couldn't be
+/// read, which holds every suspension of the pass.
+struct Ceiling {
+    rooms_with_apps: Option<u64>,
+}
+
+/// Whether the bindings check may suspend one more app now: core decides, from this object's own record of the hour's
+/// suspensions.
+fn permit(sql: &SqlStorage, ceiling: &Ceiling, now: i64) -> R<SuspensionPermit> {
+    let made: Vec<i64> = rows(
+        sql,
+        "SELECT at FROM binding_suspension WHERE at > ?",
+        vec![(now - podster_core::release::REPO_UNPUBLISH_WINDOW_MS).into()],
+    )?
+    .iter()
+    .map(|row| int(&row["at"]))
+    .collect();
+    Ok(suspension_permit(&made, ceiling.rooms_with_apps, now))
+}
+
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
 ///
@@ -707,11 +739,14 @@ async fn one_key(
 /// question, with the serve entries' namespace ID; the room judges them against its record of the label's store, and a
 /// binding the script may not hold suspends the app there. Operators are told here, by the script's name, with why in
 /// `detail`. A read that gave no list is sent as none, which the room judges unknown: nothing is decided, and the pass
-/// counts it.
+/// counts it. An answer longer than the read's bound is sent as `bindings_oversized`, which the room judges foreign.
+/// **The question says whether the ceiling allows one more suspension now** (`may_suspend`); a room the ceiling held
+/// suspends nothing and says so.
 async fn one_script(
     sql: &SqlStorage,
     env: &Env,
     provider: &Provider,
+    ceiling: &Ceiling,
     id: &str,
     listed_at: i64,
     counts: &mut Counts,
@@ -726,19 +761,37 @@ async fn one_script(
     };
     // With when the list was read: a script the room counted gone since then is in the list only because the list is
     // older than the deletion, and isn't found again.
-    let bindings = provider.read_bindings(id).await;
+    let (bindings, oversized) = match provider.read_bindings(id).await {
+        Bindings::List(list) => (Value::Array(list), false),
+        Bindings::Oversized => (Value::Null, true),
+        Bindings::Unread => (Value::Null, false),
+    };
+    let allowed = permit(sql, ceiling, now_ms())?;
     match ask_room(
         env,
         &room,
         json!({
             "kind": "script", "script": id, "listed_at": listed_at,
-            "bindings": bindings, "serve_entries": provider.serve_entries_namespace(),
+            "bindings": bindings, "bindings_oversized": oversized,
+            "serve_entries": provider.serve_entries_namespace(),
+            "may_suspend": allowed == SuspensionPermit::Allowed,
         }),
     )
     .await
     {
         Some(answer) => {
-            bound(sql, id, &answer["bindings"], counts)?;
+            bound(sql, id, &answer["bindings"], allowed, counts)?;
+            // A step after the bindings' check failed in the room: its verdict has been taken, and the script's step
+            // is counted failed, as a room's failure always is.
+            if let Some(code) = answer["failed"].as_str() {
+                console_error!(
+                    "reconcile: a room's step after the bindings' check failed: code={}",
+                    code_form(code)
+                );
+                return Err(Stopped::Failed(ApiError::internal(
+                    "a room's takedown check failed after its bindings' check",
+                )));
+            }
             counts.take(sql, &answer, now_ms())?;
             if answer["known"] != true {
                 counts.finding(sql, "script_without_room", id, now_ms())?;
@@ -749,27 +802,112 @@ async fn one_script(
     }
 }
 
-/// What the room said of a script's bindings (rule 3(b)): a binding it may not hold is told to operators by the
-/// script's name with the room's code in `detail`, and counted as a change when this answer suspended the app. A
-/// script the room judged unknown is counted unread. A room that answered nothing about it holds no such label, and is
-/// told as `script_without_room` by the caller.
-fn bound(sql: &SqlStorage, id: &str, judged: &Value, counts: &mut Counts) -> R<()> {
+/// A code from a room, as a log line may carry it: lower-case letters, digits and `_`, or `other`.
+fn code_form(code: &str) -> &str {
+    if (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        code
+    } else {
+        "other"
+    }
+}
+
+/// What the room said of a script's bindings (rule 3(b)). A binding it may not hold is told to operators by the
+/// script's name with the room's code in `detail`; a suspension it made is counted as a change and against the
+/// ceiling's hour; one the ceiling held is told by `script_binding_held`, with why. A script the room judged unknown is
+/// counted unread for the pass and for itself, told by name from its third pass in a row; any judged verdict forgets
+/// that count. A room that answered nothing about it holds no such label, and is told as `script_without_room` by the
+/// caller.
+fn bound(
+    sql: &SqlStorage,
+    id: &str,
+    judged: &Value,
+    allowed: SuspensionPermit,
+    counts: &mut Counts,
+) -> R<()> {
+    let now = now_ms();
     match judged["verdict"].as_str() {
-        None | Some("clean") => {}
+        None => return Ok(()),
+        Some("clean") => {}
         Some("foreign") => {
             if judged["suspended"] == true {
                 counts.changed += 1;
+                exec(
+                    sql,
+                    "INSERT INTO binding_suspension (at) VALUES (?)",
+                    vec![now.into()],
+                )?;
             }
             counts.found += 1;
             record(
                 sql,
                 podster_core::app_bindings::BINDING_FOREIGN,
                 id,
-                Some(judged["foreign"].as_str().unwrap_or("other_binding")),
-                now_ms(),
+                Some(code_form(
+                    judged["foreign"].as_str().unwrap_or("other_binding"),
+                )),
+                now,
             )?;
+            if judged["held"] == true {
+                counts.found += 1;
+                record(
+                    sql,
+                    podster_core::app_bindings::BINDING_HELD,
+                    id,
+                    Some(allowed.held_code().unwrap_or("ceiling_reached")),
+                    now,
+                )?;
+            }
         }
-        _ => counts.bindings_unread += 1,
+        Some(_) => {
+            counts.bindings_unread += 1;
+            return unread_again(sql, id, now, counts);
+        }
+    }
+    exec(
+        sql,
+        "DELETE FROM binding_unread WHERE script = ?",
+        vec![id.into()],
+    )
+}
+
+/// One more pass in a row in which a script's bindings couldn't be judged. From [`unread_told`]'s pass on, operators
+/// are told by the script's name, with how many. Counted for at most [`MAX_FAILING`] scripts at once.
+fn unread_again(sql: &SqlStorage, id: &str, now: i64, counts: &mut Counts) -> R<()> {
+    let known = rows(
+        sql,
+        "SELECT passes FROM binding_unread WHERE script = ?",
+        vec![id.into()],
+    )?
+    .first()
+    .map(|row| int(&row["passes"]));
+    if known.is_none() {
+        let held = rows(sql, "SELECT count(*) AS n FROM binding_unread", vec![])?
+            .first()
+            .map_or(0, |row| int(&row["n"]));
+        if held >= MAX_FAILING {
+            return record(sql, "failures_full", "binding_unread", None, now);
+        }
+    }
+    let passes = known.unwrap_or(0) + 1;
+    exec(
+        sql,
+        "INSERT INTO binding_unread (script, passes, last_at) VALUES (?, ?, ?)
+           ON CONFLICT (script) DO UPDATE SET passes = excluded.passes, last_at = excluded.last_at",
+        vec![id.into(), passes.into(), now.into()],
+    )?;
+    if unread_told(passes) {
+        counts.found += 1;
+        record(
+            sql,
+            podster_core::app_bindings::BINDINGS_KEEP_UNREAD,
+            id,
+            Some(&passes.to_string()),
+            now,
+        )?;
     }
     Ok(())
 }
@@ -834,6 +972,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
     for table in [
         "DELETE FROM takedown_finding WHERE last_seen_at < ?",
         "DELETE FROM reconcile_failure WHERE last_at < ?",
+        "DELETE FROM binding_unread WHERE last_at < ?",
     ] {
         let pruned = exec(sql, table, vec![(started - FINDING_KEPT_MS).into()]);
         counts.skipped(pruned);
@@ -920,6 +1059,16 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     let mut at = pass(sql, "scripts")?;
+    // Rule 3(b)'s ceiling is sized once for the pass. The hour's record keeps only what can still count.
+    let ceiling = Ceiling {
+        rooms_with_apps: crate::repo_ceiling::rooms_with_apps(env).await,
+    };
+    let pruned = exec(
+        sql,
+        "DELETE FROM binding_suspension WHERE at <= ?",
+        vec![(started - podster_core::release::REPO_UNPUBLISH_WINDOW_MS).into()],
+    );
+    counts.skipped(pruned);
     // Taken before the list is asked for: whatever the list holds, the provider read it after this.
     let listed_at = now_ms();
     let Some(list) = provider.list_scripts().await else {
@@ -953,14 +1102,14 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let step = one_script(sql, env, &provider, id, listed_at, &mut counts).await;
+        let step = one_script(sql, env, &provider, &ceiling, id, listed_at, &mut counts).await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
         at.cursor = None;
     }
     if counts.bindings_unread > 0 {
-        // One finding for the pass, with how many: rule 3(b) decided nothing for those scripts.
+        // One finding for the pass, with how many of the scripts this pass reached: rule 3(b) decided nothing for them.
         let told = record(
             sql,
             podster_core::app_bindings::BINDINGS_UNREAD,

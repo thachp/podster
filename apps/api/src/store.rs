@@ -493,7 +493,8 @@ CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY RE
 // task's prompt inputs, from the commands that wrote them, for the provenance `get_task` shows Runner's run policy.
 // `task_input_author` keeps every author and organization pair that ever wrote an input (F1, G3), and a lasting unknown
 // author, `unknown` 1 with an empty ID and organization, wherever a write found words nobody recorded (G1). No row of it
-// is ever removed: a trigger refuses it. An organization of none is kept as an empty string, since it is part of the key.
+// is ever removed or rewritten: triggers refuse a delete, and any update but of `written_at` (H1). An organization of
+// none is kept as an empty string, since it is part of the key.
 // `task_input_text` keeps the latest write: the SHA-256 of the words written, or for a change request its
 // `task.changes_requested` event (F2). `task_requester_org` keeps the requester's organization as of when they took the
 // part (F3). Every existing task's title, instructions and criteria get the unknown author, since nobody's writes were
@@ -511,6 +512,10 @@ CREATE TABLE IF NOT EXISTS task_input_author (task_id TEXT NOT NULL,
   PRIMARY KEY (task_id, input, author_id, author_org)) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS task_input_author_kept BEFORE DELETE ON task_input_author
   BEGIN SELECT RAISE(ABORT, 'a task input author is kept'); END;
+CREATE TRIGGER IF NOT EXISTS task_input_author_unchanged BEFORE UPDATE ON task_input_author
+  WHEN NEW.task_id IS NOT OLD.task_id OR NEW.input IS NOT OLD.input OR NEW.author_id IS NOT OLD.author_id
+    OR NEW.author_org IS NOT OLD.author_org OR NEW.unknown IS NOT OLD.unknown OR NEW.first_written_at IS NOT OLD.first_written_at
+  BEGIN SELECT RAISE(ABORT, 'a task input author is kept as written'); END;
 CREATE TABLE IF NOT EXISTS task_input_text (task_id TEXT NOT NULL,
   input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
   text_sha256 TEXT CHECK (text_sha256 IS NULL OR (length(text_sha256) = 64 AND text_sha256 NOT GLOB '*[^0-9a-f]*')),

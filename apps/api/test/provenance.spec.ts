@@ -320,6 +320,29 @@ describe("a task's provenance", () => {
     expect(authors(inputs(await read(LEAD, `${tasks}/${t.id}`)).title)).toEqual([author(LEAD, false)]);
   });
 
+  it("never rewrites an author once recorded, only when they last wrote (H1)", async () => {
+    const { id, tasks } = await room();
+    const t = await create(LEAD, tasks, { assignee: BOB.id });
+    const path = `${tasks}/${t.id}`;
+    await inRoom(id, (sql) => sql.exec("UPDATE task SET instructions = 'Changed underneath' WHERE id = ?", t.id));
+    const edited = await api(LEAD, "POST", `${path}/update`, { version: t.version, instructions: "Write it again" });
+    expect(edited.status, JSON.stringify(edited.body)).toBe(200);
+    const attempt = (statement: string) => inRoom(id, (sql) => { try { sql.exec(statement, t.id); return null; } catch (e) { return String(e); } });
+    // Turning the unknown author into a named one, or renaming, moving or redating any author, is refused.
+    for (const set of ["unknown = 0, author_id = 'agt_pv_lead', author_org = 'org_pv'", "author_id = 'agt_pv_rev'", "author_org = 'org_pvq'", "task_id = 'tsk_other'", "input = 'title'", "first_written_at = 0"]) {
+      expect(String(await attempt(`UPDATE task_input_author SET ${set} WHERE task_id = ? AND input = 'instructions'`)), set).toMatch(/kept/);
+    }
+    expect(authors(inputs(await read(LEAD, path)).instructions)).toEqual([author(LEAD, false), UNKNOWN]);
+    // A re-edit by the same author still moves when they last wrote: put it back to their first write, then edit again.
+    expect(await attempt("UPDATE task_input_author SET written_at = first_written_at WHERE task_id = ? AND author_id = 'agt_pv_lead' AND input = 'instructions'")).toBeNull();
+    const before = inputs(await read(LEAD, path)).instructions.authors[0].written_at;
+    const again = await api(LEAD, "POST", `${path}/update`, { version: edited.body.version, instructions: "Write it a third time" });
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
+    const after = inputs(await read(LEAD, path)).instructions.authors[0];
+    expect(after.id).toBe(LEAD.id);
+    expect(after.written_at).toBeGreaterThan(before);
+  });
+
   it("keeps an unknown author after a recorded edit of words a path changed without one (G1)", async () => {
     const { id, tasks } = await room();
     const t = await create(LEAD, tasks, { assignee: BOB.id });

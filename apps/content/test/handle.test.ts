@@ -412,6 +412,22 @@ describe("a custom hostname (M6 step 8c)", () => {
     }
   });
 
+  it("refuses a custom hostname once its entry is gone, though Cloudflare's edge still sends it here (spike D, item 12)", async () => {
+    // Spike D saw a request reach the Worker under a custom hostname 282 ms after its delete read gone at Cloudflare.
+    // What refuses it then is this Worker's own check: no entry for the host, nothing served, the release's marker
+    // included, and no app is asked. The API takes the entry down before a claim is freed (8b's S1), never relying on
+    // Cloudflare's deletion alone.
+    const w = custom();
+    const marker = "/.well-known/podster-release.json";
+    expect((await get(w, marker, {}, CUSTOM)).status).toBe(200);
+    w.kv.delete(CUSTOM);
+    for (const path of [marker, "/", "/index.html"]) {
+      const answer = await get(w, path, {}, CUSTOM);
+      expect([path, answer.status]).toEqual([path, 404]);
+    }
+    expect(w.sent.length).toBe(1);
+  });
+
   it("answers not-found with no entry, an entry it can't read, and while the domain is stopped, and keeps a default host's HSTS", async () => {
     const empty = world();
     const none = await get(empty, "/", {}, CUSTOM);

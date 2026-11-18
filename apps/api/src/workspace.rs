@@ -76,6 +76,7 @@ mod changes;
 mod collaboration;
 mod cursor;
 mod custom_hostname;
+mod custom_marker;
 mod downloads;
 mod held;
 mod hostname;
@@ -3914,6 +3915,14 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A custom host's marker to fetch, or a set-back custom host to open again (M6 step 8e).
+        if let Some(next) = migrated
+            .then(|| custom_marker::next_due(&sql, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // A serve entry to write or remove, or a script to delete (M6 step 4(a)). Nothing while no provider is configured.
         if let Some(next) = migrated
             .then(|| takedown::next_due(&sql, &self.env, now))
@@ -5554,6 +5563,10 @@ impl DurableObject for Workspace {
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());
+        }
+        // A custom host's marker (M6 step 8e), right after the applier has written what it wants.
+        if let Err(error) = self.custom_marker_upkeep().await {
+            console_error!("custom marker upkeep failed: {:?}", error.code());
         }
         // An app's data owed a deletion (S4 of the store plan), after the applier and the script deletes.
         if let Err(error) = self.store_delete_upkeep().await {

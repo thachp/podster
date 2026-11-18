@@ -290,18 +290,18 @@ describe("the room's record of its store", () => {
   it("is added to a room made before it, and its step runs again safely", async () => {
     const r = await room();
     const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
-    // A room as it was before step 51: no table, five steps behind (steps 52, the record of a script's kind, 53, the
-    // record's rebuild, 54, who wrote a task's inputs, and 55, the recheck's record, are after it and run again safely
-    // too).
+    // A room as it was before step 51: no table, six steps behind (steps 52, the record of a script's kind, 53, the
+    // record's rebuild, 54, who wrote a task's inputs, 55, the recheck's record, and 56, a custom host's marker, are
+    // after it and run again safely too).
     await inRoom(r.id, (sql) => {
       sql.exec("DROP TABLE app_store");
-      sql.exec("UPDATE schema_version SET version = version - 5");
+      sql.exec("UPDATE schema_version SET version = version - 6");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     await inRoom(r.id, (sql) => insert(sql, { store_id: ID, create_sent_at: 2, made_at: 3 }));
     // The step again, over a table that is there with a row in it: the row is kept.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 5"));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 6"));
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT label, store_id FROM app_store").toArray())).toEqual([{ label: "todo", store_id: ID }]);
@@ -315,8 +315,8 @@ describe("the room's record of its store", () => {
     const latest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     const NAMES = ["0", "1", "2", "3"].map((d) => NAME.replace(/f$/, d));
     const IDS = ["0", "1"].map((d) => ID.replace(/f$/, d));
-    // A room as it was before step 53: the record as step 51 made it, and four rows of it. Steps 54 and 55, after it, run
-    // again safely too.
+    // A room as it was before step 53: the record as step 51 made it, and four rows of it. Steps 54, 55 and 56, after it,
+    // run again safely too.
     await inRoom(r.id, (sql) => {
       for (const label of ["l1", "l2", "l3"]) sql.exec("INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, NULL, 1, 1)", label);
       sql.exec("DROP TABLE app_store");
@@ -334,7 +334,7 @@ describe("the room's record of its store", () => {
       // A store owed a deletion, and one gone.
       old("l2", NAMES[2], { store_id: IDS[0], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "operator_takedown", updated_at: 3 });
       old("l3", NAMES[3], { store_id: IDS[1], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "owner_deleted", gone_at: 4, updated_at: 4 });
-      sql.exec("UPDATE schema_version SET version = version - 3");
+      sql.exec("UPDATE schema_version SET version = version - 4");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
@@ -350,7 +350,7 @@ describe("the room's record of its store", () => {
     const refused = await inRoom(r.id, (sql) => { try { sql.exec("UPDATE app_store SET gone_at = 9 WHERE label = 'todo'"); return null; } catch (e) { return String(e); } });
     expect(String(refused)).toMatch(/constraint/i);
     // The step again, over the rebuilt table: every row kept, the notes as they were.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 3"));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE schema_version SET version = version - 4"));
     expect(await visit(r)).toBe(200);
     expect(await read()).toEqual(rebuilt);
   });
@@ -380,8 +380,8 @@ describe("the room's record of a script's kind", () => {
       sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, 2, 10, 5)", UPLOADED, `todo.${UPLOADED}`);
       sql.exec("INSERT INTO release_uncertain (release_id, script_name, files, bytes, since, last_code) VALUES (?, ?, 2, 10, 6, 'x')", UNCERTAIN, `todo.${UNCERTAIN}`);
       sql.exec("DROP TABLE release_script_kind");
-      // Four steps behind: steps 53, 54 and 55, after it, run again safely too.
-      sql.exec("UPDATE schema_version SET version = version - 4");
+      // Five steps behind: steps 53, 54, 55 and 56, after it, run again safely too.
+      sql.exec("UPDATE schema_version SET version = version - 5");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
@@ -394,7 +394,7 @@ describe("the room's record of a script's kind", () => {
     // The step again, over a record that holds code for another script: nothing is changed or added twice.
     await inRoom(r.id, (sql) => {
       sql.exec("INSERT INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'code', 7)", OTHER, `todo.${OTHER}`);
-      sql.exec("UPDATE schema_version SET version = version - 4");
+      sql.exec("UPDATE schema_version SET version = version - 5");
     });
     expect(await visit(r)).toBe(200);
     expect(await kinds()).toEqual([...backfilled, { release_id: OTHER, script_name: `todo.${OTHER}`, kind: "code", recorded_at: 7 }]);

@@ -523,7 +523,7 @@ impl CommitLiveRefusal {
 }
 
 /// A version one higher, if it stays below `u64::MAX`, which is kept for the saturated "can't move" state.
-fn bump(version: u64) -> Option<u64> {
+pub(crate) fn bump(version: u64) -> Option<u64> {
     version.checked_add(1).filter(|v| *v < u64::MAX)
 }
 

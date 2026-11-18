@@ -15,6 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
+import { handlePairing, handlePairingRedeem } from "./pairing";
 import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath, isCardPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { A2A_CAPABILITIES, type LifecycleOptions } from "./a2a/lifecycle";
@@ -469,7 +470,7 @@ async function memberships(env: Env, person: string): Promise<Memberships> {
 }
 
 /** A signed-in person, acting in the organization they choose among their own. */
-async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
+export async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
   const person = personId(userId);
   const { orgs, adminOrgs, defaultOrg, orgSince } = await memberships(env, person);
   const org = request.headers.get("x-podster-org") ?? defaultOrg;
@@ -1184,6 +1185,9 @@ const appHandler = {
     // GitHub's deliveries come to the gateway's own host, never the application's.
     const webhook = onApplicationHost ? null : await handleGithubWebhook(request, url, publicEnv);
     if (webhook) return webhook;
+    // Runner's pairing redemption (M7 step 5(b)) comes to the gateway's own host, with a host JWT and no session.
+    const redeemed = onApplicationHost ? null : await handlePairingRedeem(request, url, publicEnv);
+    if (redeemed) return redeemed;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
     const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
@@ -1265,6 +1269,8 @@ const appHandler = {
     const identity = await personIdentity(env, request, session.user.id);
     if (!identity) return denied("not_allowed", 403);
     if (request.method !== "GET" && request.method !== "HEAD" && !sameOrigin(request, env)) return denied("not_allowed", 403);
+    const pairing = await handlePairing(request, url, env, identity);
+    if (pairing) return pairing;
 
     const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
     if (connection && request.method === "POST") return handleConnection(env, identity, connection[1], connection[2] as "disconnect" | "reconnect");

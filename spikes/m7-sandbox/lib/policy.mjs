@@ -24,3 +24,13 @@ export function decide(policy, tool, input) {
   }
   return { allow: true, rule: "tool-allowed" };
 }
+
+/**
+ * The SDK's own permission settings, the second lock. Only an explicit "open" (used by the spike to show
+ * Runner's lock holds alone) bypasses them; anything else, missing or misspelled included, is dontAsk with
+ * Runner's allow list.
+ */
+export function sdkPermissions(sdkLock, allow) {
+  if (sdkLock === "open") return { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true };
+  return { permissionMode: "dontAsk", allowedTools: [...allow] };
+}

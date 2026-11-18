@@ -454,7 +454,10 @@ async function scenarioStructured(oversize, maxOutputTokens) {
       filesClaimed: claimed.length,
       claimedFilesExist: claimed.length > 0 && claimed.every((f) => files.includes(f)),
       runnerBound: bound,
-      pass: oversize ? !bound.ok || (v?.summary?.length ?? 0) <= 200 : bound.ok && v?.status === "done" && claimed.every((f) => files.includes(f)),
+      endedBy: rec.stopKind ? `runner-${rec.stopKind}-cap` : rec.result?.subtype ?? "no-result",
+      // Passes only with a result that Runner's bound accepts. A run cut by a cap with no result fails,
+      // even though nothing oversize got through.
+      pass: v !== undefined && bound.ok && v?.status === "done" && claimed.every((f) => files.includes(f)),
     },
   };
 }

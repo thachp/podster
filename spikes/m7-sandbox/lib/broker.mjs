@@ -28,6 +28,24 @@ export function costOf(model, usage) {
 }
 
 const FORWARDED = ["anthropic-version", "anthropic-beta", "content-type", "accept"];
+
+/**
+ * The upstream URL for a client's request target, or the reason it is refused. The URL is built from the
+ * fixed origin and fixed path; nothing the client sent is copied into it. The path must be exactly
+ * /v1/messages as sent (an encoded spelling is refused), and the only query allowed is beta=true.
+ */
+export function upstreamUrl(target) {
+  const [path, query = ""] = String(target ?? "").split(/\?(.*)/s, 2);
+  if (path !== "/v1/messages") return { refused: "path" };
+  const url = new URL("/v1/messages", UPSTREAM);
+  if (query !== "") {
+    const params = new URLSearchParams(query);
+    const keys = [...params.keys()];
+    if (keys.length !== 1 || keys[0] !== "beta" || params.get("beta") !== "true") return { refused: "query" };
+    url.searchParams.set("beta", "true");
+  }
+  return { url: url.href };
+}
 export const PLACEHOLDER = "placeholder-not-a-key";
 
 /**
@@ -39,7 +57,7 @@ export async function startBroker({ keyFile, models, caps, onCap, host = "127.0.
   const state = {
     requests: 0, // requests forwarded to the provider
     completed: 0,
-    refused: { path: 0, model: 0, stopped: 0, turns: 0 },
+    refused: { path: 0, query: 0, model: 0, stopped: 0, turns: 0 },
     refusedPaths: [],
     usd: 0,
     tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
@@ -92,7 +110,9 @@ export async function startBroker({ keyFile, models, caps, onCap, host = "127.0.
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify({ type: "error", error: { type: "permission_error", message: `broker refused: ${why}` } }));
     };
-    if (req.method !== "POST" || path !== "/v1/messages") return refuse("path", 404);
+    if (req.method !== "POST") return refuse("path", 404);
+    const target = upstreamUrl(req.url);
+    if (target.refused) return refuse(target.refused, target.refused === "path" ? 404 : 400);
     if (state.stopped) return refuse("stopped", 429);
 
     const chunks = [];
@@ -144,7 +164,7 @@ export async function startBroker({ keyFile, models, caps, onCap, host = "127.0.
     };
     inFlight.add(abort);
     try {
-      const up = await fetch(UPSTREAM + req.url, { method: "POST", headers, body: forward, signal: controller.signal });
+      const up = await fetch(target.url, { method: "POST", headers, body: forward, signal: controller.signal });
       const out = {};
       for (const h of ["content-type", "request-id"]) if (up.headers.get(h)) out[h] = up.headers.get(h);
       res.writeHead(up.status, out);

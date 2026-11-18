@@ -167,7 +167,9 @@
       ],
       "size": 0
     },
-    "pass": true
+    "pass": false,
+    "endedBy": "runner-time-cap",
+    "note": "Recomputed 2026-11-18 without a rerun: the run hung until Runner's time cap and ended with no result, so it does not pass."
   },
   "ranAt": "2026-11-18T11:06:20.685Z"
 }

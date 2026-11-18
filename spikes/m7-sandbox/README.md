@@ -14,18 +14,20 @@ M7B_SCRATCH=<an empty folder> M7B_LINUX_CLAUDE=<path to package/claude> node spi
 node --test selftest.mjs
 ```
 
-`spike.mjs` lists the scenarios. The key is read only by `lib/broker.mjs`, from `M7B_KEY_FILE` (default `~/.podster/anthropic-spike-b.key`). Docker runs with a throwaway `DOCKER_CONFIG` holding `{}` and the allow-listed environment from `e2e/child-env.mjs`.
+`spike.mjs` lists the scenarios. The key is read from `M7B_KEY_FILE` (default `~/.podster/anthropic-spike-b.key`) by `lib/broker.mjs`, which sends it to the provider, and by `spike.mjs`'s `containsKey`, only to check that it appears nowhere in the probes' output or the containers' `docker inspect`. Neither prints, logs or stores it.
+
+**Which code made each result file.** Some result files came from earlier code in this branch, and reruns overwrote earlier files of the same name; `results/spend.json` lists every run in order, reruns included. `d-oversize.json`'s `pass` was recomputed without a rerun after the review (a run that hung until Runner's time cap with no result doesn't pass), and `a-outside-refuse.json` was rerun once after the broker's upstream URL was rebuilt from fixed parts. Docker runs with a throwaway `DOCKER_CONFIG` holding `{}` and the allow-listed environment from `e2e/child-env.mjs`.
 
 | File | What it is |
 | --- | --- |
-| `lib/broker.mjs` | The provider broker, the only holder of the key. Loopback only; accepts `POST /v1/messages` for allow-listed models; counts spend and requests from the provider's usage; Runner's hard stop (refuse later requests, cut those in flight); optional `max_tokens` clamp and worst-case reservation |
+| `lib/broker.mjs` | The provider broker, the only part that sends the key. Loopback only; accepts `POST /v1/messages` (with `beta=true` the only query allowed; the upstream URL is built from fixed parts) for allow-listed models; counts spend and requests from the provider's usage; Runner's hard stop (refuse later requests, cut those in flight); optional `max_tokens` clamp and worst-case reservation |
 | `lib/runner.mjs` | The stand-in Runner's adapter. A `PreToolUse` hook is the decision point for every tool call; caps on spend, turns and run time; the stop kills the task container. Two placements: `outside` (Claude Code on the host in an empty folder, no built-in tools, Runner's MCP tools `docker exec` into a container with no network) and `inside` (Claude Code's Linux binary in the container through `spawnClaudeCodeProcess`, reaching the broker only through a relay) |
 | `lib/policy.mjs`, `lib/result.mjs` | Runner's run policy for one call, and its bound on the final result. Pure |
 | `lib/docker.mjs` | Containers: user 1000, all capabilities dropped, `no-new-privileges`, read-only root, own task folder at `/work`, no home, key or Docker socket mounted |
 | `probe/probe.mjs` | The isolation probe, run as a task command |
 | `results/*.json` | One file per scenario: IDs, tool names, rule names, counts, times and costs. No task text, model text, command or key. Host paths are written as `<scratch>` and `<home>` |
 | `results/spend.json` | The running spend, as the broker counted it and as the SDK reported it |
-| `selftest.mjs` | Pure checks of the policy, the price table and the result bound |
+| `selftest.mjs` | Pure checks of the policy, the SDK permission default, the broker's upstream URL, the price table and the result bound |
 
 ## Scenarios
 
@@ -42,4 +44,4 @@ node --test selftest.mjs
 | `t-sdk-turns`, `t-runner-turns` | A turn cap of 5 | 5 requests and 5 tool runs each; no tool ran after either stop |
 | `r-runner-time` | A 15 s cap on a loop of `sleep 3` commands, `inside` | Stop +2 ms, Claude Code exited +106 ms, container killed +188 ms. A killed `docker exec` client left its process running |
 | `d-structured` | `outputFormat` with a JSON schema | Pass, once Runner's policy names the SDK's `StructuredOutput` tool |
-| `d-oversize`, `d-oversize-capped` | The model asked to put 3000 characters in a 200-character field | Uncapped: 118 s of generation inside one tool call, nothing seen until Runner's time cap cut it. With a 2048-token output cap: the SDK's schema check refused the oversize tries and the run ended with a valid result |
+| `d-oversize`, `d-oversize-capped` | The model asked to put 3000 characters in a 200-character field | Uncapped: fail, no result; 118 s of generation inside one tool call, nothing seen until Runner's time cap cut it. With a 2048-token output cap: the SDK's schema check refused the oversize tries and the run ended with a valid result |

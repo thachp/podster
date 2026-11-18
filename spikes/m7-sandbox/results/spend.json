@@ -1,6 +1,6 @@
 {
-  "totalUsd": 0.015079925,
-  "sdkReportedUsd": 0.00920754,
+  "totalUsd": 0.01542346,
+  "sdkReportedUsd": 0.009551075000000001,
   "runs": [
     {
       "id": "a-outside-refuse",
@@ -136,6 +136,11 @@
       "id": "b-runner-usd-reserve",
       "brokerUsd": 0.00139832,
       "sdkUsd": null
+    },
+    {
+      "id": "a-outside-refuse",
+      "brokerUsd": 0.000343535,
+      "sdkUsd": 0.000343535
     }
   ]
 }

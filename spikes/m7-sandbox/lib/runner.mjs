@@ -19,7 +19,7 @@ import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import { childEnv, forbidden } from "../../../e2e/child-env.mjs";
 import { startBroker, PLACEHOLDER } from "./broker.mjs";
-import { decide } from "./policy.mjs";
+import { decide, sdkPermissions } from "./policy.mjs";
 import { docker, dockerAsync } from "./docker.mjs";
 
 export const MODEL = "claude-haiku-5-5";
@@ -173,9 +173,7 @@ export async function runTask(o) {
     ...(mode === "outside"
       ? { tools: [], mcpServers: { task: taskServer } }
       : { tools: builtinTools }),
-    ...(sdkLock === "refuse"
-      ? { permissionMode: "dontAsk", allowedTools: allow }
-      : { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true }),
+    ...sdkPermissions(sdkLock, allow),
     ...(sdkCaps.maxTurns ? { maxTurns: sdkCaps.maxTurns } : {}),
     ...(sdkCaps.maxBudgetUsd ? { maxBudgetUsd: sdkCaps.maxBudgetUsd } : {}),
     ...(outputFormat ? { outputFormat } : {}),

@@ -9,7 +9,7 @@ function gateway(response = new Response("{}")) {
 }
 
 describe("isForwardable", () => {
-  it.each(["/api/auth/sign-in/magic-link", "/api/auth/magic-link/verify", "/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/orgs/org_1/members", "/api/orgs/org_1/members/per_1", "/api/orgs/org_1/invitations", "/api/orgs/org_1/invitations/oin_1", "/api/org-invitations/preview", "/api/org-invitations/accept", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github", "/api/consent", "/api/claim"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
+  it.each(["/api/auth/sign-in/magic-link", "/api/auth/magic-link/verify", "/api/v1/me", "/api/v1/workspaces/ws_1/tasks", "/api/v1/agents/agt_1/inbox", "/api/orgs", "/api/orgs/org_1/members", "/api/orgs/org_1/members/per_1", "/api/orgs/org_1/invitations", "/api/orgs/org_1/invitations/oin_1", "/api/org-invitations/preview", "/api/org-invitations/accept", "/api/agents", "/api/agents/agt_1/disconnect", "/api/auth/get-session", "/api/auth/sign-out", "/api/auth/sign-in/social", "/api/auth/callback/github", "/api/consent", "/api/claim", "/api/pairing", "/api/pairing/agt_0123456789abcdef0123456789abcdef", "/api/pairing/agt_1/cancel", "/api/pairing/agt_1/activate"])("forwards %s", (path) => expect(isForwardable(path)).toBe(true));
 
   it.each([
     "/api/auth/agent/register",
@@ -28,6 +28,15 @@ describe("isForwardable", () => {
     "/api/agentsx",
     "/api/consent/x",
     "/api/claimx",
+    "/api/pairingx",
+    "/api/pairing/",
+    "/api/pairing/agt_1/redeem",
+    "/api/pairing/agt_1/activate/x",
+    "/api/pairing/agt_1/cancelx",
+    "/api/pairing/agt.1",
+    "/api/pairing/agt_1/../x",
+    `/api/pairing/${"a".repeat(129)}`,
+    "/pairing/agt_1/redeem",
     "/api/orgsx",
     "/api/orgs/nope/members",
     "/api/orgs/org_1/other",
@@ -74,6 +83,20 @@ describe("forwardToGateway", () => {
     await sent("/api/v1/me");
     const headers = calls.mock.calls.map((call: unknown[]) => new Headers((call[1] as RequestInit).headers).get("referer"));
     expect(headers).toEqual([`${APP}/sign-in/email?token=t`, null]);
+  });
+
+  it("passes a person's pairing start and confirmation on, with their own origin, and never Runner's redeem", async () => {
+    const { fetch, calls } = gateway();
+    const headers = { origin: APP, cookie: "better-auth.session_token=s", "content-type": "application/json" };
+    await forwardToGateway(new Request(`${APP}/api/pairing`, { method: "POST", headers, body: "{}" }), { fetch }, APP);
+    await forwardToGateway(new Request(`${APP}/api/pairing/agt_1/activate`, { method: "POST", headers, body: '{"key_thumbprint":"x"}' }), { fetch }, APP);
+    expect(calls.mock.calls.map((call: unknown[]) => [call[0], (call[1] as RequestInit).method, new Headers((call[1] as RequestInit).headers).get("origin")])).toEqual([
+      [`${APP}/api/pairing`, "POST", APP],
+      [`${APP}/api/pairing/agt_1/activate`, "POST", APP],
+    ]);
+    const redeem = await forwardToGateway(new Request(`${APP}/api/pairing/agt_1/redeem`, { method: "POST", headers, body: "{}" }), { fetch }, APP);
+    expect(redeem.status).toBe(404);
+    expect(calls).toHaveBeenCalledTimes(2);
   });
 
   it("answers a refused path without calling the gateway", async () => {

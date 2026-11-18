@@ -1,6 +1,13 @@
+/**
+ * A person's Runner pairing routes (M7 step 5(b) and (c)): start, and one session's read, cancel and confirm. Exactly
+ * these, so nothing else under `/api/pairing` reaches the gateway, and never Runner's redeem, which is the gateway's own
+ * host's. The gateway checks the session and that a change comes from this origin.
+ */
+const PAIRING = [/^\/api\/pairing$/, /^\/api\/pairing\/[A-Za-z0-9_-]{1,128}(\/(cancel|activate))?$/];
+
 /** The session paths a browser may use through this host. Agent Auth, capabilities and MCP stay on the gateway's host. */
 const PERSON_AUTH = [/^\/api\/auth\/sign-in\/(social|email|magic-link)$/, /^\/api\/auth\/magic-link\/verify$/, /^\/api\/auth\/sign-up\/email$/, /^\/api\/auth\/sign-out$/, /^\/api\/auth\/callback\/[\w-]+$/, /^\/api\/auth\/get-session$/, /^\/api\/auth\/error$/];
-const DASHBOARD = [/^\/api\/v1\//, /^\/api\/orgs$/, /^\/api\/orgs\/org_[\w-]+\/(members|invitations)(\/[\w-]+)?$/, /^\/api\/org-invitations\/(preview|accept)$/, /^\/api\/agents(\/|$)/, /^\/api\/consent$/, /^\/api\/claim$/];
+const DASHBOARD = [/^\/api\/v1\//, /^\/api\/orgs$/, /^\/api\/orgs\/org_[\w-]+\/(members|invitations)(\/[\w-]+)?$/, /^\/api\/org-invitations\/(preview|accept)$/, /^\/api\/agents(\/|$)/, /^\/api\/consent$/, /^\/api\/claim$/, ...PAIRING];
 
 export function isForwardable(path: string) {
   // A collapsed slash or dot segment could reach something the gateway's prefix checks didn't look at.

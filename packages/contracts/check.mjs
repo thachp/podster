@@ -10,7 +10,7 @@ import { exclusiveSchemeProblems } from "./security-classes.mjs";
 import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
-const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
+const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], service_only: serviceOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
 
 const operations = new Map();
 for (const [path, item] of Object.entries(api.paths)) {
@@ -54,14 +54,21 @@ for (const id of pairingOnly) {
   if (!operations.has(id)) problems.push(`${id}: pairing_only operation doesn't exist`);
   if (covered.has(id) || personOnly.includes(id) || transferOnly.includes(id) || providerOnly.includes(id)) problems.push(`${id}: pairing_only but also listed elsewhere`);
 }
+for (const id of serviceOnly) {
+  if (!operations.has(id)) problems.push(`${id}: service_only operation doesn't exist`);
+  if (covered.has(id) || personOnly.includes(id) || transferOnly.includes(id) || providerOnly.includes(id) || pairingOnly.includes(id)) problems.push(`${id}: service_only but also listed elsewhere`);
+}
+// The pairing sweep (M7 step 5(c), ruling L1 on #453) is the gateway's cron, a service, never a person or an agent.
+for (const id of ["sweepPairings", "settlePairingSweep"]) if (!serviceOnly.includes(id)) problems.push(`${id}: must be service_only`);
 // A provider's delivery and Runner's redemption (M7 step 5) each carry their own assertion, never an identity's: an
 // operation of either class lists only its scheme, and nothing outside the class lists it (security-classes.mjs). A
 // delivery's ID stands in for an idempotency key.
 problems.push(...exclusiveSchemeProblems(operations, [
   { name: "provider_only", ids: providerOnly, scheme: "providerDelivery" },
   { name: "pairing_only", ids: pairingOnly, scheme: "pairingRedeem" },
+  { name: "service_only", ids: serviceOnly, scheme: "pairingSweep" },
 ], api.security));
-for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id) && !providerOnly.includes(id) && !pairingOnly.includes(id)) problems.push(`${id}: operation with no capability`);
+for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id) && !providerOnly.includes(id) && !pairingOnly.includes(id) && !serviceOnly.includes(id)) problems.push(`${id}: operation with no capability`);
 // A person's pairing operations are person_only.
 for (const id of ["startPairing", "getPairing", "activatePairing", "cancelPairing"]) if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 

@@ -1,12 +1,12 @@
 // Runner pairing, the gateway's routes (M7 step 5(b); decision 222). The person's start, read, cancel and activate
 // on their session, and Runner's redeem with a host JWT signed by the key it binds, against the real API build. Runner's
 // side uses the pinned client, `@auth/agent` 0.6.2, for its key, its proof and its later connection.
-import { AgentAuthClient, generateKeypair, MemoryStorage, signHostJWT, type Keypair } from "@auth/agent";
+import { AgentAuthClient, generateKeypair, MemoryStorage, signAgentJWT, signHostJWT, type Keypair } from "@auth/agent";
 import { env, SELF } from "cloudflare:test";
 import { SignJWT, importJWK } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/index";
-import { confirmEnrollment, settleSession, START_PER_MINUTE, strictLimit, REDEEM_PER_MINUTE, RUNNER_CAPABILITIES } from "../src/pairing";
+import { confirmEnrollment, pluginFacts, settleSession, START_PER_MINUTE, strictLimit, REDEEM_PER_MINUTE, RUNNER_CAPABILITIES, sweepPairings } from "../src/pairing";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string };
@@ -43,6 +43,16 @@ async function redeem(agent: string, code: unknown, jwt: string | null, ip = net
   const parsed = await res.json<any>();
   return { status: res.status, body: parsed, code: parsed?.error?.code };
 }
+/** Runner, holding only its key, registers its one agent on the session's host with the pinned client. */
+async function runnerAgent(key: Keypair, capabilities: string[] = ["get_identity", "list_workspaces"], name = "Paired runner") {
+  const storage = new MemoryStorage();
+  await storage.setHostIdentity({ keypair: key, createdAt: Date.now() });
+  const client = new AgentAuthClient({ storage, urls: [BASE], fetch: (input, init) => SELF.fetch(new Request(input as RequestInfo, init)), hostName: "runner" });
+  await client.init();
+  const connected = await client.connectAgent({ provider: BASE, capabilities, mode: "delegated", preferredMethod: "device_authorization", name });
+  return { client, connected, storage };
+}
+
 async function started(who?: Person) {
   const person = who ?? (await signUp());
   const res = await start(person, { name: "Laptop runner" });
@@ -202,7 +212,7 @@ describe("the person's read, cancel and activate", () => {
 });
 
 describe("Runner's redeem", () => {
-  it("pairs a machine end to end with the pinned client: start, redeem, activate, then a connection Podster still holds unclaimed", async () => {
+  it("pairs a machine end to end with the pinned client: start, redeem, register, confirm, then the linked agent acts within Runner's allowlist", async () => {
     const logged: string[] = [];
     for (const level of ["log", "info", "warn", "error", "debug"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
     const { person, agent, code, hostId } = await started();
@@ -214,27 +224,107 @@ describe("Runner's redeem", () => {
     // The plugin's host now holds the key, by its thumbprint.
     expect(await host(hostId)).toMatchObject({ status: "active", kid: key.publicKey.kid, enrollmentTokenHash: null });
     const seen = await read(person, agent);
-    expect([seen.body.status, seen.body.key_thumbprint]).toEqual(["redeemed", key.publicKey.kid]);
-    const done = await activate(person, agent, key.publicKey.kid as string);
-    expect(done.status).toBe(200);
-    expect(done.body.status).toBe("activated");
-    expect(done.body.connection).toMatchObject({ id: agent, generation: 1 });
+    expect([seen.body.status, seen.body.key_thumbprint, seen.body.runner_ready]).toEqual(["redeemed", key.publicKey.kid, false]);
 
-    // Runner, holding only its key, connects an agent on that host. The plugin takes it at once; Podster refuses it as
-    // unclaimed until step 5(c) links it.
-    const storage = new MemoryStorage();
-    await storage.setHostIdentity({ keypair: key, createdAt: Date.now() });
-    const client = new AgentAuthClient({ storage, urls: [BASE], fetch: (input, init) => SELF.fetch(new Request(input as RequestInfo, init)), hostName: "runner" });
-    await client.init();
-    const connected = await client.connectAgent({ provider: BASE, capabilities: ["get_identity"], mode: "delegated", preferredMethod: "device_authorization", name: "Paired runner" });
+    // Runner, holding only its key, registers one agent on that host. The plugin takes it at once; Podster refuses it as
+    // unclaimed until the person confirms.
+    const { client, connected, storage } = await runnerAgent(key);
     expect(connected.status).toBe("active");
-    const refused = await client.executeCapability({ agentId: connected.agentId, capability: "get_identity", arguments: {} }).catch((error) => error);
-    expect(refused.status).toBe(403);
+    const unclaimed = await client.executeCapability({ agentId: connected.agentId, capability: "get_identity", arguments: {} }).catch((error) => error);
+    expect(unclaimed.status).toBe(403);
+    expect((await read(person, agent)).body.runner_ready).toBe(true);
+
+    const done = await activate(person, agent, key.publicKey.kid as string);
+    expect(done.status, done.text).toBe(200);
+    expect(done.body).toMatchObject({ status: "activated", plugin_agent_id: connected.agentId, connection: { id: agent, generation: 1 } });
+    // Visible in its organization's directory, linked by the starter.
+    const listed = await dash(person, "GET", "/agents");
+    expect(listed.body.agents.map((a: any) => a.id)).toContain(agent);
+    expect(await e.DB.prepare(`SELECT agent_id, person_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(connected.agentId).first()).toEqual({ agent_id: agent, person_id: person.id });
+    expect((await dash(person, "GET", `/agents/${agent}`)).body).toMatchObject({ id: agent, status: "active" });
+
+    // Now it acts as the paired agent, within Runner's allowlist and nothing more.
+    const identity = await client.executeCapability({ agentId: connected.agentId, capability: "get_identity", arguments: {} });
+    expect((identity as any).data ?? identity).toMatchObject({ id: agent, org_id: person.personal });
+    expect((await client.executeCapability({ agentId: connected.agentId, capability: "list_workspaces", arguments: {} }).catch((error) => error)) instanceof Error).toBe(false);
+    // A capability outside the allowlist was never granted, so the plugin refuses it before Podster is asked.
+    const agentKeypair = (await storage.getAgentConnection(connected.agentId))!.agentKeypair;
+    const outsideJwt = await signAgentJWT({ agentKeypair, agentId: connected.agentId, audience: BASE, capabilities: ["create_task"] });
+    const outside = await call("/api/auth/capability/execute", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${outsideJwt}` }, body: JSON.stringify({ capability: "create_task", arguments: { workspace_id: "ws_x", title: "x" } }) });
+    const grants = await e.DB.prepare(`SELECT capability FROM agentCapabilityGrant WHERE agentId = ? AND status = 'active'`).bind(connected.agentId).all<{ capability: string }>();
+    expect(grants.results.map((g) => g.capability).every((c) => (RUNNER_CAPABILITIES as readonly string[]).includes(c))).toBe(true);
+    expect(grants.results.map((g) => g.capability)).not.toContain("create_task");
+    expect(outside.status).toBe(403);
+    expect(await outside.text()).toMatch(/not_granted|grant/i);
+    expect(RUNNER_CAPABILITIES as readonly string[]).not.toContain("create_task");
     client.destroy();
+
+    // Confirming again answers the same, links nothing twice, and the sweep leaves the activated session's host alone.
+    expect((await activate(person, agent, key.publicKey.kid as string)).status).toBe(200);
+    expect((await e.DB.prepare(`SELECT count(*) AS n FROM identity_link WHERE agent_id = ?`).bind(agent).first<{ n: number }>())!.n).toBe(1);
+    await sweepPairings(e, Date.now() + 11 * 60 * 1000);
+    expect((await host(hostId))!.status).toBe("active");
+
+    // Runner asks for more than its allowlist with a second agent on the host: it waits for an approval, and the claim that
+    // would approve it is refused, because a pairing's host is linked only by its starter's confirmation (L3).
+    const greedyKey = await generateKeypair();
+    const greedy = await call("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await signHostJWT({ hostKeypair: key, audience: BASE, agentPublicKey: greedyKey.publicKey } as never)}` }, body: JSON.stringify({ name: "Greedy", mode: "delegated", capabilities: ["get_identity", "create_task"], preferred_method: "device_authorization" }) });
+    const asked = await greedy.json<any>();
+    expect(greedy.status).toBe(200);
+    expect(asked.status).not.toBe("active");
+    expect(typeof asked.approval?.user_code).toBe("string");
+    const claimed = await call("/claim", { method: "POST", headers: { cookie: person.cookie, origin: BASE, "content-type": "application/json" }, body: JSON.stringify({ agent_id: asked.agent_id, user_code: asked.approval.user_code, org_id: person.personal }) });
+    expect(claimed.status).toBe(403);
+    const greedyGrants = await e.DB.prepare(`SELECT capability FROM agentCapabilityGrant WHERE agentId = ? AND status = 'active'`).bind(asked.agent_id).all<{ capability: string }>();
+    expect(greedyGrants.results.map((g) => g.capability)).not.toContain("create_task");
+    expect(await e.DB.prepare(`SELECT count(*) AS n FROM identity_link WHERE external_id = ?`).bind(asked.agent_id).first<{ n: number }>()).toEqual({ n: 0 });
 
     // Logs carry IDs only: never the code, the proof or a key.
     const all = logged.join("\n");
     for (const secret of [code, jwt, key.publicKey.x as string, key.privateKey.d as string]) expect(all).not.toContain(secret);
+  });
+
+  it("won't confirm until Runner has registered its agent, and never links an agent on a host that isn't the session's alone", async () => {
+    const { person, agent, code, hostId } = await started();
+    const key = await generateKeypair();
+    expect((await redeem(agent, code, await proof(key, agent))).status).toBe(200);
+    const early = await activate(person, agent, key.publicKey.kid as string);
+    expect([early.status, early.code]).toEqual([409, "invalid_transition"]);
+    expect((await read(person, agent)).body.status).toBe("redeemed");
+    // Two agents on the host: never a guess at which.
+    const one = await runnerAgent(key, ["get_identity"], "One");
+    const two = await runnerAgent(key, ["get_identity"], "Two");
+    one.client.destroy();
+    two.client.destroy();
+    expect((await read(person, agent)).body.runner_ready).toBe(false);
+    const ambiguous = await activate(person, agent, key.publicKey.kid as string);
+    expect([ambiguous.status, ambiguous.code]).toEqual([403, "not_allowed"]);
+    expect((await read(person, agent)).body.status).toBe("redeemed");
+    expect(await e.DB.prepare(`SELECT count(*) AS n FROM identity_link WHERE agent_id = ?`).bind(agent).first<{ n: number }>()).toEqual({ n: 0 });
+    // The facts the API judges are read from the plugin's own tables: the session's host, its owner, the key it holds.
+    const facts = await pluginFacts(e, hostId);
+    expect(facts).toMatchObject({ host_id: hostId, host_owner: person.id, host_active: true, host_thumbprint: key.publicKey.kid, hosts_holding_key: 1 });
+    expect(facts.agents).toHaveLength(2);
+  });
+
+  it("refuses another admin of the organization the confirmation, and the paired agent's connection", async () => {
+    const admin = await signUp();
+    const org = (await dash(admin, "POST", "/orgs", { name: "Pairs" })).body.id as string;
+    const other = await signUp();
+    const invitation = (await dash(admin, "POST", `/orgs/${org}/invitations`, { role: "admin" })).body.token;
+    expect((await dash(other, "POST", "/org-invitations/accept", { token: invitation })).status).toBe(200);
+    const res = await start(admin, { name: "Team runner" }, { "x-podster-org": org });
+    expect(res.status).toBe(200);
+    const agent = res.body.agent_id as string;
+    const key = await generateKeypair();
+    expect((await redeem(agent, res.body.code, await proof(key, agent))).status).toBe(200);
+    const { client } = await runnerAgent(key);
+    client.destroy();
+    expect((await dash(other, "POST", `/pairing/${agent}/activate`, { key_thumbprint: key.publicKey.kid }, { "x-podster-org": org })).status).toBe(404);
+    expect((await dash(admin, "POST", `/pairing/${agent}/activate`, { key_thumbprint: key.publicKey.kid }, { "x-podster-org": org })).status).toBe(200);
+    // The other admin sees it in the organization, but can't take its connection through the passthrough.
+    expect((await dash(other, "GET", "/agents", undefined, { "x-podster-org": org })).body.agents.map((a: any) => a.id)).toContain(agent);
+    expect((await dash(other, "PUT", `/v1/agents/${agent}`, { org_id: org }, { "x-podster-org": org })).status).toBe(404);
   });
 
   it("answers the same again for a lost answer, on a fresh proof, without enrolling twice", async () => {
@@ -396,7 +486,7 @@ describe("Runner's redeem", () => {
     expect(ours.length).toBeGreaterThan(0);
     for (const line of ours) {
       const entry = JSON.parse(line);
-      expect(Object.keys(entry).every((k) => ["at", "agent", "outcome"].includes(k))).toBe(true);
+      expect(Object.keys(entry).every((k) => ["at", "agent", "plugin_agent", "person", "outcome"].includes(k))).toBe(true);
       expect(entry.outcome).toMatch(/^[a-z_]+$/);
       if (entry.agent !== undefined) expect(entry.agent).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
     }
@@ -408,5 +498,224 @@ describe("Runner's redeem", () => {
     const res = await call(`/pairing/${agent}/redeem`, { method: "GET", headers: { authorization: `Bearer ${await proof(key, agent)}`, "cf-connecting-ip": network() } });
     expect(res.status).toBe(404);
     expect((await call(`/api/pairing/${agent}/redeem`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await proof(key, agent)}` }, body: JSON.stringify({ code }) })).status).toBe(401);
+  });
+});
+
+describe("finishing the link (step 5(c), M2 and L3 on #453)", () => {
+  async function readyToConfirm(capabilities?: string[]) {
+    const { person, agent, code, hostId } = await started();
+    const key = await generateKeypair();
+    expect((await redeem(agent, code, await proof(key, agent))).status).toBe(200);
+    const { client, connected } = await runnerAgent(key, capabilities);
+    client.destroy();
+    return { person, agent, hostId, key, pluginAgent: connected.agentId };
+  }
+
+  it("finishes a link whose directory write failed, on the starter's next read", async () => {
+    const { person, agent, key } = await readyToConfirm();
+    await e.DB.prepare(`ALTER TABLE podster_agent RENAME TO podster_agent_away`).run();
+    let done: Awaited<ReturnType<typeof activate>>;
+    try {
+      done = await activate(person, agent, key.publicKey.kid as string);
+    } finally {
+      await e.DB.prepare(`ALTER TABLE podster_agent_away RENAME TO podster_agent`).run();
+    }
+    expect([done.status, done.body.status, done.body.connected]).toEqual([200, "activated", false]);
+    expect((await dash(person, "GET", "/agents")).body.agents.map((a: any) => a.id)).not.toContain(agent);
+    const again = await read(person, agent);
+    expect([again.status, again.body.connected]).toEqual([200, true]);
+    expect((await dash(person, "GET", "/agents")).body.agents.map((a: any) => a.id)).toContain(agent);
+  });
+
+  it("refuses with fixed words, and leaves the session, when the plugin agent is already linked elsewhere", async () => {
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+    const { person, agent, key, pluginAgent } = await readyToConfirm();
+    await e.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, person_id, created_at) VALUES ('agent_auth', ?, 'agt_elsewhere', ?, ?)`).bind(pluginAgent, person.id, Date.now()).run();
+    const done = await activate(person, agent, key.publicKey.kid as string);
+    expect([done.status, done.code]).toEqual([409, "already_linked"]);
+    const seen = await read(person, agent);
+    expect([seen.body.status, seen.body.connected, seen.body.link_problem]).toEqual(["activated", false, "already_linked"]);
+    expect(logged.map((l) => JSON.parse(l)).filter((l) => l.outcome === "linked_elsewhere")).toContainEqual({ at: "pairing.link", agent, plugin_agent: pluginAgent, outcome: "linked_elsewhere" });
+  });
+
+  it("never links Runner's agent that asked for more than the allowlist: it isn't active, so the binding rule refuses it", async () => {
+    const { person, agent, key } = await started().then(async (s) => {
+      const key = await generateKeypair();
+      expect((await redeem(s.agent, s.code, await proof(key, s.agent))).status).toBe(200);
+      return { ...s, key };
+    });
+    const agentKey = await generateKeypair();
+    const res = await call("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await signHostJWT({ hostKeypair: key, audience: BASE, agentPublicKey: agentKey.publicKey } as never)}` }, body: JSON.stringify({ name: "Greedy", mode: "delegated", capabilities: ["get_identity", "create_task"], preferred_method: "device_authorization" }) });
+    const registered = await res.json<any>();
+    expect(res.status).toBe(200);
+    expect(registered.status).not.toBe("active");
+    expect((await read(person, agent)).body.runner_ready).toBe(false);
+    const refused = await activate(person, agent, key.publicKey.kid as string);
+    expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    expect((await read(person, agent)).body.status).toBe("redeemed");
+  });
+});
+
+describe("the expiry sweep, from the cron (step 5(c))", () => {
+  type Seen = { path: string; person: string; kind: string; body: string };
+  /**
+   * The API's sweep, as it would answer once these sessions expired: its own clock decides that, and its tests show it.
+   * `answers` maps a person to their sessions, or to a status the API fails with.
+   */
+  function apiAnswering(answers: Record<string, Record<string, unknown>[] | number>, seen: Seen[]) {
+    return {
+      ...e,
+      API: {
+        fetch: async (request: Request) => {
+          const path = new URL(request.url).pathname;
+          const claims = JSON.parse(atob((request.headers.get("x-podster-assertion") ?? "").split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+          seen.push({ path, person: claims.person_id, kind: claims.kind, body: await request.text() });
+          const answer = answers[claims.person_id] ?? [];
+          if (typeof answer === "number") return Response.json({ error: { code: "internal_error" } }, { status: answer });
+          if (path === "/v1/pairing/sweep") return Response.json({ sessions: answer });
+          if (path === "/v1/pairing/sweep/settled") return Response.json({ settled: 1 });
+          return Response.json({ error: { code: "not_found" } }, { status: 404 });
+        },
+      } as unknown as Fetcher,
+    };
+  }
+  /** Moves a session's expiry, in the gateway's own record, as time would. */
+  const due = (agent: string, ago = 1000) => e.DB.prepare(`UPDATE pairing_host SET expires_at = ? WHERE agent_id = ?`).bind(Date.now() - ago, agent).run();
+  const row = (agent: string) => e.DB.prepare(`SELECT person_id, linked_agent_id FROM pairing_host WHERE agent_id = ?`).bind(agent).first<any>();
+
+  it("records each start, by Podster's own person, and drops the record when the session ends", async () => {
+    const person = await signUp();
+    const one = await started(person);
+    expect(await row(one.agent)).toEqual({ person_id: person.id, linked_agent_id: null });
+    expect((await dash(person, "POST", `/pairing/${one.agent}/cancel`, {})).status).toBe(200);
+    expect(await row(one.agent)).toBeNull();
+  });
+
+  it("revokes the host of a redeemed session that expired untouched, retires a waiting one, and settles them, under the service assertion", async () => {
+    const person = await signUp();
+    const redeemedOne = await started(person);
+    const key = await generateKeypair();
+    expect((await redeem(redeemedOne.agent, redeemedOne.code, await proof(key, redeemedOne.agent))).status).toBe(200);
+    const { client, connected } = await runnerAgent(key);
+    client.destroy();
+    const waiting = await started(person);
+    const missing = await started(person);
+    for (const s of [redeemedOne, waiting, missing]) await due(s.agent);
+    const seen: Seen[] = [];
+    const sessions = [
+      { agent_id: redeemedOne.agent, plugin_host_id: redeemedOne.hostId, status: "expired", key_thumbprint: key.publicKey.kid },
+      { agent_id: waiting.agent, plugin_host_id: waiting.hostId, status: "expired", key_thumbprint: null },
+      { agent_id: missing.agent, plugin_host_id: missing.hostId, status: "missing", key_thumbprint: null },
+    ];
+    await sweepPairings(apiAnswering({ [person.id]: sessions }, seen) as never);
+    expect(await host(redeemedOne.hostId)).toMatchObject({ status: "revoked", kid: null, publicKey: "" });
+    expect(await e.DB.prepare(`SELECT status, kid FROM agent WHERE id = ?`).bind(connected.agentId).first()).toEqual({ status: "revoked", kid: null });
+    expect(await host(waiting.hostId)).toMatchObject({ status: "rejected", enrollmentTokenHash: null });
+    expect(await host(missing.hostId)).toMatchObject({ status: "rejected", enrollmentTokenHash: null });
+    for (const s of [redeemedOne, waiting, missing]) expect(await row(s.agent)).toBeNull();
+    const mine = seen.filter((c) => c.person === person.id);
+    expect(mine.map((c) => [c.path, c.kind])).toEqual([["/v1/pairing/sweep", "pairing_sweep"], ["/v1/pairing/sweep/settled", "pairing_sweep"]]);
+    expect(JSON.parse(mine[1].body).agent_ids.sort()).toEqual([redeemedOne.agent, waiting.agent, missing.agent].sort());
+  });
+
+  it("reaches every due session over runs, oldest first, whatever other hosts the plugin holds and whoever fails (M1, L2)", async () => {
+    // The probe: more people than one run takes, each with an old unlinked plugin host, and their own due sessions.
+    const now = Date.now();
+    const answers: Record<string, Record<string, unknown>[] | number> = {};
+    for (let i = 0; i < 30; i++) {
+      const id = `p${crypto.randomUUID().replaceAll("-", "")}`;
+      const at = new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString();
+      await e.DB.prepare(`INSERT INTO agentHost (id, name, userId, defaultCapabilities, publicKey, kid, status, createdAt, updatedAt) VALUES (?, 'old', NULL, '[]', '', NULL, 'active', ?, ?)`).bind(`h${id}`, at, at).run();
+      const person = `per_probe_${i}_${id.slice(0, 8)}`;
+      await e.DB.prepare(`INSERT INTO pairing_host (host_id, person_id, agent_id, expires_at) VALUES (?, ?, ?, ?)`).bind(`ph${id}`, person, `agt_${id.slice(1)}`, now - 60 * 60 * 1000 - i).run();
+      // One person's sweep fails every time; it mustn't hold the others up.
+      answers[person] = i === 0 ? 500 : [];
+    }
+    // The target: a redeemed session that expired untouched, later than all of those.
+    const person = await signUp();
+    const target = await started(person);
+    const key = await generateKeypair();
+    expect((await redeem(target.agent, target.code, await proof(key, target.agent))).status).toBe(200);
+    await due(target.agent, 60_000);
+    answers[person.id] = [{ agent_id: target.agent, plugin_host_id: target.hostId, status: "expired", key_thumbprint: key.publicKey.kid }];
+    const seen: Seen[] = [];
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+    const env = apiAnswering(answers, seen) as never;
+    for (let run = 0; run < 3 && (await host(target.hostId))!.status === "active"; run++) await sweepPairings(env, now + run);
+    expect(await host(target.hostId)).toMatchObject({ status: "revoked", kid: null });
+    // The failing person was logged by ID and put back, and the run went on past them.
+    expect(logged.map((l) => JSON.parse(l)).filter((l) => l.outcome === "failed").map((l) => Object.keys(l).sort().join())).toContain("at,outcome,person");
+    expect(seen.some((c) => c.person === person.id)).toBe(true);
+  });
+
+  it("reaches a new due session within two hourly runs, however many people keep failing ahead of it (probe B)", async () => {
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+    const answers: Record<string, Record<string, unknown>[] | number> = {};
+    const failing: string[] = [];
+    for (let i = 0; i < 26; i++) {
+      const id = crypto.randomUUID().replaceAll("-", "");
+      const person = `per_failing_${i}_${id.slice(0, 8)}`;
+      await e.DB.prepare(`INSERT INTO pairing_host (host_id, person_id, agent_id, expires_at) VALUES (?, ?, ?, ?)`).bind(`fh${id}`, person, `agt_${id}`, now - 2 * hour - i).run();
+      answers[person] = 500;
+      failing.push(person);
+    }
+    const person = await signUp();
+    const target = await started(person);
+    const key = await generateKeypair();
+    expect((await redeem(target.agent, target.code, await proof(key, target.agent))).status).toBe(200);
+    await due(target.agent, 60_000);
+    answers[person.id] = [{ agent_id: target.agent, plugin_host_id: target.hostId, status: "expired", key_thumbprint: key.publicKey.kid }];
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const env = apiAnswering(answers, []) as never;
+    // The cron's real spacing: an hour apart, a few milliseconds late.
+    await sweepPairings(env, now);
+    await sweepPairings(env, now + hour + 5);
+    expect(await host(target.hostId)).toMatchObject({ status: "revoked", kid: null });
+    // Each failure doubles a person's wait, from two hours to a day at most.
+    const backoff = async (who: string) => (await e.DB.prepare(`SELECT next_sweep_at, sweep_failures FROM pairing_host WHERE person_id = ?`).bind(who).first<{ next_sweep_at: number; sweep_failures: number }>())!;
+    // The oldest failed in the first run; the newest, the 26th, was still reached in the second.
+    expect((await backoff(failing[0])).sweep_failures).toBe(1);
+    const first = await backoff(failing[25]);
+    expect(first).toEqual({ next_sweep_at: now + 2 * hour, sweep_failures: 1 });
+    // Only that person, from here: everyone else waits.
+    await e.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id != ?`).bind(Number.MAX_SAFE_INTEGER, failing[25]).run();
+    for (const [run, at] of [[2, first.next_sweep_at], [3, now + 2 * hour + 4 * hour], [4, now + 14 * hour], [5, now + 30 * hour], [6, now + 54 * hour]] as const) {
+      await sweepPairings(apiAnswering({ [failing[25]]: 500 }, []) as never, at);
+      const after = await backoff(failing[25]);
+      expect(after.sweep_failures).toBe(run);
+      expect(after.next_sweep_at - at).toBe(Math.min(2 * hour * 2 ** (run - 1), 24 * hour));
+    }
+  });
+
+  it("leaves activated and live sessions' hosts alone, and settles nothing it didn't act on", async () => {
+    const person = await signUp();
+    const live = await started(person);
+    const key = await generateKeypair();
+    expect((await redeem(live.agent, live.code, await proof(key, live.agent))).status).toBe(200);
+    await due(live.agent);
+    const seen: Seen[] = [];
+    await sweepPairings(apiAnswering({ [person.id]: [{ agent_id: live.agent, plugin_host_id: live.hostId, status: "redeemed", key_thumbprint: key.publicKey.kid }] }, seen) as never);
+    expect((await host(live.hostId))!.status).toBe("active");
+    expect(seen.filter((c) => c.person === person.id).map((c) => c.path)).toEqual(["/v1/pairing/sweep"]);
+    // With the real API, a session that hasn't expired by its own clock isn't listed, and nothing of it ends.
+    await e.DB.prepare(`UPDATE pairing_host SET next_sweep_at = 0 WHERE agent_id = ?`).bind(live.agent).run();
+    await sweepPairings(e, Date.now() + 11 * 60 * 1000);
+    expect((await host(live.hostId))!.status).toBe("active");
+    expect(await row(live.agent)).not.toBeNull();
+  });
+
+  it("logs IDs and fixed outcomes only", async () => {
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+    const person = await signUp();
+    const one = await started(person);
+    await due(one.agent);
+    await sweepPairings(apiAnswering({ [person.id]: [{ agent_id: one.agent, plugin_host_id: one.hostId, status: "expired", key_thumbprint: null }] }, []) as never);
+    const lines = logged.filter((l) => l.includes("pairing.sweep")).map((l) => JSON.parse(l));
+    expect(lines).toContainEqual({ at: "pairing.sweep", agent: one.agent, outcome: "expired" });
+    expect(logged.join("\n")).not.toContain(one.code);
   });
 });

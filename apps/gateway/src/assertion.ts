@@ -87,3 +87,22 @@ export async function mintPairingRedeem(proof: { agentId: string; keyThumbprint:
     .setJti(crypto.randomUUID())
     .sign(key);
 }
+
+/**
+ * The pairing expiry sweep's service assertion (M7 step 5(c), ruling L1 on #453): `kind: "pairing_sweep"`, the person
+ * whose own list of started sessions the cron reads or settles, and the SHA-256 of the exact body sent. It's no one's
+ * identity: no organization or role. Only the cron mints it, and the API takes it on the sweep's two routes alone
+ * (`podster_assertion::verify_pairing_sweep`).
+ */
+export async function mintPairingSweep(personId: string, bodySha256: string, jwkJson: string): Promise<string> {
+  const { key, kid } = await signingKey(jwkJson);
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ kind: "pairing_sweep", person_id: personId, body_sha256: bodySha256 })
+    .setProtectedHeader({ alg: "EdDSA", kid })
+    .setIssuer("podster-gateway")
+    .setAudience("podster-api")
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60)
+    .setJti(crypto.randomUUID())
+    .sign(key);
+}

@@ -49,6 +49,7 @@ Route names are proposed; final routing depends on the host decision in [ARCHITE
 | `/agents/connect` | Connection Sheet over the Agents list |
 | `/settings/{profile,organization,notifications}` | Account-level settings |
 | `/invitations/:token`, `/claim?agent_id=…&code=…`, `/oauth/consent` | Focused, shell-free person approval pages |
+| `/pairing/new`, `/pairing/:agent` | Focused pages to start a Runner pairing, which shows its code once, and to confirm one by the key fingerprint Runner sent, which never shows the code (M7 step 5(c)) |
 
 A private room the viewer cannot access renders the same **not-found** page as a room that does not exist.
 

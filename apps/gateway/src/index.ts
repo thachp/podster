@@ -15,7 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
-import { handlePairing, handlePairingRedeem } from "./pairing";
+import { handlePairing, handlePairingRedeem, onPairingHost, sweepPairings } from "./pairing";
 import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath, isCardPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { A2A_CAPABILITIES, type LifecycleOptions } from "./a2a/lifecycle";
@@ -564,7 +564,7 @@ type LinkProvider = "agent_auth" | "mcp_oauth";
 const linkStatement = (env: Env, provider: LinkProvider, externalId: string, agentId: string, person: string, now: number) =>
   env.DB.prepare(`INSERT INTO identity_link (provider, external_id, agent_id, person_id, created_at) VALUES (?, ?, ?, ?, ?)`).bind(provider, externalId, agentId, person, now);
 
-async function createAgent(env: Env, org: string, name: string, provider: LinkProvider, externalId: string, agentId: string, person: string) {
+export async function createAgent(env: Env, org: string, name: string, provider: LinkProvider, externalId: string, agentId: string, person: string) {
   const now = Date.now();
   await env.DB.batch([
     env.DB.prepare(`INSERT OR IGNORE INTO podster_agent (id, org_id, name, created_at) VALUES (?, ?, ?, ?)`).bind(agentId, org, name, now),
@@ -588,10 +588,16 @@ async function renewLink(env: Env, externalId: string, person: string, org: stri
   ]);
 }
 
-/** An existing, connected agent in this organization, which a new credential may link to. */
-async function linkableAgent(env: Env, id: string, org: string) {
+/**
+ * An existing, connected agent in this organization, which a new credential may link to. The API's read decides, without
+ * a write: an agent a Runner pairing made says `paired`, and only its starter's confirmation links it (M7 step 5(c)).
+ */
+async function linkableAgent(env: Env, identity: Identity, id: string, org: string) {
   const row = await env.DB.prepare(`SELECT org_id FROM podster_agent WHERE id = ? AND revoked_at IS NULL`).bind(id).first<{ org_id: string }>();
-  return row?.org_id === org;
+  if (row?.org_id !== org) return false;
+  const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${id}` });
+  const agent = await response.json<{ org_id?: string; status?: string; paired?: unknown }>().catch(() => null);
+  return response.status === 200 && agent?.org_id === org && agent.status === "active" && agent.paired === false;
 }
 
 export const sha256Hex = async (value: string) =>
@@ -886,7 +892,7 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   const existing = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'mcp_oauth' AND external_id = ?`).bind(externalId).first<{ agent_id: string }>();
   if (!existing) {
     if (linkAgent) {
-      if (!(await linkableAgent(env, linkAgent, org))) return denied("not_allowed", 403);
+      if (!(await linkableAgent(env, identity, linkAgent, org))) return denied("not_allowed", 403);
       await linkStatement(env, "mcp_oauth", externalId, linkAgent, person, Date.now()).run();
     } else {
       const agentId = newId("agt");
@@ -1081,9 +1087,11 @@ async function claim(request: Request, env: Env, userId: string, body: ClaimBody
   const suppliedName = typeof body.name === "string" ? body.name.trim() : "";
   if (suppliedName && !validName(suppliedName)) return denied("invalid_argument", 400);
   const linked = typeof body.link_agent_id === "string" && body.link_agent_id ? body.link_agent_id : null;
-  if (linked && !(await linkableAgent(env, linked, org))) return denied("not_allowed", 403);
+  if (linked && !(await linkableAgent(env, identity, linked, org))) return denied("not_allowed", 403);
   const alreadyLinked = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(pluginAgent).first();
   if (alreadyLinked) return denied("not_allowed", 403);
+  // A pairing's host is linked only by its starter's confirmation, never claimed, whatever its agents ask for (M7 step 5(c)).
+  if (await onPairingHost(env, pluginAgent)) return denied("not_allowed", 403);
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
   if (await claimedByThisPerson(env, pluginAgent, userId)) {
@@ -1621,7 +1629,7 @@ function insecureRequest(request: Request, env: Env): Response | null {
 export default {
   // The resource URL comes from the environment, so the provider is built per deployment rather than at import.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(Promise.all([cleanUp(env), retryDepartures(env)]));
+    ctx.waitUntil(Promise.all([cleanUp(env), retryDepartures(env), sweepPairings(env)]));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     // Before anything else, so `/a2a/` gets exactly `/a2a`'s limits, checks and answers (decision 190).

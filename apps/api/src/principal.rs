@@ -2453,15 +2453,16 @@ impl Principal {
             {
                 return Err(ApiError::not_allowed());
             }
+            // A pairing session's agent is made only by its activation, and linked only by its starter's confirmation
+            // (M7 step 5(a) and (c)): no admin registers it, or gets its connection to link another credential to it.
+            if pairing::holds_session(&sql)? {
+                return Err(ApiError::not_allowed());
+            }
             if let Some(existing) = connection(&sql)? {
                 if existing["org_id"].as_str() != Some(org.as_str()) {
                     return Err(ApiError::not_allowed());
                 }
                 return Ok(connection_json(&existing));
-            }
-            // A pairing session's agent is made only by its activation (M7 step 5(a)).
-            if pairing::holds_session(&sql)? {
-                return Err(ApiError::not_allowed());
             }
             let (store, id, created) = (sql.clone(), agent_id.clone(), now_ms());
             // Together, because a schema with no connection row could never be registered again.
@@ -2493,6 +2494,8 @@ impl Principal {
                 identity["a2a_endpoint"] =
                     a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref())?;
                 identity["participation_policy"] = participation::json(&sql)?["policy"].clone();
+                // Made by a Runner pairing: only its starter's confirmation links a credential to it (M7 step 5(c)).
+                identity["paired"] = json!(pairing::holds_session(&sql)?);
                 Ok(identity)
             }
             // The agent and its organization's admins can read it, and the admins see its history.

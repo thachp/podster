@@ -214,6 +214,12 @@ provider_only:
 # a proof signed by the submitted key, with an assertion that names no one. It is never a capability or a tool.
 pairing_only:
   - redeemPairing
+# Not a call a person or an agent makes: the gateway's cron, a service, sends it for the pairing expiry sweep (M7 step 5(c),
+# ruling L1 on #453), with an assertion naming only the person whose own list of sessions it reads or settles. Never a
+# capability or a tool, and a person's assertion never reaches it.
+service_only:
+  - sweepPairings
+  - settlePairingSweep
 # What an `/a2a` token reaches (docs/spec/A2A-PROFILE.md), and nothing else: each A2A method or lifecycle-extension method,
 # and the one capability it calls, as the agent the token names. The gateway's A2A_CAPABILITIES is exactly these
 # capabilities, and a gateway test holds the two together, so the token's reach changes only with this list. Policy and the

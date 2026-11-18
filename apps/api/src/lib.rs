@@ -413,6 +413,10 @@ async fn route(
             let agent = agent.to_string();
             return principal::pairing::redeem(req, env, &agent).await;
         }
+        // The expiry sweep (M7 step 5(c)) is the gateway's cron, a service: its own assertion, on its two routes alone.
+        if let Some(settle) = principal::pairing::sweep_route(&req.method(), &parts) {
+            return principal::pairing::sweep_service(req, env, settle).await;
+        }
     }
 
     let token = req

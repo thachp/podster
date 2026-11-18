@@ -56,7 +56,9 @@
 //
 // It reads every file under apps/api/test and apps/gateway/test, specs and the helpers and stand-ins beside them, whether a
 // spec imports them or not; the room rules (unquieted, runtime-alarms) apply to the API's specs only, direct-alarm,
-// runtime-opt-out and bare-alarm-read to the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them.
+// runtime-opt-out and bare-alarm-read to the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them;
+// a sleeping export is also followed through a default export, a re-export (`export { a as b } from`, `export * from`)
+// and a namespace import (`import * as m`, then `m.f()`), to the function and file its sleep is in.
 //
 // How it reads TypeScript: esbuild (pinned in e2e/package.json, so a bump elsewhere can't change it) strips the types
 // with a source map. acorn parses what is left, as static-check.mjs does, and each finding is mapped back to its line.
@@ -73,11 +75,13 @@
 // - a busy loop on the clock (`while (Date.now() < until) {}`), which waits without a timer;
 // - a margin checked with `if` and `throw`, or with `assert`, rather than `expect`;
 // - a sleep inside a package's code, or in a file outside the two test folders;
-// - a call to a helper that sleeps, made from another file, unless the helper is exported by name and imported by
-//   name;
+// - a call to a helper that sleeps, made from another file, unless the helper is exported (by name, as the default,
+//   or re-exported with `export { a } from` or `export * from`) and imported by name, as the default, or as a
+//   namespace whose member is called (`m.f()`); `export * as m from`, and a namespace passed on or destructured, pass;
 // - a clock read inside a helper function and returned to the test;
 // - a room made through a Durable Object's own routes (`stub.fetch("https://workspace/internal/...")`), through a
-//   `Request` object, or with the method or path computed at run time;
+//   `Request` object, or with the method or path computed at run time, or through a helper file's export reached by a
+//   default export, a re-export or a namespace (only sleeps are followed those ways);
 // - a shared counter or limit key that other tests also spend, and a rate limit's wall-clock window. Two are known:
 //   test-timing-allow.json lists them under `known_gaps`.
 //
@@ -268,19 +272,34 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     const d = declaration(id);
     return d?.kind === "import" && PROMISES.test(d.from);
   };
-  /** The helper file's export an imported name is, when that export sleeps: `{ via, viaFile }`, for the allow-list. */
+  const helperOf = (from) => (path && from.startsWith(".") ? helpers.get(resolveImport(path, from)) : null);
+  /**
+   * A helper file's export, when it sleeps: `{ via, viaFile }`, the function and file its sleeps are in, for the
+   * allow-list. A helper read by this check says what each export reaches (`exports`), through a default export or a
+   * re-export; one given by hand names its sleepers.
+   */
+  const exportOf = (helper, name) => {
+    if (!helper) return null;
+    if (helper.exports) return helper.exports.get(name) ?? null;
+    return helper.sleepers?.has(name) ? { via: name, viaFile: helper.file } : null;
+  };
+  /** The helper file's export an imported name is, when that export sleeps. A namespace (`* as m`) is none itself. */
   const sleepyExport = (id) => {
     const d = declaration(id);
-    if (d?.kind !== "import" || !path || !d.from.startsWith(".")) return null;
-    const helper = helpers.get(resolveImport(path, d.from));
-    return helper?.sleepers.has(d.imported) && helper.file ? { via: d.imported, viaFile: helper.file } : null;
+    return d?.kind === "import" && d.imported !== "*" ? exportOf(helperOf(d.from), d.imported) : null;
+  };
+  /** `m.f`, where `m` is a helper file's namespace (`import * as m`) and its export `f` sleeps. */
+  const namespaceExport = (callee) => {
+    if (callee.type !== "MemberExpression" || callee.object.type !== "Identifier") return null;
+    const d = declaration(callee.object);
+    const name = propertyName(callee);
+    return d?.kind === "import" && d.imported === "*" && name ? exportOf(helperOf(d.from), name) : null;
   };
   const sleepyImport = (id) => {
     const d = declaration(id);
     if (d?.kind !== "import") return false;
     if (SLEEPY.test(d.imported)) return true;
-    const helper = path && d.from.startsWith(".") ? helpers.get(resolveImport(path, d.from)) : null;
-    return Boolean(helper?.sleepers.has(d.imported));
+    return Boolean(sleepyExport(id));
   };
   const isDateNow = (n) => isMember(n, "Date", "now") || isMember(n, "performance", "now");
   const isNow = (node) =>
@@ -408,12 +427,16 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     // An imported sleep sleeps however it's called; a local name like a sleep is taken as one only with an argument.
     else if (node.callee.type === "Identifier" && sleepyImport(node.callee)) what = `a call to ${node.callee.name}(), imported as a sleep`;
     else if (node.callee.type === "Identifier" && node.arguments.length && SLEEPY.test(node.callee.name)) what = `a call to ${node.callee.name}(), named like a sleep`;
+    // `m.f()` through a helper file's namespace, `import * as m`.
+    else if (namespaceExport(node.callee)) what = `a call to ${node.callee.object.name}.${propertyName(node.callee)}(), a helper file's export that sleeps`;
     else if (node.callee.type === "MemberExpression" && node.arguments.length && SLEEPY.test(propertyName(node.callee) ?? "")) what = `a call to ${propertyName(node.callee)}(), named like a sleep`;
     if (!what) continue;
-    // A helper file's export is named with its file, so the allow-list can judge it as it judges a helper here. A name
-    // like a sleep is a sleep whatever its file says, and names nothing.
-    const exported = what.endsWith("imported as a sleep") && !SLEEPY.test(declaration(node.callee)?.imported ?? "") ? sleepyExport(node.callee) : null;
-    report(node, "sleep", what, exported ?? {});
+    // A helper file's export is named with the function and file its sleeps are in, so the allow-list can judge it as it
+    // judges a helper here. A name like a sleep is a sleep whatever its file says, and names nothing.
+    const exported = what.endsWith("imported as a sleep") && !SLEEPY.test(declaration(node.callee)?.imported ?? "") ? sleepyExport(node.callee)
+      : what.endsWith("export that sleeps") && !SLEEPY.test(propertyName(node.callee)) ? namespaceExport(node.callee)
+      : null;
+    report(node, "sleep", what, exported?.viaFile ? exported : {});
     // Both the nearest named function and the outermost one sleep: an exported helper whose sleep sits in a named
     // callback inside it is a sleeper where it's imported.
     for (const fn of [innermostName(node), enclosingName(node)]) if (fn) sleeping.add(fn);
@@ -434,6 +457,43 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     }
   }
   for (const node of every(tree)) if (localSleeper(node)) found.push({ line: at(node.loc.start.line, node.loc.start.column), rule: "sleep", text: `a call to ${node.callee.name}(), a helper here that sleeps`, where: where(node), fn: innermostName(node), via: node.callee.name });
+
+  // What each of this file's exports reaches, when it sleeps: `{ via, viaFile }`, the function and file its sleeps are
+  // in. Through a named export, a default one, `export { a as b }`, `export { a } from` and `export * from`. (esbuild
+  // writes a default export as `export { x as default }`, an anonymous one held by a `var`, and `export { a } from` as
+  // an import and an export.)
+  const exportsOut = new Map();
+  const reaches = (id, seen = new Set()) => {
+    const d = declaration(id);
+    if (!d || seen.has(id.name)) return null;
+    seen.add(id.name);
+    if (d.kind === "import") return d.imported === "*" ? null : exportOf(helperOf(d.from), d.imported);
+    if (d.init?.type === "Identifier") return reaches(d.init, seen);
+    if (d.kind === "function" || (d.init && FUNCTIONS.has(d.init.type))) return sleeping.has(id.name) ? { via: id.name, viaFile: file } : null;
+    return null;
+  };
+  const exportName = (n) => n.name ?? n.value;
+  for (const s of tree.body) {
+    if (s.type === "ExportNamedDeclaration") {
+      const ids = s.declaration?.type === "FunctionDeclaration" ? [s.declaration.id] : s.declaration?.type === "VariableDeclaration" ? s.declaration.declarations.map((v) => v.id).filter((v) => v.type === "Identifier") : [];
+      for (const id of ids) {
+        const to = reaches(id);
+        if (to) exportsOut.set(id.name, to);
+      }
+      for (const spec of s.specifiers) {
+        const to = s.source ? exportOf(helperOf(s.source.value), exportName(spec.local)) : reaches(spec.local);
+        if (to) exportsOut.set(exportName(spec.exported), to);
+      }
+    } else if (s.type === "ExportDefaultDeclaration") {
+      const to = s.declaration.type === "Identifier" ? reaches(s.declaration) : s.declaration.id ? reaches(s.declaration.id) : null;
+      if (to) exportsOut.set("default", to);
+    }
+  }
+  // `export * from` gives every export but the default, and never one this file names itself.
+  for (const s of tree.body) {
+    if (s.type !== "ExportAllDeclaration" || s.exported) continue;
+    for (const [name, to] of helperOf(s.source.value)?.exports ?? []) if (name !== "default" && !exportsOut.has(name)) exportsOut.set(name, to);
+  }
 
   // Rule 3's room-making calls, and the functions here that make one.
   const staticString = (n) => {
@@ -522,6 +582,7 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     found: found.filter((f) => !seen.has(`${f.line}|${f.rule}|${f.text}|${f.where}`) && seen.add(`${f.line}|${f.rule}|${f.text}|${f.where}`)).sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule)),
     rooms: makers,
     sleepers: sleeping,
+    exports: exportsOut,
     manual: callsManual,
   };
 }
@@ -569,7 +630,7 @@ function specs(dir) {
 }
 
 const lineText = (source, line) => (source.split("\n")[line - 1] ?? "").trim().replace(/\s+/g, " ").slice(0, 200);
-const relativeImports = (source) => [...source.matchAll(/^\s*import\s[^;]*?from\s+["'](\.[^"']+)["']/gm), ...source.matchAll(/^\s*import\s+["'](\.[^"']+)["']/gm)].map((m) => m[1]);
+const relativeImports = (source) => [...source.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+["'](\.[^"']+)["']/gm), ...source.matchAll(/^\s*import\s+["'](\.[^"']+)["']/gm)].map((m) => m[1]);
 
 /**
  * Every finding in these specs and in the helper files they import from the specs' folders, as `{ file, line, rule,
@@ -593,7 +654,7 @@ export async function check(files) {
     try {
       result = await analyze(source, { api: file.startsWith("apps/api/") && file.endsWith(".spec.ts"), file, path, helpers: new Map([...helpers].filter(([, v]) => v)) });
     } catch (error) {
-      result = { found: [{ line: error?.loc?.line ?? 0, rule: "parse", text: `doesn't parse: ${String(error?.message ?? error).slice(0, 120)}`, where: "(module)" }], rooms: new Set(), sleepers: new Set(), manual: false };
+      result = { found: [{ line: error?.loc?.line ?? 0, rule: "parse", text: `doesn't parse: ${String(error?.message ?? error).slice(0, 120)}`, where: "(module)" }], rooms: new Set(), sleepers: new Set(), exports: new Map(), manual: false };
     }
     if (result === null) return null;
     results.set(path, { ...result, file, source });
@@ -792,6 +853,59 @@ async function selfTest() {
   allowCase("an owed poll in the export's file doesn't allow the imported call", [thereEntry({ owed: true, calls_allowed: true })], { allowed: 1, failing: 2, stale: 0, unreasoned: 1 }, [pollThere, serveThere, imported]);
   allowCase("an imported export with another sleep besides the allowed poll fails where it's imported", [thereEntry({ calls_allowed: true })], { allowed: 2, failing: 2, stale: 0, unreasoned: 0 }, [pollThere, serveThere, imported, { file: "h.ts", line: 10, rule: "sleep", where: "function serve", fn: "serve", code: "await nap(5);" }]);
   allowCase("the same export name in the spec's own file doesn't stand in for the imported one", [entry({ calls_allowed: true })], { allowed: 1, failing: 3, stale: 0, unreasoned: 0 }, [all[0], { ...pollThere }, serveThere, imported]);
+  {
+    // A helper file's export reached through a default export, a re-export or a namespace import, read file by file as
+    // check() reads them: helpers first, each seeing what the files it imports export. The spec's call is a sleep, and
+    // is allowed only when the export's one sleep is a poll whose entry says calls_allowed and isn't owed.
+    const project = async (files) => {
+      const results = new Map();
+      const got = [];
+      for (const [name, text] of files) {
+        const r = await analyze(text, { file: name, path: `/t/${name}`, helpers: new Map([...results].map(([n, v]) => [`/t/${n}`, v])) });
+        results.set(name, { ...r, file: name });
+        for (const f of r.found) got.push({ file: name, ...f, code: lineText(text, f.line) });
+      }
+      return got;
+    };
+    const tries = "  for (let i = 0; i < 100 && !ready(); i++) await new Promise((r) => setTimeout(r, 5));\n";
+    const named = `export async function poll(ready: () => boolean) {\n${tries}}\n`;
+    const routes = [
+      ["a default export, imported under another name", [["h.ts", `export default async function poll(ready: () => boolean) {\n${tries}}\n`]], 'import until from "./h.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["an anonymous default export", [["h.ts", `export default async (ready: () => boolean) => {\n${tries}};\n`]], 'import until from "./h.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["a default export of a name declared before it", [["h.ts", `async function poll(ready: () => boolean) {\n${tries}}\nexport default poll;\n`]], 'import until from "./h.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["export { a } from", [["h.ts", named], ["b.ts", 'export { poll } from "./h.ts";\n']], 'import { poll } from "./b.ts";\nit("a", async () => { await poll(ready); });\n'],
+      ["export { a as b } from", [["h.ts", named], ["b.ts", 'export { poll as until } from "./h.ts";\n']], 'import { until } from "./b.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["export { a as b } of a local function", [["h.ts", `async function poll(ready: () => boolean) {\n${tries}}\nexport { poll as until };\n`]], 'import { until } from "./h.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["export { default as a } from", [["h.ts", `export default async function poll(ready: () => boolean) {\n${tries}}\n`], ["b.ts", 'export { default as until } from "./h.ts";\n']], 'import { until } from "./b.ts";\nit("a", async () => { await until(ready); });\n'],
+      ["export * from", [["h.ts", named], ["b.ts", 'export * from "./h.ts";\n']], 'import { poll } from "./b.ts";\nit("a", async () => { await poll(ready); });\n'],
+      ["a namespace import", [["h.ts", named]], 'import * as h from "./h.ts";\nit("a", async () => { await h.poll(ready); });\n'],
+      ["a namespace import of a file that re-exports with export *", [["h.ts", named], ["b.ts", 'export * from "./h.ts";\n']], 'import * as b from "./b.ts";\nit("a", async () => { await b["poll"](ready); });\n'],
+      ["a namespace import's default", [["h.ts", `export default async function poll(ready: () => boolean) {\n${tries}}\n`]], 'import * as h from "./h.ts";\nit("a", async () => { await h.default(ready); });\n'],
+    ];
+    for (const [route, helperFiles, spec] of routes) {
+      const got = await project([...helperFiles, ["x.spec.ts", spec]]);
+      const atSpec = got.filter((f) => f.file === "x.spec.ts").map((f) => `${f.line}: ${f.rule}`);
+      const reported = JSON.stringify(atSpec) === JSON.stringify(["2: sleep"]);
+      if (!reported) failures.push(`sleep: a call through ${route} is found`);
+      console.log(`${reported ? "ok  " : "FAIL"} sleep: a call through ${route} is found${reported ? "" : `\n     wanted ["2: sleep"]\n     got    ${JSON.stringify(got)}`}`);
+      // The poll's own finding in h.ts, listed as a poll whose calls are allowed: then the spec's call passes, and not
+      // when the entry is owed or doesn't say calls_allowed.
+      const poll = got.filter((f) => f.file === "h.ts");
+      const listed = (more) => poll.map((f) => ({ file: "h.ts", rule: "sleep", where: f.where, code: f.code, category: "A", reason: "a bounded poll for the state itself", owed: false, calls_allowed: true, ...more }));
+      const ok = judge(got, listed({}), categories);
+      const owedPoll = judge(got, listed({ owed: true }), categories);
+      const notCalls = judge(got, listed({ calls_allowed: undefined }), categories);
+      const passed = poll.length === 1 && ok.failing.length === 0 && ok.stale.length === 0 && ok.unreasoned.length === 0 && owedPoll.failing.length === 1 && notCalls.failing.length === 1;
+      if (!passed) failures.push(`allow-list: a call through ${route} passes only by a calls_allowed poll that isn't owed`);
+      console.log(`${passed ? "ok  " : "FAIL"} allow-list: a call through ${route} passes only by a calls_allowed poll that isn't owed${passed ? "" : `: got ${JSON.stringify({ poll: poll.length, ok: ok.failing.length, owed: owedPoll.failing.length, notCalls: notCalls.failing.length })}`}`);
+    }
+    // The same routes to exports that don't sleep find nothing.
+    const quietHelper = 'export default async function go() { await fetch("https://x"); }\nexport async function run() {}\nconst idle = () => 1;\nexport { idle as rest };\n';
+    const none = await project([["h.ts", quietHelper], ["b.ts", 'export * from "./h.ts";\nexport { default as go } from "./h.ts";\n'], ["x.spec.ts", 'import go from "./h.ts";\nimport * as h from "./h.ts";\nimport { run, rest, go as again } from "./b.ts";\nawait go();\nawait h.run();\nawait h.default();\nawait run();\nawait rest();\nawait again();\n']]);
+    const quietOk = none.length === 0;
+    if (!quietOk) failures.push("sleep: a default export, a re-export or a namespace's member that doesn't sleep isn't found");
+    console.log(`${quietOk ? "ok  " : "FAIL"} sleep: a default export, a re-export or a namespace's member that doesn't sleep isn't found${quietOk ? "" : `: got ${JSON.stringify(none)}`}`);
+  }
   if (!failures.length) {
     console.log("\ntest-timing-check self-test: all passed");
     return 0;

@@ -294,13 +294,15 @@ Added 2026-11-17 by [the owner's ruling](#the-adapter-the-owners-ruling-of-2026-
 
 ### The owner's ruling on decision 29, 2026-11-17
 
-**Decided by the owner on 2026-11-17,** approving the architect's recommendation: **unattended runs are allowed in principle, and ask-first stays the default until M7's security review signs off.** The conditions:
+**Decided by the owner on 2026-11-17.** The architect recommended allowing unattended runs under the five conditions below, and the owner answered "i think it should be fine". So **unattended runs are allowed in principle, and ask-first stays the default until M7's security review signs off.** The conditions:
 
 1. Unattended runs are **off by default.** Only the machine's owner can turn them on, per workroom, and never from Podster's side.
 2. **A tool allowlist and a working-folder sandbox,** with no shell or network access unless added explicitly.
 3. **Hard caps on spend, run time and turns** per task.
 4. **Revoking the machine in Podster stops it at its next check-in,** and a local stop ends the run at once.
 5. **Logs carry IDs only.**
+
+*Ruled by the architect on 2026-11-17, for the owner to review, not the owner's ruling:* the plan's earlier room split stays on top of these conditions. B for the owner's own organization's private rooms; A, with its trust statement and public-room warning, for rooms with other organizations' authors and for public rooms.
 
 **Where each lands in this plan:** condition 1 in step 7 and S-40; condition 2 in steps 7 and 9 and S-41; condition 3 in steps 7 and 9 and S-42 (spend was already planned; run time and turns are new); condition 4 in steps 8 and 9 and S-43 (revocation at the next call was already planned; the local stop is new); condition 5 was already planned, in step 11 and S-32. Step 7 still builds both modes. Nothing is built, and the security review's sign-off is still owed before the default can change.
 

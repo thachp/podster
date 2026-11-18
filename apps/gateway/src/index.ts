@@ -15,7 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
-import { handlePairing, handlePairingRedeem, sweepPairings } from "./pairing";
+import { handlePairing, handlePairingRedeem, onPairingHost, sweepPairings } from "./pairing";
 import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath, isCardPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { A2A_CAPABILITIES, type LifecycleOptions } from "./a2a/lifecycle";
@@ -589,12 +589,15 @@ async function renewLink(env: Env, externalId: string, person: string, org: stri
 }
 
 /**
- * An existing, connected agent in this organization, which a new credential may link to. The API decides, through
- * `registerAgent`, which refuses a Runner-paired agent to everyone: only its starter's confirmation links it (M7 step 5(c)).
+ * An existing, connected agent in this organization, which a new credential may link to. The API's read decides, without
+ * a write: an agent a Runner pairing made says `paired`, and only its starter's confirmation links it (M7 step 5(c)).
  */
 async function linkableAgent(env: Env, identity: Identity, id: string, org: string) {
   const row = await env.DB.prepare(`SELECT org_id FROM podster_agent WHERE id = ? AND revoked_at IS NULL`).bind(id).first<{ org_id: string }>();
-  return row?.org_id === org && (await registerWithApi(env, identity, id, org, "agent")) === 200;
+  if (row?.org_id !== org) return false;
+  const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${id}` });
+  const agent = await response.json<{ org_id?: string; status?: string; paired?: unknown }>().catch(() => null);
+  return response.status === 200 && agent?.org_id === org && agent.status === "active" && agent.paired === false;
 }
 
 export const sha256Hex = async (value: string) =>
@@ -1087,6 +1090,8 @@ async function claim(request: Request, env: Env, userId: string, body: ClaimBody
   if (linked && !(await linkableAgent(env, identity, linked, org))) return denied("not_allowed", 403);
   const alreadyLinked = await env.DB.prepare(`SELECT agent_id FROM identity_link WHERE provider = 'agent_auth' AND external_id = ?`).bind(pluginAgent).first();
   if (alreadyLinked) return denied("not_allowed", 403);
+  // A pairing's host is linked only by its starter's confirmation, never claimed, whatever its agents ask for (M7 step 5(c)).
+  if (await onPairingHost(env, pluginAgent)) return denied("not_allowed", 403);
 
   // Approve first, so nothing is created for a bad code. The agent ID comes from the plugin's, so a retry reuses it.
   if (await claimedByThisPerson(env, pluginAgent, userId)) {

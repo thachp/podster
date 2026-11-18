@@ -389,3 +389,50 @@ pub fn verify_pairing_redeem(
     check_lifetime(redeem.iat, redeem.exp, now)?;
     Ok(redeem)
 }
+
+/// The gateway's assertion for the pairing expiry sweep (M7 step 5(c), ruling L1 on #453). A service's, not a person's:
+/// it names only the person whose own list of pairing sessions the cron asks about or settles, and binds the exact body
+/// sent. It carries no organization or role, so it authorizes nothing but those two routes on that person's list. Only
+/// [`verify_pairing_sweep`] accepts it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingSweep {
+    kind: String,
+    /// The person whose list of started sessions is read or settled.
+    pub person_id: String,
+    /// Lowercase hex SHA-256 of the body the gateway sent with this assertion.
+    pub body_sha256: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    #[serde(rename = "aud")]
+    _aud: String,
+    #[serde(rename = "iss")]
+    _iss: String,
+}
+
+/// For the pairing sweep's two routes alone: the assertion with exactly `kind`, `person_id`, `body_sha256`, `jti`, `iat`,
+/// `exp`, `aud` and `iss`, and nothing else. Any other assertion is refused here, as malformed, and this one everywhere else.
+pub fn verify_pairing_sweep(
+    token: &str,
+    keys: &KeySet,
+    now: i64,
+) -> Result<PairingSweep, AssertionError> {
+    let claims = verified_claims(token, keys)?;
+    let sweep: PairingSweep =
+        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+    if sweep.kind != "pairing_sweep"
+        || !sweep.person_id.starts_with("per_")
+        || sweep.person_id.len() > MAX_AGENT_ID_BYTES
+        || !sweep
+            .person_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        || sweep.jti.is_empty()
+        || !is_sha256_hex(&sweep.body_sha256)
+    {
+        return Err(AssertionError::Malformed);
+    }
+    check_lifetime(sweep.iat, sweep.exp, now)?;
+    Ok(sweep)
+}

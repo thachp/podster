@@ -493,3 +493,87 @@ fn a_pairing_redeem_is_checked_like_any_other() {
         Err(AssertionError::BadSignature)
     );
 }
+
+fn sweep_claims() -> Value {
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "pairing_sweep", "person_id": "per_starter_1",
+        "body_sha256": "cd".repeat(32), "jti": "s1", "iat": NOW, "exp": NOW + 60 })
+}
+
+#[test]
+fn only_the_sweep_routes_take_a_pairing_sweep() {
+    let token = sign(&sweep_claims());
+    let sweep = podster_assertion::verify_pairing_sweep(&token, &keys(), NOW).unwrap();
+    assert_eq!(sweep.person_id, "per_starter_1");
+    assert_eq!(sweep.body_sha256, "cd".repeat(32));
+    // It's no one's identity: every other route refuses it.
+    assert_eq!(verify(&token, &keys(), NOW), Err(AssertionError::Malformed));
+    assert!(matches!(
+        verify_room_page_caller(&token, &keys(), NOW),
+        Err(AssertionError::Malformed)
+    ));
+    assert_eq!(
+        podster_assertion::verify_provider_delivery(&token, &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    assert!(podster_assertion::verify_pairing_redeem(&token, &keys(), NOW).is_err());
+    // And the sweep routes take nothing else, a person's own assertion included.
+    for other in [
+        claims(),
+        public_claims(),
+        delivery_claims(),
+        redeem_claims(),
+    ] {
+        assert_eq!(
+            podster_assertion::verify_pairing_sweep(&sign(&other), &keys(), NOW),
+            Err(AssertionError::Malformed)
+        );
+    }
+}
+
+#[test]
+fn a_pairing_sweep_is_checked_like_any_other() {
+    let check = |c: &Value| podster_assertion::verify_pairing_sweep(&sign(c), &keys(), NOW);
+    let set = |field: &str, value: Value| {
+        let mut c = sweep_claims();
+        c[field] = value;
+        c
+    };
+    assert_eq!(
+        check(&set("exp", json!(NOW + 600))),
+        Err(AssertionError::LifetimeTooLong)
+    );
+    assert_eq!(
+        check(&set("aud", json!("someone-else"))),
+        Err(AssertionError::WrongAudience)
+    );
+    for (field, value) in [
+        ("person_id", json!("")),
+        ("person_id", json!("agt_1")),
+        ("person_id", json!("per_has space")),
+        ("person_id", json!(format!("per_{}", "a".repeat(125)))),
+        ("body_sha256", json!("CD".repeat(32))),
+        ("jti", json!("")),
+        ("sub", json!("per_1")),
+        ("org", json!("org_1")),
+    ] {
+        assert_eq!(
+            check(&set(field, value)),
+            Err(AssertionError::Malformed),
+            "{field}"
+        );
+    }
+    for field in ["person_id", "body_sha256", "jti", "kind"] {
+        let mut c = sweep_claims();
+        c.as_object_mut().unwrap().remove(field);
+        assert_eq!(check(&c), Err(AssertionError::Malformed), "{field}");
+    }
+    let forged = sign_raw(
+        &json!({ "alg": "EdDSA", "kid": "k1" }),
+        &sweep_claims(),
+        &key(2),
+    );
+    assert_eq!(
+        podster_assertion::verify_pairing_sweep(&forged, &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+}

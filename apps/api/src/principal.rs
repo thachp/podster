@@ -2494,6 +2494,8 @@ impl Principal {
                 identity["a2a_endpoint"] =
                     a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref())?;
                 identity["participation_policy"] = participation::json(&sql)?["policy"].clone();
+                // Made by a Runner pairing: only its starter's confirmation links a credential to it (M7 step 5(c)).
+                identity["paired"] = json!(pairing::holds_session(&sql)?);
                 Ok(identity)
             }
             // The agent and its organization's admins can read it, and the admins see its history.

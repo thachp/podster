@@ -63,6 +63,8 @@ pub(super) const ACTIVATE: &str = "/internal/pairing-activate";
 pub(super) const REDEEM: &str = "/internal/pairing-redeem";
 pub(super) const DUE: &str = "/internal/pairing-due";
 pub(super) const SETTLED: &str = "/internal/pairing-settled";
+/// On an agent's Principal: its session's state, for the sweep, if the person named started it.
+pub(super) const SWEEP_READ: &str = "/internal/pairing-sweep-read";
 
 /// Whether a path is one of this module's, on any Principal.
 pub(super) fn handles(path: &str) -> bool {
@@ -75,6 +77,7 @@ pub(super) fn handles(path: &str) -> bool {
         REDEEM,
         DUE,
         SETTLED,
+        SWEEP_READ,
     ]
     .contains(&path)
 }
@@ -190,8 +193,6 @@ pub async fn person_route(
     body: Option<&str>,
 ) -> R<Response> {
     let (agent, path, body) = match (rest, method) {
-        (["sweep"], Method::Post) => return sweep(env, caller).await,
-        (["sweep", "settled"], Method::Post) => return settle(env, caller, body).await,
         ([agent], Method::Get) => (*agent, READ, json!({})),
         ([agent, "cancel"], Method::Post) => (*agent, CANCEL, json!({})),
         ([agent, "activate"], Method::Post) => {
@@ -258,14 +259,44 @@ fn facts_json(facts: &decide::PluginFacts) -> Value {
     })
 }
 
-/// `POST /v1/pairing/sweep`: the starter's sessions past their expiry, each with its state as the starter would read it,
-/// so the gateway can end the plugin host of each that wasn't activated. A session listed but never made reads `missing`.
-/// It changes nothing: [`settle`] does, once the gateway has acted.
-async fn sweep(env: &Env, caller: &Caller) -> R<Response> {
-    if caller.kind != "person" {
-        return Err(ApiError::not_allowed());
+/// The sweep's routes, `POST /v1/pairing/sweep` and `…/sweep/settled`, if this is one: `Some(true)` for settled. They
+/// take the gateway's `pairing_sweep` assertion and nothing else, so they're matched before any identity is asked for.
+pub fn sweep_route(method: &Method, parts: &[&str]) -> Option<bool> {
+    match parts {
+        ["v1", "pairing", "sweep"] if *method == Method::Post => Some(false),
+        ["v1", "pairing", "sweep", "settled"] if *method == Method::Post => Some(true),
+        _ => None,
     }
-    let mut due = call(env, &caller.id, DUE, &json!({ "now": now_ms() }), None).await?;
+}
+
+/// The sweep's routes under the gateway's service assertion (ruling L1 on #453), which names only the person whose list
+/// it reads or settles, and binds the exact body.
+pub async fn sweep_service(mut req: Request, env: Env, settled: bool) -> R<Response> {
+    let token = req
+        .headers()
+        .get("x-podster-assertion")?
+        .ok_or(ApiError::invalid_assertion())?;
+    let keys = podster_assertion::KeySet::from_json(&env.secret("ASSERTION_KEYS")?.to_string())
+        .map_err(|_| ApiError::internal("bad ASSERTION_KEYS"))?;
+    let now_s = (Date::now().as_millis() / 1000) as i64;
+    let sweep = podster_assertion::verify_pairing_sweep(&token, &keys, now_s)
+        .map_err(|_| ApiError::invalid_assertion())?;
+    let text = req.text().await?;
+    if verifier(&text) != sweep.body_sha256 {
+        return Err(ApiError::invalid_assertion());
+    }
+    if settled {
+        settle(&env, &sweep.person_id, &text).await
+    } else {
+        sweep_list(&env, &sweep.person_id).await
+    }
+}
+
+/// `POST /v1/pairing/sweep`: the person's sessions past their expiry, each with its state as its starter would read it, so
+/// the gateway can end the plugin host of each that wasn't activated. A session listed but never made, or not the person's,
+/// reads `missing`. It changes nothing: [`settle`] does, once the gateway has acted.
+async fn sweep_list(env: &Env, person: &str) -> R<Response> {
+    let mut due = call(env, person, DUE, &json!({ "now": now_ms() }), None).await?;
     if due.status_code() != 200 {
         return Err(ApiError::internal("pairing sweep unavailable"));
     }
@@ -275,13 +306,21 @@ async fn sweep(env: &Env, caller: &Caller) -> R<Response> {
         let Some(agent) = row["agent_id"].as_str().filter(|a| is_agent_id(a)) else {
             continue;
         };
-        let mut read = call(env, agent, READ, &json!({}), Some(caller)).await?;
+        let mut read = call(
+            env,
+            agent,
+            SWEEP_READ,
+            &json!({ "person_id": person }),
+            None,
+        )
+        .await?;
         match read.status_code() {
             200 => {
                 let view: Value = read.json().await?;
-                sessions.push(json!({ "agent_id": agent, "plugin_host_id": view["plugin_host_id"], "status": view["status"], "key_thumbprint": view["key_thumbprint"] }));
+                sessions.push(json!({ "agent_id": agent, "plugin_host_id": view["plugin_host_id"], "status": view["status"],
+                    "key_thumbprint": view["key_thumbprint"], "plugin_agent_id": view.get("plugin_agent_id").cloned().unwrap_or(Value::Null) }));
             }
-            404 => sessions.push(json!({ "agent_id": agent, "plugin_host_id": row["plugin_host_id"], "status": "missing", "key_thumbprint": null })),
+            404 => sessions.push(json!({ "agent_id": agent, "plugin_host_id": row["plugin_host_id"], "status": "missing", "key_thumbprint": null, "plugin_agent_id": null })),
             // Unreadable now: it stays listed, for the next sweep.
             _ => {}
         }
@@ -290,13 +329,9 @@ async fn sweep(env: &Env, caller: &Caller) -> R<Response> {
 }
 
 /// `POST /v1/pairing/sweep/settled`: the gateway has ended these sessions' plugin hosts, or found nothing to end, so the
-/// starter's list forgets them. Only sessions past their expiry are forgotten, so a live one stays listed whatever is sent.
-async fn settle(env: &Env, caller: &Caller, body: Option<&str>) -> R<Response> {
-    if caller.kind != "person" {
-        return Err(ApiError::not_allowed());
-    }
-    let body: Value =
-        serde_json::from_str(body.unwrap_or("")).map_err(|_| ApiError::invalid_argument())?;
+/// person's list forgets them. Only sessions past their expiry are forgotten, so a live one stays listed whatever is sent.
+async fn settle(env: &Env, person: &str, body: &str) -> R<Response> {
+    let body: Value = serde_json::from_str(body).map_err(|_| ApiError::invalid_argument())?;
     let ids = body["agent_ids"]
         .as_array()
         .filter(|ids| ids.len() <= SWEEP_BATCH)
@@ -309,7 +344,7 @@ async fn settle(env: &Env, caller: &Caller, body: Option<&str>) -> R<Response> {
     relay(
         call(
             env,
-            &caller.id,
+            person,
             SETTLED,
             &json!({ "agent_ids": ids, "now": now_ms() }),
             None,
@@ -559,6 +594,14 @@ impl Principal {
         }
         if path == REDEEM {
             return self.redeem(body, now);
+        }
+        if path == SWEEP_READ {
+            // The sweep's read, for the person its service assertion names: only a session they started answers.
+            let row = session_row(&sql)?.ok_or_else(ApiError::not_found)?;
+            if text(&body["person_id"]).is_none() || row["person_id"] != body["person_id"] {
+                return Err(ApiError::not_found());
+            }
+            return view(&sql, now);
         }
         let caller: Caller = req
             .headers()

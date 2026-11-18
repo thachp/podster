@@ -528,12 +528,40 @@ describe("linking Runner's plugin agent, in the confirmation (step 5(c))", () =>
       const res = await person(as, "PUT", `/v1/agents/${agent}`, { org_id: ORG, name: "agent" });
       expect([res.status, res.code]).toEqual([403, "not_allowed"]);
     }
+    // The read says so, so the gateway can refuse linking another credential without a write.
+    expect((await person(admin(), "GET", `/v1/agents/${agent}`)).body).toMatchObject({ id: agent, status: "active", paired: true });
   });
 });
 
+/** The gateway cron's service assertion for the sweep (ruling L1 on #453): only the person whose list it is, and the body. */
+async function sweepAssertion(personId: string, body: string, extra: Record<string, unknown> = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ kind: "pairing_sweep", person_id: personId, body_sha256: await sha256Hex(body), ...extra })
+    .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setAudience("podster-api")
+    .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
+}
+const asService = async (personId: string, path: string, body: unknown) => {
+  const text = JSON.stringify(body);
+  return call(await sweepAssertion(personId, text), "POST", path, text);
+};
+
 describe("the expiry sweep (step 5(c))", () => {
-  const sweep = (who: Person) => person(who, "POST", "/v1/pairing/sweep", {});
-  const settle = (who: Person, ids: string[]) => person(who, "POST", "/v1/pairing/sweep/settled", { agent_ids: ids });
+  const sweep = (who: Person) => asService(who.id, "/v1/pairing/sweep", {});
+  const settle = (who: Person, ids: string[]) => asService(who.id, "/v1/pairing/sweep/settled", { agent_ids: ids });
+
+  it("takes only the gateway's service assertion, for the exact body, never a person's or an agent's (L1)", async () => {
+    const who = admin();
+    const { agent } = await start(who);
+    expect((await person(who, "POST", "/v1/pairing/sweep", {})).code).toBe("invalid_assertion");
+    expect((await person(who, "POST", "/v1/pairing/sweep/settled", { agent_ids: [] })).code).toBe("invalid_assertion");
+    expect((await call(await agentAssertion(agent), "POST", "/v1/pairing/sweep", "{}")).code).toBe("invalid_assertion");
+    const other = await sweepAssertion(who.id, "{}");
+    expect((await call(other, "POST", "/v1/pairing/sweep", '{"x":1}')).code).toBe("invalid_assertion");
+    expect((await call(await sweepAssertion(who.id, "{}"), "GET", "/v1/pairing/sweep")).status).toBeGreaterThanOrEqual(400);
+    // The service assertion reaches nothing else.
+    expect((await call(await sweepAssertion(who.id, ""), "GET", `/v1/pairing/${agent}`)).code).toBe("invalid_assertion");
+    expect((await sweep(who)).status).toBe(200);
+  });
 
   it("lists, for its starter, each session past its expiry with its state, until the gateway settles it", async () => {
     const who = admin();
@@ -553,13 +581,25 @@ describe("the expiry sweep (step 5(c))", () => {
     const listed = (await sweep(who)).body.sessions;
     const by = Object.fromEntries(listed.map((s: any) => [s.agent_id, s]));
     expect(Object.keys(by).sort()).toEqual([redeemed.agent, waiting.agent, done.agent].sort());
-    expect(by[redeemed.agent]).toEqual({ agent_id: redeemed.agent, plugin_host_id: redeemed.hostId, status: "expired", key_thumbprint: KEY });
+    expect(by[redeemed.agent]).toEqual({ agent_id: redeemed.agent, plugin_host_id: redeemed.hostId, status: "expired", key_thumbprint: KEY, plugin_agent_id: null });
     expect(by[waiting.agent]).toMatchObject({ status: "expired", key_thumbprint: null, plugin_host_id: waiting.hostId });
-    expect(by[done.agent]).toMatchObject({ status: "activated" });
+    expect(by[done.agent]).toMatchObject({ status: "activated", plugin_agent_id: `plug${done.agent.slice(4)}` });
     expect(by[live.agent]).toBeUndefined();
     // Settling forgets only what's past its expiry, whatever is sent.
     expect((await settle(who, [redeemed.agent, live.agent])).body.settled).toBe(1);
     expect((await sweep(who)).body.sessions.map((s: any) => s.agent_id).sort()).toEqual([waiting.agent, done.agent].sort());
+  });
+
+  it("reads another person's session, listed on someone's list, as missing", async () => {
+    const who = admin();
+    const { agent } = await start(who);
+    await expire(agent);
+    const other = admin();
+    await runInDurableObject(principal(other.id), (_: any, state: any) => {
+      state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pairing_due (agent_id TEXT PRIMARY KEY, plugin_host_id TEXT NOT NULL, expires_at INTEGER NOT NULL)");
+      state.storage.sql.exec("INSERT INTO pairing_due VALUES (?, 'host_x', ?)", agent, Date.now() - 1);
+    });
+    expect((await sweep(other)).body.sessions).toEqual([{ agent_id: agent, plugin_host_id: "host_x", status: "missing", key_thumbprint: null, plugin_agent_id: null }]);
   });
 
   it("reads a listed session that was never made as missing", async () => {
@@ -569,7 +609,7 @@ describe("the expiry sweep (step 5(c))", () => {
       state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pairing_due (agent_id TEXT PRIMARY KEY, plugin_host_id TEXT NOT NULL, expires_at INTEGER NOT NULL)");
       state.storage.sql.exec("INSERT INTO pairing_due VALUES (?, 'host_ghost', ?)", ghost, Date.now() - 1);
     });
-    expect((await sweep(who)).body.sessions).toEqual([{ agent_id: ghost, plugin_host_id: "host_ghost", status: "missing", key_thumbprint: null }]);
+    expect((await sweep(who)).body.sessions).toEqual([{ agent_id: ghost, plugin_host_id: "host_ghost", status: "missing", key_thumbprint: null, plugin_agent_id: null }]);
   });
 
   it("is a person's own list: another person sees none of it, and an agent or a bad body is refused", async () => {
@@ -578,9 +618,8 @@ describe("the expiry sweep (step 5(c))", () => {
     await expire(agent);
     await runInDurableObject(principal(who.id), (_: any, state: any) => { state.storage.sql.exec("UPDATE pairing_due SET expires_at = ?", Date.now() - 1); });
     expect((await sweep(admin())).body.sessions).toEqual([]);
-    expect((await call(await agentAssertion(agent), "POST", "/v1/pairing/sweep", "{}")).status).toBeGreaterThanOrEqual(400);
     for (const bad of [{}, { agent_ids: ["not-an-agent"] }, { agent_ids: Array.from({ length: 51 }, () => agent) }]) {
-      expect((await person(who, "POST", "/v1/pairing/sweep/settled", bad)).code).toBe("invalid_argument");
+      expect((await asService(who.id, "/v1/pairing/sweep/settled", bad)).code).toBe("invalid_argument");
     }
     expect((await sweep(who)).body.sessions.map((s: any) => s.agent_id)).toEqual([agent]);
   });

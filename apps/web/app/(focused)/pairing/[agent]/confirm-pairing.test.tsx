@@ -67,4 +67,32 @@ describe("ConfirmPairing", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("Nothing was connected");
   });
+
+  it("offers Finish connecting when the directory write didn't finish, and shows the server's result after a retry", async () => {
+    const fetcher = answer(200, view({ status: "activated", connected: true, plugin_agent_id: "plug_1" }));
+    vi.stubGlobal("fetch", fetcher);
+    render(<ConfirmPairing initial={view({ status: "activated", connected: false, plugin_agent_id: "plug_1" })} />);
+    expect(screen.getByRole("status")).toHaveTextContent("didn't finish");
+    await userEvent.click(screen.getByRole("button", { name: "Finish connecting" }));
+    expect(await screen.findByText(/Runner is connected as/)).toBeInTheDocument();
+    expect(fetcher.mock.calls[0][0]).toBe("/api/pairing/agt_1");
+  });
+
+  it("says in fixed words when Runner's agent is already connected elsewhere", async () => {
+    render(<ConfirmPairing initial={view({ status: "activated", connected: false, link_problem: "already_linked" })} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("already connected to another agent");
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("shows the same words when confirming finds it already connected elsewhere", async () => {
+    vi.stubGlobal("fetch", answer(409, { error: { code: "already_linked" } }));
+    render(<ConfirmPairing initial={view()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Confirm this key" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("already connected to another agent");
+  });
+
+  it("shows an activated session's connection only once its directory rows are written", () => {
+    render(<ConfirmPairing initial={view({ status: "activated", connected: true })} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Runner is connected as Laptop runner");
+  });
 });

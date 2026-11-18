@@ -29,13 +29,15 @@
  *   decides by the binding rule and, in one transaction, activates the session and records the one plugin agent it links.
  *   Only then does the directory get `podster_agent` and `identity_link`, as the claim writes them after `registerAgent`,
  *   so the agent shows in its organization and can act within its host's capabilities, Runner's allowlist.
- * - **Sweep** (M7 step 5(c)): the cron asks the API, as the owner of each plugin host no link uses, for that person's
- *   sessions past their expiry, ends the host of each that wasn't activated, and settles them.
+ * - **Sweep** (M7 step 5(c), rulings M1, L1 and L2 on #453): the gateway's own `pairing_host` table, written when a session
+ *   starts, drives it. Oldest first and a bounded batch of people per run, it asks the API under its service assertion,
+ *   which names only the person, for their sessions past expiry, ends the host of each that wasn't activated, and settles
+ *   them. One person's failure is logged and put back, never the run's end.
  *
  * The plugin's own `/host/*` routes stay private. Logs carry IDs and fixed outcomes only: never a code, a proof or a key.
  */
 import { calculateJwkThumbprint, decodeJwt, decodeProtectedHeader, importJWK, jwtVerify } from "jose";
-import { mintPairingRedeem, type Identity } from "./assertion";
+import { mintPairingRedeem, mintPairingSweep, type Identity } from "./assertion";
 import { capabilitiesFor } from "./capabilities";
 import { callApi, clientKey, createAgent, createAuth, denied, json, linkOnce, personIdentity, rateLimited, withinLimit, type Env } from "./index";
 
@@ -165,6 +167,13 @@ export async function settleSession(env: Env, view: Record<string, unknown> | nu
   if (typeof hostId !== "string" || !["canceled", "expired", "locked"].includes(view?.status as string)) return;
   if (typeof view?.key_thumbprint === "string") await revokeHost(env, hostId, view.key_thumbprint);
   await retireHost(env, hostId);
+  // Ended for good: the sweep needn't ask about it again.
+  await env.DB.prepare(`DELETE FROM pairing_host WHERE host_id = ? AND linked_agent_id IS NULL`).bind(hostId).run();
+}
+
+/** Whether a plugin agent is on a host a pairing made: such a host's agents are linked only by its starter's confirmation. */
+export async function onPairingHost(env: Pick<Env, "DB">, pluginAgent: string) {
+  return (await env.DB.prepare(`SELECT 1 AS n FROM pairing_host WHERE host_id = (SELECT hostId FROM agent WHERE id = ?)`).bind(pluginAgent).first()) !== null;
 }
 
 /** Cancels a session through the API as its starter, the person who owns its plugin host, so it can't be activated. */
@@ -347,7 +356,7 @@ export async function handlePairing(request: Request, url: URL, env: Env, identi
   if (!match || identity.kind !== "person") return denied("not_found", 404);
   const [, agent, action] = match;
   if (!agent) return request.method === "POST" ? start(request, env, identity) : denied("not_found", 404);
-  if (!action) return request.method === "GET" ? relay(env, await callApi(env, identity, { method: "GET", path: `/v1/pairing/${agent}` })) : denied("not_found", 404);
+  if (!action) return request.method === "GET" ? relay(env, await callApi(env, identity, { method: "GET", path: `/v1/pairing/${agent}` }), identity.id) : denied("not_found", 404);
   if (request.method !== "POST") return denied("not_found", 404);
   if (action === "cancel") {
     const response = await callApi(env, identity, { method: "POST", path: `/v1/pairing/${agent}/cancel`, body: "{}" });
@@ -372,9 +381,32 @@ export async function handlePairing(request: Request, url: URL, env: Env, identi
   if (activated.status !== 200) return relay(env, activated);
   const answer = await activated.json<Record<string, unknown>>().catch(() => null);
   if (!answer) return denied("upstream_unavailable", 502);
-  const linked = await linkDirectory(env, identity.id, answer);
-  logAt("pairing.link", agent, linked ? "linked" : "link_refused");
-  return linked ? noStore(json({ ...answer, runner_ready: true })) : denied("not_allowed", 403);
+  const linked = await finishLink(env, identity.id, answer);
+  if (linked === "linked_elsewhere") return denied("already_linked", 409);
+  return noStore(json({ ...answer, runner_ready: true, connected: linked === "linked" }));
+}
+
+/**
+ * An activated session's directory rows (ruling M2 on #453): written after the API's activation, and again on any later
+ * read of it, so a write that failed once is finished by a reload. A plugin agent already linked to another agent is
+ * refused with fixed words and its IDs logged, and the session is left as it is.
+ */
+async function finishLink(env: Env, starter: string, answer: Record<string, unknown>): Promise<"linked" | "unfinished" | "linked_elsewhere"> {
+  const agent = typeof answer.agent_id === "string" ? answer.agent_id : undefined;
+  let linked: boolean;
+  try {
+    linked = await linkDirectory(env, starter, answer);
+  } catch {
+    logAt("pairing.link", agent, "unfinished");
+    return "unfinished";
+  }
+  if (!linked) {
+    console.log(JSON.stringify({ at: "pairing.link", agent, plugin_agent: answer.plugin_agent_id, outcome: "linked_elsewhere" }));
+    return "linked_elsewhere";
+  }
+  if (typeof answer.plugin_host_id === "string") await env.DB.prepare(`UPDATE pairing_host SET linked_agent_id = ? WHERE host_id = ?`).bind(answer.plugin_agent_id, answer.plugin_host_id).run();
+  logAt("pairing.link", agent, "linked");
+  return "linked";
 }
 
 /** The plugin agents a host holds that aren't revoked, oldest first, one more than a link may ever take. */
@@ -416,48 +448,84 @@ async function linkDirectory(env: Env, starter: string, answer: Record<string, u
   return linkOnce(env, pluginAgent, agentId, () => createAgent(env, org, named, "agent_auth", pluginAgent, agentId, starter));
 }
 
-/** People whose sessions one sweep asks about, at most. Each has at most `SWEEP_BATCH` sessions answered. */
+/** People one sweep run asks about, at most, oldest due first. A person put back waits `SWEEP_RETRY_MS`. */
 export const SWEEP_PEOPLE = 25;
-/** A session's life, as the API sets it: a host younger than this can't belong to an expired session. */
-const SESSION_MS = 10 * 60 * 1000;
+const SWEEP_RETRY_MS = 60 * 60 * 1000;
+/** As `podster_api::principal::pairing::SWEEP_BATCH`: sessions the API answers for one person in one sweep, at most. */
+const SWEEP_BATCH = 50;
+/** A row the API no longer lists is taken as ended only this long after its expiry, so clocks that differ can't end a live one. */
+const ORPHANED_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** The API's sweep routes, under the service assertion naming only `person` (L1), with the exact body. */
+async function sweepCall(env: Env, person: string, path: string, body: unknown) {
+  const text = JSON.stringify(body);
+  const assertion = await mintPairingSweep(person, hex(await digest(text)), env.ASSERTION_SIGNING_JWK);
+  return env.API.fetch(new Request(`https://api.internal${path}`, { method: "POST", headers: { "x-podster-assertion": assertion, "content-type": "application/json" }, body: text, signal: AbortSignal.timeout(API_TIMEOUT_MS) }));
+}
+
+/** One person's turn in the sweep. Answers how many hosts it ended. Throws on anything it can't read. */
+async function sweepPerson(env: Env, person: string, now: number) {
+  const response = await sweepCall(env, person, "/v1/pairing/sweep", {});
+  const answer = await response.json<{ sessions?: Record<string, unknown>[] }>().catch(() => null);
+  if (response.status !== 200 || !Array.isArray(answer?.sessions)) throw new Error("sweep_unavailable");
+  const settled: string[] = [];
+  let ended = 0;
+  for (const session of answer.sessions) {
+    const agent = typeof session.agent_id === "string" ? session.agent_id : null;
+    if (!agent) continue;
+    const status = typeof session.status === "string" && /^[a-z]+$/.test(session.status) ? session.status : "unknown";
+    if (status === "missing") {
+      if (typeof session.plugin_host_id === "string") await retireHost(env, session.plugin_host_id);
+      await env.DB.prepare(`DELETE FROM pairing_host WHERE agent_id = ? AND linked_agent_id IS NULL`).bind(agent).run();
+    } else if (["canceled", "expired", "locked"].includes(status)) {
+      await settleSession(env, session);
+      ended++;
+    } else if (status === "activated") {
+      // Activated: nothing to end. Its link is finished by the starter's next read (M2); here it's only marked.
+      await env.DB.prepare(`UPDATE pairing_host SET linked_agent_id = COALESCE(linked_agent_id, ?) WHERE agent_id = ?`).bind(typeof session.plugin_agent_id === "string" ? session.plugin_agent_id : agent, agent).run();
+    } else continue;
+    logAt("pairing.sweep", agent, status);
+    settled.push(agent);
+  }
+  if (settled.length > 0) {
+    const done = await sweepCall(env, person, "/v1/pairing/sweep/settled", { agent_ids: settled });
+    await done.body?.cancel();
+  }
+  // A row the API no longer lists, long past its expiry, ended without the sweep: its host goes too.
+  if (answer.sessions.length < SWEEP_BATCH) {
+    const listed = new Set(answer.sessions.map((s) => s.agent_id));
+    const { results } = await env.DB.prepare(`SELECT host_id, agent_id FROM pairing_host WHERE person_id = ? AND linked_agent_id IS NULL AND expires_at <= ?`).bind(person, now - ORPHANED_AFTER_MS).all<{ host_id: string; agent_id: string }>();
+    for (const row of results) {
+      if (listed.has(row.agent_id)) continue;
+      const host = await env.DB.prepare(`SELECT kid FROM agentHost WHERE id = ?`).bind(row.host_id).first<{ kid: string | null }>();
+      if (host?.kid) await revokeHost(env, row.host_id, host.kid);
+      await retireHost(env, row.host_id);
+      await env.DB.prepare(`DELETE FROM pairing_host WHERE host_id = ?`).bind(row.host_id).run();
+      logAt("pairing.sweep", row.agent_id, "orphaned");
+    }
+  }
+  // Whatever is still due waits its turn, so the people behind this one are reached.
+  await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id = ? AND linked_agent_id IS NULL AND expires_at <= ?`).bind(now + SWEEP_RETRY_MS, person, now).run();
+  return ended;
+}
 
 /**
- * The expiry sweep (M7 step 5(c)), from the cron. For each person who owns a plugin host that is still waiting or active,
- * is older than a session can live, and has no linked agent, it asks the API, as that person, for their sessions past
- * their expiry. Each that wasn't activated has its host ended, as a person's touch would (M1): retired if waiting,
- * revoked with its unlinked agents if it holds the session's key. Then those sessions are settled, so they aren't asked
- * about again. A person the sweep can't act for, or an answer it can't read, is left for the next run.
+ * The expiry sweep (M7 step 5(c)), from the cron. The people with sessions past expiry in the gateway's own `pairing_host`,
+ * oldest first, at most `SWEEP_PEOPLE` a run (M1). Each has the hosts of their sessions that weren't activated ended, as a
+ * person's touch would: retired if waiting, revoked with their unlinked agents if they hold the session's key. A person
+ * whose turn fails is logged by ID and put back, and the run goes on (L2).
  */
 export async function sweepPairings(env: Env, now = Date.now()) {
   const { results } = await env.DB.prepare(
-    `SELECT DISTINCT h.userId AS userId FROM agentHost h WHERE h.userId IS NOT NULL AND h.status IN ('pending_enrollment', 'active') AND h.createdAt < ? AND NOT EXISTS (SELECT 1 FROM agent a JOIN identity_link l ON l.provider = 'agent_auth' AND l.external_id = a.id WHERE a.hostId = h.id) LIMIT ?`,
-  ).bind(new Date(now - SESSION_MS).toISOString(), SWEEP_PEOPLE).all<{ userId: string }>();
+    `SELECT person_id, MIN(expires_at) AS first FROM pairing_host WHERE linked_agent_id IS NULL AND expires_at <= ? AND next_sweep_at <= ? GROUP BY person_id ORDER BY first, person_id LIMIT ?`,
+  ).bind(now, now, SWEEP_PEOPLE).all<{ person_id: string }>();
   let ended = 0;
-  for (const { userId } of results) {
-    const identity = await personIdentity(env, new Request(env.BASE_URL), userId);
-    if (!identity) continue;
-    const response = await callApi(env, identity, { method: "POST", path: "/v1/pairing/sweep", body: "{}" });
-    const answer = await response.json<{ sessions?: Record<string, unknown>[] }>().catch(() => null);
-    if (response.status !== 200 || !Array.isArray(answer?.sessions)) {
-      logAt("pairing.sweep", undefined, "unavailable");
-      continue;
-    }
-    const settled: string[] = [];
-    for (const session of answer.sessions) {
-      const agent = typeof session.agent_id === "string" ? session.agent_id : null;
-      if (!agent) continue;
-      if (session.status === "missing") {
-        if (typeof session.plugin_host_id === "string") await retireHost(env, session.plugin_host_id);
-      } else if (["canceled", "expired", "locked"].includes(session.status as string)) {
-        await settleSession(env, session);
-        ended++;
-      } else if (session.status !== "activated") continue;
-      logAt("pairing.sweep", agent, typeof session.status === "string" && /^[a-z]+$/.test(session.status) ? session.status : "unknown");
-      settled.push(agent);
-    }
-    if (settled.length > 0) {
-      const done = await callApi(env, identity, { method: "POST", path: "/v1/pairing/sweep/settled", body: JSON.stringify({ agent_ids: settled }) });
-      await done.body?.cancel();
+  for (const { person_id: person } of results) {
+    try {
+      ended += await sweepPerson(env, person, now);
+    } catch {
+      console.log(JSON.stringify({ at: "pairing.sweep", person, outcome: "failed" }));
+      await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id = ?`).bind(now + SWEEP_RETRY_MS, person).run().catch(() => undefined);
     }
   }
   return ended;
@@ -468,10 +536,16 @@ export async function sweepPairings(env: Env, now = Date.now()) {
  * also says whether Runner has registered the one agent the confirmation will link, `runner_ready`, for the screen only:
  * the API's binding rule decides at confirmation.
  */
-async function relay(env: Env, response: Response) {
+async function relay(env: Env, response: Response, starter?: string) {
   const answer = await response.json<Record<string, unknown>>().catch(() => null);
   if (answer === null) return denied("upstream_unavailable", 502);
   if (response.status === 200) await settleSession(env, answer);
+  // The starter's read of an activated session finishes its link, if a write was lost (M2).
+  if (response.status === 200 && starter && answer.status === "activated" && typeof answer.plugin_agent_id === "string") {
+    const linked = await finishLink(env, starter, answer);
+    answer.connected = linked === "linked";
+    if (linked === "linked_elsewhere") answer.link_problem = "already_linked";
+  }
   if (response.status === 200 && typeof answer.plugin_host_id === "string") {
     const agents = answer.status === "redeemed" || answer.status === "activated" ? await hostAgents(env, answer.plugin_host_id) : [];
     answer.runner_ready = agents.length === 1 && agents[0].status === "active";
@@ -507,6 +581,14 @@ async function start(request: Request, env: Env, identity: Identity & { kind: "p
   if (response.status !== 200 || !answer || typeof answer.agent_id !== "string") {
     await retireHost(env, hostId);
     return answer && response.status !== 200 ? noStore(json(answer, response.status)) : denied("upstream_unavailable", 502);
+  }
+  // The sweep's own record of who started it (M1). Without it the host could outlive its session, so it's retired instead.
+  try {
+    await env.DB.prepare(`INSERT INTO pairing_host (host_id, person_id, agent_id, expires_at) VALUES (?, ?, ?, ?)`).bind(hostId, identity.id, answer.agent_id, Number(answer.expires_at)).run();
+  } catch {
+    logAt("pairing.start", answer.agent_id, "unrecorded");
+    await retireHost(env, hostId);
+    return denied("upstream_unavailable", 502);
   }
   return noStore(json({ ...answer, code }));
 }

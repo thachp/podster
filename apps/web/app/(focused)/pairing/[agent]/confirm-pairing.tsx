@@ -49,10 +49,33 @@ export function ConfirmPairing({ initial }: { initial: PairingView }) {
     const result = await clientCommand<PairingView>(`/api/pairing/${view.agent_id}/${path}`, body).catch(() => null);
     setBusy(false);
     if (result?.ok) setView(result.data);
+    else if (result && !result.ok && result.code === "already_linked") setView({ ...view, status: "activated", link_problem: "already_linked" });
+    else setFailure(result ? pairingFailure(result.status, result.code) : pairingFailure(500, "error"));
+  }
+
+  /** Reads the session again, which finishes a link whose write was lost. The server's answer is what's shown. */
+  async function finish() {
+    setBusy(true);
+    setFailure(null);
+    const result = await clientQuery<PairingView>(`/api/pairing/${view.agent_id}`).catch(() => null);
+    setBusy(false);
+    if (result?.ok) setView(result.data);
     else setFailure(result ? pairingFailure(result.status, result.code) : pairingFailure(500, "error"));
   }
 
   const name = <strong className="break-words">{view.name}</strong>;
+  if (view.status === "activated" && view.link_problem)
+    return <p role="alert">{pairingFailure(409, view.link_problem)}</p>;
+  if (view.status === "activated" && view.connected === false)
+    return (
+      <div className="space-y-3">
+        <p role="status">Runner&apos;s key is confirmed, but connecting {name} to your organization didn&apos;t finish.</p>
+        {failure ? <p role="alert">{failure}</p> : null}
+        <Button type="button" disabled={busy} onClick={() => void finish()}>
+          Finish connecting
+        </Button>
+      </div>
+    );
   if (view.status === "activated")
     return (
       <div role="status" className="space-y-2">

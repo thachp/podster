@@ -32,7 +32,7 @@
  * - **Sweep** (M7 step 5(c), rulings M1, L1 and L2 on #453): the gateway's own `pairing_host` table, written when a session
  *   starts, drives it. Oldest first and a bounded batch of people per run, it asks the API under its service assertion,
  *   which names only the person, for their sessions past expiry, ends the host of each that wasn't activated, and settles
- *   them. One person's failure is logged and put back, never the run's end.
+ *   them. One person's failure is logged and put back, waiting longer with each failure, never the run's end.
  *
  * The plugin's own `/host/*` routes stay private. Logs carry IDs and fixed outcomes only: never a code, a proof or a key.
  */
@@ -448,9 +448,17 @@ async function linkDirectory(env: Env, starter: string, answer: Record<string, u
   return linkOnce(env, pluginAgent, agentId, () => createAgent(env, org, named, "agent_auth", pluginAgent, agentId, starter));
 }
 
-/** People one sweep run asks about, at most, oldest due first. A person put back waits `SWEEP_RETRY_MS`. */
+/** People one sweep run asks about, at most: those never tried or waiting least first, then oldest due. */
 export const SWEEP_PEOPLE = 25;
+/** A person whose turn went through but who still has due rows waits this long. */
 const SWEEP_RETRY_MS = 60 * 60 * 1000;
+/**
+ * A person whose turn failed waits two hours, doubling with each failure in a row to a day at most (ruling on #453's
+ * re-review). Longer than the cron's hour from the first failure, so people who keep failing fall behind everyone new.
+ */
+export function sweepBackoffMs(failures: number) {
+  return Math.min(2 * 60 * 60 * 1000 * 2 ** Math.max(0, Math.min(failures, 20) - 1), 24 * 60 * 60 * 1000);
+}
 /** As `podster_api::principal::pairing::SWEEP_BATCH`: sessions the API answers for one person in one sweep, at most. */
 const SWEEP_BATCH = 50;
 /** A row the API no longer lists is taken as ended only this long after its expiry, so clocks that differ can't end a live one. */
@@ -504,8 +512,8 @@ async function sweepPerson(env: Env, person: string, now: number) {
       logAt("pairing.sweep", row.agent_id, "orphaned");
     }
   }
-  // Whatever is still due waits its turn, so the people behind this one are reached.
-  await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id = ? AND linked_agent_id IS NULL AND expires_at <= ?`).bind(now + SWEEP_RETRY_MS, person, now).run();
+  // Whatever is still due waits its turn, so the people behind this one are reached. The turn went through, so failures reset.
+  await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ?, sweep_failures = 0 WHERE person_id = ? AND linked_agent_id IS NULL AND expires_at <= ?`).bind(now + SWEEP_RETRY_MS, person, now).run();
   return ended;
 }
 
@@ -517,7 +525,7 @@ async function sweepPerson(env: Env, person: string, now: number) {
  */
 export async function sweepPairings(env: Env, now = Date.now()) {
   const { results } = await env.DB.prepare(
-    `SELECT person_id, MIN(expires_at) AS first FROM pairing_host WHERE linked_agent_id IS NULL AND expires_at <= ? AND next_sweep_at <= ? GROUP BY person_id ORDER BY first, person_id LIMIT ?`,
+    `SELECT person_id, MIN(next_sweep_at) AS waited, MIN(expires_at) AS first FROM pairing_host WHERE linked_agent_id IS NULL AND expires_at <= ? AND next_sweep_at <= ? GROUP BY person_id ORDER BY waited, first, person_id LIMIT ?`,
   ).bind(now, now, SWEEP_PEOPLE).all<{ person_id: string }>();
   let ended = 0;
   for (const { person_id: person } of results) {
@@ -525,7 +533,13 @@ export async function sweepPairings(env: Env, now = Date.now()) {
       ended += await sweepPerson(env, person, now);
     } catch {
       console.log(JSON.stringify({ at: "pairing.sweep", person, outcome: "failed" }));
-      await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id = ?`).bind(now + SWEEP_RETRY_MS, person).run().catch(() => undefined);
+      try {
+        const row = await env.DB.prepare(`SELECT MAX(sweep_failures) AS failures FROM pairing_host WHERE person_id = ?`).bind(person).first<{ failures: number | null }>();
+        const failures = (row?.failures ?? 0) + 1;
+        await env.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ?, sweep_failures = ? WHERE person_id = ?`).bind(now + sweepBackoffMs(failures), failures, person).run();
+      } catch {
+        // Unrecorded, this person comes round again next run; the others in this run still get their turn.
+      }
     }
   }
   return ended;

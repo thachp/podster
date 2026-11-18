@@ -650,6 +650,46 @@ describe("the expiry sweep, from the cron (step 5(c))", () => {
     expect(seen.some((c) => c.person === person.id)).toBe(true);
   });
 
+  it("reaches a new due session within two hourly runs, however many people keep failing ahead of it (probe B)", async () => {
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+    const answers: Record<string, Record<string, unknown>[] | number> = {};
+    const failing: string[] = [];
+    for (let i = 0; i < 26; i++) {
+      const id = crypto.randomUUID().replaceAll("-", "");
+      const person = `per_failing_${i}_${id.slice(0, 8)}`;
+      await e.DB.prepare(`INSERT INTO pairing_host (host_id, person_id, agent_id, expires_at) VALUES (?, ?, ?, ?)`).bind(`fh${id}`, person, `agt_${id}`, now - 2 * hour - i).run();
+      answers[person] = 500;
+      failing.push(person);
+    }
+    const person = await signUp();
+    const target = await started(person);
+    const key = await generateKeypair();
+    expect((await redeem(target.agent, target.code, await proof(key, target.agent))).status).toBe(200);
+    await due(target.agent, 60_000);
+    answers[person.id] = [{ agent_id: target.agent, plugin_host_id: target.hostId, status: "expired", key_thumbprint: key.publicKey.kid }];
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const env = apiAnswering(answers, []) as never;
+    // The cron's real spacing: an hour apart, a few milliseconds late.
+    await sweepPairings(env, now);
+    await sweepPairings(env, now + hour + 5);
+    expect(await host(target.hostId)).toMatchObject({ status: "revoked", kid: null });
+    // Each failure doubles a person's wait, from two hours to a day at most.
+    const backoff = async (who: string) => (await e.DB.prepare(`SELECT next_sweep_at, sweep_failures FROM pairing_host WHERE person_id = ?`).bind(who).first<{ next_sweep_at: number; sweep_failures: number }>())!;
+    // The oldest failed in the first run; the newest, the 26th, was still reached in the second.
+    expect((await backoff(failing[0])).sweep_failures).toBe(1);
+    const first = await backoff(failing[25]);
+    expect(first).toEqual({ next_sweep_at: now + 2 * hour, sweep_failures: 1 });
+    // Only that person, from here: everyone else waits.
+    await e.DB.prepare(`UPDATE pairing_host SET next_sweep_at = ? WHERE person_id != ?`).bind(Number.MAX_SAFE_INTEGER, failing[25]).run();
+    for (const [run, at] of [[2, first.next_sweep_at], [3, now + 2 * hour + 4 * hour], [4, now + 14 * hour], [5, now + 30 * hour], [6, now + 54 * hour]] as const) {
+      await sweepPairings(apiAnswering({ [failing[25]]: 500 }, []) as never, at);
+      const after = await backoff(failing[25]);
+      expect(after.sweep_failures).toBe(run);
+      expect(after.next_sweep_at - at).toBe(Math.min(2 * hour * 2 ** (run - 1), 24 * hour));
+    }
+  });
+
   it("leaves activated and live sessions' hosts alone, and settles nothing it didn't act on", async () => {
     const person = await signUp();
     const live = await started(person);

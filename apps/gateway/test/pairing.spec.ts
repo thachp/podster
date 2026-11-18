@@ -6,7 +6,7 @@ import { env, SELF } from "cloudflare:test";
 import { SignJWT, importJWK } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/index";
-import { redeemLimit, REDEEM_PER_MINUTE, RUNNER_CAPABILITIES } from "../src/pairing";
+import { confirmEnrollment, settleSession, START_PER_MINUTE, strictLimit, REDEEM_PER_MINUTE, RUNNER_CAPABILITIES } from "../src/pairing";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string };
@@ -71,9 +71,12 @@ describe("starting a pairing, on the person's session", () => {
     expect(stored).toMatchObject({ userId: person.id.slice("per_".length), status: "pending_enrollment", publicKey: "" });
     // Only the plugin's hash of the code is kept, and the session's read never answers it.
     expect(stored.enrollmentTokenHash).not.toBe(res.body.code);
-    expect(JSON.parse(stored.defaultCapabilities).sort()).toEqual([...RUNNER_CAPABILITIES].filter((c) => c !== "get_repo_access").sort());
-    expect(JSON.parse(stored.defaultCapabilities)).not.toContain("merge_task");
-    expect(JSON.parse(stored.defaultCapabilities)).not.toContain("deploy_release");
+    expect(JSON.parse(stored.defaultCapabilities).sort()).toEqual([...RUNNER_CAPABILITIES].sort());
+    // Decision 230, ruled 2026-11-18 (L1): no merge, release or repository token until step 10's own rules.
+    for (const withheld of ["merge_task", "deploy_release", "get_repo_access"]) {
+      expect(RUNNER_CAPABILITIES as readonly string[]).not.toContain(withheld);
+      expect(JSON.parse(stored.defaultCapabilities)).not.toContain(withheld);
+    }
     const again = await read(person, res.body.agent_id);
     expect(again.status).toBe(200);
     expect(again.text).not.toContain(res.body.code);
@@ -95,6 +98,17 @@ describe("starting a pairing, on the person's session", () => {
     expect((await dash({ cookie: "" }, "POST", "/pairing", {})).status).toBe(401);
     const foreign = await call("/api/pairing", { method: "POST", headers: { cookie: person.cookie, origin: "https://evil.test", "content-type": "application/json" }, body: "{}" });
     expect(foreign.status).toBe(403);
+  });
+
+  it("limits each person's starts before any plugin host is made, and refuses when it can't count", async () => {
+    const person = await signUp();
+    const hosts = async () => (await e.DB.prepare(`SELECT count(*) AS n FROM agentHost WHERE userId = ?`).bind(person.id.slice(4)).first<{ n: number }>())!.n;
+    for (let i = 0; i < START_PER_MINUTE; i++) expect((await start(person)).status).not.toBe(429);
+    const before = await hosts();
+    expect(await start(person)).toMatchObject({ status: 429, code: "rate_limited" });
+    expect(await hosts()).toBe(before);
+    const broken = { idFromName: (name: string) => name, get: () => ({ take: async () => { throw new Error("down"); } }) };
+    expect((await strictLimit(broken as never, "pairing-start:per_x", 1, 1))?.status).toBe(503);
   });
 
   it("lets the API decide who may start, and leaves no usable plugin host behind a refusal", async () => {
@@ -125,6 +139,46 @@ describe("the person's read, cancel and activate", () => {
     expect((await read(stranger, agent)).status).toBe(404);
     expect((await dash(stranger, "POST", `/pairing/${agent}/cancel`, {})).status).toBe(404);
     expect((await activate(stranger, agent, "A".repeat(43))).status).toBe(404);
+  });
+
+  it("cancel after a redeem revokes the session's plugin host and its agents, so the key can pair again", async () => {
+    const { person, agent, code, hostId } = await started();
+    const key = await generateKeypair();
+    expect((await redeem(agent, code, await proof(key, agent))).status).toBe(200);
+    const storage = new MemoryStorage();
+    await storage.setHostIdentity({ keypair: key, createdAt: Date.now() });
+    const client = new AgentAuthClient({ storage, urls: [BASE], fetch: (input, init) => SELF.fetch(new Request(input as RequestInfo, init)), hostName: "runner" });
+    await client.init();
+    const connected = await client.connectAgent({ provider: BASE, capabilities: ["get_identity"], mode: "delegated", preferredMethod: "device_authorization", name: "Before cancel" });
+    client.destroy();
+    const canceled = await dash(person, "POST", `/pairing/${agent}/cancel`, {});
+    expect([canceled.status, canceled.body.status]).toEqual([200, "canceled"]);
+    expect(await host(hostId)).toMatchObject({ status: "revoked", kid: null, publicKey: "" });
+    const active = await e.DB.prepare(`SELECT count(*) AS n FROM agentHost WHERE kid = ? AND status = 'active'`).bind(key.publicKey.kid).first<{ n: number }>();
+    expect(active!.n).toBe(0);
+    expect(await e.DB.prepare(`SELECT status, kid FROM agent WHERE id = ?`).bind(connected.agentId).first()).toEqual({ status: "revoked", kid: null });
+    const next = await started(person);
+    expect((await redeem(next.agent, next.code, await proof(key, next.agent))).status).toBe(200);
+    expect((await host(next.hostId))!.status).toBe("active");
+  });
+
+  it("revokes a redeemed session's host when a touch finds the session expired, and retires a waiting one", async () => {
+    const { agent, code, hostId } = await started();
+    const key = await generateKeypair();
+    expect((await redeem(agent, code, await proof(key, agent))).status).toBe(200);
+    // The session's expiry is the API's clock, so its read is given here as the person's touch would see it.
+    await settleSession(e, { status: "expired", plugin_host_id: hostId, key_thumbprint: key.publicKey.kid });
+    expect(await host(hostId)).toMatchObject({ status: "revoked", kid: null });
+    const waiting = await started();
+    await settleSession(e, { status: "expired", plugin_host_id: waiting.hostId, key_thumbprint: null });
+    expect(await host(waiting.hostId)).toMatchObject({ status: "rejected", enrollmentTokenHash: null });
+    // A live session's host is left alone, and a thumbprint that isn't the host's revokes nothing.
+    const live = await started();
+    const other = await generateKeypair();
+    expect((await redeem(live.agent, live.code, await proof(other, live.agent))).status).toBe(200);
+    await settleSession(e, { status: "redeemed", plugin_host_id: live.hostId, key_thumbprint: other.publicKey.kid });
+    await settleSession(e, { status: "expired", plugin_host_id: live.hostId, key_thumbprint: key.publicKey.kid });
+    expect((await host(live.hostId))!.status).toBe("active");
   });
 
   it("cancel ends the session and the plugin host that was waiting for it, so the code redeems nothing", async () => {
@@ -215,6 +269,8 @@ describe("Runner's redeem", () => {
       ["another session", await proof(key, other)],
       ["the plugin's default subject", await signHostJWT({ hostKeypair: key, audience: BASE })],
       ["another audience", await signHostJWT({ hostKeypair: key, audience: "https://elsewhere.test", issuer: agent } as never)],
+      ["the audience in a list", await signed({ host_public_key: key.publicKey, sub: agent, aud: [BASE] }, key)],
+      ["the audience among others", await signed({ host_public_key: key.publicKey, sub: agent, aud: [BASE, "https://elsewhere.test"] }, key)],
       ["longer than five minutes", await proof(key, agent, { expiresInSeconds: 600 })],
       ["a registration's agent key", await proof(key, agent, { agentPublicKey: attacker.publicKey })],
       ["someone else's key, signed by another", await signed({ host_public_key: key.publicKey, sub: agent, aud: BASE }, attacker)],
@@ -228,6 +284,25 @@ describe("Runner's redeem", () => {
     }
     // Nothing was bound or enrolled by any of them.
     expect((await host(hostId))!.status).toBe("pending_enrollment");
+  });
+
+  it("after enrolling, refuses unless exactly the session's host holds the key, revoking what holds it and canceling the session", async () => {
+    const { person, agent, code, hostId } = await started();
+    const key = await generateKeypair();
+    expect((await redeem(agent, code, await proof(key, agent))).status).toBe(200);
+    const held = { jwk: { kty: "OKP" as const, crv: "Ed25519" as const, x: key.publicKey.x as string }, thumbprint: key.publicKey.kid as string };
+    expect(await confirmEnrollment(e, held, hostId, agent)).toBeNull();
+    // A second host holding the same key, as a race of two sessions would leave it.
+    const rogue = `rogue${crypto.randomUUID().replaceAll("-", "")}`;
+    const now = new Date().toISOString();
+    await e.DB.prepare(`INSERT INTO agentHost (id, name, userId, defaultCapabilities, publicKey, kid, status, createdAt, updatedAt) VALUES (?, 'r', NULL, '[]', ?, ?, 'active', ?, ?)`).bind(rogue, JSON.stringify({ kty: "OKP", crv: "Ed25519", x: held.jwk.x, kid: held.thumbprint }), held.thumbprint, now, now).run();
+    const refused = await confirmEnrollment(e, held, hostId, agent);
+    expect(refused?.status).toBe(403);
+    expect(await host(hostId)).toMatchObject({ status: "revoked", kid: null });
+    expect(await host(rogue)).toMatchObject({ status: "revoked", kid: null });
+    const seen = await read(person, agent);
+    expect(seen.body.status).toBe("canceled");
+    expect((await activate(person, agent, held.thumbprint)).status).toBe(409);
   });
 
   it("refuses a key already enrolled on a host, and leaves the session and its host waiting", async () => {
@@ -269,10 +344,62 @@ describe("Runner's redeem", () => {
     expect(await redeem(agent, "x", null, ip)).toMatchObject({ status: 429, code: "rate_limited" });
     expect((await redeem(agent, "x", null, network())).status).toBe(401);
     const broken = { idFromName: (name: string) => name, get: () => ({ take: async () => { throw new Error("down"); } }) };
-    const refused = await redeemLimit(broken as never, "203.0.113.9");
+    const refused = await strictLimit(broken as never, "pairing-redeem:203.0.113.9", REDEEM_PER_MINUTE, 100);
     expect(refused?.status).toBe(503);
     const nonsense = { idFromName: (name: string) => name, get: () => ({ take: async () => Number.NaN }) };
-    expect((await redeemLimit(nonsense as never, "203.0.113.9"))?.status).toBe(503);
+    expect((await strictLimit(nonsense as never, "pairing-redeem:203.0.113.9", REDEEM_PER_MINUTE, 100))?.status).toBe(503);
+  });
+
+  it("logs IDs and fixed outcomes only on every refusal path", async () => {
+    const logged: string[] = [];
+    for (const level of ["log", "info", "warn", "error", "debug"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void logged.push(args.map(String).join(" ")));
+    const secrets: string[] = [];
+    const key = await generateKeypair();
+    secrets.push(key.publicKey.x as string, key.privateKey.d as string);
+    // Bad proof, bad body, wrong code, an enrolled key, a replay, a refused start, the limiters.
+    const one = await started();
+    secrets.push(one.code);
+    const bad = await proof(key, "agt_other");
+    secrets.push(bad);
+    await redeem(one.agent, one.code, bad);
+    const good = await proof(key, one.agent);
+    secrets.push(good);
+    await redeem(one.agent, 12, good);
+    const wrong = one.code.slice(0, -1) + (one.code.endsWith("A") ? "B" : "A");
+    secrets.push(wrong);
+    const proofWrong = await proof(key, one.agent);
+    secrets.push(proofWrong);
+    await redeem(one.agent, wrong, proofWrong);
+    const fine = await proof(key, one.agent);
+    secrets.push(fine);
+    expect((await redeem(one.agent, one.code, fine)).status).toBe(200);
+    await redeem(one.agent, one.code, fine);
+    const two = await started();
+    secrets.push(two.code);
+    const enrolled = await proof(key, two.agent);
+    secrets.push(enrolled);
+    expect((await redeem(two.agent, two.code, enrolled)).status).toBe(403);
+    const admin = await signUp();
+    const org = (await dash(admin, "POST", "/orgs", { name: "Logs" })).body.id as string;
+    const member = await signUp();
+    const invitation = (await dash(admin, "POST", `/orgs/${org}/invitations`, { role: "member" })).body.token;
+    await dash(member, "POST", "/org-invitations/accept", { token: invitation });
+    secrets.push(invitation);
+    expect((await start(member, {}, { "x-podster-org": org })).status).toBe(403);
+    const broken = { idFromName: (name: string) => name, get: () => ({ take: async () => { throw new Error("down"); } }) };
+    await strictLimit(broken as never, "pairing-redeem:203.0.113.1", 1, 1);
+    const all = logged.join("\n");
+    for (const secret of secrets) expect(all).not.toContain(secret);
+    expect(all).not.toMatch(/eyJ[A-Za-z0-9_-]{10,}/);
+    // Each pairing line is JSON naming only where, which agent, and a fixed outcome.
+    const ours = logged.filter((line) => line.includes("pairing."));
+    expect(ours.length).toBeGreaterThan(0);
+    for (const line of ours) {
+      const entry = JSON.parse(line);
+      expect(Object.keys(entry).every((k) => ["at", "agent", "outcome"].includes(k))).toBe(true);
+      expect(entry.outcome).toMatch(/^[a-z_]+$/);
+      if (entry.agent !== undefined) expect(entry.agent).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+    }
   });
 
   it("is only on the gateway's own path, for POST", async () => {

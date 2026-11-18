@@ -7,6 +7,7 @@ import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
+import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -101,8 +102,8 @@ for (const [path, item] of Object.entries(pairingRoutes.paths)) {
 }
 if (reachedPairing.slice().sort().join() !== PAIRING_OPERATIONS.slice().sort().join()) problems.push(`pairing.yaml: reaches ${reachedPairing.join()}, not each pairing operation once`);
 const gatewayIndex = readFileSync(new URL("../../apps/gateway/src/index.ts", import.meta.url), "utf8");
-if (!/allowedPassthrough[\s\S]*!path\.startsWith\("\/v1\/pairing"\)/.test(gatewayIndex)) problems.push("apps/gateway/src/index.ts: the passthrough must refuse /v1/pairing");
-for (const handler of ["handlePairing", "handlePairingRedeem"]) if (!gatewayIndex.includes(`${handler}(`)) problems.push(`apps/gateway/src/index.ts: ${handler} isn't called`);
+if (!passthroughRefuses(gatewayIndex, "/v1/pairing")) problems.push("apps/gateway/src/index.ts: the passthrough must refuse /v1/pairing");
+for (const handler of ["handlePairing", "handlePairingRedeem"]) if (!calls(gatewayIndex, handler)) problems.push(`apps/gateway/src/index.ts: ${handler} isn't called`);
 
 // The public view (ADR 0008) is closed at every level, so a field reaches the public surface only by being named here.
 const view = JSON.parse(readFileSync(new URL("public-workroom-view.schema.json", import.meta.url), "utf8"));

@@ -470,7 +470,7 @@ async function memberships(env: Env, person: string): Promise<Memberships> {
 }
 
 /** A signed-in person, acting in the organization they choose among their own. */
-async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
+export async function personIdentity(env: Env, request: Request, userId: string): Promise<Identity | null> {
   const person = personId(userId);
   const { orgs, adminOrgs, defaultOrg, orgSince } = await memberships(env, person);
   const org = request.headers.get("x-podster-org") ?? defaultOrg;

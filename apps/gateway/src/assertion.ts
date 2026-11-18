@@ -56,6 +56,19 @@ export async function mintPublicAssertion(jwkJson: string): Promise<string> {
  * and the SHA-256 of the exact body sent with it. It names no one. Only the webhook route mints it, after the provider's
  * signature checks out, and the API takes it on its one delivery route.
  */
+export async function mintProviderDelivery(provider: "github", delivery: string, bodySha256: string, jwkJson: string): Promise<string> {
+  const { key, kid } = await signingKey(jwkJson);
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ kind: "provider_delivery", provider, delivery, body_sha256: bodySha256 })
+    .setProtectedHeader({ alg: "EdDSA", kid })
+    .setIssuer("podster-gateway")
+    .setAudience("podster-api")
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60)
+    .setJti(crypto.randomUUID())
+    .sign(key);
+}
+
 /**
  * Runner's pairing redemption's assertion (M7 step 5; decision 222): `kind: "pairing_redeem"`, the session's agent, the
  * RFC 7638 thumbprint of the key whose proof the gateway verified, the proof's own ID and expiry, and the SHA-256 of the
@@ -66,19 +79,6 @@ export async function mintPairingRedeem(proof: { agentId: string; keyThumbprint:
   const { key, kid } = await signingKey(jwkJson);
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({ kind: "pairing_redeem", agent_id: proof.agentId, key_thumbprint: proof.keyThumbprint, proof_jti: proof.proofJti, proof_exp: proof.proofExp, body_sha256: proof.bodySha256 })
-    .setProtectedHeader({ alg: "EdDSA", kid })
-    .setIssuer("podster-gateway")
-    .setAudience("podster-api")
-    .setIssuedAt(now)
-    .setExpirationTime(now + 60)
-    .setJti(crypto.randomUUID())
-    .sign(key);
-}
-
-export async function mintProviderDelivery(provider: "github", delivery: string, bodySha256: string, jwkJson: string): Promise<string> {
-  const { key, kid } = await signingKey(jwkJson);
-  const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ kind: "provider_delivery", provider, delivery, body_sha256: bodySha256 })
     .setProtectedHeader({ alg: "EdDSA", kid })
     .setIssuer("podster-gateway")
     .setAudience("podster-api")

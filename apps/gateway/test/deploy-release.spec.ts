@@ -297,8 +297,10 @@ describe("an agent's link ends only by a disconnect, which moves its generation 
     // Ending links and credentials: the cleanup alone. Two exceptions, each keeping the link: renewing a link after its
     // person left and rejoined only moves its start later, which the departure read from the recorded start catches;
     // consent replaces an OAuth grant of the same link with a new one; and the scheduled clean-up removes plugin agents
-    // that nobody ever claimed, which have no link (`status = 'pending' AND userId IS NULL`).
-    expect(sites(source, ENDS_A_LINK)).toEqual(["approveConsent", "cleanUp", "renewLink", "revokeCredentials", "revokeCredentials", "revokeCredentials", "revokeCredentials"]);
+    // that nobody ever claimed, which have no link (`status = 'pending' AND userId IS NULL`); and a Runner pairing that ends
+    // (M7 step 5(b), rulings M1 and M2) revokes its plugin host and the agents on it that no link names (`revokeHost`).
+    expect(sites(source, ENDS_A_LINK)).toEqual(["approveConsent", "cleanUp", "renewLink", "revokeCredentials", "revokeCredentials", "revokeCredentials", "revokeCredentials", "revokeHost", "revokeHost"]);
+    expect(source).toMatch(/WHERE hostId = \? AND id NOT IN \(SELECT external_id FROM identity_link WHERE provider = 'agent_auth'\)/);
     expect(source).toMatch(/SELECT id FROM agent WHERE status = 'pending' AND userId IS NULL/);
     // The cleanup is called only by `handleConnection`: after the API's disconnect moved the generation, and before a
     // reconnect of an agent the API already shows disconnected.

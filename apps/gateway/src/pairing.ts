@@ -5,10 +5,13 @@
  * - **Start** (`POST /api/pairing`, the person's session, our own origin): the Agent Auth plugin's `createHost` with no
  *   key and Runner's fixed allowlist, then the API's `startPairing` with the organization the person acts in, that host
  *   and its one-time enrollment token as the code. None of those come from the client: its body may hold a `name` and
- *   nothing else. The agent's ID and the code go back in the response body, never in a URL. A refused start retires the
- *   host it made, so no usable token is left behind.
+ *   nothing else. Each person's starts are counted exactly before any host is made, failing closed. The agent's ID and
+ *   the code go back in the response body, never in a URL. A refused start retires the host it made, so no usable token
+ *   is left behind.
  * - **Read, cancel, activate** (`/api/pairing/{agent}…`): the person's own, through these handlers only. The dashboard's
- *   passthrough refuses every `/v1/pairing` path (`allowedPassthrough`). A cancel retires the plugin host still waiting.
+ *   passthrough refuses every `/v1/pairing` path (`allowedPassthrough`). Whenever one of them finds the session canceled,
+ *   expired or locked, the session's plugin host is ended: retired if it still waits, and revoked with its agents if it
+ *   holds the session's key (ruling M1). An expired session nobody touches keeps its host until (c)'s sweep.
  * - **Redeem** (`POST /pairing/{agent}/redeem`, the gateway's own host, no session): Runner's code, with a host JWT
  *   (`typ: host+jwt`, EdDSA) signed by the key it carries as `host_public_key`, naming the session's agent as its subject
  *   and the gateway as its audience, with its own `jti`, and expiring at most 300 seconds ahead. A per-network limiter
@@ -16,28 +19,37 @@
  *   own host took it on an earlier try. Then the API's `redeemPairing`, under the `pairing_redeem` assertion that names
  *   the session, the key's RFC 7638 thumbprint, the proof's ID and expiry and the SHA-256 of the exact body sent. Only
  *   after its 200 does the plugin's `enrollHost` bind the key to that session's host, so a retry after a lost answer,
- *   with a fresh proof, finds the host already holding the key and answers the same.
+ *   with a fresh proof, finds the host already holding the key and answers the same. After enrolling, exactly one host
+ *   must hold the key, the session's own; otherwise every host holding it is revoked, the session is canceled through
+ *   the API as its starter, and Runner is refused (ruling M2). A redeemed session whose host can't take the key is
+ *   canceled the same way, so it can never be activated.
  *
  * The plugin's own `/host/*` routes stay private. Logs carry IDs and fixed outcomes only: never a code, a proof or a key.
  */
 import { calculateJwkThumbprint, decodeJwt, decodeProtectedHeader, importJWK, jwtVerify } from "jose";
 import { mintPairingRedeem, type Identity } from "./assertion";
 import { capabilitiesFor } from "./capabilities";
-import { callApi, clientKey, createAuth, denied, json, rateLimited, withinLimit, type Env } from "./index";
+import { callApi, clientKey, createAuth, denied, json, personIdentity, rateLimited, withinLimit, type Env } from "./index";
 
 /**
- * What Runner's agent may be given (decision 230): what it uses, and never `merge_task`, `deploy_release` or anything that
- * makes or assigns work. A capability this deployment doesn't list, such as `get_repo_access` with managed repositories
- * off, is left out. *Proposed:* Runner's later steps may narrow it.
+ * The plugin host's default capabilities for Runner's agent (decision 230): what it uses, and never `merge_task`,
+ * `deploy_release` or anything that makes or assigns work. `get_repo_access` is withheld until step 10's repository path
+ * brings it back under its own rules (ruled 2026-11-18, L1): a contents-write token can commit straight to the default
+ * branch where rulesets aren't available, which amounts to merging. These are a budget, not a ceiling: anything more goes
+ * through the person's claim. A capability this deployment doesn't list is left out.
  */
 export const RUNNER_CAPABILITIES = [
   "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "read_inbox", "ack_inbox", "list_tasks", "get_task",
-  "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link", "list_assets", "get_repo_access",
+  "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link", "list_assets",
 ] as const;
 
 /** Redemptions one network may make, per minute and per day, counted exactly. */
 export const REDEEM_PER_MINUTE = 10;
 export const REDEEM_PER_DAY = 100;
+/** Starts one person may make, per minute and per day, counted exactly before any plugin host is made. The API's own
+ * count, 5 an hour, still decides; this only keeps refused starts from making host rows. */
+export const START_PER_MINUTE = 5;
+export const START_PER_DAY = 30;
 /** The furthest ahead a proof may expire, in seconds, as `podster_assertion::MAX_PROOF_LIFETIME_SECS` requires. */
 const MAX_PROOF_SECONDS = 300;
 const CLOCK_SKEW_SECONDS = 5;
@@ -59,7 +71,8 @@ const noStore = (response: Response) => {
   response.headers.set("cache-control", "no-store");
   return response;
 };
-const log = (agent: string, outcome: string) => console.log(JSON.stringify({ at: "pairing.redeem", agent, outcome }));
+const logAt = (at: string, agent: string | undefined, outcome: string) => console.log(JSON.stringify({ at, ...(agent === undefined ? {} : { agent }), outcome }));
+const log = (agent: string, outcome: string) => logAt("pairing.redeem", agent, outcome);
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const base64url = (bytes: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const digest = (value: string) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -116,18 +129,70 @@ const pluginTokenHash = async (code: string) => base64url(await digest(code));
 const retireHost = (env: Env, id: string) =>
   env.DB.prepare(`UPDATE agentHost SET status = 'rejected', enrollmentTokenHash = NULL, enrollmentTokenExpiresAt = NULL, updatedAt = ? WHERE id = ? AND status = 'pending_enrollment'`).bind(new Date().toISOString(), id).run();
 
+/**
+ * Revokes a plugin host that holds a key, and its unlinked agents, and takes the key off them, so neither can act and the
+ * key can pair again. Before step 5(c) no agent on a pairing host is linked; once (c) links one, ending it is (c)'s, through
+ * the disconnect. `holds` names the key: by thumbprint only (the session's own host, M1), or by its public part too (M2).
+ */
+async function revokeHost(env: Env, id: string, thumbprint: string, x?: string) {
+  const now = new Date().toISOString();
+  const holds = x === undefined ? `kid = ?` : `(kid = ? OR instr(publicKey, ?) > 0)`;
+  const key = x === undefined ? [thumbprint] : [thumbprint, `"x":"${x}"`];
+  await env.DB.batch([
+    // Never an agent Podster has linked: ending a link is the disconnect's alone, which moves the agent's generation.
+    env.DB.prepare(`UPDATE agent SET status = 'revoked', publicKey = '', kid = NULL, updatedAt = ? WHERE hostId = ? AND id NOT IN (SELECT external_id FROM identity_link WHERE provider = 'agent_auth') AND EXISTS (SELECT 1 FROM agentHost WHERE id = ? AND ${holds})`).bind(now, id, id, ...key),
+    env.DB.prepare(`UPDATE agentHost SET status = 'revoked', publicKey = '', kid = NULL, enrollmentTokenHash = NULL, enrollmentTokenExpiresAt = NULL, updatedAt = ? WHERE id = ? AND ${holds}`).bind(now, id, ...key),
+  ]);
+}
+
+/**
+ * What a person's touch does with the session it read (M1): a canceled, expired or locked session ends its plugin host.
+ * One still waiting is retired; one holding the session's thumbprint is revoked with its agents. A live session, or a
+ * host holding any other key, is left alone.
+ */
+export async function settleSession(env: Env, view: Record<string, unknown> | null) {
+  const hostId = view?.plugin_host_id;
+  if (typeof hostId !== "string" || !["canceled", "expired", "locked"].includes(view?.status as string)) return;
+  if (typeof view?.key_thumbprint === "string") await revokeHost(env, hostId, view.key_thumbprint);
+  await retireHost(env, hostId);
+}
+
+/** Cancels a session through the API as its starter, the person who owns its plugin host, so it can't be activated. */
+async function cancelAsStarter(env: Env, hostId: string, agent: string) {
+  const owner = await env.DB.prepare(`SELECT userId FROM agentHost WHERE id = ?`).bind(hostId).first<{ userId: string | null }>();
+  const starter = owner?.userId ? await personIdentity(env, new Request(env.BASE_URL), owner.userId) : null;
+  const canceled = starter ? await callApi(env, starter, { method: "POST", path: `/v1/pairing/${agent}/cancel`, body: "{}" }) : null;
+  await canceled?.body?.cancel();
+  if (canceled?.status !== 200) log(agent, "cancel_failed");
+}
+
+/**
+ * After `enrollHost` (M2): exactly one plugin host may hold the key, and it must be the session's. Otherwise every host
+ * holding it now is revoked with its agents (none did before this call, or the redeem was refused), the session's own host
+ * is ended, the session is canceled, and Runner is refused. Null when all is well.
+ */
+export async function confirmEnrollment(env: Env, key: HostKey, hostId: string, agent: string): Promise<Response | null> {
+  const holders = await hostsHolding(env, key);
+  if (holders.length === 1 && holders[0].id === hostId && holders[0].status === "active") return null;
+  log(agent, "enrollment_mismatch");
+  for (const holder of holders) await revokeHost(env, holder.id, key.thumbprint, key.jwk.x);
+  await retireHost(env, hostId);
+  await cancelAsStarter(env, hostId, agent);
+  return denied("not_allowed", 403);
+}
+
 type Counter = { idFromName(name: string): unknown; get(id: never): { take(perMinute: number, perDay: number): Promise<number> } };
 
-/** The per-network limit on redemptions, exact and failing closed: a counter that can't count refuses. */
-export async function redeemLimit(counter: Counter, network: string): Promise<Response | null> {
+/** An exact limit that fails closed: a counter that can't count refuses. `key` names the route and who is counted. */
+export async function strictLimit(counter: Counter, key: string, perMinute: number, perDay: number): Promise<Response | null> {
   let retryAfter: unknown;
   try {
-    retryAfter = await counter.get(counter.idFromName(`pairing-redeem:${network}`) as never).take(REDEEM_PER_MINUTE, REDEEM_PER_DAY);
+    retryAfter = await counter.get(counter.idFromName(key) as never).take(perMinute, perDay);
   } catch {
     retryAfter = undefined;
   }
   if (typeof retryAfter !== "number" || !Number.isSafeInteger(retryAfter) || retryAfter < 0) {
-    console.error(JSON.stringify({ at: "pairing.redeem", outcome: "limiter_unavailable" }));
+    console.error(JSON.stringify({ at: "pairing.limit", outcome: "limiter_unavailable" }));
     const refused = denied("temporarily_unavailable", 503);
     refused.headers.set("retry-after", "60");
     return refused;
@@ -184,6 +249,8 @@ async function verifiedProof(authorization: string | null, agent: string, audien
   }
   const now = Math.floor(Date.now() / 1000);
   const { jti, iat, exp } = payload;
+  // One audience, the gateway's, and not a list that also names it.
+  if (payload.aud !== audience) return invalid();
   if (typeof jti !== "string" || jti.length === 0 || new TextEncoder().encode(jti).length > MAX_PROOF_JTI_BYTES) return invalid();
   if (typeof iat !== "number" || typeof exp !== "number" || !Number.isSafeInteger(exp) || exp <= now || exp > now + MAX_PROOF_SECONDS || iat > now + CLOCK_SKEW_SECONDS || exp - iat > MAX_PROOF_SECONDS) return invalid();
   // One audience for one use: a proof that also carries an agent's key or a remote key URL reads as a registration.
@@ -205,7 +272,7 @@ export async function handlePairingRedeem(request: Request, url: URL, env: Env):
   if (!match) return null;
   if (request.method !== "POST") return denied("not_found", 404);
   const agent = match[1];
-  const limited = await redeemLimit(env.STRICT_COUNTER as unknown as Counter, clientKey(request));
+  const limited = await strictLimit(env.STRICT_COUNTER as unknown as Counter, `pairing-redeem:${clientKey(request)}`, REDEEM_PER_MINUTE, REDEEM_PER_DAY);
   if (limited) return limited;
 
   const proof = await verifiedProof(request.headers.get("authorization"), agent, new URL(env.BASE_URL).origin);
@@ -239,25 +306,26 @@ export async function handlePairingRedeem(request: Request, url: URL, env: Env):
 
   if (holding.length > 0) {
     // Only an earlier try of this session put the key there: its own host holds it, and nothing else does.
-    if (holding.every((row) => row.id === hostId && row.status === "active")) return noStore(json(answer));
+    if (holding.length === 1 && holding[0].id === hostId && holding[0].status === "active") return noStore(json(answer));
+    // Hosts that held the key before this call aren't this call's to revoke; the session just can't go on (M2).
     log(agent, "key_enrolled");
+    await cancelAsStarter(env, hostId, agent);
     return denied("not_allowed", 403);
   }
   if (waiting?.id !== hostId) {
     log(agent, "host_not_waiting");
+    await cancelAsStarter(env, hostId, agent);
     return denied("not_allowed", 403);
   }
   try {
-    const enrolled = await createAuth(env).api.enrollHost({ body: { token: code, public_key: { ...proof.key.jwk, kid: proof.key.thumbprint } } });
-    if ((enrolled as { hostId?: unknown })?.hostId !== hostId) {
-      log(agent, "enrolled_elsewhere");
-      return denied("upstream_unavailable", 502);
-    }
+    await createAuth(env).api.enrollHost({ body: { token: code, public_key: { ...proof.key.jwk, kid: proof.key.thumbprint } } });
   } catch {
     // The session holds the key; a retry with a fresh proof enrolls it.
     log(agent, "enroll_failed");
     return denied("upstream_unavailable", 502);
   }
+  const mismatch = await confirmEnrollment(env, proof.key, hostId, agent);
+  if (mismatch) return mismatch;
   log(agent, "redeemed");
   return noStore(json(answer));
 }
@@ -269,25 +337,31 @@ export async function handlePairing(request: Request, url: URL, env: Env, identi
   if (!match || identity.kind !== "person") return denied("not_found", 404);
   const [, agent, action] = match;
   if (!agent) return request.method === "POST" ? start(request, env, identity) : denied("not_found", 404);
-  if (!action) return request.method === "GET" ? relay(await callApi(env, identity, { method: "GET", path: `/v1/pairing/${agent}` })) : denied("not_found", 404);
+  if (!action) return request.method === "GET" ? relay(env, await callApi(env, identity, { method: "GET", path: `/v1/pairing/${agent}` })) : denied("not_found", 404);
   if (request.method !== "POST") return denied("not_found", 404);
   if (action === "cancel") {
     const response = await callApi(env, identity, { method: "POST", path: `/v1/pairing/${agent}/cancel`, body: "{}" });
     const answer = await response.json<Record<string, unknown>>().catch(() => null);
     if (!answer) return denied("upstream_unavailable", 502);
-    if (response.status === 200 && answer.status === "canceled" && typeof answer.plugin_host_id === "string") await retireHost(env, answer.plugin_host_id);
+    if (response.status === 200) await settleSession(env, answer);
     return noStore(json(answer, response.status));
   }
   const body = await objectBody(request, ["key_thumbprint"]);
   const thumbprint = body?.key_thumbprint;
   if (typeof thumbprint !== "string" || !BASE64URL_32.test(thumbprint)) return denied("invalid_argument", 400);
   if (!(await withinLimit(env.RL_SENSITIVE, `pairing-activate:${identity.id}`))) return rateLimited();
-  return relay(await callApi(env, identity, { method: "POST", path: `/v1/pairing/${agent}/activate`, body: JSON.stringify({ key_thumbprint: thumbprint }) }));
+  const activated = await callApi(env, identity, { method: "POST", path: `/v1/pairing/${agent}/activate`, body: JSON.stringify({ key_thumbprint: thumbprint }) });
+  // A session that can't be activated any more is read again, so its host ends with it (M1).
+  if (activated.status === 409) await settleSession(env, await (await callApi(env, identity, { method: "GET", path: `/v1/pairing/${agent}` })).json<Record<string, unknown>>().catch(() => null));
+  return relay(env, activated);
 }
 
-async function relay(response: Response) {
-  const answer = await response.json().catch(() => null);
-  return answer === null ? denied("upstream_unavailable", 502) : noStore(json(answer, response.status));
+/** Passes the API's answer on. A session it shows ended has its plugin host ended too (M1). */
+async function relay(env: Env, response: Response) {
+  const answer = await response.json<Record<string, unknown>>().catch(() => null);
+  if (answer === null) return denied("upstream_unavailable", 502);
+  if (response.status === 200) await settleSession(env, answer);
+  return noStore(json(answer, response.status));
 }
 
 /** `POST /api/pairing`: a new plugin host with no key, then the session, with nothing from the client but a name. */
@@ -296,7 +370,8 @@ async function start(request: Request, env: Env, identity: Identity & { kind: "p
   if (!body) return denied("invalid_argument", 400);
   const name = body.name === undefined ? undefined : typeof body.name === "string" ? body.name.trim() : null;
   if (name === null || (name !== undefined && (name.length === 0 || new TextEncoder().encode(name).length > MAX_NAME_BYTES))) return denied("invalid_argument", 400);
-  if (!(await withinLimit(env.RL_SENSITIVE, `pairing-start:${identity.id}`))) return rateLimited();
+  const limited = await strictLimit(env.STRICT_COUNTER as unknown as Counter, `pairing-start:${identity.id}`, START_PER_MINUTE, START_PER_DAY);
+  if (limited) return limited;
 
   const listed = new Set(capabilitiesFor(env).map((c) => c.name));
   const allowlist = RUNNER_CAPABILITIES.filter((c) => listed.has(c));

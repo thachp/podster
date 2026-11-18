@@ -6,10 +6,11 @@
 // string binding. A Worker secret of one of those names would switch a feature on, survive every deploy, and never be
 // seen by the checks that read apps/api/wrangler.jsonc.
 //
-// The names aren't listed by hand. A setting's name is the value of a `const NAME: &str = "NAME";` in a file under
-// apps/api/src that reads settings (calls `setting(` or `env.var(`), which is how every one of those modules names its
-// settings, and the form the API's own tests read them by. A name the source also reads with `env.secret(` is a
-// secret by design and is left out. Today that gives the release path's settings and PUBLIC_ROOMS,
+// The names aren't listed by hand. A setting's name is either the value of a `const NAME: &str = "NAME";` in a file
+// under apps/api/src that reads settings (calls `setting(` or `env.var(`), which is how the release path's modules name
+// their settings and the form the API's own tests read them by, or a string literal read directly, as
+// `env.var("NAME")` or `setting(env, "NAME")`. A name the source also reads with `env.secret(` is a secret by design
+// and is left out, and so is a name in FAILPOINTS_ONLY, below. Today that gives the release path's settings and PUBLIC_ROOMS,
 // MANAGED_REPOSITORIES and REPOSITORY_REQUESTERS, which staging sets in wrangler.jsonc and are the same kind of switch.
 //
 //   node scripts/setting-names.mjs names apps/api/src
@@ -24,6 +25,14 @@ import { join } from "node:path";
 
 const CONST = /const\s+([A-Z][A-Z0-9_]*)\s*:\s*&(?:'static\s+)?str\s*=\s*"([A-Z][A-Z0-9_]*)"\s*;/g;
 const READS_SETTING = /\bsetting\s*\(|\benv\s*\.\s*var\s*\(/;
+// Read directly by a string literal: `env.var("NAME")`, `setting(env, "NAME")` or `crate::setting(env, "NAME")`.
+const LITERAL_READ = /(?:\benv\s*\.\s*var|\bsetting)\s*\(\s*(?:[a-z_][a-z0-9_]*\s*,\s*)?"([A-Z][A-Z0-9_]*)"\s*\)/g;
+// Names read only in test builds, under `#[cfg(feature = "failpoints")]`, which staging never builds, so a secret of
+// that name changes nothing there. Kept by hand, since telling a `cfg` block's reach from text isn't reliable; a name
+// here that the source no longer reads is reported, so the list can't go stale.
+export const FAILPOINTS_ONLY = [
+  "TEST_STORE_RECONCILE_ACCOUNT", // app_stores.rs, StoreProvider::for_reconcile
+];
 const SECRET_LITERAL = /\benv\s*\.\s*secret\s*\(\s*"([A-Z][A-Z0-9_]*)"\s*\)/g;
 const SECRET_BY_NAME = /\benv\s*\.\s*secret\s*\(\s*([A-Z][A-Z0-9_]*)\s*\)/g;
 
@@ -44,10 +53,16 @@ export function settingNames(sources) {
     for (const match of text.matchAll(CONST)) consts.set(match[1], match[2]);
     for (const match of text.matchAll(SECRET_LITERAL)) secrets.add(match[1]);
     for (const match of text.matchAll(SECRET_BY_NAME)) if (consts.has(match[1])) secrets.add(consts.get(match[1]));
+    for (const match of text.matchAll(LITERAL_READ)) settings.add(match[1]);
     if (!READS_SETTING.test(text)) continue;
     for (const value of consts.values()) settings.add(value);
   }
   return [...settings].filter((name) => !secrets.has(name)).sort();
+}
+
+/** The names a deployed Worker must not hold as secrets: the setting names less those read only in test builds. */
+export function guardedNames(sources) {
+  return settingNames(sources).filter((name) => !FAILPOINTS_ONLY.includes(name));
 }
 
 /** The setting names under a source folder, or a reason they can't be had. */
@@ -58,7 +73,10 @@ export function settingNamesIn(dir) {
   } catch {
     return { problem: `${dir} can't be read, so which settings the API reads can't be told` };
   }
-  const names = settingNames(sources);
+  const all = settingNames(sources);
+  const stale = FAILPOINTS_ONLY.filter((name) => !all.includes(name));
+  if (stale.length > 0) return { problem: `FAILPOINTS_ONLY in scripts/setting-names.mjs names ${stale.join(", ")}, which ${dir} no longer reads as a setting` };
+  const names = all.filter((name) => !FAILPOINTS_ONLY.includes(name));
   if (names.length === 0) return { problem: `${dir} gives no setting names, so the pattern or the folder is wrong` };
   // A floor, so a broken pattern can't pass by finding the wrong few: the release switch is always among them.
   if (!names.includes("RELEASES")) return { problem: `${dir} gives no RELEASES among its setting names, so the pattern or the folder is wrong` };

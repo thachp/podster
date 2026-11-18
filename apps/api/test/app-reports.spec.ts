@@ -211,6 +211,41 @@ describe("a report that names an app (M6 step 9)", () => {
       expect((await queue())[0].id).toBe(later.body.id);
     });
   });
+
+  // M6-S02e: the run's test people aren't operators. Their refusal must be M4's, whatever the queue holds and whichever way
+  // release is switched: 403 with only an error, and nothing of any report or of step 9's keys.
+  it("answers anyone but an operator 403 not_allowed, with no report and neither of step 9's keys, switched on or off", async () => {
+    const reporter = person("s02e");
+    const made = await switchedOn(() => api(reporter, "POST", "/v1/app-reports", { address: "https://s02e-secret-host.example.com/", reason: "privacy", note: "s02e-note" }));
+    expect(made.status).toBe(200);
+    await internal("/report", { reporter: reporter.id, request_key: "s02e-room", request_hash: "h", handle: "s02e-room-handle", workspace_id: "ws_s02e", agent_id: "agt_s02e", reason: "abuse", note: "s02e-room-note" });
+    const askers: [string, Who][] = [
+      ["the reporter", reporter],
+      ["another person, who administers an organization", person("s02e-other")],
+      ["a person in no organization they administer", { id: "per_ar_s02e_plain", kind: "person", org: "org_ar" }],
+      ["an agent", AGENT],
+      ["an agent under an operator's ID", { id: OPERATOR.id, org: "org_podster" }],
+    ];
+    const refusals: [string, Awaited<ReturnType<typeof api>>][] = [];
+    for (const [label, who] of askers) {
+      refusals.push([`${label}, off`, await api(who, "GET", "/v1/moderation/reports")]);
+      refusals.push([`${label}, on`, await switchedOn(() => api(who, "GET", "/v1/moderation/reports"))]);
+      refusals.push([`${label}, on, by cursor`, await switchedOn(() => api(who, "GET", "/v1/moderation/reports?cursor=abc"))]);
+    }
+    for (const [label, refusal] of refusals) {
+      expect(refusal.status, label).toBe(403);
+      // An agent under a listed ID may be refused before the operator check, as an agent the gateway disconnected.
+      expect(["not_allowed", ...(label.startsWith("an agent under") ? ["agent_disconnected"] : [])], label).toContain(refusal.code);
+      expect(Object.keys(refusal.body), label).toEqual(["error"]);
+      for (const word of ["reports", "next_cursor", "kind", "host", "s02e-secret-host", "s02e-note", "s02e-room", made.body.id]) expect(refusal.text, `${label}: ${word}`).not.toContain(word);
+    }
+    // The operator, asking the same, sees both while switched on, and the room's alone, in M4's shape, while off.
+    const on = await switchedOn(() => queue());
+    expect(on.find((r) => r.id === made.body.id)).toMatchObject({ kind: "app", host: "s02e-secret-host.example.com" });
+    const off = await queue();
+    expect(off.find((r) => r.id === made.body.id)).toBeUndefined();
+    expect(Object.keys(off.find((r) => r.handle === "s02e-room-handle")).sort()).toEqual(ROOM_KEYS);
+  });
 });
 
 describe("the deployment's release-read budget (M6 step 9)", () => {

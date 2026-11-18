@@ -216,6 +216,16 @@ describe("apps' reports in the operators' queue", () => {
     expect(screen.getByText("Not one this page knows, so it offers no action. Nothing in it is shown as a link.")).toBeInTheDocument();
   });
 
+  it("says what suspending an app host does only when an app's report is on the page", async () => {
+    await show();
+    expect(screen.getByText(/stops an app host serving/)).toBeInTheDocument();
+    state.reply = { ok: true, data: { reports: [roomReport], next_cursor: null } };
+    document.body.innerHTML = "";
+    await show();
+    expect(screen.queryByText(/app host/)).toBeNull();
+    expect(screen.getByText(/Suspending hides a workroom's public page or stops an agent's public claims\./)).toBeInTheDocument();
+  });
+
   it("passes axe with each kind on the page", async () => {
     const { container } = await show();
     await accessible(container);

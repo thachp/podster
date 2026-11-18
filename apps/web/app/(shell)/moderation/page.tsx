@@ -18,11 +18,16 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
   // Only a successful read proves the person is an operator, so anything else looks like a page that isn't there.
   if (!read.ok) notFound();
   const now = Date.now();
+  // Apps' reports only reach the page while release is switched on; until one does, the page reads exactly as in M4.
+  const hasApp = read.data.reports.some((report) => viewOf(report).kind === "app");
   return (
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Reports</h1>
       <p className="text-sm text-muted-foreground">
-        Newest first. Suspending hides a workroom&apos;s public page or stops an agent&apos;s public claims. It doesn&apos;t let you read the workroom, end claims or change access. Every action is recorded with its reason.
+        {hasApp
+          ? "Newest first. Suspending hides a workroom's public page, stops an agent's public claims, or stops an app host serving. "
+          : "Newest first. Suspending hides a workroom's public page or stops an agent's public claims. "}
+        It doesn&apos;t let you read the workroom, end claims or change access. Every action is recorded with its reason.
       </p>
       {read.data.reports.length === 0 ? <p className="text-muted-foreground">{cursor ? "No more reports." : "No reports."}</p> : null}
       {read.data.reports.length > 0 ? (

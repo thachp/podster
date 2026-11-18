@@ -1133,60 +1133,6 @@
    "reason": "Holds a call until the caller gives up, so \"no answer in time\" never rests on this side's clock; 60 s is only an end for a request nobody aborts, and nobody reads what follows."
   },
   {
-   "file": "apps/api/test/fake-content.ts",
-   "rule": "sleep",
-   "where": "function takeFault",
-   "category": "T",
-   "owed": true,
-   "listed_at": "0295880",
-   "lines_when_listed": [
-    84
-   ],
-   "code": "if (fault.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));",
-   "reason": "A fault's scripted delay (delayMs): a test that scripts one may pass only because the delay is longer or shorter than the caller's wait. Owed: find the tests that script a delay and replace each with a hold the test releases (as the gates do)."
-  },
-  {
-   "file": "apps/api/test/fake-content.ts",
-   "rule": "sleep",
-   "where": "function fakeContent",
-   "category": "T",
-   "owed": true,
-   "listed_at": "0295880",
-   "lines_when_listed": [
-    145
-   ],
-   "code": "const fault = await takeFault(\"script.list\");",
-   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
-  },
-  {
-   "file": "apps/api/test/fake-content.ts",
-   "rule": "sleep",
-   "where": "function fakeContent",
-   "category": "T",
-   "owed": true,
-   "listed_at": "0295880",
-   "lines_when_listed": [
-    153
-   ],
-   "code": "const fault = await takeFault(\"entry.list\");",
-   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
-  },
-  {
-   "file": "apps/api/test/fake-content.ts",
-   "rule": "sleep",
-   "where": "function fakeContent",
-   "category": "T",
-   "owed": true,
-   "count": 2,
-   "listed_at": "0295880",
-   "lines_when_listed": [
-    172,
-    191
-   ],
-   "code": "const fault = await takeFault(op);",
-   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
-  },
-  {
    "file": "apps/api/test/fake-github.ts",
    "rule": "sleep",
    "where": "function fakeGithub",

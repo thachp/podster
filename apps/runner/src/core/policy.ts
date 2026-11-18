@@ -510,7 +510,7 @@ export type RunDecisionRecord = RunBinding & {
   expires_at: number;
   consumed: boolean;
 };
-export type IssueRefusal = "refused" | "owner_approval_needed" | "binding_invalid" | "clock_invalid";
+export type IssueRefusal = "refused" | "owner_approval_needed" | "reservation_excluded" | "binding_invalid" | "clock_invalid";
 export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "reservation_mismatch" | "binding_changed" | "facts_changed";
 
 const BINDING_KEYS = ["task_id", "workspace_id", "task_version", "input_hash", "repository_id", "base_commit"] as const;
@@ -559,6 +559,8 @@ export function issueRunDecision(decision: Decision, binding: RunBinding, now: n
     const o = copy(opts);
     const approved = isObj(o) && own(o, "approved_by_owner") === true;
     if (d.outcome === "ask" && !approved) return { ok: false, reason: "owner_approval_needed" };
+    // No own reservation exists before issue, so an evaluation that left one out skipped counting other runs.
+    if (d.excluded_reservation_micro_usd !== 0) return { ok: false, reason: "reservation_excluded" };
     if (!isCount(now)) return { ok: false, reason: "clock_invalid" };
     const b = bindingOf(copy(binding));
     if (!b || b.task_id !== d.task_id || b.workspace_id !== d.workspace_id) return { ok: false, reason: "binding_invalid" };

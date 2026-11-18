@@ -680,6 +680,16 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
     expect(decide({ budget: { ...tight, own_reservation_micro_usd: -1 } })).toMatchObject({ outcome: "refuse", reason: "budget_invalid" });
   });
 
+  it("L5, at issue: a decision that left out any reservation is never issued, since no own reservation exists yet", () => {
+    const tight = { spent_today_micro_usd: 4_000_000, reserved_micro_usd: 6_000_000 };
+    const skipped = decide({ budget: { ...tight, own_reservation_micro_usd: 6_000_000 } });
+    expect(skipped.outcome).toBe("run");
+    expect(issueRunDecision(skipped, binding, NOW)).toEqual({ ok: false, reason: "reservation_excluded" });
+    const asked = decide({ config: config([room({ mode: "ask" })]), budget: { ...tight, own_reservation_micro_usd: 2_000_000 } });
+    expect(issueRunDecision(asked, binding, NOW, { approved_by_owner: true })).toEqual({ ok: false, reason: "reservation_excluded" });
+    expect(issueRunDecision(decide({ budget: { spent_today_micro_usd: 4_000_000, reserved_micro_usd: 4_000_000 } }), binding, NOW).ok).toBe(true);
+  });
+
   it("L5, bound 2026-11-18: consume refuses a fresh evaluation that left out any reservation but this decision's own", () => {
     const tight = { spent_today_micro_usd: 4_000_000, reserved_micro_usd: 6_000_000 };
     const record = issue(decide());

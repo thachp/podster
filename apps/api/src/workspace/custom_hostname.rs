@@ -232,12 +232,17 @@ impl Workspace {
             HostnameProofStep::Go => {}
             HostnameProofStep::Wait => {
                 console_error!("hostname: the custom hostname waits on what it couldn't read: room={} request={} code=standing_unknown", room, id);
+                // A recheck that is due still counts, with no look made, so a claim whose facts stay unread still
+                // lapses after seven days with no match (8d, the deep review of PR #444, M1).
+                if self.recheck_if_due(sql, row, now, false).await? {
+                    return Ok(());
+                }
                 return self.tried(sql, &id, now);
             }
             HostnameProofStep::End(denial) => return end(denial.code()),
         }
         // The challenge's daily recheck (8d), when its turn has come, after the room's facts were read again.
-        if self.recheck_if_due(sql, row, now).await? {
+        if self.recheck_if_due(sql, row, now, true).await? {
             return Ok(());
         }
         let create = match claimed_step(phase.create_sent) {

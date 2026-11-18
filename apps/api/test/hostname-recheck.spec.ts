@@ -270,6 +270,24 @@ describe("the daily recheck of a committed claim (M6 step 8d)", () => {
     expect(await rechecked(r)).toBeNull();
   });
 
+  it("still lapses a claim whose room's facts can't be read: no look is made, and seven days with no match end it", async () => {
+    const { r, name, proved } = await claimed("org_rc_unread");
+    const before = await looks(name);
+    // The challenge is taken down, and the organization's release switch, as the room applied it, can't be read: held
+    // at a generation its last take equals, which no set makes.
+    await answer(name, null);
+    await inRoom(r.room, (sql) => sql.exec("UPDATE release_switch_applied SET granted = 1, generation = 1, last_take = 1"));
+    for (let day = 1; day <= 6; day++) {
+      await passAt(r, proved + day * DAY);
+      expect(await requestRow(r), `day ${day}`).toMatchObject({ state: "claimed", definite_no_since: null });
+      expect(await rechecked(r)).toBe(proved + day * DAY);
+    }
+    await passAt(r, proved + 7 * DAY);
+    expect(await requestRow(r)).toMatchObject({ state: "ending", end_reason: "hostname_proof_lapsed" });
+    // Nothing was looked up while the room's facts couldn't be read.
+    expect(await looks(name)).toBe(before);
+  });
+
   it("makes the job due for the recheck on its own, when the custom hostname's own read isn't due for days", async () => {
     const { r, name, proved } = await claimed("org_rc_due");
     const before = await looks(name);

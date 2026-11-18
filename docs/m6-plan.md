@@ -2133,6 +2133,8 @@ S5 was split in two. Rule 3(b) is a gate item, so it went first. The reconcile o
 - **The migration** (room schema step 54) adds `hostname_recheck`, one row a request, holding when it last looked. A table, not a column, so the step runs again safely; the tests that peel steps off now peel one more. Forward-only. The last match is `proved_at`, and the first no since is `definite_no_since`, both there since step 2.
 - **The contract:** `requestAppHostname`'s description says the challenge must stay published and how a claim ends on the recheck. No new code or route.
 - **Logs** carry the room's and the request's IDs and a code: `recheck_match`, `recheck_definite_no`, `resolver_no_answer`, and a look not made by its cause. Never a hostname or a value.
+- *2026-11-18, the deep review of PR #444, M1, fixed:* a room whose own facts can't be read (its applied release switch unreadable among them) used to skip the recheck, so its claim never lapsed. Now a due recheck still counts there, with no look made, recorded as no answer by `standing_unknown`, so seven days with no match end it. Tested with an unreadable switch row and a removed challenge.
+- *2026-11-18, the deep review of PR #444, L1:* "two such answers in a row" (ADR 0010, step 7) means two definite noes with no match between them; an answer of no answer between them doesn't reset the count. Amended in the ADR for the owner to review.
 
 **Open questions, each with the recommended answer:**
 
@@ -2147,6 +2149,11 @@ S5 was split in two. Rule 3(b) is a gate item, so it went first. The reconcile o
 - **The DNS-over-HTTPS answer's `Question` section** isn't read; a resolver that answered for another name would have to put that name's records under the asked name's chain to count.
 - **`HOSTNAME_CLAIMS_COMPLETE` stays false.** With 8b and 8d merged it may flip, in its own PR, as [the gate's list](#the-gate-on-the-release-path) says.
 - **No staging run;** nothing deploys.
+- *2026-11-18, from the deep review of PR #444:*
+  - **L2:** a resolver that shortens a CNAME chain and still answers `NOERROR` would read as a definite no. A chain over 8 links and a DNAME fail closed: no answer, so the claim lapses in 7 days. To be said at mapping.
+  - **L3:** a resolver's cache can carry a former owner's TXT past its removal, up to the resolver's longest TTL. To be measured with the resolver asked from a Worker.
+  - **I1:** an operator alert on a recheck that keeps logging `hostname_resolver_missing` or `hostname_claims_incomplete`, before production.
+  - **I2:** a wildcard CNAME to a third party's target (open question 2): accepted, and to be stated at mapping.
 
 #### The gate on the release path
 

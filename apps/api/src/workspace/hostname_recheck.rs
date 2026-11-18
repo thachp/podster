@@ -12,9 +12,9 @@
 //! custom hostname is deleted at Cloudflare and read until gone, the applier confirms the entry gone, and only then is
 //! the claim freed.
 //!
-//! **A look needs the gate on claims open and a resolver** (`no_look`), as the proof job's do; without either the look
-//! is recorded as no answer, by its code, so it never ends a claim quickly and a claim nobody can look at ends after
-//! seven days. **It doesn't wait on the release switches:** it only keeps or takes down, and switching release off is
+//! **A look needs the gate on claims open, a resolver and the room's own facts read** (`no_look`); without any of them
+//! the look is recorded as no answer, by its code (an unread fact's is `standing_unknown`), so it never ends a claim
+//! quickly and a claim nobody can look at ends after seven days. **It doesn't wait on the release switches:** it only keeps or takes down, and switching release off is
 //! an unpublish, which ends the claim on its own.
 //!
 //! Logs carry the room's and the request's IDs and a code, never a hostname or a challenge's value.
@@ -48,7 +48,15 @@ pub(super) fn recheck_due_at(sql: &SqlStorage, row: &Value) -> R<i64> {
 
 impl Workspace {
     /// One recheck of the committed claim in `row`, if its turn has come: whether it ran, so the pass ends there.
-    pub(super) async fn recheck_if_due(&self, sql: &SqlStorage, row: &Value, now: i64) -> R<bool> {
+    /// `room_read` is false when the room's own facts couldn't be read: then no look is made, and the recheck is
+    /// recorded as no answer, by `standing_unknown`, so the seven days still run (the deep review of PR #444, M1).
+    pub(super) async fn recheck_if_due(
+        &self,
+        sql: &SqlStorage,
+        row: &Value,
+        now: i64,
+        room_read: bool,
+    ) -> R<bool> {
         if recheck_due_at(sql, row)? > now {
             return Ok(false);
         }
@@ -59,10 +67,12 @@ impl Workspace {
             .and_then(|row| text(&row["id"]))
             .unwrap_or_default();
         let resolver = super::hostname::resolver(sql, &self.env);
-        let outcome = match (
-            no_look(self.hostname_claims_open(), resolver.is_some()),
-            resolver,
-        ) {
+        let cause = if room_read {
+            no_look(self.hostname_claims_open(), resolver.is_some())
+        } else {
+            Some("standing_unknown")
+        };
+        let outcome = match (cause, resolver) {
             (None, Some(resolver)) => {
                 let expected = text(&row["challenge"]).unwrap_or_default();
                 resolver

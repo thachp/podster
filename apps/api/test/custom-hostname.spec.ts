@@ -524,6 +524,17 @@ describe("the gate on claims, open while the release path isn't complete (M6 ste
     expect(await providerRow(r)).toMatchObject({ create_sent_at: null, provider_id: null });
     // Nothing routes: no custom host is made without the custom hostname at Cloudflare reading active.
     expect(await all(r.room, "SELECT host FROM serve_state WHERE kind = 'custom'")).toEqual([]);
+    // The create's gate alone holds routing back, apart from the content provider being off: with a content provider
+    // configured and the name already reading active at Cloudflare, the room still creates and reads nothing, so no
+    // custom host is made and the claim stays as it was.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    await setAtCloudflare(name, "active");
+    for (let i = 0; i < 3; i++) await step(r);
+    expect((await cloudflare(name)).calls).toEqual([]);
+    expect(await providerRow(r)).toMatchObject({ create_sent_at: null, provider_id: null, provider_status: null });
+    expect(await all(r.room, "SELECT host FROM serve_state WHERE kind = 'custom'")).toEqual([]);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
     // The gate on claims is one constant, true, set in one place; the release path's stays false.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = true;");

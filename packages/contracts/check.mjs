@@ -172,11 +172,11 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // S4 of the store plan built deleting an app's data, the owner's (which the room itself answers) and an operator's.
     const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "deleteAppData", "deleteAppDataAsOperator"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
-    // Asking for a custom hostname is built but gated: until claims are complete (8b and 8d), a deployment with release
-    // and a provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a
+    // Asking for a custom hostname is built but gated: while the release path isn't complete, a deployment with release
+    // and a content provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a
     // release, and approving one, until the release path is complete (`RELEASE_PATH_COMPLETE`). Declining only takes
     // away and passes no gate, so its summary may not name `release_not_available` at all.
-    const gates = { requestAppHostname: "**Until custom hostname claims are complete**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**", rollbackRelease: "**Until the release path is complete**" };
+    const gates = { requestAppHostname: "**While the release path isn't complete,**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**", rollbackRelease: "**Until the release path is complete**" };
     const gated = id in gates;
     if (gated && !found.op.summary?.includes(gates[id])) problems.push(`${id}: its summary must say when its gate answers \`release_not_available\``);
     if (built ? found.op.summary?.includes("Not built") || (!gated && found.op.summary?.includes("`release_not_available`")) : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);

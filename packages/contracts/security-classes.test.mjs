@@ -22,6 +22,13 @@ check(run({ ...good, deliver: [{ providerDelivery: [] }, { pairingRedeem: [] }] 
 check(run({ ...good, other: [{ pairingRedeem: [] }] }).some((p) => p.startsWith("other:")), "an operation outside the class that takes its scheme is a problem");
 check(run({ ...good, other: [{ assertion: [] }, { providerDelivery: [] }] }).some((p) => p.startsWith("other:")), "taking a class's scheme as one alternative outside the class is a problem");
 check(run({ deliver: good.deliver }).some((p) => p.startsWith("redeem:")), "a class naming an operation that doesn't exist is a problem");
+// The file's own `security:` default reaches every operation that lists none, so it may name no class's scheme.
+const withDefault = (security) => exclusiveSchemeProblems(ops(good), classes, security);
+check(withDefault([{ assertion: [] }]).length === 0, "a file default of the identity assertion passes");
+check(withDefault(undefined).length === 0, "no file default passes");
+check(withDefault([{ pairingRedeem: [] }]).some((p) => p.startsWith("security:")), "a file default naming the pairing scheme is a problem");
+check(withDefault([{ assertion: [] }, { providerDelivery: [] }]).some((p) => p.startsWith("security:")), "a file default offering a class's scheme as one alternative is a problem");
+check(withDefault([{ assertion: [], pairingRedeem: [] }]).some((p) => p.startsWith("security:")), "a file default pairing a class's scheme with another is a problem");
 
 if (failed) { console.error(`security-classes selftest: ${failed} failed`); process.exit(1); }
 console.log("security-classes selftest passed");

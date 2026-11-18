@@ -59,7 +59,7 @@ for (const id of pairingOnly) {
 problems.push(...exclusiveSchemeProblems(operations, [
   { name: "provider_only", ids: providerOnly, scheme: "providerDelivery" },
   { name: "pairing_only", ids: pairingOnly, scheme: "pairingRedeem" },
-]));
+], api.security));
 for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id) && !providerOnly.includes(id) && !pairingOnly.includes(id)) problems.push(`${id}: operation with no capability`);
 // A person's pairing operations are person_only.
 for (const id of ["startPairing", "getPairing", "activatePairing", "cancelPairing"]) if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);

@@ -6,6 +6,7 @@ import { parse } from "yaml";
 import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
+import { schemaShapeProblems } from "./schema-shape.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
 import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
 
@@ -223,6 +224,12 @@ if (provenance?.additionalProperties !== false || provenance?.properties?.inputs
 if (provenance?.properties?.inputs?.items?.properties?.input?.enum?.join() !== core.promptInputs.join()) problems.push(`TaskProvenance.inputs.input: must be exactly core's ${core.promptInputs.join()}`);
 if (provenance?.properties?.room_visibility?.enum?.join() !== "private,public") problems.push("TaskProvenance.room_visibility: must be exactly private,public");
 if (api.components.responses.TaskDetail?.content?.["application/json"]?.schema?.properties?.provenance?.$ref !== "#/components/schemas/TaskProvenance") problems.push("TaskDetail.provenance: must be the TaskProvenance schema");
+// Every schema in each contract file keeps its shape: no keyword slipped under `properties` and no `items` left null, the
+// marks of a mis-indented YAML block (TaskProvenance, #443). schema-shape.test.mjs shows it finds both.
+for (const file of ["openapi.yaml", "capabilities.yaml", "organizations.yaml", "pairing.yaml", "public-workroom-view.schema.json"]) {
+  const text = readFileSync(new URL(file, import.meta.url), "utf8");
+  problems.push(...schemaShapeProblems(file.endsWith(".json") ? JSON.parse(text) : parse(text)).map((problem) => `${file} ${problem}`));
+}
 // No command may take a provenance or an author, however deep its schema puts the name (F5), and only the room's recorded
 // command paths write a task's prompt text or its provenance (F6). provenance-checks.test.mjs shows each finds what it must.
 problems.push(...provenanceInRequests(api));

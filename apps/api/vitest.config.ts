@@ -1,6 +1,7 @@
 import { coreSets } from "../../packages/contracts/core-sets.mjs";
 import { generateKeyPairSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { CONTENT_PARTITIONS, type ContentPartition, FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
@@ -140,7 +141,7 @@ async function independent(base: string | undefined, request: Request, url: URL,
   return fetch(`${base}${url.pathname}`, { method: request.method, headers, body: request.method === "GET" ? undefined : body, redirect: "manual" });
 }
 
-/** Each `path` and `method` in the contract, read line by line, since this package has no YAML parser. */
+/** Each `path` and `method` in the contract, read line by line, as the route-list test has always read it. */
 function contractRoutes() {
   const text = readFileSync(new URL("../../packages/contracts/openapi.yaml", import.meta.url), "utf8");
   const routes: { path: string; method: string; operation: string }[] = [];
@@ -276,6 +277,8 @@ const pool = (partition: ContentPartition) =>
           // The closed sets crates/core defines for release (M6 step 2), read by the contract package's own reader, so a
           // test can show the room's columns take exactly those.
           TEST_CORE_SETS: JSON.stringify(coreSets(new URL("../../", import.meta.url))),
+          // The contract's schemas, parsed, so provenance.spec.ts can hold the room's real answer to `TaskProvenance`.
+          TEST_CONTRACT_SCHEMAS: JSON.stringify({ components: { schemas: parseYaml(readFileSync(new URL("../../packages/contracts/openapi.yaml", import.meta.url), "utf8")).components.schemas } }),
           TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
         },
       },

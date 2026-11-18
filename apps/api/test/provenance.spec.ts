@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { validate } from "../../../packages/contracts/schema-shape.mjs";
 import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 /**
@@ -89,9 +90,18 @@ const create = async (who: Who, tasks: string, body: object) => {
   expect(r.status, JSON.stringify(r.body)).toBe(200);
   return r.body;
 };
+/** The contract's schemas, parsed from openapi.yaml by the test config. Every provenance a read here returns holds to
+ * `TaskProvenance`, so the contract describes what the room answers. */
+const CONTRACT = JSON.parse(BINDINGS.TEST_CONTRACT_SCHEMAS);
+let heldToContract = 0;
+afterAll(() => expect(heldToContract, "no read checked a provenance against the contract").toBeGreaterThan(0));
 const read = async (who: Who, path: string) => {
   const r = await api(who, "GET", path);
   expect(r.status, JSON.stringify(r.body)).toBe(200);
+  if (r.body?.provenance !== undefined) {
+    expect(validate({ $ref: "#/components/schemas/TaskProvenance" }, r.body.provenance, CONTRACT)).toEqual([]);
+    heldToContract++;
+  }
   return r.body;
 };
 /** Takes someone out of the room, as its owner does. */

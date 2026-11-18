@@ -224,6 +224,11 @@ function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
           if (body.length < 20000) body += c;
         });
         res.on("end", () => {
+          let worker;
+          try {
+            const parsed = JSON.parse(body);
+            if (parsed?.spike === "m6-hostnames-route") worker = { ...parsed, doh: undefined };
+          } catch {}
           const code = body.match(/error code: ?(\d{3,4})/i)?.[1] ?? body.match(/Error (\d{4})/)?.[1] ?? null;
           const title = body.match(/<title>([^<]{0,120})<\/title>/i)?.[1]?.trim() ?? null;
           resolve({
@@ -237,7 +242,8 @@ function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
             cert_san: cert.subjectaltname ?? null,
             cert_issuer: cert.issuer?.O ?? null,
             cert_names_sni: authorized,
-            body_head: code || title ? undefined : body.slice(0, 80),
+            body_head: code || title || worker ? undefined : body.slice(0, 80),
+            worker,
           });
         });
       },
@@ -491,6 +497,37 @@ async function cleanup() {
   });
 }
 
+// ---- the test Worker routed */* on the zone (deployed and deleted by make-route-worker.sh) ----
+
+async function routeWorker() {
+  const keyFile = process.env.SPIKE_ROUTE_KEY_FILE;
+  if (!keyFile) throw new Error("set SPIKE_ROUTE_KEY_FILE to the key file make-route-worker.sh wrote");
+  const key = readFileSync(keyFile, "utf8").trim();
+  if (!/^[0-9a-f]{48}$/.test(key)) throw new Error("the key file doesn't hold one key");
+  secrets.add(key);
+  await probes("worker-no-hostname");
+  // The resolver from inside the Worker, asked through the fallback origin's own name.
+  const doh = await fetch(`https://${FALLBACK}/doh/${key}`);
+  const body = await doh.json().catch(() => null);
+  record("worker-doh-call", { http: doh.status, colo: body?.colo, url_host: body?.url_host });
+  for (const o of body?.doh ?? []) record("doh-worker", { resolver: o.resolver, name: o.name, type: o.type, http: o.http, ctype: o.ctype, ms: o.ms, error: o.error, head: o.head, answer: dohShape(o.json) });
+  const h = await create(MAIN);
+  if (!h) return;
+  const start = Date.now();
+  let g = null;
+  while (Date.now() - start < 15 * 60_000) {
+    g = await getById(h.id);
+    record("status-worker", { s: Math.round((Date.now() - start) / 1000), status: g.result?.status, ssl: g.result?.ssl?.status, verification_errors: g.result?.verification_errors });
+    if (g.result?.status === "active" && g.result?.ssl?.status === "active") break;
+    await sleep(15_000);
+  }
+  await probes("worker-active");
+  await probes("worker-active");
+  await remove(h.id, MAIN);
+  record("reads-gone", { hostname: MAIN, ...(await waitList(MAIN, false, 15 * 60_000)) });
+  await probes("worker-hostname-deleted");
+}
+
 const which = process.argv[2];
 await findZone();
 try {
@@ -499,6 +536,7 @@ try {
     await dohLocal();
     await dohWorker();
   } else if (which === "probes") await probes("now");
+  else if (which === "worker") await routeWorker();
   else if (which === "validate") {
     // After the owner's record on opster.dev: one hostname, its status every 30 s for up to 15 minutes, the
     // edge at each change of status and at the end, then the delete.

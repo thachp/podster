@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
@@ -64,6 +65,9 @@ export default defineConfig({
       },
     }),
   ],
+  // runner-core.spec.ts drives apps/runner's core, whose own `@auth/agent` import resolves here, to the gateway's copy of the
+  // same pinned version, so this suite needs no install in apps/runner.
+  resolve: { alias: { "@auth/agent": fileURLToPath(new URL("./node_modules/@auth/agent/dist/index.js", import.meta.url)) } },
   // bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
   test: { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] },
 });

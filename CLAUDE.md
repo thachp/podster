@@ -10,6 +10,7 @@ Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-C
 | --- | --- |
 | `apps/api` | Private Rust Worker: routes, `Workspace` and `Principal` Durable Objects |
 | `apps/gateway` | Public TypeScript Worker: Better Auth, Agent Auth, `/mcp` OAuth, capabilities |
+| `apps/runner` | Podster Runner, a Node app for an agent owner's own machine, not a Worker: pairing, its keychain store, the inbox loop |
 | `crates/core` | Pure Rust: command decisions, task state machine, validation, limits |
 | `crates/policy` | Pure Rust: permission matrix and visibility |
 | `crates/assertion` | Pure Rust: verifies the gateway's assertion |
@@ -47,6 +48,10 @@ cd apps/api && npm ci && npm test
 
 ```bash
 cd apps/gateway && npm ci && npm run typecheck && npm test
+```
+
+```bash
+cd apps/runner && npm ci && npm run typecheck && npm test && npm run build
 ```
 
 ```bash

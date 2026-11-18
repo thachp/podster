@@ -1130,15 +1130,15 @@ components:
                 minItems: 1
                 description: "Everyone who ever wrote this input, in the order they first did, once for each organization they wrote it under; none is removed while the task exists. When who wrote the present words isn't recorded (words changed by a path that records no author, a change request whose record isn't the latest, or a task made before this was recorded), an unknown author with a null `id` is listed. Once a write finds such words, the unknown author stays for good, even after later recorded edits."
                 items:
-              type: object
-              additionalProperties: false
-              required: [id, org, external, active, written_at]
-              properties:
-                id: { type: [string, "null"], description: "Null for an unknown author: who wrote the present words isn't recorded." }
-                org: { type: [string, "null"], description: "The organization the room held them in when they wrote it. Null if none was recorded." }
-                external: { type: boolean, description: "Compares organizations only: true unless `org` is the reader's organization. Always true for an unknown author." }
-                active: { type: boolean, description: "Whether they are, as the room stands now, a current participant held in `org`. False once they leave, are revoked or are held in another organization, and for an unknown author. A false here makes the input `external`; the server authorizes nothing from it." }
-                written_at: { type: [integer, "null"], description: "When they last wrote it, in milliseconds. Null for an unknown author." }
+                  type: object
+                  additionalProperties: false
+                  required: [id, org, external, active, written_at]
+                  properties:
+                    id: { type: [string, "null"], description: "Null for an unknown author: who wrote the present words isn't recorded." }
+                    org: { type: [string, "null"], description: "The organization the room held them in when they wrote it. Null if none was recorded." }
+                    external: { type: boolean, description: "Compares organizations only: true unless `org` is the reader's organization. Always true for an unknown author." }
+                    active: { type: boolean, description: "Whether they are, as the room stands now, a current participant held in `org`. False once they leave, are revoked or are held in another organization, and for an unknown author. A false here makes the input `external`; the server authorizes nothing from it." }
+                    written_at: { type: [integer, "null"], description: "When they last wrote it, in milliseconds. Null for an unknown author." }
               event_id: { type: [string, "null"], description: "For `change_request` only: the ID of the latest `task.changes_requested` history entry, whose `reason` is the request." }
     Task:
       type: object

@@ -1,0 +1,104 @@
+/**
+ * Runner's record of offers, as pure functions over its state: what an inbox page and a task listing change. No I/O.
+ *
+ * Inbox events and listed tasks are Podster's content. Only IDs, a sequence, an event type, a status and a version are
+ * taken from them, each checked for its shape; a task's title, instructions and everything else it says are dropped here,
+ * so they never reach the record or a log.
+ */
+import { isId, type Offer, type RunnerState } from "./state.js";
+
+/** Most offers kept. Past this, those least recently changed are dropped first. */
+export const OFFERS_KEPT = 5000;
+const TYPE = /^[a-z][a-z0-9_.]{0,63}$/;
+/** Event types that put a task in the record. Any other event only updates a task already there. */
+const STARTS = new Set(["task.offered", "task.changes_requested"]);
+/** Task statuses the listing reports for a task Runner may have to act on. */
+export const LISTED = new Set(["offered", "accepted"]);
+
+export type InboxEvent = { seq: number; type: string; workspace_id: string; task_id: string | null };
+
+/** An inbox page's events, each checked. One with a bad sequence makes the page unusable; any other bad field drops only its IDs. */
+export function readEvents(page: unknown): { events: InboxEvent[]; dropped: number } | null {
+  if (!page || typeof page !== "object") return null;
+  const { events, dropped } = page as Record<string, unknown>;
+  if (!Array.isArray(events)) return null;
+  const read: InboxEvent[] = [];
+  for (const event of events) {
+    if (!event || typeof event !== "object") return null;
+    const { seq, type, workspace_id, task_id } = event as Record<string, unknown>;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) return null;
+    read.push({
+      seq,
+      type: typeof type === "string" && TYPE.test(type) ? type : "unknown",
+      workspace_id: isId(workspace_id) ? workspace_id : "",
+      task_id: isId(task_id) ? task_id : null,
+    });
+  }
+  return { events: read, dropped: typeof dropped === "number" && Number.isSafeInteger(dropped) && dropped >= 0 ? dropped : 0 };
+}
+
+const key = (workspace: string, task: string) => `${workspace}/${task}`;
+
+function bounded(offers: Record<string, Offer>): Record<string, Offer> {
+  const entries = Object.entries(offers);
+  if (entries.length <= OFFERS_KEPT) return offers;
+  entries.sort(([, a], [, b]) => b.updated_at - a.updated_at);
+  return Object.fromEntries(entries.slice(0, OFFERS_KEPT));
+}
+
+/**
+ * The record after an inbox page: each event at or below the cursor is skipped, each offer recorded, and the cursor moved
+ * to the newest sequence. The caller saves this before it acknowledges anything.
+ */
+export function applyEvents(state: RunnerState, events: InboxEvent[], now: number): RunnerState {
+  const offers = { ...state.offers };
+  let cursor = state.inbox_cursor;
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (event.seq <= cursor) continue;
+    cursor = event.seq;
+    if (!event.task_id || !event.workspace_id) continue;
+    const id = key(event.workspace_id, event.task_id);
+    const known = offers[id];
+    if (known) offers[id] = { ...known, last: event.type, seq: event.seq, updated_at: now };
+    else if (STARTS.has(event.type)) offers[id] = { workspace_id: event.workspace_id, task_id: event.task_id, source: "inbox", seq: event.seq, last: event.type, version: null, recorded_at: now, updated_at: now };
+  }
+  return { ...state, inbox_cursor: cursor, offers: bounded(offers) };
+}
+
+export type ListedTask = { id: string; status: string; version: number | null; assignee: string | null };
+
+/** A listed task, by its IDs, status and version only. Null for anything not shaped as a task. */
+export function readTask(row: unknown): ListedTask | null {
+  if (!row || typeof row !== "object") return null;
+  const { id, status, version, assignee } = row as Record<string, unknown>;
+  if (!isId(id) || typeof status !== "string" || !/^[a-z_]{1,32}$/.test(status)) return null;
+  return { id, status, version: typeof version === "number" && Number.isSafeInteger(version) ? version : null, assignee: isId(assignee) ? assignee : null };
+}
+
+/**
+ * The record after listing one workspace's tasks for this agent. A task offered to or accepted by this agent is recorded
+ * if it isn't already, and every recorded task listed gets its status. When the listing was whole, a recorded task it
+ * didn't show is marked `not_listed`: it's no longer this agent's to act on, as far as this listing shows.
+ */
+export function applyListing(state: RunnerState, agentId: string, workspaceId: string, tasks: ListedTask[], whole: boolean, now: number): RunnerState {
+  const offers = { ...state.offers };
+  const seen = new Set<string>();
+  for (const task of tasks) {
+    const id = key(workspaceId, task.id);
+    const known = offers[id];
+    const ours = task.assignee === agentId && LISTED.has(task.status);
+    if (known) {
+      seen.add(id);
+      offers[id] = { ...known, last: ours ? task.status : `listed_${task.status}`, version: task.version, updated_at: now };
+    } else if (ours) {
+      seen.add(id);
+      offers[id] = { workspace_id: workspaceId, task_id: task.id, source: "reconcile", seq: null, last: task.status, version: task.version, recorded_at: now, updated_at: now };
+    }
+  }
+  if (whole) {
+    for (const [id, offer] of Object.entries(offers)) {
+      if (offer.workspace_id === workspaceId && !seen.has(id) && offer.last !== "not_listed") offers[id] = { ...offer, last: "not_listed", updated_at: now };
+    }
+  }
+  return { ...state, offers: bounded(offers) };
+}

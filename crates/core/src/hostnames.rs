@@ -744,16 +744,18 @@ pub fn end_claim<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
 pub enum RecheckOutcome {
     /// The value is there.
     Match,
-    /// The name's own authoritative servers answered, and the value isn't there.
+    /// The value isn't there: through a recursive resolver, `NXDOMAIN`, or `NOERROR` with every record read and none
+    /// the value (M6 step 8d, spike D; `crate::hostname_recheck::read_challenge`).
     DefiniteNo,
-    /// The resolver failed, timed out, or couldn't reach the name's servers.
+    /// No answer: the resolver failed, timed out, or gave anything else (`SERVFAIL`, a truncated or malformed answer, a
+    /// record that can't be read). It counts toward neither no.
     ResolverError,
 }
 
 /// A live claim's proof history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProofHistory {
-    /// The last time the proof matched: when the claim was granted, then at each matching recheck.
+    /// The last time the proof matched: the proof that won the claim, then each matching recheck.
     pub last_success_at: i64,
     /// The first definite no since that success, if there was one.
     pub definite_no_since: Option<i64>,

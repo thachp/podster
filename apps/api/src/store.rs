@@ -488,6 +488,15 @@ CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY RE
   label TEXT NOT NULL REFERENCES app_label (label),
   store_id TEXT NOT NULL CHECK (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*'),
   recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
+",
+// Step 54 (M6 step 8d): a committed claim's daily recheck records when it last looked, one row a request, so the next
+// look waits a day whatever that look said. Its last match is `proved_at` and its first definite no since is
+// `definite_no_since`, both on the request since step 2. A table, not a column, so the step runs again safely: SQLite
+// can't add a column only if it is missing. Forward-only: an open claim has no row, so its first recheck is a day after
+// its proof.
+"
+CREATE TABLE IF NOT EXISTS hostname_recheck (request_id TEXT PRIMARY KEY REFERENCES hostname_request (id),
+  rechecked_at INTEGER NOT NULL CHECK (typeof(rechecked_at) = 'integer')) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

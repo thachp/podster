@@ -41,7 +41,9 @@
 //!
 //! **What this doesn't do:** write a serve entry for a custom hostname, or recheck a claim. Nothing here serves. A
 //! committed claim's custom hostname at Cloudflare and its long end are `custom_hostname`'s (8b), and so is routing
-//! (8c), whose entry only the applier writes (`takedown`).
+//! (8c), whose entry only the applier writes (`takedown`). The daily recheck of a committed claim is
+//! `hostname_recheck`'s (8d), and reads the resolver's answer as this job's look does
+//! (`podster_core::hostname_recheck::read_challenge`), acting here only on a match.
 //!
 //! Logs carry IDs and codes only, never a hostname or a challenge's value.
 use super::*;
@@ -50,8 +52,9 @@ use podster_core::hostname_requests::{
     after_ask, claimed_read_wait_ms, request_rate_allows, unmap, HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
-    challenge_record_name, challenge_value, mappable, next_proof_check, normalize, proof_matches,
-    public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, PENDING_TTL_MS,
+    challenge_record_name, challenge_value, mappable, next_proof_check, normalize,
+    public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, RecheckOutcome,
+    PENDING_TTL_MS,
 };
 use podster_policy::release::{
     authorize_custom_hostname, hostname_proof_room, HostnameChange, HostnameProofRoom,
@@ -195,7 +198,7 @@ fn request_view(row: &Value, now: i64) -> Value {
     })
 }
 
-const COLUMNS: &str = "id, hostname, state, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, checked_at, end_reason, updated_at";
+const COLUMNS: &str = "id, hostname, state, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, checked_at, definite_no_since, end_reason, updated_at";
 
 /// The room's open request, if it has one: at most one, by the table's own constraint.
 fn open_request(sql: &SqlStorage) -> R<Option<Value>> {
@@ -444,7 +447,7 @@ fn rules(env: &Env) -> Option<String> {
 /// The deployment's resolver, if one is configured. No environment has one. Test builds can also take it away from one
 /// room, while the room holds a table named `test_hostname_resolver_off`, so the unconfigured case can be shown beside
 /// the configured one.
-fn resolver(sql: &SqlStorage, env: &Env) -> Option<Resolver> {
+pub(super) fn resolver(sql: &SqlStorage, env: &Env) -> Option<Resolver> {
     #[cfg(feature = "failpoints")]
     if rows(
         sql,
@@ -503,13 +506,12 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env) -> R<Option<i64>> {
                 None => expiry,
             })
         }
-        // An ask or a withdrawal out; a committed claim's custom hostname, created or read (8b); and every ending,
-        // withdrawn or the long way.
-        Some(
-            HostnameRequestState::Pending
-            | HostnameRequestState::Claimed
-            | HostnameRequestState::Ending,
-        ) => Some(retry),
+        // A committed claim's custom hostname, created or read (8b), and its daily recheck (8d), whichever is sooner.
+        Some(HostnameRequestState::Claimed) => {
+            Some(retry.min(super::hostname_recheck::recheck_due_at(sql, &row)?))
+        }
+        // An ask or a withdrawal out; and every ending, withdrawn or the long way.
+        Some(HostnameRequestState::Pending | HostnameRequestState::Ending) => Some(retry),
         _ => None,
     })
 }
@@ -689,13 +691,13 @@ impl Workspace {
             let Some(resolver) = resolver(&sql, &self.env) else {
                 return Ok(());
             };
-            let values = resolver.txt(&challenge_record_name(&hostname)).await;
+            // Only a match acts here; a definite no and no answer both wait for the next look (8d's reading).
             let expected = text(&row["challenge"]).unwrap_or_default();
-            let matched = values.as_ref().is_some_and(|values| {
-                let values: Vec<&str> = values.iter().map(String::as_str).collect();
-                proof_matches(&values, &expected)
-            });
-            if values.is_none() {
+            let outcome = resolver
+                .look(&challenge_record_name(&hostname), &expected)
+                .await;
+            let matched = outcome == RecheckOutcome::Match;
+            if outcome == RecheckOutcome::ResolverError {
                 console_error!("hostname: the challenge couldn't be read: room={} request={} code=resolver_no_answer", room, id);
             }
             let store = sql.clone();

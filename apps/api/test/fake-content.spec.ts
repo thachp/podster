@@ -36,11 +36,12 @@ describe("the content provider's stand-in, one partition per spec file", () => {
     for (const field of ["namespace", "kvNamespace", "control"] as const) {
       expect(new Set(partitions.map(([, p]) => p[field])).size, field).toBe(partitions.length);
     }
-    for (const [, p] of partitions) {
+    for (const [name, p] of partitions) {
       // What the provider module accepts: a namespace's name, and 32 lower-case hexadecimal digits for KV's.
       expect(p.namespace).toMatch(/^[a-z0-9_-]{1,63}$/);
       expect(p.kvNamespace).toMatch(/^[0-9a-f]{32}$/);
-      expect(p.control.endsWith("content-fake.example.com")).toBe(true);
+      // The control host exactly: the default's own, and each other partition's named for it beneath that.
+      expect(p.control).toBe(name === "default" ? "content-fake.example.com" : `${name}.content-fake.example.com`);
     }
   });
 

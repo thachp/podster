@@ -1,3 +1,4 @@
+import { webEnv } from "@/lib/gateway/env";
 import { requireSession } from "@/lib/gateway/server";
 import { StartPairing } from "./start-pairing";
 
@@ -9,7 +10,7 @@ export default async function Page() {
   return (
     <section className="space-y-4">
       <h1 className="text-2xl font-semibold">Pair Runner</h1>
-      <StartPairing />
+      <StartPairing gateway={webEnv().GATEWAY_URL} />
     </section>
   );
 }

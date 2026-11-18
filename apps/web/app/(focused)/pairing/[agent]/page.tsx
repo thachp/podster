@@ -1,12 +1,10 @@
 import { notFound } from "next/navigation";
 import { ReadFailure } from "@/components/shell/read-failure";
 import { gatewayQuery, requireSession } from "@/lib/gateway/server";
-import type { PairingView } from "../model";
+import { AGENT_ID, type PairingView } from "../model";
 import { ConfirmPairing } from "./confirm-pairing";
 
 export const metadata = { title: "Confirm Runner · Podster" };
-
-const AGENT = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
  * The starter's confirmation of a Runner pairing (M7 step 5(c)): the agent's name and the key's thumbprint, from the
@@ -15,7 +13,7 @@ const AGENT = /^[A-Za-z0-9_-]{1,128}$/;
  */
 export default async function Page({ params }: { params: Promise<{ agent: string }> }) {
   const { agent } = await params;
-  if (!AGENT.test(agent)) notFound();
+  if (!AGENT_ID.test(agent)) notFound();
   await requireSession(`/pairing/${agent}`);
   const result = await gatewayQuery<PairingView>(`/api/pairing/${agent}`);
   return (

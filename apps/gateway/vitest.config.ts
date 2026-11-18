@@ -2,10 +2,15 @@ import { generateKeyPairSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { assertApiBuild } from "../../scripts/build-api-worker.mjs";
 
 // A throwaway key per run: the gateway signs with it, and the real API verifies with the public half.
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const pub = publicKey.export({ format: "jwk" });
+// The real API, as the shipping build: npm's pretest builds it here, never into apps/api/build, which holds the API's own
+// test build with failpoints. A build with other features, or changed since it was made, stops the run here.
+const API_BUILD = new URL("./build/api/", import.meta.url);
+assertApiBuild(API_BUILD, [], "npm run pretest (in apps/gateway)");
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8").replace(/--.*$/gm, "");
 
 export default defineConfig({
@@ -43,8 +48,8 @@ export default defineConfig({
             // The real Rust API, as the production build.
             name: "podster-api",
             modules: [
-              { type: "ESModule", path: "index.js", contents: readFileSync(new URL("../api/build/index.js", import.meta.url)) },
-              { type: "CompiledWasm", path: "index_bg.wasm", contents: readFileSync(new URL("../api/build/index_bg.wasm", import.meta.url)) },
+              { type: "ESModule", path: "index.js", contents: readFileSync(new URL("index.js", API_BUILD)) },
+              { type: "CompiledWasm", path: "index_bg.wasm", contents: readFileSync(new URL("index_bg.wasm", API_BUILD)) },
             ],
             compatibilityDate: "2026-08-01",
             bindings: { ASSERTION_KEYS: JSON.stringify({ test: pub.x }) },

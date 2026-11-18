@@ -7,6 +7,7 @@ import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
+import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -73,6 +74,36 @@ for (const [path, item] of Object.entries(organizations.paths)) {
     if (id && operations.has(id)) problems.push(`organizations.yaml: ${id} is also an API operation`);
   }
 }
+
+// The gateway's own pairing routes (M7 step 5(b)): each reaches exactly one of the API's pairing operations, every one is
+// reached, the person's are on their session under `/api/pairing`, and Runner's redeem alone takes a host proof, off
+// `/api/`. A body names only what the route takes from the client, and start takes no code, host or organization.
+const pairingRoutes = parse(readFileSync(new URL("pairing.yaml", import.meta.url), "utf8"));
+const PAIRING_OPERATIONS = ["startPairing", "getPairing", "cancelPairing", "activatePairing", "redeemPairing"];
+const reachedPairing = [];
+for (const [path, item] of Object.entries(pairingRoutes.paths)) {
+  for (const method of ["get", "post", "put", "delete"]) {
+    const op = item[method];
+    if (!op) continue;
+    const target = op["x-api-operation"];
+    if (!PAIRING_OPERATIONS.includes(target)) problems.push(`pairing.yaml: ${op.operationId} reaches ${target}, not a pairing operation`);
+    if (operations.has(op.operationId)) problems.push(`pairing.yaml: ${op.operationId} is also an API operation`);
+    if (operations.get(target)?.method !== method) problems.push(`pairing.yaml: ${op.operationId} uses ${method.toUpperCase()}, ${target} doesn't`);
+    reachedPairing.push(target);
+    const schemes = (op.security ?? []).flatMap((r) => Object.keys(r));
+    const isRedeem = target === "redeemPairing";
+    if (schemes.join() !== (isRedeem ? "hostProof" : "session")) problems.push(`pairing.yaml: ${op.operationId} must list only ${isRedeem ? "hostProof" : "session"}`);
+    if (isRedeem ? path !== "/pairing/{agent}/redeem" : !path.startsWith("/api/pairing")) problems.push(`pairing.yaml: ${op.operationId} is at ${path}`);
+    const body = op.requestBody?.content?.["application/json"]?.schema;
+    if (body && body.additionalProperties !== false) problems.push(`pairing.yaml: ${op.operationId}'s body isn't closed`);
+    const names = Object.keys(body?.properties ?? {});
+    if (target === "startPairing" && names.some((n) => n !== "name")) problems.push("pairing.yaml: the start takes only `name` from the client");
+  }
+}
+if (reachedPairing.slice().sort().join() !== PAIRING_OPERATIONS.slice().sort().join()) problems.push(`pairing.yaml: reaches ${reachedPairing.join()}, not each pairing operation once`);
+const gatewayIndex = readFileSync(new URL("../../apps/gateway/src/index.ts", import.meta.url), "utf8");
+if (!passthroughRefuses(gatewayIndex, "/v1/pairing")) problems.push("apps/gateway/src/index.ts: the passthrough must refuse /v1/pairing");
+for (const handler of ["handlePairing", "handlePairingRedeem"]) if (!calls(gatewayIndex, handler)) problems.push(`apps/gateway/src/index.ts: ${handler} isn't called`);
 
 // The public view (ADR 0008) is closed at every level, so a field reaches the public surface only by being named here.
 const view = JSON.parse(readFileSync(new URL("public-workroom-view.schema.json", import.meta.url), "utf8"));

@@ -23,7 +23,7 @@ import { pair, type PairingOutcome } from "../core/pairing.js";
 import { clampGrace, clampInterval, DEFAULT_GRACE_MS, DEFAULT_INTERVAL_MS, Poller } from "../core/poller.js";
 import { lineLogger, systemClock } from "../core/runtime.js";
 import { RunnerStorage } from "../core/storage.js";
-import { FileRunStore } from "./file-runs.js";
+import { FileRunStore, forgetRuns } from "./file-runs.js";
 import { FileStateStore } from "./file-state.js";
 import { readHidden } from "./hidden-input.js";
 import { systemKeychain } from "./keychain.js";
@@ -97,7 +97,7 @@ async function main(argv: string[]) {
   // One Runner per agent on this machine (decision 227). Held until this command ends.
   let lock;
   try {
-    lock = await acquireLock(home);
+    lock = await acquireLock(home, { command });
   } catch (error) {
     if (error instanceof LockRefused) {
       say(error.message);
@@ -115,9 +115,14 @@ async function main(argv: string[]) {
 async function locked(command: string, args: string[], home: string, state: FileStateStore, nonce: string): Promise<number> {
   if (command === "forget") {
     // Never the SDK's disconnect: it only pretends to revoke. Disconnecting is the owner's act in Podster.
+    // Refused while a run may still be going or budget is reserved; the day's spend is kept (L5 on #458).
+    const blocked = await forgetRuns(new FileRunStore(home));
+    if (blocked) {
+      say(`Runner won't forget this agent while it has ${blocked}. Start it with \`run\` until that settles, then try again.`);
+      return 1;
+    }
     await new RunnerStorage(systemKeychain(home)).deleteAll();
     await state.remove();
-    await new FileRunStore(home).remove();
     say("Runner's keys and record on this machine are deleted. The agent is still connected in Podster until you disconnect it there.");
     return 0;
   }
@@ -180,8 +185,8 @@ async function locked(command: string, args: string[], home: string, state: File
     });
     const stop = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => stop.abort());
-    // The owner's `stop`, from another terminal: a request naming this Runner's lock. One left from before is cleared.
-    await clearStop(home);
+    // The owner's `stop`, from another terminal: a request naming this Runner's lock by its nonce, so one left for an
+    // earlier Runner can't stop this one (L2 on #458).
     const unwatch = watchStop(home, nonce, () => stop.abort());
     say(`Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C or \`stop\`.`);
     let outcome;

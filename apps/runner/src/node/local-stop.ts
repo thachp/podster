@@ -4,7 +4,7 @@
  * nonce, and the Runner, which watches for it, ends any run at once and then calls nothing until restarted.
  *
  * It sends no signal to a process ID, so it can never stop some other program that reused one. A stop request naming an
- * earlier Runner's nonce is ignored, and a Runner clears any left over when it starts.
+ * earlier Runner's nonce is ignored: the nonce binding is enough, so nothing is cleared when a Runner starts.
  */
 import { watch, type FSWatcher } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
@@ -15,10 +15,13 @@ export const STOP_FILE = "stop.request";
 /** How often the request is looked for, beside the folder watch, which isn't reliable on every system. */
 export const STOP_POLL_MS = 200;
 
-/** Asks the Runner holding this home's lock to stop. False when no Runner holds it. */
+/**
+ * Asks the Runner running from this home to stop. False when none is running: no lock, or a lock held by `pair` or
+ * `forget`, which run no task and aren't stopped this way (L2 on #458).
+ */
 export async function requestStop(home: string): Promise<boolean> {
   const holder = await lockHolder(home);
-  if (!holder) return false;
+  if (!holder || holder.command !== "run") return false;
   await writeFile(join(home, STOP_FILE), holder.nonce, { mode: 0o600 });
   return true;
 }

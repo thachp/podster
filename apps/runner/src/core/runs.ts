@@ -125,11 +125,17 @@ export const newEntry = (workspace_id: string, task_id: string, now: number): Ru
   updated_at: now,
 });
 
-/** The ledger as of `now`: a new UTC day starts its spend at zero. Reservations carry over. */
+/**
+ * The ledger as of `now`: a new UTC day starts its spend at zero. Reservations carry over. A clock that has gone back
+ * before the ledger's day never resets it (`clockWentBack`; the lifecycle refuses with `clock_invalid`, L4 on #458).
+ */
 export function rolled(ledger: Ledger, now: number): Ledger {
   const today = dayOf(now);
-  return ledger.day === today ? ledger : { day: today, spent_micro_usd: 0, reservations: { ...ledger.reservations } };
+  return today <= ledger.day ? ledger : { day: today, spent_micro_usd: 0, reservations: { ...ledger.reservations } };
 }
+
+/** Whether `now` is on a day before the ledger's: the clock went back, and no evaluation may trust it. */
+export const clockWentBack = (ledger: Ledger, now: number) => dayOf(now) < ledger.day;
 
 /** What the policy's `budget` input is built from: today's spend and every reservation not yet settled. */
 export function budgetOf(ledger: Ledger, now: number): { spent_today_micro_usd: number; reserved_micro_usd: number } {
@@ -157,3 +163,59 @@ export function settle(ledger: Ledger, key: string | null, spent: number | null,
   delete reservations[key];
   return { ...today, spent_micro_usd: today.spent_micro_usd + counted, reservations };
 }
+
+const PHASES = new Set<string>(["accepting", "ready", "running", "giving_up", "held", "waiting", "finished", "done"]);
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const isText = (v: unknown, max = 256) => typeof v === "string" && v.length <= max;
+const orNull = (v: unknown, check: (x: unknown) => boolean) => v === null || check(v);
+
+/**
+ * Checks a run record read from disk, its ledger and every entry's shape (L8 on #458). Answers the first field that's
+ * wrong, or null when it's whole. A record that fails is an error for the owner, never a silent wait or a fresh start.
+ */
+export function checkRuns(v: unknown): string | null {
+  if (!isObj(v) || v.version !== 1) return "version";
+  if (!orNull(v.agent_id, (x) => isText(x, 128))) return "agent_id";
+  if (!isCount(v.next_reservation) || (v.next_reservation as number) < 1) return "next_reservation";
+  const ledger = v.ledger;
+  if (!isObj(ledger) || !isCount(ledger.day) || !isCount(ledger.spent_micro_usd) || !isObj(ledger.reservations)) return "ledger";
+  for (const amount of Object.values(ledger.reservations)) if (!isCount(amount) || amount === 0) return "ledger.reservations";
+  if (!isObj(v.entries)) return "entries";
+  for (const [key, e] of Object.entries(v.entries)) {
+    const at = `entries[${JSON.stringify(key.slice(0, 80))}]`;
+    if (!isObj(e) || !isText(e.workspace_id, 128) || !isText(e.task_id, 128) || key !== `${e.workspace_id}/${e.task_id}`) return at;
+    if (typeof e.phase !== "string" || !PHASES.has(e.phase)) return `${at}.phase`;
+    if (!isText(e.marker, 512) || !orNull(e.outcome, (x) => isText(x, 128))) return `${at}.marker`;
+    if (!orNull(e.decision, isObj) || !orNull(e.consumed, isObj)) return `${at}.decision`;
+    if (!orNull(e.reservation, (x) => isText(x, 64)) || !orNull(e.accept_key, (x) => isText(x, 128)) || !orNull(e.run_ref, (x) => isText(x, 128))) return `${at}.keys`;
+    if (!orNull(e.expected_version, isCount) || !orNull(e.retry_at, isCount) || !isCount(e.updated_at)) return `${at}.numbers`;
+    if (!orNull(e.ran_hash, (x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x))) return `${at}.ran_hash`;
+    const give = e.give_up;
+    if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
+    const after = e.after_stop;
+    if (after !== null && (!isObj(after) || !["release", "reconsider", "finish", "none"].includes(after.kind as string) || (after.kind === "release" && !isText(after.reason, 128)))) return `${at}.after_stop`;
+    const attempts = e.attempts;
+    if (!isObj(attempts) || !isCount(attempts.day) || !isCount(attempts.count)) return `${at}.attempts`;
+    // Each phase holds what it needs to go on.
+    if ((e.phase === "accepting" || e.phase === "ready" || e.phase === "running") && e.decision === null) return `${at}.decision`;
+    if (e.phase === "accepting" && e.accept_key === null) return `${at}.accept_key`;
+    if (e.phase === "running" && (e.consumed === null || e.run_ref === null)) return `${at}.run_ref`;
+    if (e.phase === "giving_up" && give === null) return `${at}.give_up`;
+    if (e.reservation !== null && !Object.hasOwn(ledger.reservations, e.reservation as string)) return `${at}.reservation`;
+  }
+  return null;
+}
+
+/**
+ * Why `forget` may not go on (L5 on #458): a run that may still be going, or budget still reserved. Null when it may.
+ */
+export function forgetBlocked(state: RunsState): string | null {
+  const entries = Object.values(state.entries);
+  if (entries.some((e) => e.phase === "held" || e.phase === "running")) return "a run that may still be going";
+  if (entries.some((e) => e.reservation !== null) || Object.keys(state.ledger.reservations).length > 0) return "budget reserved for a run not yet settled";
+  return null;
+}
+
+/** What `forget` leaves: no entries, and the day's ledger kept, so forgetting doesn't reset the day's spend (L5). */
+export const afterForget = (state: RunsState): RunsState => ({ ...emptyRuns(), ledger: { day: state.ledger.day, spent_micro_usd: state.ledger.spent_micro_usd, reservations: {} }, next_reservation: state.next_reservation });

@@ -99,13 +99,13 @@ class FakeAdapter implements RunAdapter {
 class FakePrompter {
   answers: OwnerAnswer[] = [];
   asked: AskView[] = [];
-  async ask(view: AskView): Promise<OwnerAnswer> {
+  async ask(view: AskView, _signal?: AbortSignal): Promise<OwnerAnswer> {
     this.asked.push(view);
     return this.answers.shift() ?? "later";
   }
 }
 
-async function setup(config: unknown = policyConfig()) {
+async function setup(config: unknown | (() => unknown) = policyConfig()) {
   const clock = new TestClock();
   const gateway = new FakeGateway(clock);
   const secrets = new MemorySecretStore();
@@ -300,7 +300,10 @@ describe("the serialised policy calls and the reservation ledger", () => {
     expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(CAPS.spend_micro_usd);
     t.offer(detail("tsk_two"));
     await t.pass();
-    expect(t.commands("decline_task").map((c) => [c.arguments.task_id, c.arguments.reason])).toContainEqual(["tsk_two", "day_budget_exhausted"]);
+    // Podster is told only that Runner can't take it; the reason stays on this machine (Info on #458).
+    expect(t.commands("decline_task").map((c) => [c.arguments.task_id, c.arguments.reason])).toContainEqual(["tsk_two", "runner_unavailable"]);
+    expect(t.entry("tsk_two").outcome).toBe("day_budget_exhausted");
+    expect(t.logged.some((l) => l.includes('"code":"day_budget_exhausted"'))).toBe(true);
   });
 
   it("starts each UTC day's spend at zero and keeps reservations across the boundary", () => {
@@ -374,7 +377,8 @@ describe("ask mode, run mode and refusals", () => {
     const t = await setup(policyConfig("unattended", { rooms: [] }));
     t.offer(detail("tsk_one"));
     await t.pass();
-    expect(t.commands("decline_task").map((c) => c.arguments)).toEqual([expect.objectContaining({ task_id: "tsk_one", version: 1, reason: "room_not_configured" })]);
+    expect(t.commands("decline_task").map((c) => c.arguments)).toEqual([expect.objectContaining({ task_id: "tsk_one", version: 1, reason: "runner_unavailable" })]);
+    expect(t.entry("tsk_one").outcome).toBe("room_not_configured");
     expect(t.gateway.details.tsk_one.task.status).toBe("open");
 
     // Stale authority is Runner's, not the task's: it waits.
@@ -393,7 +397,8 @@ describe("ask mode, run mode and refusals", () => {
     t.offer(detail("tsk_stranger", {}, "org_stranger"));
     await t.pass();
     expect(t.prompter.asked.map((v) => [v.task_id, v.reason])).toEqual([["tsk_guest", "requester_external"]]);
-    expect(t.commands("decline_task").map((c) => [c.arguments.task_id, c.arguments.reason])).toEqual([["tsk_stranger", "requester_out_of_scope"]]);
+    expect(t.commands("decline_task").map((c) => [c.arguments.task_id, c.arguments.reason])).toEqual([["tsk_stranger", "runner_unavailable"]]);
+    expect(t.entry("tsk_stranger").outcome).toBe("requester_out_of_scope");
   });
 
   it("refuses to open with a policy that can't be read, or whose owner_org isn't the agent's", async () => {
@@ -591,13 +596,17 @@ describe("stopping a run", () => {
     const t = await setup();
     t.offer(detail("tsk_one"));
     t.adapter.finishWith = null;
-    // The process dies while the run goes: the record says running.
+    // The process dies while the run goes: the disk can't be written after the start, so the record there says running.
     t.clock.onIdle = () => {
+      t.runs.failSaves = true;
       throw new Error("crash");
     };
     await t.pass().catch(() => undefined);
     t.clock.onIdle = null;
-    expect(t.entry("tsk_one").phase).toBe("running");
+    // In this process the run is held, in memory, whatever the disk says.
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "held", outcome: "run_interrupted" });
+    t.runs.failSaves = false;
+    expect(JSON.parse(t.runs.text).entries[`${ROOM}/tsk_one`].phase).toBe("running");
     t.adapter.confirmed = false;
     const restarted = await Lifecycle.open(t.lifecycleDeps);
     expect(restarted.record.entries[`${ROOM}/tsk_one`]).toMatchObject({ phase: "held", outcome: "runner_restarted" });
@@ -640,7 +649,8 @@ describe("a fresh evaluation for every rerun, re-offer and change request", () =
     t.gateway.offer(ROOM, "tsk_one", "task.changes_requested");
     await t.pass();
     expect(t.adapter.starts).toHaveLength(1);
-    expect(t.commands("release_task").map((c) => c.arguments.reason)).toEqual(["author_out_of_scope"]);
+    expect(t.commands("release_task").map((c) => c.arguments.reason)).toEqual(["runner_unavailable"]);
+    expect(t.entry("tsk_one").outcome).toBe("author_out_of_scope");
   });
 
   it("asks before rerunning when a guest wrote the change request, even in an unattended room", async () => {
@@ -664,6 +674,8 @@ describe("a fresh evaluation for every rerun, re-offer and change request", () =
       await t.lifecycle.tick(t.stop.signal);
     }
     expect(t.entry("tsk_one")).toMatchObject({ phase: "waiting", outcome: "authority_stale", attempts: { count: 1 } });
+    // Once the wait is over and authority is fresh again, it runs.
+    t.clock.at += 61_000;
     await t.pass();
     expect(t.adapter.starts).toHaveLength(1);
   });
@@ -677,5 +689,166 @@ describe("a fresh evaluation for every rerun, re-offer and change request", () =
     }
     expect(t.commands("decline_task")).toHaveLength(MAX_ATTEMPTS_PER_DAY);
     expect(t.entry("tsk_one")).toMatchObject({ phase: "waiting", outcome: "attempts_exhausted" });
+  });
+});
+
+describe("the rulings on #458's review", () => {
+  it("M1: a stop that comes while the adapter starts ends the run at once, with no wait for a check-in", async () => {
+    const t = await setup();
+    t.adapter.finishWith = null;
+    const start = t.adapter.start.bind(t.adapter);
+    t.adapter.start = async (run) => {
+      const handle = await start(run);
+      t.stop.abort();
+      return handle;
+    };
+    t.offer(detail("tsk_one"));
+    const calls = () => t.gateway.calls.length;
+    expect(await t.pass()).toBe("stopped");
+    expect(t.adapter.stops).toBe(1);
+    expect(t.clock.idles).not.toContain(CHECK_IN_MS);
+    expect(t.timeline.at(-1)).toBe("adapter:stop");
+    const before = calls();
+    expect(await t.lifecycle.tick(t.stop.signal)).toBe("stopped");
+    expect(calls()).toBe(before);
+  });
+
+  it("M1: a start that never answers is abandoned at once on a stop, held, and stopped when it does answer", async () => {
+    const t = await setup();
+    let answer: ((h: RunHandle) => void) | null = null;
+    t.adapter.start = async (run) => {
+      t.adapter.starts.push(run);
+      t.stop.abort();
+      return new Promise<RunHandle>((resolve) => (answer = resolve));
+    };
+    t.offer(detail("tsk_one"));
+    expect(await t.pass()).toBe("stopped");
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "held", outcome: "stopped_locally" });
+    let stopped = 0;
+    answer!({ done: new Promise(() => undefined), stop: async () => (stopped++, "stopped" as const) });
+    await expect.poll(() => stopped).toBe(1);
+  });
+
+  it("M1: a stop while the policy decides at start consumes nothing and starts nothing", async () => {
+    const t = await setup();
+    const evaluateReal = t.policyCalls; // keeps the log
+    let evaluations = 0;
+    const policy = t.lifecycleDeps.policy;
+    const lifecycle = await Lifecycle.open({
+      ...t.lifecycleDeps,
+      policy: {
+        ...policy,
+        evaluate: (input) => {
+          if (++evaluations === 2) t.stop.abort();
+          return policy.evaluate(input);
+        },
+      },
+    });
+    t.offer(detail("tsk_one"));
+    expect(await t.poller.pollOnce()).toBe("ok");
+    expect(await lifecycle.tick(t.stop.signal)).toBe("stopped");
+    expect(evaluateReal.some((c) => c.fn === "consume")).toBe(false);
+    expect(t.adapter.starts).toHaveLength(0);
+    expect(lifecycle.record.entries[`${ROOM}/tsk_one`]).toMatchObject({ phase: "ready", consumed: null });
+  });
+
+  it("M2: a stop that throws counts as unconfirmed, and nothing new starts while that run may still be going", async () => {
+    const t = await setup();
+    t.adapter.finishWith = { status: "failed", spent_micro_usd: 10 };
+    t.adapter.confirmed = false;
+    t.offer(detail("tsk_one"));
+    // Every handle's stop throws.
+    const start = t.adapter.start.bind(t.adapter);
+    t.adapter.start = async (run) => ({ ...(await start(run)), stop: async () => Promise.reject(new Error("docker went away")) });
+    await t.pass();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "held", outcome: "run_failed" });
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    await t.pass();
+    expect(t.adapter.starts.map((r) => r.task_id)).toEqual(["tsk_one"]);
+    expect(t.commands("get_task").some((c) => c.arguments.task_id === "tsk_two")).toBe(false);
+    expect(t.commands("release_task")).toHaveLength(0);
+  });
+
+  it("L1: a stop while the owner is asked abandons the question, and nothing more calls Podster", async () => {
+    const t = await setup(policyConfig("ask"));
+    t.offer(detail("tsk_one"));
+    let signalSeen: AbortSignal | undefined;
+    t.prompter.ask = async (_view: AskView, signal?: AbortSignal) => {
+      signalSeen = signal;
+      t.stop.abort();
+      return "approve";
+    };
+    const before = () => t.gateway.calls.length;
+    expect(await t.poller.pollOnce()).toBe("ok");
+    const calls = before();
+    expect(await t.lifecycle.tick(t.stop.signal)).toBe("stopped");
+    expect(signalSeen).toBe(t.stop.signal);
+    // Only the read the ask was built from.
+    expect(t.gateway.calls.slice(calls).map((c) => c.capability)).toEqual(["get_task"]);
+    expect(t.policyCalls.filter((c) => c.fn === "issue")).toHaveLength(0);
+  });
+
+  it("L4: a clock gone back before the ledger's day refuses with clock_invalid, and never resets the day's spend", async () => {
+    const t = await setup();
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    const spent = t.lifecycle.record.ledger.spent_micro_usd;
+    expect(spent).toBeGreaterThan(0);
+    t.clock.at -= DAY_MS;
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    expect(t.entry("tsk_two")).toMatchObject({ phase: "waiting", outcome: "clock_invalid" });
+    expect(t.commands("decline_task")).toHaveLength(0);
+    expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).spent_today_micro_usd).toBe(spent);
+  });
+
+  it("L6: other events never count as attempts, and a first ask is stored before it's asked and counts once", async () => {
+    const t = await setup(policyConfig("ask"));
+    t.offer(detail("tsk_one"));
+    let onDisk: Record<string, unknown> | null = null;
+    t.prompter.ask = async () => {
+      onDisk = JSON.parse(t.runs.text).entries[`${ROOM}/tsk_one`];
+      return "approve";
+    };
+    t.adapter.finishWith = null;
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1 };
+    await t.pass();
+    expect(onDisk).toMatchObject({ phase: "waiting", outcome: "asking", attempts: { count: 1 } });
+    expect(t.entry("tsk_one").attempts.count).toBe(1);
+    for (let i = 0; i < MAX_ATTEMPTS_PER_DAY + 5; i++) {
+      t.gateway.offer(ROOM, "tsk_one", "message.posted");
+      await t.pass();
+    }
+    expect(t.entry("tsk_one").attempts.count).toBe(1);
+    expect(t.commands("get_task").length).toBeLessThan(10);
+  });
+
+  it("L7: the run policy is read afresh on every evaluation: switching a room to ask takes effect with no restart, mid-run too", async () => {
+    let policy = policyConfig("unattended");
+    const t = await setup(() => policy);
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(1);
+    // Switched to ask: the next offer asks.
+    policy = policyConfig("ask");
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    expect(t.prompter.asked.map((v) => v.task_id)).toEqual(["tsk_two"]);
+    // Back on; a run going when it's switched off stops at its next check-in.
+    policy = policyConfig("unattended");
+    t.adapter.finishWith = null;
+    t.offer(detail("tsk_three"));
+    t.clock.onIdle = () => void (policy = policyConfig("ask"));
+    await t.pass();
+    expect(t.entry("tsk_three")).toMatchObject({ outcome: "policy_changed" });
+    expect(t.adapter.stops).toBeGreaterThanOrEqual(2);
+    // A policy file that can't be read refuses rather than running.
+    t.clock.onIdle = null;
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1 };
+    policy = { broken: true } as never;
+    t.offer(detail("tsk_four"));
+    await t.pass();
+    expect(t.entry("tsk_four")).toMatchObject({ phase: "waiting", outcome: "config_invalid" });
   });
 });

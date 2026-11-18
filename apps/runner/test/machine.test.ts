@@ -237,18 +237,30 @@ describe("Runner's own source", () => {
     const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
     const main = cli.slice(cli.indexOf("async function main("), cli.indexOf("async function locked("));
     expect(main).toMatch(/command !== "pair" && command !== "run" && command !== "forget"/);
-    expect(main.indexOf("acquireLock(home)")).toBeGreaterThan(-1);
-    expect(main.indexOf("acquireLock(home)")).toBeLessThan(main.indexOf("locked(command"));
+    expect(main.indexOf("acquireLock(home, { command })")).toBeGreaterThan(-1);
+    expect(main.indexOf("acquireLock(home, { command })")).toBeLessThan(main.indexOf("locked(command"));
     // Every command that touches keys or the records is inside `locked`, after the lock.
     const after = cli.slice(cli.indexOf("async function locked("));
     for (const command of ["forget", "pair", "run"]) expect(after).toContain(`command === "${command}"`);
     expect(main).not.toMatch(/command === "(forget|pair|run)"/);
   });
 
-  it("keeps the lifecycle's core free of the machine: no node: import, so it runs as tested against the real gateway", async () => {
-    for (const file of ["lifecycle.ts", "prompt.ts", "runs.ts", "adapter.ts", "policy.ts"]) {
-      const text = await readFile(new URL(`apps/runner/src/core/${file}`, repo), "utf8");
-      expect([file, /from "node:/.test(text)]).toEqual([file, false]);
+  it("keeps every file in src/core free of the machine, so it runs as tested against the real gateway (Standards Low 1 on #458)", async () => {
+    const root = new URL("apps/runner/src/core/", repo);
+    const files = (await readdir(root)).filter((f) => f.endsWith(".ts"));
+    expect(files.length).toBeGreaterThan(10);
+    const machine = ["fs", "os", "child_process", "net", "path", "http", "https", "dgram", "worker_threads", "process", "crypto", "tls", "dns", "readline", "stream", "url", "util", "vm", "cluster"];
+    for (const file of files) {
+      const text = await readFile(new URL(file, root), "utf8");
+      const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const found = [
+        /from\s+["']node:/.test(code),
+        /\brequire\s*\(/.test(code),
+        /\bimport\s*\(/.test(code),
+        new RegExp(`(from|import)\\s+["'](${machine.join("|")})(/[^"']*)?["']`).test(code),
+        /\bprocess\.(env|exit|kill|argv|stdin|stdout)/.test(code),
+      ];
+      expect([file, found]).toEqual([file, [false, false, false, false, false]]);
     }
   });
 

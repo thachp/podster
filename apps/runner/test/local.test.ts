@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AskView } from "../src/core/lifecycle.js";
-import { emptyRuns } from "../src/core/runs.js";
-import { FileRunStore } from "../src/node/file-runs.js";
+import { emptyRuns, MemoryRunStore, newEntry, type RunsState } from "../src/core/runs.js";
+import { FileRunStore, forgetRuns } from "../src/node/file-runs.js";
 import { acquireLock, LOCK_FILE, LockRefused, lockHolder, processAlive, STALE_UNREADABLE_MS } from "../src/node/lock.js";
 import { clearStop, requestStop, STOP_FILE, watchStop } from "../src/node/local-stop.js";
-import { askScreen, fenced, SHOWN_CHARS, TerminalPrompter } from "../src/node/prompter.js";
+import { askScreen, fenced, MAX_LINES, SHOWN_CHARS, TerminalPrompter, visible, type Terminal } from "../src/node/prompter.js";
 
 const folders: string[] = [];
 async function home() {
@@ -145,7 +145,70 @@ describe("the owner's local stop", () => {
   });
 });
 
+describe("the owner's local stop, during pair and forget (L2)", () => {
+  it("says no Runner is running while pair or forget holds the lock", async () => {
+    for (const command of ["pair", "forget"] as const) {
+      const h = await home();
+      const held = await acquireLock(h, { ...opts(1), command });
+      expect(await requestStop(h)).toBe(false);
+      await held.release();
+    }
+    const h = await home();
+    const run = await acquireLock(h, { ...opts(1), command: "run" });
+    expect(await requestStop(h)).toBe(true);
+    await run.release();
+  });
+});
+
+describe("forget's part of the run record (L5)", () => {
+  const withEntry = (patch: Partial<ReturnType<typeof newEntry>>, reservations: Record<string, number> = {}): RunsState => {
+    const entry = { ...newEntry("ws_a", "tsk_a", 1), ...patch };
+    return { ...emptyRuns(), agent_id: "agt_a", ledger: { day: 5, spent_micro_usd: 700, reservations }, entries: { "ws_a/tsk_a": entry } };
+  };
+  it("refuses while a run may still be going, or budget is reserved, and changes nothing", async () => {
+    for (const state of [withEntry({ phase: "held" }), withEntry({ phase: "running" }), withEntry({ phase: "accepting", reservation: "r1" }, { r1: 2 })]) {
+      const store = new MemoryRunStore();
+      await store.save(state);
+      const before = store.text;
+      expect(await forgetRuns(store)).toMatch(/run that may still be going|budget reserved/);
+      expect(store.text).toBe(before);
+    }
+  });
+  it("otherwise drops every entry and keeps the day's spend", async () => {
+    const store = new MemoryRunStore();
+    await store.save(withEntry({ phase: "finished" }));
+    expect(await forgetRuns(store)).toBeNull();
+    const after = await store.load();
+    expect(after.entries).toEqual({});
+    expect(after.agent_id).toBeNull();
+    expect(after.ledger).toEqual({ day: 5, spent_micro_usd: 700, reservations: {} });
+  });
+});
+
 describe("the run record on disk", () => {
+  it("fails loudly, naming the field, on a damaged ledger or entry (L8)", async () => {
+    const h = await home();
+    const store = new FileRunStore(h);
+    const good = { ...emptyRuns(), entries: { "ws_a/tsk_a": newEntry("ws_a", "tsk_a", 1) } };
+    await store.save(good);
+    expect(await store.load()).toEqual(good);
+    const damaged = [
+      [{ ...good, ledger: { day: 1, spent_micro_usd: -5, reservations: {} } }, /ledger/],
+      [{ ...good, ledger: { day: 1, spent_micro_usd: 0, reservations: { r1: "2" } } }, /ledger\.reservations/],
+      [{ ...good, entries: { "ws_a/tsk_a": { ...newEntry("ws_a", "tsk_a", 1), phase: "flying" } } }, /phase/],
+      [{ ...good, entries: { "ws_a/tsk_a": { ...newEntry("ws_a", "tsk_a", 1), phase: "accepting" } } }, /decision/],
+      [{ ...good, entries: { "ws_b/tsk_a": newEntry("ws_a", "tsk_a", 1) } }, /entries/],
+      [{ ...good, entries: { "ws_a/tsk_a": { ...newEntry("ws_a", "tsk_a", 1), reservation: "r9" } } }, /reservation/],
+    ] as const;
+    for (const [state, field] of damaged) {
+      await writeFile(join(h, "runs.json"), JSON.stringify(state));
+      const error = await store.load().catch((e: Error) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/damaged at/);
+      expect((error as Error).message).toMatch(field);
+    }
+  });
+
   it("is written whole, owner-only, and read back; one it can't read is an error, never a fresh start", async () => {
     const h = await home();
     const store = new FileRunStore(h);
@@ -175,24 +238,74 @@ describe("the ask screen", () => {
     inputs: [{ input: "title", text: "Hello\u001b[2J\u001b]0;owned\u0007 world‮\r\nsecond line" }],
   };
 
-  it("shows the task's words fenced, with no escape, control or direction characters, and bounded", () => {
-    const screen = askScreen(view);
-    expect(screen).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/);
-    expect(screen).toContain("  | Hello�[2J�]0;owned� world�");
+  const term = (typed: string, over: Partial<Terminal> = {}) => {
+    const written: string[] = [];
+    const asked: string[] = [];
+    const terminal: Terminal = { inputIsTTY: true, outputIsTTY: true, columns: 60, write: (t) => void written.push(t), question: async (q) => (asked.push(q), typed), ...over };
+    return { terminal, written, asked };
+  };
+
+  it("shows what the model gets: every character that wouldn't show as a visible mark, nothing able to drive the terminal (L3)", () => {
+    const { screen, cut } = askScreen(view, 80);
+    expect(cut).toBe(false);
+    expect(screen).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2028\u2029\u2060-\u2069\ufeff]/);
+    expect(screen).toContain("  | Hello⟨U+001B⟩[2J⟨U+001B⟩]0;owned⟨U+0007⟩ world⟨U+202E⟩⟨U+000D⟩");
     expect(screen).toContain("  | second line");
     expect(screen).toMatch(/someone else's text/);
-    const long = fenced("x".repeat(SHOWN_CHARS + 50));
-    expect(long).toContain("[cut: 50 more characters not shown]");
-    expect(fenced(Array.from({ length: 200 }, () => "l").join("\n"))).toContain("[cut: 120 more lines not shown]");
   });
 
-  it("approves only on a typed yes; anything else declines; with no terminal there is no answer", async () => {
-    const written: string[] = [];
-    const answer = async (typed: string) => new TerminalPrompter({ isTTY: true, write: (t) => void written.push(t), question: async () => typed }).ask(view);
-    expect(await answer("y")).toBe("approve");
-    expect(await answer("YES")).toBe("approve");
-    expect(await answer("")).toBe("decline");
-    expect(await answer("sure")).toBe("decline");
-    expect(await new TerminalPrompter({ isTTY: false, write: () => undefined, question: async () => "y" }).ask(view)).toBe("later");
+  it("shows hidden tag text, zero-width and separator characters as marks (L3)", () => {
+    // "rm -rf /" written in Unicode tag characters, invisible on most terminals, between two visible words.
+    const hidden = [..."rm -rf /"].map((c) => String.fromCodePoint(0xe0000 + c.codePointAt(0)!)).join("");
+    const text = `Fix\u200bthe${hidden}build\u2028now\u00a0\u2060ok\t.`;
+    const lines = fenced(text, 200).join("\n");
+    expect(lines).toContain("Fix⟨U+200B⟩the⟨U+E0072⟩⟨U+E006D⟩⟨U+E0020⟩⟨U+E002D⟩");
+    expect(lines).toContain("build⟨U+2028⟩now⟨U+00A0⟩⟨U+2060⟩ok⟨U+0009⟩.");
+    expect(lines).not.toMatch(/[\u{E0000}-\u{E007F}\u200b\u2028\u00a0\u2060\t]/u);
+    expect(visible(text).length).toBeGreaterThan(text.length);
+  });
+
+  it("wraps each line to the terminal's width with the fence on every piece, never splitting a mark", () => {
+    const lines = fenced(`${"a".repeat(100)}\u200b${"b".repeat(30)}`, 40);
+    expect(lines.every((l) => l.startsWith("  | ") && [...l].length <= 40 + 6)).toBe(true);
+    expect(lines.length).toBeGreaterThan(3);
+    expect(lines.join("")).toContain("⟨U+200B⟩");
+    expect(lines.some((l) => /⟨U\+200B$|^ {2}\| [0-9A-F]{0,3}⟩/.test(l))).toBe(false);
+  });
+
+  it("approves only on a typed yes; anything else declines", async () => {
+    expect(await new TerminalPrompter(term("y").terminal).ask(view)).toBe("approve");
+    expect(await new TerminalPrompter(term("YES").terminal).ask(view)).toBe("approve");
+    expect(await new TerminalPrompter(term("").terminal).ask(view)).toBe("decline");
+    expect(await new TerminalPrompter(term("sure").terminal).ask(view)).toBe("decline");
+  });
+
+  it("approves nothing unless both standard input and output are terminals: `yes | runner run` gets no answer (L8)", async () => {
+    const piped = term("y", { inputIsTTY: false });
+    expect(await new TerminalPrompter(piped.terminal).ask(view)).toBe("later");
+    expect(piped.asked).toEqual([]);
+    expect(await new TerminalPrompter(term("y", { outputIsTTY: false }).terminal).ask(view)).toBe("later");
+  });
+
+  it("never approves words too long to show whole: they can only be declined, or left waiting (L3)", async () => {
+    const long = { ...view, inputs: [{ input: "instructions", text: "x".repeat(SHOWN_CHARS + 1) }] };
+    expect(askScreen(long).cut).toBe(true);
+    expect(askScreen(long).screen).not.toContain("xxxxxxxxxx");
+    const yes = term("y");
+    expect(await new TerminalPrompter(yes.terminal).ask(long)).toBe("decline");
+    expect(yes.asked).toEqual(["Decline it? [y/N] "]);
+    expect(await new TerminalPrompter(term("").terminal).ask(long)).toBe("later");
+    const many = { ...view, inputs: [{ input: "instructions", text: Array.from({ length: MAX_LINES + 1 }, () => "l").join("\n") }] };
+    expect(askScreen(many).cut).toBe(true);
+  });
+
+  it("abandons the question on a local stop (L1)", async () => {
+    const stop = new AbortController();
+    const waiting = term("", { question: (_q, signal) => new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")))) });
+    const answer = new TerminalPrompter(waiting.terminal).ask(view, stop.signal);
+    stop.abort();
+    expect(await answer).toBe("later");
+    stop.abort();
+    expect(await new TerminalPrompter(term("y").terminal).ask(view, stop.signal)).toBe("later");
   });
 });

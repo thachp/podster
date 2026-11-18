@@ -39,7 +39,7 @@ import { readTaskDetail, type TaskDetail } from "./prompt.js";
 import { AuthorityEnded, type Poller } from "./poller.js";
 import type { Offer } from "./state.js";
 import type { Clock, Logger } from "./runtime.js";
-import { budgetOf, dayOf, newEntry, reserve, settle, type After, type GiveUp, type RunEntry, type RunsState, type RunStore } from "./runs.js";
+import { budgetOf, clockWentBack, dayOf, newEntry, reserve, settle, type After, type GiveUp, type RunEntry, type RunsState, type RunStore } from "./runs.js";
 
 /** The check-in's fixed maximum interval during a run (S-33, S-43). **Proposed** figure. */
 export const CHECK_IN_MS = 60_000;
@@ -56,6 +56,15 @@ export const WAIT_MS = 60_000;
 
 /** Refusals about Runner's own state, not the task: they leave the task waiting rather than give it up. */
 const LOCAL = new Set(["authority_stale", "config_invalid", "budget_invalid", "clock_invalid"]);
+/**
+ * Refusals that come from the owner's own budget or configuration. Podster is told only `runner_unavailable`, so a
+ * decline doesn't disclose the owner's caps or allowlists; the reason itself stays in Runner's record and log (Info on
+ * #458's review).
+ */
+const PRIVATE = new Set(["day_budget_exhausted", "room_not_configured", "requester_out_of_scope", "author_out_of_scope"]);
+export const GENERIC_REASON = "runner_unavailable";
+/** Events that count as a new attempt at a task: an offer or re-offer, and a change request (L6 on #458). */
+const TRIGGERS = new Set(["task.offered", "task.changes_requested", "offered"]);
 
 export type AskView = {
   workspace_id: string;
@@ -71,9 +80,9 @@ export type AskView = {
   inputs: { input: string; text: string }[];
 };
 export type OwnerAnswer = "approve" | "decline" | "later";
-/** Asks the owner on this machine. Silence is never approval: no answer is `later`. */
+/** Asks the owner on this machine. Silence is never approval: no answer is `later`. A local stop abandons the question. */
 export interface OwnerPrompter {
-  ask(view: AskView): Promise<OwnerAnswer>;
+  ask(view: AskView, signal?: AbortSignal): Promise<OwnerAnswer>;
 }
 
 export type PolicyCalls = { evaluate: typeof evaluate; issueRunDecision: typeof issueRunDecision; consumeRunDecision: typeof consumeRunDecision };
@@ -83,8 +92,12 @@ export type LifecyclePoller = Pick<Poller, "agentId" | "authorityFresh" | "reque
 export type LifecycleDeps = {
   poller: LifecyclePoller;
   runs: RunStore;
-  /** The owner's run policy, as read from Runner's local file. */
-  config: unknown;
+  /**
+   * The owner's run policy: a function that reads Runner's local file afresh, called on every evaluation, so a change
+   * such as switching a room's unattended runs off counts at the next one with no restart (L7 on #458). A plain value is
+   * used as it is, for tests. A read that throws reads as no policy, which refuses.
+   */
+  config: unknown | (() => unknown | Promise<unknown>);
   adapter: RunAdapter;
   prompter: OwnerPrompter;
   clock: Clock;
@@ -152,6 +165,8 @@ export class Lifecycle {
   private state: RunsState;
   /** What the owner approved on an ask, by task, until it's issued: it holds only while a fresh read still matches. */
   private readonly approvals = new Map<string, { hash: string; version: number; facts: string }>();
+  /** The agent's own organization, checked at open: a policy reread later must still name it. */
+  private ownerOrg = "";
 
   private constructor(deps: LifecycleDeps, state: RunsState) {
     this.deps = deps;
@@ -167,12 +182,13 @@ export class Lifecycle {
    * Runner last stopped is held until the adapter confirms it stopped, then released: a run is never resumed.
    */
   static async open(deps: LifecycleDeps): Promise<Lifecycle> {
-    const parsed = parsePolicyConfig(deps.config);
+    const parsed = parsePolicyConfig(await readConfig(deps.config));
     if (!parsed.ok) throw new Error(`Runner's run policy can't be used: ${parsed.at} is missing or out of range. Nothing was started.`);
     const identity = (await deps.poller.request("get_identity")) as Record<string, unknown> | null;
     if (identity?.id !== deps.poller.agentId) throw new AuthorityEnded();
     if (identity?.org_id !== parsed.value.owner_org) throw new Error("The run policy's owner_org isn't this agent's organization. Nothing was started.");
     const lifecycle = new Lifecycle(deps, await deps.runs.load());
+    lifecycle.ownerOrg = parsed.value.owner_org;
     await lifecycle.recover();
     return lifecycle;
   }
@@ -264,6 +280,8 @@ export class Lifecycle {
   }
 
   private async work(signal: AbortSignal): Promise<TickOutcome> {
+    // No run is supervised between passes, so any entry still recorded as running is an orphan: held (M2 on #458).
+    for (const entry of this.entries("running")) await this.holdOrphan(entry, "run_interrupted");
     for (const entry of this.entries("held")) {
       const stopped = entry.run_ref !== null && (await this.deps.adapter.confirmStopped(entry.run_ref).catch(() => false));
       if (!stopped) continue;
@@ -294,13 +312,24 @@ export class Lifecycle {
       const entry = this.state.entries[key];
       if (entry && ACTIVE.has(entry.phase)) continue;
       const marker = markerOf(offer);
-      const due = !entry || entry.marker !== marker || (entry.phase === "waiting" && entry.retry_at !== null && this.now() >= entry.retry_at);
-      if (!due) continue;
-      await this.consider(offer, marker);
+      // Only an offer, a re-offer or a change request is a new attempt; a retry after a refused consume or give-up
+      // (marker cleared) and a wait that's over aren't, and any other event only moves the marker (L6 on #458).
+      const waitOver = !!entry && entry.phase === "waiting" && entry.retry_at !== null && this.now() >= entry.retry_at;
+      let counted = false;
+      if (!entry) counted = true;
+      else if (entry.marker === "") counted = false;
+      else if (entry.marker !== marker && TRIGGERS.has(offer.last)) counted = true;
+      else {
+        if (entry.marker !== marker) await this.put({ ...entry, marker });
+        if (!waitOver) continue;
+      }
+      await this.consider(offer, marker, counted, signal);
+      if (signal.aborted) return "stopped";
       const now = this.state.entries[key];
       if (now?.phase === "giving_up") await this.sendGiveUp(now, signal);
       const after = this.state.entries[key];
       if (after?.phase === "accepting") await this.accept(after, signal);
+      if (signal.aborted) return "stopped";
       const ready = this.state.entries[key];
       if (ready?.phase === "ready") return this.start(ready, signal);
     }
@@ -324,9 +353,15 @@ export class Lifecycle {
     return ownReservation === undefined ? budget : { ...budget, own_reservation_micro_usd: ownReservation };
   }
 
-  private evaluateFresh(detail: TaskDetail, entry: RunEntry, authorityFresh: boolean, ownReservation?: number): Decision {
+  private async evaluateFresh(detail: TaskDetail, entry: RunEntry, authorityFresh: boolean, ownReservation?: number): Promise<Decision> {
+    const ids = { task_id: entry.task_id, workspace_id: entry.workspace_id };
+    // A clock gone back before the ledger's day can't be trusted with the day's budget (L4 on #458).
+    if (clockWentBack(this.state.ledger, this.now())) return { outcome: "refuse", reason: "clock_invalid", ...ids };
+    const config = await readConfig(this.deps.config);
+    const parsed = parsePolicyConfig(config);
+    if (parsed.ok && parsed.value.owner_org !== this.ownerOrg) return { outcome: "refuse", reason: "config_invalid", ...ids };
     return this.policy.evaluate({
-      config: this.deps.config,
+      config,
       provenance: detail.provenance,
       prompt: detail.prompt?.shape ?? null,
       task: { id: entry.task_id, workspace_id: entry.workspace_id },
@@ -337,13 +372,11 @@ export class Lifecycle {
   }
 
   /** A new event for a task, or a wait that's over: a fresh read and a fresh evaluation. */
-  private async consider(offer: Offer, marker: string, approvedRound = false): Promise<void> {
+  private async consider(offer: Offer, marker: string, counted: boolean, signal: AbortSignal, approvedRound = false): Promise<void> {
     const key = keyOf(offer.workspace_id, offer.task_id);
     const today = dayOf(this.now());
     const known = this.state.entries[key] ?? newEntry(offer.workspace_id, offer.task_id, this.now());
     const attempts = known.attempts.day === today ? known.attempts : { day: today, count: 0 };
-    // Only a new event counts as an attempt: a wait on Runner's own condition, or on the owner, retried, doesn't.
-    const counted = !this.state.entries[key] || known.marker !== marker;
     if (counted && attempts.count >= MAX_ATTEMPTS_PER_DAY) {
       await this.put({ ...known, marker, phase: "waiting", outcome: "attempts_exhausted", retry_at: (today + 1) * 24 * 60 * 60 * 1000 });
       this.log("lifecycle.decision", "waiting", known, { code: "attempts_exhausted" });
@@ -363,13 +396,17 @@ export class Lifecycle {
     }
     const asked = await this.gate.run(() => this.decide(entry, detail));
     if (!asked) return;
-    const answer = await this.deps.prompter.ask(asked.view);
+    // Stored before the owner is asked, so this attempt counts once whatever the answer (L6 on #458).
+    const asking: RunEntry = { ...entry, phase: "waiting", outcome: "asking", retry_at: this.now() + ASK_AGAIN_MS };
+    await this.put(asking);
+    const answer = await this.deps.prompter.ask(asked.view, signal);
+    if (signal.aborted) return;
     this.log("lifecycle.ask", answer, entry, { code: asked.decision.reason });
     if (answer === "approve" && detail.prompt && !approvedRound) {
       const facts = factsKey(asked.decision);
       if (facts) this.approvals.set(key, { hash: detail.prompt.hash, version: task.version, facts });
       // Issued only on a fresh read and evaluation that still match what the owner saw.
-      await this.consider(offer, marker, true);
+      await this.consider(offer, marker, false, signal, true);
       return;
     }
     if (answer === "decline") {
@@ -396,7 +433,7 @@ export class Lifecycle {
       return null;
     }
     // Never `own_reservation_micro_usd` here: no reservation of this decision's exists before it's issued.
-    const decision = this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh());
+    const decision = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh());
     this.log("lifecycle.decision", decision.outcome, entry, { code: decision.reason });
     if (decision.outcome === "refuse") {
       if (LOCAL.has(decision.reason)) await this.put({ ...entry, phase: "waiting", outcome: decision.reason, retry_at: this.now() + WAIT_MS });
@@ -437,7 +474,9 @@ export class Lifecycle {
       return;
     }
     const capability = status === "offered" ? "decline_task" : "release_task";
-    await this.put({ ...entry, phase: "giving_up", outcome: reason, give_up: { capability, reason, version, key: this.newId() } });
+    // What Podster is told; the record keeps the reason itself.
+    const told = PRIVATE.has(reason) ? GENERIC_REASON : reason;
+    await this.put({ ...entry, phase: "giving_up", outcome: reason, give_up: { capability, reason: told, version, key: this.newId() } });
   }
 
   private async backoff(attempt: number, signal: AbortSignal, failure: GatewayError) {
@@ -447,6 +486,8 @@ export class Lifecycle {
 
   /** Sends an owed decline or release, retried with its stored key. */
   private async sendGiveUp(entry: RunEntry, signal: AbortSignal): Promise<void> {
+    // After a local stop nothing calls Podster (L1 on #458).
+    if (signal.aborted) return;
     let give = entry.give_up as GiveUp;
     if (give.version === null) {
       // A release after a stop: the task's version as it stands, read before the key is first used.
@@ -486,6 +527,7 @@ export class Lifecycle {
   private async accept(entry: RunEntry, signal: AbortSignal): Promise<void> {
     const decision = entry.decision;
     if (!decision || !entry.accept_key) throw new Error("accept_without_decision");
+    if (signal.aborted) return;
     for (let attempt = 0; attempt < COMMAND_TRIES; attempt++) {
       try {
         const answer = (await this.deps.poller.request("accept_task", { workspace_id: entry.workspace_id, task_id: entry.task_id, version: decision.task_version, idempotency_key: entry.accept_key })) as Record<string, unknown> | null;
@@ -534,7 +576,9 @@ export class Lifecycle {
     }
     const prompt = detail.prompt;
     const started = await this.gate.run(async () => {
-      const fresh = this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
+      if (signal.aborted) return "aborted" as const;
+      const fresh = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
+      if (signal.aborted) return "aborted" as const;
       // The accept moved the version by exactly itself; any other change since shows as a different version and refuses.
       const version = task.version === entry.expected_version ? decision.task_version : task.version;
       const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: version, input_hash: prompt?.hash ?? "", repository_id: null, base_commit: null };
@@ -550,24 +594,72 @@ export class Lifecycle {
         else await this.put({ ...cleared, phase: "done", marker: "", outcome: `consume_${consumed.reason}` });
         return null;
       }
+      // A local stop while the policy decided: nothing is consumed, and the decision waits as it was (M1 on #458).
+      if (signal.aborted) return "aborted" as const;
       const run_ref = this.newId();
       // Stored as returned, with the run's ID, before the adapter starts anything.
       const running: RunEntry = { ...entry, phase: "running", outcome: "started", consumed: consumed.record, run_ref };
       await this.put(running);
       return { running, facts: (fresh as Decision & { facts: RunFacts }).facts };
     });
+    if (started === "aborted") return "stopped";
     if (!started || !prompt) return "idle";
     const { running, facts } = started;
     this.log("lifecycle.run", "started", running);
-    let handle: RunHandle;
     try {
-      handle = await this.deps.adapter.start({ run_ref: running.run_ref as string, workspace_id: running.workspace_id, task_id: running.task_id, prompt: prompt.bytes, facts });
-    } catch {
-      const stopped = await this.deps.adapter.confirmStopped(running.run_ref as string).catch(() => false);
-      await this.stopped(running, stopped ? "stopped" : "unknown", null, "run_failed", { kind: "release", reason: "run_failed" });
-      return "idle";
+      let handle: RunHandle;
+      const starting = this.deps.adapter.start({ run_ref: running.run_ref as string, workspace_id: running.workspace_id, task_id: running.task_id, prompt: prompt.bytes, facts });
+      try {
+        const answered = await orAbort(starting, signal);
+        if (answered === ABORTED) {
+          // Stopped while the adapter was starting: whatever it starts is stopped as soon as it's there, and the run is
+          // held until the adapter confirms nothing is left of it.
+          starting.then((late) => this.safeStop(late), () => undefined);
+          this.log("lifecycle.stop", "local_stop_unknown", running);
+          await this.stopped(running, "unknown", null, "stopped_locally", { kind: "release", reason: "stopped_locally" }, false);
+          return "stopped";
+        }
+        handle = answered;
+      } catch {
+        const stopped = await this.deps.adapter.confirmStopped(running.run_ref as string).catch(() => false);
+        await this.stopped(running, stopped ? "stopped" : "unknown", null, "run_failed", { kind: "release", reason: "run_failed" });
+        return "idle";
+      }
+      // A local stop that came while the adapter started ends the run now, with no wait for a check-in (M1 on #458).
+      if (signal.aborted) return await this.localStop(running, handle);
+      return await this.supervise(running, handle, signal);
+    } catch (error) {
+      // Whatever went wrong, a run that may still be going is never left looking like nothing is (M2 on #458).
+      await this.holdOrphan(running, "run_interrupted");
+      throw error;
     }
-    return this.supervise(running, handle, signal);
+  }
+
+  /** A stop that throws counts as unconfirmed (M2 on #458). */
+  private async safeStop(handle: RunHandle): Promise<StopResult> {
+    try {
+      return (await handle.stop()) === "stopped" ? "stopped" : "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  /**
+   * Holds an entry still recorded as running: its spend counts as the whole reservation, and it's released only once the
+   * adapter confirms it stopped. Kept in memory if the record can't be saved, so this process starts nothing new.
+   */
+  private async holdOrphan(entry: RunEntry, outcome: string) {
+    const key = keyOf(entry.workspace_id, entry.task_id);
+    const current = this.state.entries[key];
+    if (!current || current.phase !== "running") return;
+    const ledger = settle(this.state.ledger, current.reservation, null, this.now());
+    const next: RunsState = { ...this.state, ledger, entries: { ...this.state.entries, [key]: { ...current, phase: "held", outcome, reservation: null, after_stop: { kind: "release", reason: outcome }, updated_at: this.now() } } };
+    try {
+      await this.save(next);
+    } catch {
+      this.state = next;
+    }
+    this.log("lifecycle.run", "held", entry, { code: outcome });
   }
 
   /** Waits on the run, checking in at the fixed interval, and stops it on a local stop or anything a check-in finds. */
@@ -578,6 +670,8 @@ export class Lifecycle {
     );
     let lastContact = this.now();
     for (;;) {
+      // Before every wait, and never a listener on a signal that already fired (M1 on #458).
+      if (signal.aborted) return this.localStop(entry, handle);
       const wake = new AbortController();
       const onAbort = () => wake.abort();
       signal.addEventListener("abort", onAbort, { once: true });
@@ -621,7 +715,7 @@ export class Lifecycle {
    * with the inputs the run was decided on, and a fresh evaluation must give the same facts, and `run` for an unattended
    * decision.
    */
-  private checkIn(entry: RunEntry, detail: TaskDetail | null): { outcome: string; after: After } | null {
+  private async checkIn(entry: RunEntry, detail: TaskDetail | null): Promise<{ outcome: string; after: After } | null> {
     const consumed = entry.consumed as NonNullable<RunEntry["consumed"]>;
     const task = detail?.task;
     if (!detail || !task) return { outcome: "not_readable", after: { kind: "none" } };
@@ -629,7 +723,7 @@ export class Lifecycle {
     if (task.status !== "accepted" || task.assignee !== this.deps.poller.agentId) return { outcome: `task_${task.status}`, after: { kind: "reconsider" } };
     if (!detail.prompt || detail.prompt.hash !== consumed.input_hash) return { outcome: "inputs_changed", after: { kind: "reconsider" } };
     // The read just made was answered as this agent, so its authority is fresh for this evaluation.
-    const fresh = this.evaluateFresh(detail, entry, true, consumed.reserved_micro_usd);
+    const fresh = await this.evaluateFresh(detail, entry, true, consumed.reserved_micro_usd);
     if (fresh.outcome === "refuse") return { outcome: `policy_${fresh.reason}`, after: { kind: "reconsider" } };
     if (consumed.mode === "unattended" && fresh.outcome !== "run") return { outcome: "policy_changed", after: { kind: "reconsider" } };
     if (factsKey(fresh) !== consumed.facts_key) return { outcome: "policy_changed", after: { kind: "reconsider" } };
@@ -638,7 +732,7 @@ export class Lifecycle {
 
   /** The owner's local stop: the run's process tree first, with no call to Podster, then the record on this machine. */
   private async localStop(entry: RunEntry, handle: RunHandle): Promise<TickOutcome> {
-    const result = await handle.stop();
+    const result = await this.safeStop(handle);
     this.log("lifecycle.stop", result === "stopped" ? "local_stop" : "local_stop_unknown", entry);
     // The release is owed to Podster and sent after a restart, once the stop is confirmed.
     await this.stopped(entry, result, null, "stopped_locally", { kind: "release", reason: "stopped_locally" }, false);
@@ -646,14 +740,14 @@ export class Lifecycle {
   }
 
   private async stopFor(entry: RunEntry, handle: RunHandle, outcome: string, after: After) {
-    const result = await handle.stop();
+    const result = await this.safeStop(handle);
     await this.stopped(entry, result, null, outcome, after);
   }
 
   /** A run that ended by itself. A failure, a budget stop or a time-out is never a submission: it's released. */
   private async ended(entry: RunEntry, handle: RunHandle, report: RunReport): Promise<TickOutcome> {
     // Confirmed, not assumed: the tree is stopped before anything is released (R-24).
-    const result = await handle.stop();
+    const result = await this.safeStop(handle);
     const spent = typeof report.spent_micro_usd === "number" ? report.spent_micro_usd : null;
     if (report.status === "succeeded") await this.stopped(entry, result, spent, "succeeded", { kind: "finish" });
     else await this.stopped(entry, result, spent, `run_${report.status}`, { kind: "release", reason: `run_${report.status}` });
@@ -722,4 +816,13 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
     await clock.idle(poller.nextWaitMs(polled), signal);
   }
   return "stopped";
+}
+
+/** The run policy as it stands: a function's answer read now, or the value given. A read that throws is no policy. */
+async function readConfig(config: LifecycleDeps["config"]): Promise<unknown> {
+  try {
+    return typeof config === "function" ? await (config as () => unknown)() : config;
+  } catch {
+    return null;
+  }
 }

@@ -27,7 +27,10 @@ const GUARD_FILE = "run.lock.takeover";
 /** How old an unreadable lock, or a takeover guard, must be before it counts as left by a crash. */
 export const STALE_UNREADABLE_MS = 60_000;
 
-export type LockHolder = { pid: number; host: string; started_at: number; nonce: string };
+export const LOCK_COMMANDS = ["pair", "run", "forget"] as const;
+export type LockCommand = (typeof LOCK_COMMANDS)[number];
+/** Who holds the lock, and for which command: only a `run` can be stopped by `stop` (L2 on #458). */
+export type LockHolder = { pid: number; host: string; started_at: number; nonce: string; command: LockCommand };
 
 export class LockRefused extends Error {
   readonly holder: LockHolder | null;
@@ -39,6 +42,8 @@ export class LockRefused extends Error {
 }
 
 export type LockOptions = {
+  /** The command taking the lock. `run` unless said. */
+  command?: LockCommand;
   pid?: number;
   host?: string;
   now?: () => number;
@@ -59,7 +64,8 @@ function parse(text: string): LockHolder | null {
   try {
     const v = JSON.parse(text) as Record<string, unknown>;
     if (!Number.isSafeInteger(v.pid) || (v.pid as number) <= 0 || typeof v.host !== "string" || !Number.isSafeInteger(v.started_at) || typeof v.nonce !== "string" || !/^[0-9a-f]{32}$/.test(v.nonce)) return null;
-    return { pid: v.pid as number, host: v.host, started_at: v.started_at as number, nonce: v.nonce };
+    if (!(LOCK_COMMANDS as readonly unknown[]).includes(v.command)) return null;
+    return { pid: v.pid as number, host: v.host, started_at: v.started_at as number, nonce: v.nonce, command: v.command as LockCommand };
   } catch {
     return null;
   }
@@ -111,7 +117,7 @@ export async function acquireLock(home: string, options: LockOptions = {}): Prom
   await chmod(home, 0o700);
   const path = join(home, LOCK_FILE);
   const guard = join(home, GUARD_FILE);
-  const holder: LockHolder = { pid, host, started_at: now(), nonce: randomBytes(16).toString("hex") };
+  const holder: LockHolder = { pid, host, started_at: now(), nonce: randomBytes(16).toString("hex"), command: options.command ?? "run" };
   const text = JSON.stringify(holder);
   const held: HeldLock = {
     holder,

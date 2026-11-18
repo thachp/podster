@@ -298,7 +298,7 @@ describe("Runner's core against the gateway", () => {
       expect(Object.keys(poller.record.offers)).toEqual(expect.arrayContaining([key(room, task.body.id), key(other, elsewhere.body.id)]));
     });
     expect(await lifecycle.tick(stop.signal)).toBe("idle");
-    // Out of scope: declined with the reason code, before anything else.
+    // Out of scope: declined, before anything else.
     expect(await lifecycle.tick(stop.signal)).toBe("idle");
 
     const read = async (ws: string, t: string) => (await dash(person, "GET", `/v1/workspaces/${ws}/tasks/${t}`)).body;
@@ -306,7 +306,9 @@ describe("Runner's core against the gateway", () => {
     expect(accepted.task).toMatchObject({ status: "accepted", assignee: agent });
     const declined = await read(other, elsewhere.body.id);
     expect(declined.task).toMatchObject({ status: "open", assignee: null });
-    expect(declined.history.find((h: { type: string }) => h.type === "task.declined")?.reason).toBe("room_not_configured");
+    // Podster is told only that Runner can't take it; the owner's own reason stays on the machine.
+    expect(declined.history.find((h: { type: string }) => h.type === "task.declined")?.reason).toBe("runner_unavailable");
+    expect(lifecycle.record.entries[key(other, elsewhere.body.id)].outcome).toBe("room_not_configured");
 
     // One run, from exactly the inputs provenance listed, its hash bound to the decision.
     expect(starts).toHaveLength(1);

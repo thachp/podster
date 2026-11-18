@@ -6,7 +6,7 @@
  */
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { emptyRuns, type RunsState, type RunStore } from "../core/runs.js";
+import { afterForget, checkRuns, emptyRuns, forgetBlocked, type RunsState, type RunStore } from "../core/runs.js";
 import { writeWhole } from "./file-state.js";
 
 const FILE = "runs.json";
@@ -36,11 +36,11 @@ export class FileRunStore implements RunStore {
     } catch {
       throw new Error(`Runner's run record at ${this.path} can't be read. Nothing was changed.`);
     }
-    const v = parsed as RunsState | null;
-    if (!v || typeof v !== "object" || v.version !== 1 || !v.entries || typeof v.entries !== "object" || !v.ledger || typeof v.ledger !== "object") {
-      throw new Error(`Runner's run record at ${this.path} isn't one this Runner reads. Nothing was changed.`);
-    }
-    return { ...emptyRuns(), ...v };
+    if (!parsed || typeof parsed !== "object" || (parsed as RunsState).version !== 1) throw new Error(`Runner's run record at ${this.path} isn't one this Runner reads. Nothing was changed.`);
+    const whole = { ...emptyRuns(), ...(parsed as RunsState) };
+    const wrong = checkRuns(whole);
+    if (wrong) throw new Error(`Runner's run record at ${this.path} is damaged at ${wrong}. Nothing was changed or started; tell whoever supports your Runner.`);
+    return whole;
   }
 
   async save(state: RunsState): Promise<void> {
@@ -50,4 +50,16 @@ export class FileRunStore implements RunStore {
   async remove(): Promise<void> {
     await rm(this.path, { force: true });
   }
+}
+
+/**
+ * `forget`'s part of the run record (L5 on #458): refused while a run may still be going or budget is reserved, and
+ * otherwise every entry is dropped while the day's spend is kept. Answers why it was refused, or null.
+ */
+export async function forgetRuns(store: RunStore): Promise<string | null> {
+  const state = await store.load();
+  const blocked = forgetBlocked(state);
+  if (blocked) return blocked;
+  await store.save(afterForget(state));
+  return null;
 }

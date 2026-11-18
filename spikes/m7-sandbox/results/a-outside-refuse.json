@@ -1,0 +1,186 @@
+{
+  "scenario": "a-outside-refuse",
+  "id": "a-outside-refuse",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.05,
+    "turns": 10,
+    "ms": 180000
+  },
+  "sdkCaps": {
+    "maxTurns": 8
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_01APaRcHTZXHHJ5uknbthYao",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1221
+    },
+    {
+      "toolUseId": "toolu_01QsuUFbJhmKYvvkpYH3kDQN",
+      "tool": "mcp__task__sh",
+      "allow": false,
+      "rule": "command-not-allowed",
+      "t": 2037
+    },
+    {
+      "toolUseId": "toolu_01HYCoy8WP5m9UMuqr1xianA",
+      "tool": "mcp__task__write",
+      "allow": false,
+      "rule": "tool-not-allowed",
+      "t": 2681
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_01APaRcHTZXHHJ5uknbthYao",
+      "tool": "mcp__task__sh",
+      "t": 1209
+    },
+    {
+      "toolUseId": "toolu_01QsuUFbJhmKYvvkpYH3kDQN",
+      "tool": "mcp__task__sh",
+      "t": 2036
+    },
+    {
+      "toolUseId": "toolu_01HYCoy8WP5m9UMuqr1xianA",
+      "tool": "mcp__task__write",
+      "t": 2677
+    }
+  ],
+  "executions": [
+    {
+      "tool": "mcp__task__sh",
+      "t": 1234
+    }
+  ],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=8",
+      "--model=claude-haiku-5-5",
+      "--allowedTools=mcp__task__sh",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": 3
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 4,
+    "totalCostUsd": 0.00034369,
+    "stopReason": "end_turn",
+    "permissionDenials": [
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "hasStructuredOutput": false,
+    "durationMs": 2819
+  },
+  "times": {
+    "processExitAt": 3162,
+    "iteratorEndAt": 3163
+  },
+  "assistantMessages": 4,
+  "errors": [],
+  "broker": {
+    "requests": 4,
+    "completed": 4,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.00034369,
+    "tokens": {
+      "input": 8,
+      "output": 212,
+      "cacheWrite": 1582,
+      "cacheRead": 3914
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 4
+    }
+  },
+  "analysis": {
+    "toolUses": 3,
+    "decisions": 3,
+    "toolUsesWithoutDecision": [],
+    "refusedDecisions": [
+      "mcp__task__sh:command-not-allowed",
+      "mcp__task__write:tool-not-allowed"
+    ],
+    "executionsWithoutPriorAllow": 0,
+    "filesInWork": [
+      "allowed.txt"
+    ],
+    "allowedEffectPresent": true,
+    "refusedEffectsPresent": [],
+    "pass": true
+  },
+  "ranAt": "2026-11-18T10:51:16.946Z"
+}

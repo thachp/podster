@@ -1,0 +1,522 @@
+{
+  "scenario": "b-runner-usd-reserve",
+  "id": "b-runner-usd-reserve",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "maxOutputTokens": null,
+  "caps": {
+    "usd": 0.003,
+    "turns": 70,
+    "ms": 300000
+  },
+  "sdkCaps": {
+    "maxTurns": 70
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_018aG6ekmkDyA2uK9ySR1xpv",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1385
+    },
+    {
+      "toolUseId": "toolu_01Y2AJaGhboDhCs8G2puTyut",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#1",
+      "t": 2122
+    },
+    {
+      "toolUseId": "toolu_01CG4WvPbGEHVaeqv7kyHKhH",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#2",
+      "t": 2859
+    },
+    {
+      "toolUseId": "toolu_01GwHirtYcYksSguDCiKkEFm",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#3",
+      "t": 3572
+    },
+    {
+      "toolUseId": "toolu_01C2SGtnzx2T5tvQZpRceiQ2",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#4",
+      "t": 4237
+    },
+    {
+      "toolUseId": "toolu_011JApZsGMJukHqYA5FZNFss",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#5",
+      "t": 4951
+    },
+    {
+      "toolUseId": "toolu_012wWPZ66UGyCy9qE3eucSXJ",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#6",
+      "t": 5650
+    },
+    {
+      "toolUseId": "toolu_01DBWAab5MW5EMFFDgCg3Tpx",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#7",
+      "t": 6334
+    },
+    {
+      "toolUseId": "toolu_01HtWk4zK4s3cMu9g3XMXjqM",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#8",
+      "t": 7052
+    },
+    {
+      "toolUseId": "toolu_01WrxZzPBcH4Ug9RFw64FVLS",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#9",
+      "t": 7779
+    },
+    {
+      "toolUseId": "toolu_011wThKGbiirj6UQQUD5eVgL",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#10",
+      "t": 8481
+    },
+    {
+      "toolUseId": "toolu_01UBGXakd3BmuYQRsDxv5nfs",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#11",
+      "t": 9186
+    },
+    {
+      "toolUseId": "toolu_013HzyrsGiDz9qJDF34xkvQd",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#12",
+      "t": 9883
+    },
+    {
+      "toolUseId": "toolu_01QMQkNMGuKhUSS5b6b7ogrK",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#13",
+      "t": 10615
+    },
+    {
+      "toolUseId": "toolu_01Gj6TpNzw8NsMWe9Tbnh7Es",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#14",
+      "t": 11294
+    },
+    {
+      "toolUseId": "toolu_01PeMExxufnC4mfsWvHLeQaZ",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#15",
+      "t": 11980
+    },
+    {
+      "toolUseId": "toolu_01KadCP6QUH1cQUYuRzgHKsg",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#16",
+      "t": 12619
+    },
+    {
+      "toolUseId": "toolu_01VrehesQb92eWsYBLWP5E1n",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#17",
+      "t": 13406
+    },
+    {
+      "toolUseId": "toolu_013cyw7RcVtD8XzAbwf1vJ43",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#18",
+      "t": 14137
+    },
+    {
+      "toolUseId": "toolu_01BJRANc4aUHXVkSy4Jux1Yt",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#19",
+      "t": 14852
+    },
+    {
+      "toolUseId": "toolu_01RKkawkUSSeTkPgggVGbV2F",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#20",
+      "t": 15549
+    },
+    {
+      "toolUseId": "toolu_019tpZQcy8snPuRYi6TVDnWE",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#21",
+      "t": 16286
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_018aG6ekmkDyA2uK9ySR1xpv",
+      "tool": "mcp__task__sh",
+      "t": 1375
+    },
+    {
+      "toolUseId": "toolu_01Y2AJaGhboDhCs8G2puTyut",
+      "tool": "mcp__task__sh",
+      "t": 2121
+    },
+    {
+      "toolUseId": "toolu_01CG4WvPbGEHVaeqv7kyHKhH",
+      "tool": "mcp__task__sh",
+      "t": 2858
+    },
+    {
+      "toolUseId": "toolu_01GwHirtYcYksSguDCiKkEFm",
+      "tool": "mcp__task__sh",
+      "t": 3570
+    },
+    {
+      "toolUseId": "toolu_01C2SGtnzx2T5tvQZpRceiQ2",
+      "tool": "mcp__task__sh",
+      "t": 4235
+    },
+    {
+      "toolUseId": "toolu_011JApZsGMJukHqYA5FZNFss",
+      "tool": "mcp__task__sh",
+      "t": 4948
+    },
+    {
+      "toolUseId": "toolu_012wWPZ66UGyCy9qE3eucSXJ",
+      "tool": "mcp__task__sh",
+      "t": 5648
+    },
+    {
+      "toolUseId": "toolu_01DBWAab5MW5EMFFDgCg3Tpx",
+      "tool": "mcp__task__sh",
+      "t": 6332
+    },
+    {
+      "toolUseId": "toolu_01HtWk4zK4s3cMu9g3XMXjqM",
+      "tool": "mcp__task__sh",
+      "t": 7050
+    },
+    {
+      "toolUseId": "toolu_01WrxZzPBcH4Ug9RFw64FVLS",
+      "tool": "mcp__task__sh",
+      "t": 7778
+    },
+    {
+      "toolUseId": "toolu_011wThKGbiirj6UQQUD5eVgL",
+      "tool": "mcp__task__sh",
+      "t": 8480
+    },
+    {
+      "toolUseId": "toolu_01UBGXakd3BmuYQRsDxv5nfs",
+      "tool": "mcp__task__sh",
+      "t": 9184
+    },
+    {
+      "toolUseId": "toolu_013HzyrsGiDz9qJDF34xkvQd",
+      "tool": "mcp__task__sh",
+      "t": 9881
+    },
+    {
+      "toolUseId": "toolu_01QMQkNMGuKhUSS5b6b7ogrK",
+      "tool": "mcp__task__sh",
+      "t": 10613
+    },
+    {
+      "toolUseId": "toolu_01Gj6TpNzw8NsMWe9Tbnh7Es",
+      "tool": "mcp__task__sh",
+      "t": 11291
+    },
+    {
+      "toolUseId": "toolu_01PeMExxufnC4mfsWvHLeQaZ",
+      "tool": "mcp__task__sh",
+      "t": 11978
+    },
+    {
+      "toolUseId": "toolu_01KadCP6QUH1cQUYuRzgHKsg",
+      "tool": "mcp__task__sh",
+      "t": 12618
+    },
+    {
+      "toolUseId": "toolu_01VrehesQb92eWsYBLWP5E1n",
+      "tool": "mcp__task__sh",
+      "t": 13403
+    },
+    {
+      "toolUseId": "toolu_013cyw7RcVtD8XzAbwf1vJ43",
+      "tool": "mcp__task__sh",
+      "t": 14135
+    },
+    {
+      "toolUseId": "toolu_01BJRANc4aUHXVkSy4Jux1Yt",
+      "tool": "mcp__task__sh",
+      "t": 14850
+    },
+    {
+      "toolUseId": "toolu_01RKkawkUSSeTkPgggVGbV2F",
+      "tool": "mcp__task__sh",
+      "t": 15547
+    },
+    {
+      "toolUseId": "toolu_019tpZQcy8snPuRYi6TVDnWE",
+      "tool": "mcp__task__sh",
+      "t": 16283
+    }
+  ],
+  "executions": [
+    {
+      "tool": "mcp__task__sh",
+      "t": 1400
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 2130
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 2864
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 3577
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 4241
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 4955
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 5654
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 6338
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 7055
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 7783
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 8485
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 9191
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 9886
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 10618
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 11297
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 11984
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 12622
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 13409
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 14140
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 14855
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 15554
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 16290
+    }
+  ],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=70",
+      "--model=claude-haiku-5-5",
+      "--allowedTools=mcp__task__sh",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": [
+      "cc-plugin-agents-md",
+      "cc-plugin-privacy",
+      "cc-plugin-plugin-authoring"
+    ],
+    "outputStyle": "default"
+  },
+  "result": null,
+  "times": {
+    "timerStartAt": 5,
+    "capAt": 16457,
+    "stopAt": 16457,
+    "containerKilledAt": 16571,
+    "iteratorEndAt": 18462,
+    "processExitAt": 18481
+  },
+  "assistantMessages": 22,
+  "errors": [
+    "Error:Claude Code process aborted by user"
+  ],
+  "stopKind": "usd",
+  "containerKill": "killed",
+  "broker": {
+    "requests": 22,
+    "completed": 22,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 3,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.00139832,
+    "tokens": {
+      "input": 44,
+      "output": 1210,
+      "cacheWrite": 2948,
+      "cacheRead": 42042
+    },
+    "stopped": {
+      "kind": "usd",
+      "at": 1795000025413
+    },
+    "usdAtStop": 0.00139832,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 22
+    },
+    "canarySeen": false,
+    "cutStreams": 0,
+    "estimatedOutputTokens": 0,
+    "maxTokensRequested": 128000,
+    "clamped": 23,
+    "refusedByReservation": 1
+  },
+  "analysis": {
+    "kind": "usd",
+    "cap": 0.003,
+    "stoppedBy": "usd",
+    "sdkResult": null,
+    "sdkReportedUsd": null,
+    "sdkNumTurns": null,
+    "brokerUsd": 0.00139832,
+    "brokerUsdAtStop": 0.00139832,
+    "brokerRequests": 22,
+    "brokerRefusedAfterStop": 3,
+    "maxTokensRequested": 128000,
+    "clamped": 23,
+    "refusedByReservation": 1,
+    "cutInFlight": 0,
+    "toolCallsDecided": 22,
+    "toolExecutions": 22,
+    "executionsAfterStop": 0,
+    "allowDecisionsAfterStop": 0,
+    "ms": {
+      "stopAt": 16457,
+      "containerKilled": 16571,
+      "iteratorEnd": 18462,
+      "processExit": 18481
+    },
+    "overshootUsd": -0.00160168,
+    "overshootPct": -53.38933333333333,
+    "containerRunningAfter": "false"
+  },
+  "ranAt": "2026-11-18T11:07:07.620Z"
+}

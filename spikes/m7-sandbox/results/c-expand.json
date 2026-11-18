@@ -1,0 +1,133 @@
+{
+  "scenario": "c-expand",
+  "id": "c-expand",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.02,
+    "turns": 3,
+    "ms": 60000
+  },
+  "sdkCaps": {
+    "maxTurns": 2
+  },
+  "decisions": [],
+  "toolUses": [],
+  "executions": [],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=2",
+      "--model=claude-haiku-5-5",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": [
+      "cc-plugin-agents-md",
+      "cc-plugin-privacy",
+      "cc-plugin-plugin-authoring"
+    ],
+    "outputStyle": "default"
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 1,
+    "totalCostUsd": 0.00008576,
+    "stopReason": "end_turn",
+    "permissionDenials": [],
+    "hasStructuredOutput": false,
+    "durationMs": 711
+  },
+  "times": {
+    "processExitAt": 1070,
+    "iteratorEndAt": 1071
+  },
+  "assistantMessages": 1,
+  "errors": [],
+  "broker": {
+    "requests": 1,
+    "completed": 1,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.00008576,
+    "tokens": {
+      "input": 2,
+      "output": 4,
+      "cacheWrite": 622,
+      "cacheRead": 581
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 1
+    },
+    "canarySeen": true
+  },
+  "analysis": {
+    "hostFileReachedProvider": true,
+    "pass": false
+  },
+  "ranAt": "2026-11-18T10:55:01.080Z"
+}

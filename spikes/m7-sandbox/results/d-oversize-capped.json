@@ -1,0 +1,207 @@
+{
+  "scenario": "d-oversize-capped",
+  "id": "d-oversize-capped",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "maxOutputTokens": 2048,
+  "caps": {
+    "usd": 0.02,
+    "turns": 8,
+    "ms": 60000
+  },
+  "sdkCaps": {
+    "maxTurns": 6
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_018PLHQGatjTRpMGgXHPK6Um",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1198
+    },
+    {
+      "toolUseId": "toolu_013eueyDBG9xSh7WGPJsQdmz",
+      "tool": "StructuredOutput",
+      "allow": true,
+      "rule": "tool-allowed",
+      "t": 9541
+    },
+    {
+      "toolUseId": "toolu_01YLUQmi2dVJb7zUVjwGQ27c",
+      "tool": "StructuredOutput",
+      "allow": true,
+      "rule": "tool-allowed",
+      "t": 11409
+    },
+    {
+      "toolUseId": "toolu_01Uf5o4nHdSrzpXaimNeDfzC",
+      "tool": "StructuredOutput",
+      "allow": true,
+      "rule": "tool-allowed",
+      "t": 12949
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_018PLHQGatjTRpMGgXHPK6Um",
+      "tool": "mcp__task__sh",
+      "t": 1192
+    },
+    {
+      "toolUseId": "toolu_013eueyDBG9xSh7WGPJsQdmz",
+      "tool": "StructuredOutput",
+      "t": 9539
+    },
+    {
+      "toolUseId": "toolu_01YLUQmi2dVJb7zUVjwGQ27c",
+      "tool": "StructuredOutput",
+      "t": 11407
+    },
+    {
+      "toolUseId": "toolu_01Uf5o4nHdSrzpXaimNeDfzC",
+      "tool": "StructuredOutput",
+      "t": 12947
+    }
+  ],
+  "executions": [
+    {
+      "tool": "mcp__task__sh",
+      "t": 1210
+    }
+  ],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=6",
+      "--model=claude-haiku-5-5",
+      "--json-schema={\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"done\",\"failed\"]},\"summary\":{\"type\":\"string\",\"maxLength\":200},\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":10}},\"required\":[\"status\",\"summary\",\"files\"],\"additionalProperties\":false}",
+      "--allowedTools=mcp__task__sh,StructuredOutput",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "StructuredOutput",
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": [
+      "cc-plugin-agents-md",
+      "cc-plugin-privacy",
+      "cc-plugin-plugin-authoring"
+    ],
+    "outputStyle": "default"
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 6,
+    "totalCostUsd": 0.001992655,
+    "stopReason": "tool_use",
+    "permissionDenials": [],
+    "hasStructuredOutput": true,
+    "durationMs": 12660
+  },
+  "times": {
+    "timerStartAt": 5,
+    "processExitAt": 12970,
+    "iteratorEndAt": 12971
+  },
+  "assistantMessages": 7,
+  "errors": [],
+  "broker": {
+    "requests": 5,
+    "completed": 5,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.001992655,
+    "tokens": {
+      "input": 10,
+      "output": 3390,
+      "cacheWrite": 1803,
+      "cacheRead": 7128
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 5
+    },
+    "canarySeen": false,
+    "cutStreams": 0,
+    "estimatedOutputTokens": 0
+  },
+  "analysis": {
+    "sdkResult": "success",
+    "structuredPresent": true,
+    "structuredType": "object",
+    "status": "done",
+    "summaryLength": 106,
+    "filesClaimed": 1,
+    "claimedFilesExist": true,
+    "runnerBound": {
+      "ok": true,
+      "problems": [],
+      "size": 162
+    },
+    "pass": true
+  },
+  "ranAt": "2026-11-18T11:04:08.259Z"
+}

@@ -1,0 +1,141 @@
+{
+  "totalUsd": 0.015079925,
+  "sdkReportedUsd": 0.00920754,
+  "runs": [
+    {
+      "id": "a-outside-refuse",
+      "brokerUsd": 0.00034369,
+      "sdkUsd": 0.00034369
+    },
+    {
+      "id": "a-outside-open",
+      "brokerUsd": 0.00025391000000000004,
+      "sdkUsd": 0.00025391
+    },
+    {
+      "id": "a-inside-refuse",
+      "brokerUsd": 0.00071815,
+      "sdkUsd": 0.0007181500000000001
+    },
+    {
+      "id": "a-inside-open",
+      "brokerUsd": 0.00027586,
+      "sdkUsd": 0.00027586
+    },
+    {
+      "id": "a-outside-open-control",
+      "brokerUsd": 0.00024408,
+      "sdkUsd": 0.00024407999999999998
+    },
+    {
+      "id": "a-inside-open-control",
+      "brokerUsd": 0.00032292500000000006,
+      "sdkUsd": 0.00032292499999999995
+    },
+    {
+      "id": "c-probe",
+      "brokerUsd": 0.0000014,
+      "sdkUsd": null
+    },
+    {
+      "id": "c-probe",
+      "brokerUsd": 0.0000014,
+      "sdkUsd": null
+    },
+    {
+      "id": "c-probe-model",
+      "brokerUsd": 0.000211385,
+      "sdkUsd": 0.000209985
+    },
+    {
+      "id": "c-repo",
+      "brokerUsd": 0.00019168,
+      "sdkUsd": 0.00019168
+    },
+    {
+      "id": "c-repo-control",
+      "brokerUsd": 0.00022606499999999996,
+      "sdkUsd": 0.000226065
+    },
+    {
+      "id": "c-expand",
+      "brokerUsd": 0.00008576,
+      "sdkUsd": 0.00008576
+    },
+    {
+      "id": "c-expand-verbatim",
+      "brokerUsd": 0.00009926000000000001,
+      "sdkUsd": 0.00009926
+    },
+    {
+      "id": "b-sdk-usd",
+      "brokerUsd": 0.0030892450000000004,
+      "sdkUsd": 0.0030892450000000004
+    },
+    {
+      "id": "b-runner-usd",
+      "brokerUsd": 0.003005845,
+      "sdkUsd": null
+    },
+    {
+      "id": "t-sdk-turns",
+      "brokerUsd": 0.00029122,
+      "sdkUsd": 0.00029121999999999997
+    },
+    {
+      "id": "t-runner-turns",
+      "brokerUsd": 0.000291055,
+      "sdkUsd": null
+    },
+    {
+      "id": "r-runner-time",
+      "brokerUsd": 0.000444315,
+      "sdkUsd": null
+    },
+    {
+      "id": "r-runner-time",
+      "brokerUsd": 0.00032506,
+      "sdkUsd": null
+    },
+    {
+      "id": "d-structured",
+      "brokerUsd": 0.00068146,
+      "sdkUsd": 0.00068146
+    },
+    {
+      "id": "d-oversize",
+      "brokerUsd": 0.00014428,
+      "sdkUsd": null
+    },
+    {
+      "id": "d-structured",
+      "brokerUsd": 0.000181595,
+      "sdkUsd": 0.000181595
+    },
+    {
+      "id": "d-oversize",
+      "brokerUsd": 0.00012952,
+      "sdkUsd": null
+    },
+    {
+      "id": "d-oversize-capped",
+      "brokerUsd": 0,
+      "sdkUsd": null
+    },
+    {
+      "id": "d-oversize-capped",
+      "brokerUsd": 0.001992655,
+      "sdkUsd": 0.001992655
+    },
+    {
+      "id": "d-oversize",
+      "brokerUsd": 0.00012979000000000002,
+      "sdkUsd": null
+    },
+    {
+      "id": "b-runner-usd-reserve",
+      "brokerUsd": 0.00139832,
+      "sdkUsd": null
+    }
+  ]
+}

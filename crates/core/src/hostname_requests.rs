@@ -213,7 +213,7 @@ pub enum RoomRead {
 /// What the room holds of a custom hostname, read from its own rows before anything outside it is asked (M6 step 8c).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RouteLocal<'a> {
-    /// The gate on claims (`HOSTNAME_CLAIMS_COMPLETE`, or a test build's opt-in) is open.
+    /// The gate on claims (`HOSTNAME_CLAIMS_COMPLETE`, unless a test build closed it for the room) is open.
     pub claims_open: bool,
     /// The room's open request for this host is `claimed`: a committed claim, not pending and not ending.
     pub request_claimed: bool,

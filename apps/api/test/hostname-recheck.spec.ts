@@ -82,7 +82,6 @@ async function room(org: string): Promise<Room> {
   await inRoom(id, (sql) => {
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", `pub_${crypto.randomUUID().replace(/-/g, "")}`);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-    sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/recheck', 'public', 'main', 'ready', ?, 1, 1, 1)", 987670100 + n, owner.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rc_1', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", owner.id, owner.id);
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
@@ -245,11 +244,11 @@ describe("the daily recheck of a committed claim (M6 step 8d)", () => {
   it("doesn't look with the gate on claims closed or no resolver, records that as no answer, and so ends the claim after seven days", async () => {
     const { r, name, proved } = await claimed("org_rc_no_look");
     const before = await looks(name);
-    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_open"));
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"));
     await passAt(r, proved + DAY);
     expect(await rechecked(r)).toBe(proved + DAY);
     await inRoom(r.room, (sql) => {
-      sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
+      sql.exec("DROP TABLE test_hostname_claims_closed");
       sql.exec("CREATE TABLE test_hostname_resolver_off (x INTEGER)");
     });
     for (let day = 2; day <= 6; day++) await passAt(r, proved + day * DAY);

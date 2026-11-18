@@ -31,13 +31,16 @@
 //! its proof was taken there; one that can't be read makes it wait. An ask or a withdrawal that got no answer is tried
 //! again after a wait that doubles from a minute up to an hour (`retry_wait_ms`), and never given up.
 //!
-//! **The gate on claims, [`HOSTNAME_CLAIMS_COMPLETE`], false: closed everywhere until 8b and 8d.** While it is false,
-//! every build and environment refuses every ask for a hostname as a route that isn't built (`release_not_available`),
-//! whatever the provider, the resolver, the Public Suffix List or `RELEASES` say, and its proof job neither looks nor
-//! asks the object, each saying so in one log line by its code. Only a test build opens it, for a room a test opts in.
-//! It is flipped only once a committed claim can end the long way (8b) and claims are rechecked (8d). A request whose
-//! proof was recorded and whose granted answer was lost stays held at the object while the gate is closed, which fails
-//! closed, until a removal withdraws it.
+//! **The gate on claims, [`HOSTNAME_CLAIMS_COMPLETE`], true since 2026-11-18,** once a committed claim could end the
+//! long way (8b, #403) and claims were rechecked (8d, #444). Open, it still opens nothing by itself: asking reads
+//! everything switching release on reads, so with `RELEASES` unset the route answers as one that doesn't exist, and
+//! with `RELEASES` on and a content provider it is refused (`release_not_available`) while the release path's own
+//! constant (`release_commit::RELEASE_PATH_COMPLETE`) is false; the proof job looks only while release is on for the
+//! deployment and in the room, with a resolver and the Public Suffix List bound, which no environment binds; and the
+//! custom hostname at Cloudflare is created only once `RELEASE_PATH_COMPLETE` is true, everywhere (`custom_hostname`).
+//! Only a test build closes it again, for a room a test gives `test_hostname_claims_closed`, so the closed path, which
+//! refuses an ask and keeps the proof job from looking or asking, each with one log line by its code, can still be
+//! shown.
 //!
 //! **What this doesn't do:** write a serve entry for a custom hostname, or recheck a claim. Nothing here serves. A
 //! committed claim's custom hostname at Cloudflare and its long end are `custom_hostname`'s (8b), and so is routing
@@ -67,11 +70,12 @@ pub(crate) const HOSTNAME_REQUEST_PREFIX: &str = "hnr_";
 /// The setting that holds the Public Suffix List's rules, as the list writes them. Bound in no environment: with none,
 /// every name is refused `hostname_unavailable`.
 const PUBLIC_SUFFIX_RULES: &str = "PUBLIC_SUFFIX_RULES";
-/// **Whether custom hostname claims are complete.** False until 8b (a committed claim's long end) and 8d (the daily
-/// recheck) have both merged, and this is the only place it is set. While false, every build and environment refuses
-/// every ask for a hostname and its proof job neither looks nor asks (`Workspace::hostname_claims_open`); only a test
-/// build opens it, for a room a test opts in. What must be true first is in `docs/m6-plan.md`, under "Step 8: the build plan".
-pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;
+/// **Whether custom hostname claims are complete.** True since 2026-11-18, once 8b (a committed claim's long end, #403)
+/// and 8d (the daily recheck, #444) had both merged, and this is the only place it is set. While it was false, every
+/// build and environment refused every ask for a hostname and its proof job neither looked nor asked
+/// (`Workspace::hostname_claims_open`). What had to be true first is in `docs/m6-plan.md`, under "Step 8: the build
+/// plan" and "The gate on the release path". The release path's own constant still holds back the create at Cloudflare.
+pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = true;
 /// The rolling window [`request_rate_allows`] counts a room's new requests in.
 const RATE_WINDOW_MS: i64 = 60 * 60 * 1000;
 
@@ -573,10 +577,10 @@ impl Workspace {
     }
 
     /// **The gate on claims** ([`HOSTNAME_CLAIMS_COMPLETE`]): whether a hostname may be asked for and its proof job may
-    /// look and ask. **Closed everywhere until claims are complete,** whatever the provider, the resolver, the Public
-    /// Suffix List or `RELEASES` say: a claim is permanent until 8b can end one and 8d rechecks it. Test builds only: a
-    /// room a test gave the table `test_hostname_claims_open` has it open, so the rest of the path can be shown. A
-    /// build without the `failpoints` feature never reads that table.
+    /// look and ask. **Open since claims are complete** (8b ends a committed claim, 8d rechecks it); what else an ask
+    /// and a look need is read after it. Test builds only: a room a test gave the table `test_hostname_claims_closed`
+    /// has it closed, so the closed path can still be shown. A build without the `failpoints` feature never reads that
+    /// table.
     pub(super) fn hostname_claims_open(&self) -> bool {
         claims_open(&self.state.storage().sql())
     }
@@ -753,23 +757,20 @@ impl Workspace {
 /// **The gate on claims** ([`HOSTNAME_CLAIMS_COMPLETE`]), from the room's own storage, as
 /// [`Workspace::hostname_claims_open`] reads it: for the applier too, which is no method of the room's.
 pub(super) fn claims_open(sql: &SqlStorage) -> bool {
-    if HOSTNAME_CLAIMS_COMPLETE {
-        return true;
-    }
+    // Test builds only: a room a test closed it for.
     #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_claims_closed'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty())
     {
-        rows(
-            sql,
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hostname_claims_open'",
-            vec![],
-        )
-        .is_ok_and(|found| !found.is_empty())
+        return false;
     }
     #[cfg(not(feature = "failpoints"))]
-    {
-        let _ = sql;
-        false
-    }
+    let _ = sql;
+    HOSTNAME_CLAIMS_COMPLETE
 }
 
 /// Records that the job looked at a request now, so its next look waits its turn. It isn't a change to the request,

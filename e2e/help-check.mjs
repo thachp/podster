@@ -50,6 +50,7 @@ export const NOT_ENTRY = {
   "e2e/m6-staging-kept.mjs": "a library m6-staging.mjs imports for its kept file",
   "e2e/m6-staging-standin.mjs": "a preload m6-staging-selftest.mjs loads with --import, never run by itself",
   "scripts/requesters-rule.mjs": "a module merge-gate's rule is read from, not executable",
+  "scripts/lib/rust-toolchain.sh": "sourced by deploy-staging and with-pinned-rust, not executable",
   "scripts/test/lib.sh": "sourced by the self-tests, not executable",
   "scripts/test/fixtures/": "captured JSON the merge-gate self-test reads",
 };

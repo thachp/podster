@@ -17,7 +17,7 @@ An OAuth client's redirect URI can't be on the gateway's own hostname, whatever 
 ## Before you start
 
 - Node, and `npm ci` in `apps/gateway` and `apps/api`.
-- Rust and `worker-build` 0.8.7, because deploying the API builds it: `cargo install worker-build --version 0.8.7 --locked`. The first `rustc` on your `PATH` must have the `wasm32-unknown-unknown` target, so put rustup's ahead of any other, such as Homebrew's; `scripts/deploy-staging` refuses otherwise.
+- Rust and `worker-build` 0.8.7, because deploying the API builds it: `cargo install worker-build --version 0.8.7 --locked`. The API builds with the toolchain `rust-toolchain.toml` pins, which has the `wasm32-unknown-unknown` target. With rustup installed, you don't need to change `PATH`: `scripts/deploy-staging`, and `npm run build` and `npm test` in `apps/api` (and the gateway's `npm test`, which builds the API first), put that toolchain first on `PATH` themselves, ahead of any other `rustc` or `cargo`, such as Homebrew's. They install nothing, and refuse when the toolchain or its Wasm target is missing (`rustup toolchain install`, from the repository, installs both). To run `worker-build` or `npx wrangler dev` in `apps/api` by hand, run it through the same helper: `../../scripts/with-pinned-rust npx wrangler dev`.
 - `npx wrangler login` from an app folder, or `CLOUDFLARE_API_TOKEN` in your shell.
 - The account ID in your shell. It stays out of this repo.
 

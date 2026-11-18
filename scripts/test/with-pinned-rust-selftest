@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Checks scripts/with-pinned-rust with stand-ins for rustup and rustc: the pinned toolchain goes first on PATH, nothing
+# is installed, every refusal runs nothing, and without rustup PATH is left alone. Nothing reaches the network.
+#
+#   scripts/test/with-pinned-rust-selftest
+set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/with-pinned-rust-selftest
+
+Checks scripts/with-pinned-rust with stand-ins for rustup and rustc: the pinned toolchain goes first
+on PATH, nothing is installed, every refusal runs nothing, and without rustup PATH is left alone.
+EOF
+  exit 0
+fi
+. "$(dirname "$0")/lib.sh"
+wrapper="$scripts/with-pinned-rust"
+repo=$(cd "$scripts/.." && pwd -P)
+
+# rustc_in DIR LIBS: a stand-in rustc in DIR that names LIBS as the Wasm target's folder, there or not, as Homebrew's
+# does. A cargo beside it, so a case can see which cargo comes first.
+rustc_in() {
+  mkdir -p "$1"
+  printf '#!/usr/bin/env bash\n[ "$*" = "--print target-libdir --target wasm32-unknown-unknown" ] || exit 97\necho "%s"\n' "$2" > "$1/rustc"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1/cargo"
+  chmod +x "$1/rustc" "$1/cargo"
+}
+mkdir -p "$tmp/wasm-libs"
+rustc_in "$tmp/homebrew" "$tmp/homebrew/no-such/wasm32-unknown-unknown/lib"
+rustc_in "$tmp/pinned/bin" "$tmp/wasm-libs"
+rustc_in "$tmp/pinned-no-wasm/bin" "$tmp/pinned-no-wasm/no-such/lib"
+
+# rustup, asked only `which rustc`: answers $fix/rustup-which, or fails as for a toolchain that isn't installed.
+stub rustup <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "rustup $* [in $PWD] RUSTUP_AUTO_INSTALL=${RUSTUP_AUTO_INSTALL:-}" >> "$fix/rustup-calls"
+[ "$*" = "which rustc" ] || exit 97
+[ -f "$fix/rustup-which" ] || { echo "error: toolchain '1.99.1-aarch64-apple-darwin' is not installed" >&2; exit 1; }
+cat "$fix/rustup-which"
+EOF
+# What the wrapped command saw: its folder, the first rustc and cargo, and its arguments. Exits with $1.
+cat > "$tmp/show" <<'EOF'
+#!/usr/bin/env bash
+echo "pwd=$PWD"
+echo "rustc=$(command -v rustc)"
+echo "cargo=$(command -v cargo)"
+echo "args=$*"
+exit "$1"
+EOF
+chmod +x "$tmp/show"
+ran() { said '^args='; }
+# Bash for the cases without rustup, which run on a PATH of $bin and the system folders alone.
+ln -s "$(command -v bash)" "$bin/bash"
+mkdir -p "$tmp/elsewhere"
+cd "$tmp/elsewhere"
+here=$(pwd)
+
+check "--help exits 0 and prints its usage" run 0 "$wrapper" --help
+check "  with Usage" said '^Usage: scripts/with-pinned-rust'
+check "no command is wrong usage, exit 2" run 2 "$wrapper"
+
+# The owner's Mac: Homebrew's rustc and cargo first, rustup's pinned toolchain elsewhere.
+echo "$tmp/pinned/bin/rustc" > "$fix/rustup-which"
+check "with rustup, the pinned toolchain goes first, and the command's exit is the wrapper's" \
+  run 7 env PATH="$bin:$tmp/homebrew:$PATH" "$wrapper" "$tmp/show" 7 two words
+check "  its rustc is the pinned one" said "^rustc=$tmp/pinned/bin/rustc$"
+check "  and so is its cargo" said "^cargo=$tmp/pinned/bin/cargo$"
+check "  it ran in the caller's folder" said "^pwd=$here$"
+check "  with its arguments as given" said '^args=7 two words$'
+check "  rustup was asked once, from the repository, with installing switched off" \
+  test "$(cat "$fix/rustup-calls")" = "rustup which rustc [in $repo] RUSTUP_AUTO_INSTALL=0"
+
+rm -f "$fix/rustup-which"
+check "a pinned toolchain rustup hasn't installed is refused, exit 1" run 1 env PATH="$bin:$tmp/homebrew:$PATH" "$wrapper" "$tmp/show" 0
+check "  and says what to run" said '^with-pinned-rust: rustup has no toolchain installed for .*/rust-toolchain.toml. From the repository, run: rustup toolchain install$'
+check "  and runs nothing" test "$(ran && echo yes || echo no)" = no
+
+echo "$tmp/pinned-no-wasm/bin/rustc" > "$fix/rustup-which"
+check "a pinned toolchain without the Wasm target is refused, exit 1" run 1 env PATH="$bin:$tmp/homebrew:$PATH" "$wrapper" "$tmp/show" 0
+check "  and names that rustc, and what to run" said "^with-pinned-rust: the rustc on PATH, '$tmp/pinned-no-wasm/bin/rustc', has no wasm32-unknown-unknown target. Run: rustup target add wasm32-unknown-unknown$"
+check "  and runs nothing" test "$(ran && echo yes || echo no)" = no
+
+# Without rustup: PATH is $bin (bash alone, rustup's stand-in hidden) and the system folders, where no rustup is.
+mv "$bin/rustup" "$tmp/rustup.hidden"
+check "without rustup, the first rustc decides: one with the Wasm target runs the command" \
+  run 0 env PATH="$bin:$tmp/pinned/bin:/usr/bin:/bin" "$wrapper" "$tmp/show" 0
+check "  with PATH as it was" said "^rustc=$tmp/pinned/bin/rustc$"
+check "without rustup, a first rustc without the Wasm target is refused, exit 1" \
+  run 1 env PATH="$bin:$tmp/homebrew:/usr/bin:/bin" "$wrapper" "$tmp/show" 0
+check "  and names it" said "the rustc on PATH, '$tmp/homebrew/rustc', has no wasm32-unknown-unknown target"
+check "  and runs nothing" test "$(ran && echo yes || echo no)" = no
+check "without rustup or rustc, it is refused, exit 1" run 1 env PATH="$bin:/usr/bin:/bin" "$wrapper" "$tmp/show" 0
+check "  and says rustc is missing" said "the rustc on PATH, 'missing', has no wasm32-unknown-unknown target"
+
+check "across every case, rustup was asked nothing but 'which rustc', and always with installing switched off" \
+  test "$(grep -c -v -F "rustup which rustc [in $repo] RUSTUP_AUTO_INSTALL=0" "$fix/rustup-calls")" -eq 0
+
+finish with-pinned-rust

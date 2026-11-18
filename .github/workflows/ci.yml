@@ -311,6 +311,7 @@ jobs:
       # The scripts agents merge, deploy and probe with: every refusal, with stand-ins for gh, wrangler and curl.
       - run: scripts/test/merge-gate-selftest
       - run: scripts/test/deploy-staging-selftest
+      - run: scripts/test/with-pinned-rust-selftest
       - run: scripts/test/staging-probes-selftest
       # The content Worker's deploy (M6 step 4(b)): every refusal makes no changing call, the token is in no argument
       # or output, and --deploy needs a terminal. It deploys nothing.

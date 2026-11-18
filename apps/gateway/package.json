@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "pretest": "cd ../api && worker-build --release",
+    "pretest": "cd ../api && ../../scripts/with-pinned-rust worker-build --release",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

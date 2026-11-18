@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Runs a command with the Rust toolchain rust-toolchain.toml pins first on PATH. apps/api's build and test go through
+# it, so a Mac whose first rustc is Homebrew's still builds the API for Wasm.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/with-pinned-rust COMMAND [ARG...]
+
+Runs COMMAND, in the current folder, with the Rust toolchain rust-toolchain.toml pins first on
+PATH: rustup is asked for it (`rustup which rustc`, from the repository) and that folder goes
+first, ahead of any other rustc or cargo, such as Homebrew's. Without rustup, PATH is unchanged.
+
+It installs nothing, and refuses, exit 1, running nothing, when:
+
+  - rustup is on PATH and the pinned toolchain isn't installed. Run: rustup toolchain install
+  - the first rustc on PATH then can't build for wasm32-unknown-unknown. Run:
+    rustup target add wasm32-unknown-unknown
+
+Otherwise its exit code is COMMAND's. Exit 2 with no COMMAND.
+EOF
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  "") usage >&2; exit 2 ;;
+esac
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/scripts/lib/rust-toolchain.sh"
+refuse() { echo "with-pinned-rust: $*" >&2; exit 1; }
+
+pinned_rust_first "$root" || refuse "$pinned_rust_problem"
+if ! rustc_builds_wasm; then
+  refuse "the rustc on PATH, '$(command -v rustc || echo missing)', has no wasm32-unknown-unknown target. Run: rustup target add wasm32-unknown-unknown"
+fi
+exec "$@"

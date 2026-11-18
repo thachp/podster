@@ -1,6 +1,6 @@
 # M6 spike D: custom hostnames
 
-**Status, 2026-11-18 UTC: run five times on the content zone `podster.site`, 10:39:24 to 10:52:16 UTC, by the owner's answers of 2026-11-17. The fourth run, `02dd4b`, followed the owner's record `spike.opster.dev CNAME fallback.podster.site`, proxied, on `opster.dev`, and took a custom hostname to `active` with its certificate; the fifth, `65c6f6`, repeated it with the probe's certificate checks on (below). Everything it created is deleted, confirmed by listing.** No Worker route exists on the content zone, so what a Worker sees on a custom hostname is still untried. It answers the parts of [spike D](../../docs/m6-plan.md#the-spikes) that need no customer DNS, and the items step 8b and 8c left owed to it. The answers and what they change are in the plan's [Spike D results](../../docs/m6-plan.md#spike-d-results-2026-11-18). Nothing builds on this folder.
+**Status, 2026-11-18 UTC: the test Worker on the content zone ran 11:52:30 to 11:53:58 (run `0bd4a7`, [below](#the-test-worker-on-the-content-zone-2026-11-18-run-0bd4a7)); before it, the spike ran five times on the content zone `podster.site`, 10:39:24 to 10:52:16 UTC, by the owner's answers of 2026-11-17. The fourth run, `02dd4b`, followed the owner's record `spike.opster.dev CNAME fallback.podster.site`, proxied, on `opster.dev`, and took a custom hostname to `active` with its certificate; the fifth, `65c6f6`, repeated it with the probe's certificate checks on (below). Everything it created is deleted, confirmed by listing.** It answers the parts of [spike D](../../docs/m6-plan.md#the-spikes) that need no customer DNS, and the items step 8b and 8c left owed to it. The answers and what they change are in the plan's [Spike D results](../../docs/m6-plan.md#spike-d-results-2026-11-18). Nothing builds on this folder.
 
 "The zone" is `podster.site`. "The account" is the one the zone is on, which is the staging account that also holds `podster.dev` and `opster.dev`. "The second account" is the one the owner opened for apps. Their IDs stay out of this repository.
 
@@ -10,7 +10,8 @@
 | --- | --- |
 | `spike.mjs` | The runner. `hostnames` is the custom-hostname run; `pending` the edge probes around one pending hostname, on fresh connections; `validate` one hostname watched to `active` once the customer's record is in place; `doh` the resolver half; `probes` the edge alone; `cleanup` deletes by listing. Every command ends with the clean-up |
 | `guard.mjs`, `guard.test.mjs` | What the runner may send to Cloudflare, and an offline test of it |
-| `results/results.jsonl` | Every step of the five runs, redacted. Run `d8e31d` is `doh`, `c06765` is `hostnames`, `2bc8b6` is `pending`, `02dd4b` and `65c6f6` are `validate` |
+| `route-worker.mjs`, `make-route-worker.sh` | The test Worker routed `*/*` on the content zone, and the script that deploys and deletes it with wrangler. It writes the Worker, its config and its random key into a scratch folder outside the repository |
+| `results/results.jsonl` | Every step of the runs, redacted. Run `d8e31d` is `doh`, `c06765` is `hostnames`, `2bc8b6` is `pending`, `02dd4b` and `65c6f6` are `validate`, `0bd4a7` is `worker`, and `83652b` (11:51:40 to 11:51:47, a fallback-origin check and clean-up), `121876` and `7cfcac` are clean-ups around it |
 
 ## How it calls Cloudflare
 
@@ -130,9 +131,40 @@ Nine names, each through Cloudflare's JSON endpoint by name and by `1.1.1.1`, an
 
 **Not made.** The second account's token, `spike-store-d1only`, was refused the upload (`403`, "No access to the specified resource.", no code) and the account's `workers.dev` subdomain (`403`, code 10000). It could list the account's Workers (none). So no resolver was asked from inside a Worker, and nothing was left to delete; the clean-up's listing found no `spike-hostnames-…` script.
 
-## The test Worker on the content zone: not run
+## The test Worker on the content zone, 2026-11-18 (run `0bd4a7`)
 
-Later on 2026-11-18 the owner said yes to one short-lived Worker on the staging account, routed on `podster.site` (`*/*` if the zone had no route, else the narrowest pattern), to answer which zone serves an `active` custom hostname, what host a Worker sees, whether the fallback origin reaches it, a resolver asked from inside it, and `moved`. The brief required the zone's existing Worker routes to be listed first. **No credential this spike may use could list them:** the custom-hostname token is refused the zone's routes (code 10000); wrangler, logged in as staging deploys are, has no command that lists a zone's routes; and reading wrangler's stored login for a direct API call was refused by the session's permission check. So nothing was deployed and no route was made.
+**Run 11:52:30 to 11:53:58 UTC by the owner, in their own terminal, by their yes of 2026-11-18,** at commit `7b62c370` of `spike/m6-hostnames-worker`. The owner had checked in the dashboard that `podster.site` had no Worker route. The session's own permission check had refused this deploy, so the agent didn't run it. The owner ran it through `make-route-worker.sh`:
+- **`deploy`** made one Worker, `spike-hostnames-route-f9717e`, on the staging account, with no bindings, `workers_dev` and `preview_urls` off, and the route `*/*` on `podster.site`. It used wrangler's own login, as staging deploys do.
+- **`node spike.mjs worker`** ran the checks.
+- **`delete`** removed the Worker and its route.
+
+The Worker (`route-worker.mjs`) answers every request with its host as it sees it and a few `cf` fields. It logs nothing. Runs `83652b` (11:51:40 to 11:51:47) and `121876` (11:51:44) are the clean-up's listings before the deploy, and run `7cfcac` (11:53:59) the one after; each read 0 custom hostnames and 0 spike scripts.
+
+| When (UTC) | What | Answer |
+| --- | --- | --- |
+| 11:52:31 | Probes right after the deploy, no custom hostname | `fallback.podster.site`: **`522`**, the zone's origin, not the Worker. `spike.opster.dev`: `522`, `opster.dev`'s own certificate |
+| 11:52:32 | DNS over HTTPS from inside the Worker, through `fallback.podster.site` | **`522`: the route wasn't live yet, so this was never measured** |
+| 11:52:32 to 11:53:49 | `spike.opster.dev` made; read every 15 s | `active` at 15 s, its certificate `active` at 77 s |
+| 11:53:49 to 11:53:51 | Probes, twice, with it `active` | See below |
+| 11:53:51.410 | Delete | `200`; the list read it gone on the first read, 145 ms later |
+| 11:53:51.692 | Probe, SNI and `Host` `spike.opster.dev` | **`200` from the Worker, with the custom hostname's certificate**, 282 ms after the delete's answer |
+| 11:53:52.085 | Probe, SNI `spike.opster.dev`, `Host` `fallback.podster.site` | `403`, now with `opster.dev`'s own certificate |
+
+**With `spike.opster.dev` `active`, on both probes:**
+- **The content zone serves it, and the Worker sees the custom hostname.** SNI and `Host` `spike.opster.dev` gave `200` from the Worker, with `url_host` and the `Host` header both `spike.opster.dev`, scheme `https:`, TLS 1.3, HTTP/1.1, colo SEA. The certificate was SSL Corporation's for `spike.opster.dev`. `cf.hostMetadata` was `null`: none was set on the custom hostname.
+- **Traffic reaches the Worker through the fallback origin.** `fallback.podster.site` gave `200` from the Worker, which saw `fallback.podster.site`, with the zone's own `*.podster.site` certificate.
+- **A mismatch never reached the Worker.** All four pairs whose SNI and `Host` name different zones (`fallback.podster.site` and `spike.opster.dev` both ways, and `podster.dev` against `spike.opster.dev`) gave `403` from Cloudflare, not the Worker's JSON. So whenever the Worker answered, the host it saw was the one the certificate was served for, at least for the pairs tried.
+
+**Route propagation.** The deploy reported its trigger, `*/*` on `podster.site`, but probes about two seconds later still got the origin's `522`. At 11:53:49 the Worker answered. So the route went live somewhere in that window of under 80 seconds; when exactly wasn't measured.
+
+**The edge lagged a deletion.** 282 ms after the delete's `200`, and after the list already read the name gone, one request for `spike.opster.dev` still reached the Worker, with the custom hostname's own certificate. The next connection with that SNI, 393 ms later, was served `opster.dev`'s certificate. It was a mismatched pair (`Host` `fallback.podster.site`, refused `403`), so it shows only that the custom hostname's certificate was gone, not that a matching request would no longer reach the Worker: no matching request was made after that point. That is one request, from one place (SEA). How long the lag can last elsewhere is unknown.
+
+**After the run,** the owner's terminal recorded:
+- `wrangler delete`: "Successfully deleted spike-hostnames-route-f9717e".
+- `fallback.podster.site`: `522` again, so no Worker answers there.
+- The clean-up's listing: 0 custom hostnames (`total_count` 0) and 0 spike scripts on the second account.
+
+At 11:54, from this machine, `fallback.podster.site` and `spike.opster.dev` each answered `522`. **The route's removal was checked only this way.** No credential this spike may use can list the zone's routes, so it rests on `wrangler delete` and the Worker no longer answering at the edge.
 
 ## Clean-up
 

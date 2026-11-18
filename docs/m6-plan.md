@@ -541,11 +541,28 @@ For Podster's own data only the status was kept: no secret's name, setting or co
 
 ### What stays unknown
 
-- **Which zone serves an `active` custom hostname, and what a Worker sees as its host:** needs a `*/*` Worker route on the content zone. *Later on 2026-11-18 the owner said yes to a short-lived test Worker on the staging account, routed on `podster.site`, with the brief that the zone's existing routes be listed first. It wasn't deployed: no credential this spike may use could list the zone's routes (the custom-hostname token is refused them, and reading wrangler's own login for a direct API call was refused by the session's permission check). So which zone serves the name, what host the Worker sees, the fallback origin reaching a Worker, a resolver asked from a Worker, and `moved` remain open.*
+- ~~**Which zone serves an `active` custom hostname, and what a Worker sees as its host.**~~ *Answered on 2026-11-18 by the test Worker's run, below.*
 - **The ordinary customer case,** a `CNAME` not proxied or on another DNS provider, and a real orange-to-orange case on another account.
 - **`moved`:** what happens when the customer's record is removed or pointed elsewhere.
-- **A resolver asked from a Worker:** the second account's D1-only token was refused the test Worker's upload (`403`) and the account's `workers.dev` subdomain.
+- **A resolver asked from a Worker:** still unmeasured. The second account's D1-only token was refused the test Worker's upload (`403`) and the account's `workers.dev` subdomain; the staging account's test Worker, later on 2026-11-18, made its one call before its route was live.
 - **Certificate-transparency logging** of a custom hostname's certificate wasn't looked up.
+
+### The test Worker on the content zone, 2026-11-18
+
+**Run 11:52:30 to 11:53:58 UTC by the owner, in their own terminal, by their yes of 2026-11-18.** One Worker, with no bindings, routed `*/*` on `podster.site` on the staging account, then deleted. The owner had checked in the dashboard that the zone had no route before. Details: [`spikes/m6-hostnames`](../spikes/m6-hostnames/README.md#the-test-worker-on-the-content-zone-2026-11-18-run-0bd4a7).
+
+9. **The content zone serves an `active` custom hostname, and a Worker there sees the custom hostname.** A request for `spike.opster.dev` reached the Worker with the custom hostname's certificate, and the Worker saw `spike.opster.dev` as both the URL's host and the `Host` header. **This closes 8c's S5 for the pairs tried:** every request whose SNI and `Host` named different zones was refused `403` by Cloudflare before the Worker, so whenever the Worker answered, the host it saw was the one the certificate was served for. `cf.hostMetadata` was `null`, since none was set on the custom hostname (risks 8 and 12).
+10. **The fallback origin reaches the Worker:** `fallback.podster.site` answered from the Worker through the `*/*` route.
+11. **A new route isn't live at once.** About two seconds after `wrangler deploy` reported the route, the zone's origin still answered (`522`). By 80 seconds later the Worker did. The exact time wasn't measured.
+12. **The edge can lag a deletion (owed to 8e).** 282 ms after the delete's `200`, and after the list already read the name gone, one request for `spike.opster.dev` still reached the Worker with the custom hostname's certificate. The next connection with that SNI, 393 ms later, was served `opster.dev`'s certificate; it was a mismatched pair (`Host` `fallback.podster.site`, refused `403`), so it shows only that the custom hostname's certificate was gone, and no matching request was made after that point. So **a custom hostname read gone at the API doesn't mean nothing reaches the content Worker under that name.** What protects the name after a claim ends is the content Worker refusing a host with no serve entry. That makes 8b's ordering load-bearing: the applier confirms the entry gone *before* the claim is freed (S1). **For 8e:** a custom hostname's marker can't be taken as proof that the name has stopped serving, and a marker fetched right after a delete can still be answered. One observation, from one place (SEA). How long the lag can last elsewhere is unknown.
+
+**Clean-up:**
+- `wrangler delete` reported the Worker deleted.
+- `fallback.podster.site` answered `522` again, so no Worker was there.
+- The listing read 0 custom hostnames and 0 spike scripts.
+- **The route's removal was checked only this way,** since no credential the spike may use can list the zone's routes.
+
+**Still unknown after it:** a resolver asked from inside a Worker (its one call came before the route was live); `moved`; the ordinary customer case; how long the lag after a delete can last, from other places; and how long a route takes to go live.
 
 ## What the spikes changed in ADR 0010
 

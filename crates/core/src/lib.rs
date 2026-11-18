@@ -15,6 +15,7 @@ pub mod asset_links;
 pub mod baseline;
 pub mod expected_outputs;
 pub mod files;
+pub mod hostname_recheck;
 pub mod hostname_requests;
 pub mod hostnames;
 pub mod pairing;

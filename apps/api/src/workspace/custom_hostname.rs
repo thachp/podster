@@ -18,7 +18,8 @@
 //! name's search is read to its last page, up to a bound past which operators are told.
 //!
 //! **Every way a committed claim ends goes one way** (`podster_core::hostname_requests::end_step`). The room sets the
-//! request `ending` and clears and closes the host in one transaction: the owner's removal (8a), the name's suspension
+//! request `ending` and clears and closes the host in one transaction: the owner's removal (8a), the daily recheck's
+//! two definite noes a day apart or seven days with no match (8d, `hostname_recheck`), the name's suspension
 //! by its notice (step 4(a)), the room unpublishing since the request was made (its release epoch, which only an
 //! unpublish moves, so every unpublish trigger is one), the room's own facts read and failing before a provider call
 //! (archived, deleted, no longer public, its public surface or app suspended, its organization gone or its release
@@ -142,7 +143,13 @@ fn provider(env: &Env, sql: &SqlStorage) -> Option<HostnameProvider> {
 
 /// Sets a committed claim's request `ending`, by `code`, and clears and closes its host, in the caller's transaction.
 /// Only a request still `claimed`; for any other, nothing.
-fn end_committed(sql: &SqlStorage, id: &str, hostname: &str, code: &str, now: i64) -> R<()> {
+pub(super) fn end_committed(
+    sql: &SqlStorage,
+    id: &str,
+    hostname: &str,
+    code: &str,
+    now: i64,
+) -> R<()> {
     let still = !rows(
         sql,
         "SELECT 1 AS c FROM hostname_request WHERE id = ? AND state = 'claimed'",
@@ -225,9 +232,18 @@ impl Workspace {
             HostnameProofStep::Go => {}
             HostnameProofStep::Wait => {
                 console_error!("hostname: the custom hostname waits on what it couldn't read: room={} request={} code=standing_unknown", room, id);
+                // A recheck that is due still counts, with no look made, so a claim whose facts stay unread still
+                // lapses after seven days with no match (8d, the deep review of PR #444, M1).
+                if self.recheck_if_due(sql, row, now, false).await? {
+                    return Ok(());
+                }
                 return self.tried(sql, &id, now);
             }
             HostnameProofStep::End(denial) => return end(denial.code()),
+        }
+        // The challenge's daily recheck (8d), when its turn has come, after the room's facts were read again.
+        if self.recheck_if_due(sql, row, now, true).await? {
+            return Ok(());
         }
         let create = match claimed_step(phase.create_sent) {
             ClaimedStep::Create => true,

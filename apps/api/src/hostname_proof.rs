@@ -1,23 +1,24 @@
-//! Reading a custom hostname's challenge from DNS (M6 step 8, ADR 0010's "Custom domains", step 3).
+//! Reading a custom hostname's challenge from DNS (M6 step 8, ADR 0010's "Custom domains", steps 3 and 7).
 //!
-//! A room's proof job asks a resolver over HTTPS for the TXT records at `_podster-challenge.<hostname>`, and Rust
-//! compares them with the request's own value (`podster_core::hostnames::proof_matches`). This module only asks and
-//! reads; it decides nothing.
+//! A room's proof job (8a) and its daily recheck (8d) ask a resolver over HTTPS for the TXT records at
+//! `_podster-challenge.<hostname>`. This module only asks and reads the answer's shape; what the answer means, a match,
+//! a definite no or no answer, is decided in Rust's core (`podster_core::hostname_recheck::read_challenge`).
 //!
-//! **No resolver is configured anywhere.** Which resolver, and what trusting it means, is a spike the ADR leaves open
-//! (spike D). [`Resolver::from_env`] answers `None` unless `HOSTNAME_RESOLVER_URL` is bound to an `https` URL on a
-//! public name, which no environment does. With none, no proof is ever read, so no request is ever claimed, and the
-//! room's job says so by a code.
+//! **No resolver is configured anywhere.** [`Resolver::from_env`] answers `None` unless `HOSTNAME_RESOLVER_URL` is
+//! bound to an `https` URL on a public name, which no environment does. With none, no proof is ever read, so no request
+//! is ever claimed, and the room's job says so by a code.
 //!
-//! **The answer's form is DNS over HTTPS's JSON form** (`application/dns-json`), which Cloudflare's and Google's public
-//! resolvers both give: `Status`, the DNS response code, and `Answer`, the records, each with its `type` and `data`.
-//! The resolver follows a CNAME for us, so every TXT record in `Answer` counts. **No spike has run this against a real
-//! resolver,** so the shape read here is the documented one, read strictly: anything that isn't exactly it is no answer.
+//! **The answer's form is DNS over HTTPS's JSON form** (`application/dns-json`), as spike D saw Cloudflare's and
+//! Google's resolvers give it (2026-11-18): `Status`, the DNS response code; `TC`; and `Answer`, the records, each with
+//! its owner `name`, its `type` and its `data`. Anything that isn't exactly that shape is no answer. Which records
+//! count, and how a TXT's quoting is read, is core's.
 //!
 //! The name asked for is the room's own normalized hostname, checked again here. Logs carry nothing from this module:
 //! no hostname, no value and no resolver's address.
 use crate::{setting, Setting};
 use futures_util::future::{select, Either};
+use podster_core::hostname_recheck::{read_challenge, DohAnswer, DohRecord};
+use podster_core::hostnames::RecheckOutcome;
 use serde_json::Value;
 use std::time::Duration;
 use worker::*;
@@ -28,11 +29,6 @@ const RESOLVER: &str = "HOSTNAME_RESOLVER_URL";
 const LOOKUP_TIMEOUT_MS: u64 = 5_000;
 /// No answer this module reads is longer.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
-/// A TXT record's type number.
-const TXT: i64 = 16;
-/// The DNS response codes read: no error, and no such name.
-const NOERROR: i64 = 0;
-const NXDOMAIN: i64 = 3;
 
 /// A configured resolver.
 pub(crate) struct Resolver {
@@ -50,10 +46,34 @@ impl Resolver {
         (!url.contains('?')).then_some(Resolver { url })
     }
 
-    /// The TXT values at `name`, each one record's text with its strings joined. An empty list when the resolver said
-    /// there are none, or that the name doesn't exist. `None` when there was no answer to read: unreachable, timed
-    /// out, too long, truncated, any other response code, or any answer that isn't exactly the documented form.
-    pub(crate) async fn txt(&self, name: &str) -> Option<Vec<String>> {
+    /// Asks for the TXT records at `name`, the challenge's name, and reads the answer against `expected`, the request's
+    /// own value: a match, a definite no, or no answer (`ResolverError`), which is also what an answer that can't be
+    /// had is: unreachable, timed out, too long, not `200`, or not the documented form.
+    pub(crate) async fn look(&self, name: &str, expected: &str) -> RecheckOutcome {
+        let Some(body) = self.ask(name).await else {
+            return RecheckOutcome::ResolverError;
+        };
+        let Some((status, truncated, records)) = answer_shape(&body) else {
+            return RecheckOutcome::ResolverError;
+        };
+        let records: Vec<DohRecord> = records
+            .iter()
+            .map(|(name, kind, data)| DohRecord {
+                name,
+                kind: *kind,
+                data,
+            })
+            .collect();
+        let answer = DohAnswer {
+            status,
+            truncated,
+            records: &records,
+        };
+        read_challenge(name, &answer, expected)
+    }
+
+    /// The answer's body as JSON, or `None` when there was none to read.
+    async fn ask(&self, name: &str) -> Option<Value> {
         if !plain_name(name) {
             return None;
         }
@@ -84,38 +104,37 @@ impl Resolver {
         if status != 200 {
             return None;
         }
-        read_answer(&serde_json::from_slice(&body).ok()?)
+        serde_json::from_slice(&body).ok()
     }
 }
 
-/// A DNS-over-HTTPS JSON answer's TXT values. A record that can't be read as text is passed over: it can't be the
-/// request's value, and the others may still be. **A truncated answer (`TC` true) is no answer:** it may be missing
-/// records, so it can't be read as what the name holds; a `TC` of any other form than a boolean is no answer either.
-fn read_answer(answer: &Value) -> Option<Vec<String>> {
-    match &answer["TC"] {
-        Value::Null | Value::Bool(false) => {}
-        _ => return None,
-    }
-    match answer["Status"].as_i64()? {
-        NXDOMAIN => return Some(Vec::new()),
-        NOERROR => {}
-        _ => return None,
-    }
-    let records = match &answer["Answer"] {
-        Value::Null => return Some(Vec::new()),
-        Value::Array(records) => records,
+/// One record of an answer as read: its owner name, its type and its data.
+type Record = (String, i64, String);
+
+/// A DNS-over-HTTPS JSON answer's shape: `Status`, an integer; `TC`, a boolean or absent; and `Answer`, absent or a list
+/// of records, each with a string `name`, an integer `type` and a string `data`. `None` for anything else.
+fn answer_shape(answer: &Value) -> Option<(i64, bool, Vec<Record>)> {
+    let truncated = match &answer["TC"] {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
         _ => return None,
     };
-    let mut values = Vec::new();
-    for record in records {
-        if record["type"].as_i64()? != TXT {
-            continue;
-        }
-        if let Some(text) = podster_core::hostnames::txt_rdata_text(record["data"].as_str()?) {
-            values.push(text);
-        }
-    }
-    Some(values)
+    let status = answer["Status"].as_i64()?;
+    let records = match &answer["Answer"] {
+        Value::Null => Vec::new(),
+        Value::Array(records) => records
+            .iter()
+            .map(|record| {
+                Some((
+                    record["name"].as_str()?.to_owned(),
+                    record["type"].as_i64()?,
+                    record["data"].as_str()?.to_owned(),
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    Some((status, truncated, records))
 }
 
 /// A name as it goes into the query: the challenge's prefix, then a hostname Podster wrote. Nothing else.

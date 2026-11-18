@@ -79,6 +79,7 @@ mod custom_hostname;
 mod downloads;
 mod held;
 mod hostname;
+mod hostname_recheck;
 mod merges;
 mod moderation;
 mod objects;

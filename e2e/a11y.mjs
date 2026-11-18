@@ -2761,12 +2761,12 @@ async function keyboardPaths(s) {
     await hydrated(page);
     await tabTo(page, page.getByRole("button", { name: "Start pairing" }), "Start pairing");
     await page.keyboard.press("Enter");
-    const code = page.getByLabel("Code for Runner");
+    const code = page.getByLabel("Code for Runner", { exact: true });
     await code.waitFor({ timeout: 15_000 });
     await audit(page, "Pair Runner, started");
     // Runner's `pair` takes the agent ID and asks for the code, so the screen shows both, and the code is never in the command.
-    const agent = (await page.getByLabel("Agent ID").textContent())?.trim() ?? "";
-    const command = (await page.getByLabel("Command for Runner").textContent()) ?? "";
+    const agent = (await page.getByLabel("Agent ID", { exact: true }).textContent())?.trim() ?? "";
+    const command = (await page.getByLabel("Command for Runner", { exact: true }).textContent()) ?? "";
     ok(/^[A-Za-z0-9_-]+$/.test(agent) && command.endsWith(` --agent ${agent}`), "the started pairing's command names its agent ID");
     ok(!command.includes(((await code.textContent()) ?? "").trim()), "the started pairing's command carries no code");
     await tabTo(page, page.getByRole("button", { name: "Copy Command for Runner" }), "Copy Command for Runner");

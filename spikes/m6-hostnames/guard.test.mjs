@@ -4,7 +4,7 @@ import { allow, folded, spikeHostname } from "./guard.mjs";
 
 const zone = "a".repeat(32);
 const account = "b".repeat(32);
-const id = "0e2d5a7f-1548-4f27-8c05-b577cb14f4ec";
+const id = "00000000-0000-4000-8000-000000000001";
 const ctx = { zone, account, made: new Set([id]) };
 const API = "https://api.cloudflare.com/client/v4";
 const create = (hostname, ssl = { method: "http", type: "dv" }) => JSON.stringify({ hostname, ssl });
@@ -28,7 +28,7 @@ test("a create only for a spike name, with exactly the spike's ssl", () => {
 
 test("a delete only for a custom hostname the spike made", () => {
   allow("DELETE", `${API}/zones/${zone}/custom_hostnames/${id}`, null, ctx);
-  assert.throws(() => allow("DELETE", `${API}/zones/${zone}/custom_hostnames/11111111-1548-4f27-8c05-b577cb14f4ec`, null, ctx));
+  assert.throws(() => allow("DELETE", `${API}/zones/${zone}/custom_hostnames/00000000-0000-4000-8000-000000000002`, null, ctx));
   assert.throws(() => allow("PATCH", `${API}/zones/${zone}/custom_hostnames/${id}`, "{}", ctx));
   assert.throws(() => allow("DELETE", `${API}/zones/${zone}/custom_hostnames/fallback_origin`, null, ctx));
   assert.throws(() => allow("DELETE", `${API}/zones/${zone}/dns_records/${id}`, null, ctx));

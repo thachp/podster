@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { request as httpsRequest } from "node:https";
 import { lookup as dnsLookup } from "node:dns";
+import { checkServerIdentity } from "node:tls";
 import { SCRIPT_NAME, allow, folded, spikeHostname } from "./guard.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -189,6 +190,9 @@ async function waitGetGone(id, limitMs) {
 
 function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
   return new Promise((resolve) => {
+    // The chain is always validated. Only the name check is replaced: it records the certificate presented and
+    // whether it names the SNI, and lets the request finish either way, so a mismatch is seen, not hidden.
+    let seen = { cn: null, san: null, issuer: null, namesSni: null };
     const req = httpsRequest(
       {
         host: connect,
@@ -197,7 +201,15 @@ function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
         path,
         method: "GET",
         headers: { Host: host, "User-Agent": "spike-client" },
-        rejectUnauthorized: false,
+        checkServerIdentity: (servername, cert) => {
+          seen = {
+            cn: cert.subject?.CN ?? null,
+            san: cert.subjectaltname ?? null,
+            issuer: cert.issuer?.O ?? null,
+            namesSni: checkServerIdentity(servername, cert) === undefined,
+          };
+          return undefined;
+        },
         // A fresh connection and a full handshake every time: run c06765 reused sessions, which hid the
         // certificate and may have changed the answer.
         agent: false,
@@ -205,8 +217,8 @@ function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
         lookup: dnsLookup,
       },
       (res) => {
-        const cert = res.socket.getPeerCertificate?.() ?? {};
-        const authorized = res.socket.authorized;
+        const cert = { subject: { CN: seen.cn }, subjectaltname: seen.san, issuer: { O: seen.issuer } };
+        const authorized = seen.namesSni;
         let body = "";
         res.on("data", (c) => {
           if (body.length < 20000) body += c;
@@ -224,7 +236,7 @@ function edge(sni, host, { connect = sni, path = "/", port = 443 } = {}) {
             cert_cn: cert.subject?.CN ?? null,
             cert_san: cert.subjectaltname ?? null,
             cert_issuer: cert.issuer?.O ?? null,
-            cert_valid_for_sni: authorized,
+            cert_names_sni: authorized,
             body_head: code || title ? undefined : body.slice(0, 80),
           });
         });

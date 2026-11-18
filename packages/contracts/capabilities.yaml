@@ -201,6 +201,9 @@ person_only:
   - getPairing
   - activatePairing
   - cancelPairing
+  # M7 step 5(c): the expiry sweep, called by the gateway's cron as each session's starter. Never an agent's.
+  - sweepPairings
+  - settlePairingSweep
 # Not a call an agent makes through a tool: raw bytes. An upload goes to the path `create_upload` returned, with its token. A download goes to
 # the path `get_asset_link` returned, with the caller's own credential or session.
 transfer_only:

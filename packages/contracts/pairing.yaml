@@ -29,7 +29,7 @@ paths:
       x-api-operation: getPairing
       tags: [queries]
       security: [{ session: [] }]
-      summary: "The starter's read of their session, passed on as the API answers it, never with the code. A session it shows canceled, expired or locked has its plugin host ended: retired if waiting, revoked with its agents if it holds the session's thumbprint"
+      summary: "The starter's read of their session, passed on as the API answers it, never with the code. A session it shows canceled, expired or locked has its plugin host ended: retired if waiting, revoked with its agents if it holds the session's thumbprint. A redeemed or activated session also carries `runner_ready`, whether the session's plugin host holds exactly one agent that isn't revoked, and it active: for the confirm screen only (step 5(c)), since the API's binding rule decides at confirmation"
       responses: { "200": { description: "The session" }, default: { description: "An error with one `code`" } }
   /api/pairing/{agent}/cancel:
     parameters: [{ $ref: "#/components/parameters/agent" }]
@@ -47,7 +47,7 @@ paths:
       x-api-operation: activatePairing
       tags: [commands]
       security: [{ session: [] }]
-      summary: "The starter confirms the key thumbprint they were shown. The body is exactly `key_thumbprint`, 43 characters of base64url, or `invalid_argument` (400) before the API is asked. The API decides the rest. If it answers `invalid_transition` (409), the session is read again and its plugin host ended as the read does"
+      summary: "The starter confirms the key thumbprint they were shown, and links Runner's agent (step 5(c)). The body is exactly `key_thumbprint`, 43 characters of base64url, or `invalid_argument` (400) before the API is asked. The gateway reads the session as the person (anyone else's read answers as the API does), then reads from the Agent Auth plugin's own tables, never the client, what holds for the session's plugin host: its owner, whether it's active, the thumbprint of the key it holds (computed from the key), how many hosts hold that key, and its agents that aren't revoked; and sends those as `plugin` with the thumbprint. The API decides by the binding rule, activating and linking in one transaction. If it answers `invalid_transition` (409), such as before Runner has registered its agent, the session is read again and its plugin host ended as the read does. On its 200 the gateway writes the directory's `podster_agent` and `identity_link` (provider `agent_auth`, the plugin agent, linked by the starter), as the claim does, and a repeat finds them and answers the same; a plugin agent already linked elsewhere answers `not_allowed` (403). Answers the session with `connection`, `plugin_agent_id` and `runner_ready`"
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [key_thumbprint], properties: { key_thumbprint: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" } } } } } }
       responses: { "200": { description: "The session, with `connection`" }, default: { description: "An error with one `code`" } }
   /pairing/{agent}/redeem:

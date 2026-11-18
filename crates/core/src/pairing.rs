@@ -93,6 +93,10 @@ pub enum Refusal {
     KeyMismatch,
     /// Confirmed before Runner redeemed it.
     NotRedeemed,
+    /// Confirmed before Runner registered its agent on the session's host (M7 step 5(c)).
+    NotRegistered,
+    /// The plugin's host or agent isn't the one the binding rule allows (M7 step 5(c)).
+    BindingMismatch,
 }
 
 impl Refusal {
@@ -105,6 +109,8 @@ impl Refusal {
             Refusal::Locked => "locked",
             Refusal::KeyMismatch => "key_mismatch",
             Refusal::NotRedeemed => "not_redeemed",
+            Refusal::NotRegistered => "not_registered",
+            Refusal::BindingMismatch => "binding_mismatch",
         }
     }
 }
@@ -292,6 +298,62 @@ pub fn cancel(session: &Session) -> Decision {
             },
             outcome: Outcome::Canceled,
         },
+    }
+}
+
+/// Plugin agents a host may hold for a link to be decided. More than this is never one, so the reader need read no more.
+pub const MAX_HOST_AGENTS: usize = 5;
+
+/// A plugin agent on the session's host, as the gateway read it: its ID and whether the plugin holds it active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginAgent {
+    pub id: String,
+    pub active: bool,
+}
+
+/// What the gateway read of the Agent Auth plugin's state for a session's host, at confirmation (M7 step 5(c)). Facts,
+/// not authority: whether they let the session's agent be linked is decided here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginFacts {
+    /// The host that was read, which must be the session's own.
+    pub host_id: String,
+    /// The person who owns that host in the plugin, as a Podster person ID, or empty for none.
+    pub host_owner: String,
+    /// Whether the plugin holds that host active.
+    pub host_active: bool,
+    /// The RFC 7638 thumbprint of the key that host holds, or empty for none.
+    pub host_thumbprint: String,
+    /// How many plugin hosts hold that key, in any state.
+    pub hosts_holding_key: i64,
+    /// The host's plugin agents that aren't revoked, at most [`MAX_HOST_AGENTS`] + 1 of them.
+    pub agents: Vec<PluginAgent>,
+}
+
+/// The one plugin agent a confirmed session links to its Podster agent (M7 step 5(c), the binding rule ruled on #449):
+/// the only agent, active, on the session's own plugin host, which its starter owns, which holds the session's
+/// thumbprint, and which is the only host holding it. `plugin_host_id`, `starter` and `thumbprint` are the session's.
+/// No agent there yet is [`Refusal::NotRegistered`], which Runner can still fix; anything else is
+/// [`Refusal::BindingMismatch`]. A session that is canceled, expired or locked never gets here: [`activate`] refuses it.
+pub fn link_target<'a>(
+    facts: &'a PluginFacts,
+    plugin_host_id: &str,
+    starter: &str,
+    thumbprint: &str,
+) -> Result<&'a str, Refusal> {
+    let host_holds_key = facts.host_id == plugin_host_id
+        && facts.host_active
+        && !starter.is_empty()
+        && facts.host_owner == starter
+        && valid_thumbprint(thumbprint)
+        && facts.host_thumbprint == thumbprint
+        && facts.hosts_holding_key == 1;
+    if !host_holds_key {
+        return Err(Refusal::BindingMismatch);
+    }
+    match facts.agents.as_slice() {
+        [] => Err(Refusal::NotRegistered),
+        [only] if only.active && !only.id.is_empty() => Ok(only.id.as_str()),
+        _ => Err(Refusal::BindingMismatch),
     }
 }
 
@@ -518,5 +580,111 @@ mod tests {
         assert!(!verifiers_match(b"abc", b"abd"));
         assert!(!verifiers_match(b"abc", b"ab"));
         assert!(!verifiers_match(b"", b"a"));
+    }
+
+    fn facts() -> PluginFacts {
+        PluginFacts {
+            host_id: "host_1".into(),
+            host_owner: "per_a".into(),
+            host_active: true,
+            host_thumbprint: KEY.into(),
+            hosts_holding_key: 1,
+            agents: vec![PluginAgent {
+                id: "plug_1".into(),
+                active: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn links_only_the_one_active_agent_on_the_sessions_own_host_holding_its_key() {
+        assert_eq!(link_target(&facts(), "host_1", "per_a", KEY), Ok("plug_1"));
+    }
+
+    #[test]
+    fn waits_for_runner_to_register_its_agent() {
+        let none = PluginFacts {
+            agents: vec![],
+            ..facts()
+        };
+        assert_eq!(
+            link_target(&none, "host_1", "per_a", KEY),
+            Err(Refusal::NotRegistered)
+        );
+    }
+
+    #[test]
+    fn refuses_any_host_agent_owner_or_key_the_rule_does_not_allow() {
+        let mismatch = Err(Refusal::BindingMismatch);
+        // Another host than the session's.
+        assert_eq!(link_target(&facts(), "host_2", "per_a", KEY), mismatch);
+        // A host the starter doesn't own, or no one owns.
+        assert_eq!(link_target(&facts(), "host_1", "per_b", KEY), mismatch);
+        let unowned = PluginFacts {
+            host_owner: String::new(),
+            ..facts()
+        };
+        assert_eq!(link_target(&unowned, "host_1", "", KEY), mismatch);
+        // A key other than the session's, or one the host doesn't hold.
+        assert_eq!(
+            link_target(&facts(), "host_1", "per_a", OTHER_KEY),
+            mismatch
+        );
+        let keyless = PluginFacts {
+            host_thumbprint: String::new(),
+            ..facts()
+        };
+        assert_eq!(link_target(&keyless, "host_1", "per_a", ""), mismatch);
+        // The key on two hosts, or on none the reader found.
+        for holders in [0, 2, 3] {
+            let shared = PluginFacts {
+                hosts_holding_key: holders,
+                ..facts()
+            };
+            assert_eq!(link_target(&shared, "host_1", "per_a", KEY), mismatch);
+        }
+        // A host the plugin no longer holds active.
+        let revoked = PluginFacts {
+            host_active: false,
+            ..facts()
+        };
+        assert_eq!(link_target(&revoked, "host_1", "per_a", KEY), mismatch);
+        // Two agents on the host, or one the plugin doesn't hold active: never a guess at which.
+        let two = PluginFacts {
+            agents: vec![
+                PluginAgent {
+                    id: "plug_1".into(),
+                    active: true,
+                },
+                PluginAgent {
+                    id: "plug_2".into(),
+                    active: true,
+                },
+            ],
+            ..facts()
+        };
+        assert_eq!(link_target(&two, "host_1", "per_a", KEY), mismatch);
+        let pending = PluginFacts {
+            agents: vec![PluginAgent {
+                id: "plug_1".into(),
+                active: false,
+            }],
+            ..facts()
+        };
+        assert_eq!(link_target(&pending, "host_1", "per_a", KEY), mismatch);
+        let nameless = PluginFacts {
+            agents: vec![PluginAgent {
+                id: String::new(),
+                active: true,
+            }],
+            ..facts()
+        };
+        assert_eq!(link_target(&nameless, "host_1", "per_a", KEY), mismatch);
+    }
+
+    #[test]
+    fn the_new_refusals_have_their_reason_codes() {
+        assert_eq!(Refusal::NotRegistered.code(), "not_registered");
+        assert_eq!(Refusal::BindingMismatch.code(), "binding_mismatch");
     }
 }

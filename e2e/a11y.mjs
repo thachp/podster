@@ -18,6 +18,7 @@ import * as playwright from "playwright";
 import { seedInputAssets } from "./asset-fixture.mjs";
 import { bounded, boundMethods, waitingFor } from "./bounded.mjs";
 import { childEnv } from "./child-env.mjs";
+import { generateKeypair, signHostJWT } from "@auth/agent";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -210,6 +211,14 @@ async function seed() {
   await owner.must("POST", `/agents/${off.id}/disconnect`);
   // These pages need live links.
   const pending = await AuthAgent.register(target, "Pending agent");
+  // M7 step 5(c): a Runner pairing waiting for its key, and one whose key Runner sent, as its confirm screen shows them.
+  const pairingWaiting = (await owner.must("POST", "/pairing", { name: "Waiting runner" })).agent_id;
+  const sent = await owner.must("POST", "/pairing", { name: "Laptop runner" });
+  const runnerKey = await generateKeypair();
+  const proof = await signHostJWT({ hostKeypair: runnerKey, audience: target.base, issuer: sent.agent_id });
+  const redeemed = await target.http(`/pairing/${sent.agent_id}/redeem`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${proof}` }, body: JSON.stringify({ code: sent.code }) });
+  ok(redeemed.status === 200, `redeeming the a11y run's pairing answered ${redeemed.status}`);
+  const pairingKeySent = sent.agent_id;
   const roomInvite = await owner.invite(room, partner.org);
   const teamOrg = (await owner.must("POST", "/orgs", { name: "Ada team" })).id;
   const orgInvite = await owner.must("POST", `/orgs/${teamOrg}/invitations`, { role: "member" });
@@ -323,7 +332,7 @@ async function seed() {
   await askRunner({ type: "set-file-states", changes: [{ id: removedFile.fileId, state: "ready" }] });
   await removedFile.approveThenRemove();
   // END REMOVED OUTPUT FILE FIXTURE
-  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, keptThread, keptArabicThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { pairingWaiting, pairingKeySent, outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, keptThread, keptArabicThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -377,6 +386,9 @@ const screens = (s) => {
     ["Task Sheet over Artifacts", `/w/${s.outputs.room}/artifacts?task=${s.outputs.readyTask}`, "Expected output", "owner", true],
     ["Claim", `/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`, "Confirm ownership"],
     ["MCP consent", `/oauth/consent?${s.consent}`, "Connect an agent to Podster"],
+    ["Pair Runner", "/pairing/new", "Start pairing"],
+    ["Confirm Runner, waiting for its key", `/pairing/${s.pairingWaiting}`, "Confirm Runner"],
+    ["Confirm Runner, key sent", `/pairing/${s.pairingKeySent}`, "Confirm Runner"],
     ["Room invitation", `/invitations/${s.roomInvite.token}`, "Workroom invitation", "partner"],
     ["Organization invitation", `/join#${s.orgInvite.token}`, "Ada team", "partner"],
     ["Not found", `/w/ws_${"0".repeat(32)}/overview`, "find that page"],

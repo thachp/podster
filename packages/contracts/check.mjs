@@ -63,7 +63,7 @@ problems.push(...exclusiveSchemeProblems(operations, [
 ], api.security));
 for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id) && !providerOnly.includes(id) && !pairingOnly.includes(id)) problems.push(`${id}: operation with no capability`);
 // A person's pairing operations are person_only.
-for (const id of ["startPairing", "getPairing", "activatePairing", "cancelPairing"]) if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
+for (const id of ["startPairing", "getPairing", "activatePairing", "cancelPairing", "sweepPairings", "settlePairingSweep"]) if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 
 // The gateway's own dashboard routes for an organization's people. They never reach the API, so they aren't capabilities.
 const organizations = parse(readFileSync(new URL("organizations.yaml", import.meta.url), "utf8"));

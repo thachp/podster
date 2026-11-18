@@ -74,10 +74,21 @@ const KEY = "K".repeat(43);
 const OTHER_KEY = "Q".repeat(43);
 const newCode = () => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
+/** Each session's plugin host and starter, for the facts the gateway would read at confirmation. */
+const sessions = new Map<string, { hostId: string; starter: string }>();
+type Facts = { host_id: string; host_owner: string; host_active: boolean; host_thumbprint: string; hosts_holding_key: number; agents: { id: string; active: boolean }[] };
+/** What the gateway reads of the plugin when all is as the binding rule wants: the session's host, its starter's, holding KEY alone, with one active agent. */
+function factsFor(agent: string, more: Partial<Facts> = {}): Facts {
+  const session = sessions.get(agent) ?? { hostId: "host_unknown", starter: "" };
+  return { host_id: session.hostId, host_owner: session.starter, host_active: true, host_thumbprint: KEY, hosts_holding_key: 1, agents: [{ id: `plug${agent.slice(4)}`, active: true }], ...more };
+}
+const plugged = (agent: string, thumbprint: string, more: Partial<Facts> = {}) => ({ key_thumbprint: thumbprint, plugin: factsFor(agent, more) });
+
 async function start(who: Person, extra: Record<string, unknown> = {}) {
   const code = newCode();
   const res = await person(who, "POST", "/v1/pairing", { org_id: ORG, plugin_host_id: `host_${crypto.randomUUID().slice(0, 8)}`, code, name: "Runner on a Mac", ...extra });
   expect(res.status, res.text).toBe(200);
+  sessions.set(res.body.agent_id, { hostId: res.body.plugin_host_id, starter: who.id });
   return { agent: res.body.agent_id as string, code, answer: res.body, hostId: res.body.plugin_host_id as string };
 }
 
@@ -304,7 +315,7 @@ describe("redeeming the code", () => {
       ["pairing.refused", "locked"],
       ["pairing.refused", "locked"],
     ]);
-    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY })).status).toBe(409);
+    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY))).status).toBe(409);
   });
 
   it("refuses an expired session without counting, and a malformed code without reaching it", async () => {
@@ -355,13 +366,13 @@ describe("confirming", () => {
     const who = admin();
     const { agent, code, hostId } = await start(who);
     await redeem(agent, code);
-    const done = await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY });
+    const done = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY));
     expect(done.status, done.text).toBe(200);
     expect(done.body).toMatchObject({ agent_id: agent, org_id: ORG, status: "activated", key_thumbprint: KEY, plugin_host_id: hostId, connection: { id: agent, org_id: ORG, name: "Runner on a Mac", generation: 1, status: "active" } });
     expect((await person(who, "GET", `/v1/agents/${agent}`)).body).toMatchObject({ id: agent, org_id: ORG, status: "active" });
     expect((await internalCheck(agent)).status).toBe(200);
     // Again: the same answer, and still one connection at generation 1.
-    const again = await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY });
+    const again = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY));
     expect(again.status).toBe(200);
     expect(again.body.connection.generation).toBe(1);
     // Nothing reopens it.
@@ -369,7 +380,7 @@ describe("confirming", () => {
     expect((await person(who, "POST", `/v1/pairing/${agent}/cancel`)).status).toBe(409);
     // The late redemption is audited as a refusal, with the key's thumbprint and a reason, and nothing else.
     const history = (await person(who, "GET", `/v1/pairing/${agent}`)).body.history.map((e: any) => [e.type, e.actor_id, e.reason]);
-    expect(history).toEqual([["pairing.started", who.id, null], ["pairing.redeemed", `key:${KEY}`, null], ["pairing.activated", who.id, null], ["pairing.refused", `key:${KEY}`, "closed"]]);
+    expect(history).toEqual([["pairing.started", who.id, null], ["pairing.redeemed", `key:${KEY}`, null], ["pairing.activated", who.id, null], ["pairing.linked", who.id, null], ["pairing.refused", `key:${KEY}`, "closed"]]);
     expect(await everything(agent)).not.toContain(code);
   });
 
@@ -377,7 +388,7 @@ describe("confirming", () => {
     const who = admin();
     const { agent, code } = await start(who);
     await redeem(agent, code);
-    const both = await Promise.all([1, 2].map(() => person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY })));
+    const both = await Promise.all([1, 2].map(() => person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY))));
     expect(both.map((r) => r.status)).toEqual([200, 200]);
     expect(both[0].body.connection).toEqual(both[1].body.connection);
     const events = (await person(who, "GET", `/v1/pairing/${agent}`)).body.history.filter((e: any) => e.type === "pairing.activated");
@@ -388,38 +399,38 @@ describe("confirming", () => {
     const who = admin();
     const { agent, code } = await start(who);
     await redeem(agent, code);
-    const wrong = await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: OTHER_KEY });
+    const wrong = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, OTHER_KEY));
     expect(wrong.status).toBe(403);
     expect(wrong.code).toBe("not_allowed");
     expect((await person(who, "GET", `/v1/pairing/${agent}`)).body.status).toBe("redeemed");
     expect((await person(who, "GET", `/v1/agents/${agent}`)).code).toBe("agent_not_found");
     // And after activation, another thumbprint never replaces the key.
-    await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY });
-    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: OTHER_KEY })).code).toBe("not_allowed");
+    await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY));
+    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, OTHER_KEY))).code).toBe("not_allowed");
     expect((await person(who, "GET", `/v1/pairing/${agent}`)).body.key_thumbprint).toBe(KEY);
   });
 
   it("needs a redemption first, and a session that hasn't expired or been canceled", async () => {
     const who = admin();
     const waiting = await start(who);
-    expect((await person(who, "POST", `/v1/pairing/${waiting.agent}/activate`, { key_thumbprint: KEY })).status).toBe(409);
+    expect((await person(who, "POST", `/v1/pairing/${waiting.agent}/activate`, plugged(waiting.agent, KEY))).status).toBe(409);
     const late = await start(who);
     await redeem(late.agent, late.code);
     await expire(late.agent);
-    expect((await person(who, "POST", `/v1/pairing/${late.agent}/activate`, { key_thumbprint: KEY })).status).toBe(409);
+    expect((await person(who, "POST", `/v1/pairing/${late.agent}/activate`, plugged(late.agent, KEY))).status).toBe(409);
     const ended = await start(who);
     await redeem(ended.agent, ended.code);
     expect((await person(who, "POST", `/v1/pairing/${ended.agent}/cancel`)).status).toBe(200);
-    expect((await person(who, "POST", `/v1/pairing/${ended.agent}/activate`, { key_thumbprint: KEY })).status).toBe(409);
+    expect((await person(who, "POST", `/v1/pairing/${ended.agent}/activate`, plugged(ended.agent, KEY))).status).toBe(409);
     for (const agent of [waiting.agent, late.agent, ended.agent]) expect((await person(who, "GET", `/v1/agents/${agent}`)).code).toBe("agent_not_found");
-    expect((await person(who, "POST", `/v1/pairing/${waiting.agent}/activate`, { key_thumbprint: "short" })).code).toBe("invalid_argument");
+    expect((await person(who, "POST", `/v1/pairing/${waiting.agent}/activate`, plugged(waiting.agent, "short"))).code).toBe("invalid_argument");
   });
 
   it("is the starter's alone, while they still administer the organization in a membership older than the session", async () => {
     const who = admin();
     const { agent, code } = await start(who);
     await redeem(agent, code);
-    const confirm = (as: Person) => person(as, "POST", `/v1/pairing/${agent}/activate`, { key_thumbprint: KEY });
+    const confirm = (as: Person) => person(as, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY));
     // Another admin of the organization learns nothing.
     expect((await confirm(admin())).code).toBe("not_found");
     // The starter, no longer an admin.
@@ -447,5 +458,130 @@ describe("canceling", () => {
     // A starter who lost their role can still end it.
     const other = await start(who);
     expect((await person({ ...who, adminOrgs: [] }, "POST", `/v1/pairing/${other.agent}/cancel`)).status).toBe(200);
+  });
+});
+
+describe("linking Runner's plugin agent, in the confirmation (step 5(c))", () => {
+  it("records the one plugin agent the binding rule allows, in the transaction that activates", async () => {
+    const who = admin();
+    const { agent, code } = await start(who);
+    await redeem(agent, code);
+    const done = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY));
+    expect(done.status, done.text).toBe(200);
+    expect(done.body.plugin_agent_id).toBe(`plug${agent.slice(4)}`);
+    expect((await person(who, "GET", `/v1/pairing/${agent}`)).body.plugin_agent_id).toBe(`plug${agent.slice(4)}`);
+    // A repeat names the same agent and answers the same; another agent is refused and changes nothing.
+    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY))).status).toBe(200);
+    const other = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY, { agents: [{ id: "plug_other", active: true }] }));
+    expect([other.status, other.code]).toEqual([403, "not_allowed"]);
+    expect((await person(who, "GET", `/v1/pairing/${agent}`)).body.plugin_agent_id).toBe(`plug${agent.slice(4)}`);
+    const linkedEvents = (await person(who, "GET", `/v1/pairing/${agent}`)).body.history.filter((e: any) => e.type === "pairing.linked");
+    expect(linkedEvents).toHaveLength(1);
+  });
+
+  it("waits, unactivated, until Runner has registered its agent on the session's host", async () => {
+    const who = admin();
+    const { agent, code } = await start(who);
+    await redeem(agent, code);
+    const early = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY, { agents: [] }));
+    expect([early.status, early.code]).toEqual([409, "invalid_transition"]);
+    const seen = (await person(who, "GET", `/v1/pairing/${agent}`)).body;
+    expect(seen.status).toBe("redeemed");
+    expect(seen.history.at(-1)).toMatchObject({ type: "pairing.refused", reason: "not_registered" });
+    expect((await person(who, "GET", `/v1/agents/${agent}`)).code).toBe("agent_not_found");
+    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY))).status).toBe(200);
+  });
+
+  it("never activates or links on another host, another owner, another key, a shared key or an ambiguous agent", async () => {
+    const who = admin();
+    const { agent, code } = await start(who);
+    await redeem(agent, code);
+    const wrong: [string, Partial<Facts>][] = [
+      ["another host", { host_id: "host_elsewhere" }],
+      ["another owner", { host_owner: "per_someone_else" }],
+      ["no owner", { host_owner: "" }],
+      ["a host not active", { host_active: false }],
+      ["another key on the host", { host_thumbprint: OTHER_KEY }],
+      ["the key on two hosts", { hosts_holding_key: 2 }],
+      ["two agents", { agents: [{ id: "plug_a", active: true }, { id: "plug_b", active: true }] }],
+      ["an agent not active", { agents: [{ id: "plug_a", active: false }] }],
+    ];
+    for (const [why, more] of wrong) {
+      const res = await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY, more));
+      expect([why, res.status, res.code]).toEqual([why, 403, "not_allowed"]);
+    }
+    for (const bad of [{ key_thumbprint: KEY }, plugged(agent, KEY, { agents: "x" as never }), plugged(agent, KEY, { hosts_holding_key: -1 }), plugged(agent, KEY, { agents: Array.from({ length: 7 }, (_, i) => ({ id: `p${i}`, active: true })) })]) {
+      expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, bad)).code).toBe("invalid_argument");
+    }
+    const seen = (await person(who, "GET", `/v1/pairing/${agent}`)).body;
+    expect(seen.status).toBe("redeemed");
+    expect(seen.plugin_agent_id).toBeUndefined();
+    expect((await person(who, "GET", `/v1/agents/${agent}`)).code).toBe("agent_not_found");
+  });
+
+  it("refuses registerAgent on a paired agent to everyone, its starter and another admin included, once it's activated", async () => {
+    const who = admin();
+    const { agent, code } = await start(who);
+    await redeem(agent, code);
+    expect((await person(who, "POST", `/v1/pairing/${agent}/activate`, plugged(agent, KEY))).status).toBe(200);
+    for (const as of [admin(), who]) {
+      const res = await person(as, "PUT", `/v1/agents/${agent}`, { org_id: ORG, name: "agent" });
+      expect([res.status, res.code]).toEqual([403, "not_allowed"]);
+    }
+  });
+});
+
+describe("the expiry sweep (step 5(c))", () => {
+  const sweep = (who: Person) => person(who, "POST", "/v1/pairing/sweep", {});
+  const settle = (who: Person, ids: string[]) => person(who, "POST", "/v1/pairing/sweep/settled", { agent_ids: ids });
+
+  it("lists, for its starter, each session past its expiry with its state, until the gateway settles it", async () => {
+    const who = admin();
+    const live = await start(who);
+    const redeemed = await start(who);
+    await redeem(redeemed.agent, redeemed.code);
+    const waiting = await start(who);
+    const done = await start(who);
+    await redeem(done.agent, done.code);
+    expect((await person(who, "POST", `/v1/pairing/${done.agent}/activate`, plugged(done.agent, KEY))).status).toBe(200);
+    expect((await sweep(who)).body.sessions).toEqual([]);
+    for (const s of [redeemed, waiting, done]) await expire(s.agent);
+    // The due list is the starter's own: its expiry is moved with the session's, as time would.
+    await runInDurableObject(principal(who.id), (_: any, state: any) => {
+      for (const s of [redeemed, waiting, done]) state.storage.sql.exec("UPDATE pairing_due SET expires_at = ? WHERE agent_id = ?", Date.now() - 1, s.agent);
+    });
+    const listed = (await sweep(who)).body.sessions;
+    const by = Object.fromEntries(listed.map((s: any) => [s.agent_id, s]));
+    expect(Object.keys(by).sort()).toEqual([redeemed.agent, waiting.agent, done.agent].sort());
+    expect(by[redeemed.agent]).toEqual({ agent_id: redeemed.agent, plugin_host_id: redeemed.hostId, status: "expired", key_thumbprint: KEY });
+    expect(by[waiting.agent]).toMatchObject({ status: "expired", key_thumbprint: null, plugin_host_id: waiting.hostId });
+    expect(by[done.agent]).toMatchObject({ status: "activated" });
+    expect(by[live.agent]).toBeUndefined();
+    // Settling forgets only what's past its expiry, whatever is sent.
+    expect((await settle(who, [redeemed.agent, live.agent])).body.settled).toBe(1);
+    expect((await sweep(who)).body.sessions.map((s: any) => s.agent_id).sort()).toEqual([waiting.agent, done.agent].sort());
+  });
+
+  it("reads a listed session that was never made as missing", async () => {
+    const who = admin();
+    const ghost = `agt_${crypto.randomUUID().replaceAll("-", "")}`;
+    await runInDurableObject(principal(who.id), (_: any, state: any) => {
+      state.storage.sql.exec("CREATE TABLE IF NOT EXISTS pairing_due (agent_id TEXT PRIMARY KEY, plugin_host_id TEXT NOT NULL, expires_at INTEGER NOT NULL)");
+      state.storage.sql.exec("INSERT INTO pairing_due VALUES (?, 'host_ghost', ?)", ghost, Date.now() - 1);
+    });
+    expect((await sweep(who)).body.sessions).toEqual([{ agent_id: ghost, plugin_host_id: "host_ghost", status: "missing", key_thumbprint: null }]);
+  });
+
+  it("is a person's own list: another person sees none of it, and an agent or a bad body is refused", async () => {
+    const who = admin();
+    const { agent } = await start(who);
+    await expire(agent);
+    await runInDurableObject(principal(who.id), (_: any, state: any) => { state.storage.sql.exec("UPDATE pairing_due SET expires_at = ?", Date.now() - 1); });
+    expect((await sweep(admin())).body.sessions).toEqual([]);
+    expect((await call(await agentAssertion(agent), "POST", "/v1/pairing/sweep", "{}")).status).toBeGreaterThanOrEqual(400);
+    for (const bad of [{}, { agent_ids: ["not-an-agent"] }, { agent_ids: Array.from({ length: 51 }, () => agent) }]) {
+      expect((await person(who, "POST", "/v1/pairing/sweep/settled", bad)).code).toBe("invalid_argument");
+    }
+    expect((await sweep(who)).body.sessions.map((s: any) => s.agent_id)).toEqual([agent]);
   });
 });

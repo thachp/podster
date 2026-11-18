@@ -7,7 +7,7 @@ const app = join(root, "app");
 
 /** Every route in docs/spec/DESIGN.md section 2. */
 const SHELL = ["attention", "workrooms", "workrooms/explore", "workrooms/new", "w/[id]/overview", "w/[id]/tasks", "w/[id]/team", "w/[id]/collaboration", "w/[id]/activity", "w/[id]/artifacts", "w/[id]/settings", "agents", "agents/connect", "settings/profile", "settings/organization", "settings/notifications"];
-const FOCUSED = ["invitations/[token]", "claim", "oauth/consent"];
+const FOCUSED = ["invitations/[token]", "claim", "oauth/consent", "pairing/new", "pairing/[agent]"];
 
 const files = (dir: string): string[] => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? files(join(dir, name)) : [join(dir, name)]));
 

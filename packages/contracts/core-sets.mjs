@@ -81,12 +81,14 @@ export function coreSets(root) {
     maxLabelLen: Number(constant(release, "MAX_LABEL_LEN")),
     maxScriptNameLen: Number(constant(release, "MAX_SCRIPT_NAME_LEN")),
     idLen: Number(constant(release, "ID_LEN")),
+    // A task's prompt inputs (M7 step 4): what its provenance names, and what the room records an author for.
+    promptInputs: enumNames(read(root, "crates/core/src/task_inputs.rs"), "PromptInput", "name"),
   };
 }
 
-/** The values of a `column … CHECK (column IN ('a', 'b'))` in the room's migrations, in order. */
+/** The values of a `column … CHECK (column IN ('a', 'b'))` in the room's migrations, in order. The table may be made `IF NOT EXISTS`. */
 export function columnCheck(store, table, column) {
-  const create = store.match(new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\)(?: WITHOUT ROWID)?;\\n`))?.[1];
+  const create = store.match(new RegExp(`CREATE TABLE (?:IF NOT EXISTS )?${table} \\(([\\s\\S]*?)\\)(?: WITHOUT ROWID)?;\\n`))?.[1];
   if (create === undefined) throw new Error(`${table}: no such table in the room's migrations`);
   const found = [...create.matchAll(new RegExp(`CHECK \\(${column} IN \\(([^)]*)\\)\\)`, "g"))];
   if (found.length !== 1) throw new Error(`${table}.${column}: ${found.length} closed checks, not one`);

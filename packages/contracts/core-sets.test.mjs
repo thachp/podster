@@ -42,6 +42,7 @@ check(constant(good, "LIMIT") === "26" && constant(good, "WORD") === "rel_" && t
 const store = "CREATE TABLE paint (id TEXT, colour TEXT NOT NULL CHECK (colour IN ('red', 'dark_blue')), open INTEGER, CHECK ((open IS NOT NULL) = (colour IN ('red'))));\n";
 check(columnCheck(store, "paint", "colour").join() === "red,dark_blue", "a column's closed check is read, and a tie that names the column isn't taken for it");
 check(throws(() => columnCheck(store, "paint", "id")) && throws(() => columnCheck(store, "canvas", "colour")), "a column with no closed check, and a missing table, are refused");
+check(columnCheck("CREATE TABLE IF NOT EXISTS paint (colour TEXT CHECK (colour IN ('red')), PRIMARY KEY (colour)) WITHOUT ROWID;\n", "paint", "colour").join() === "red", "a table made only if it isn't there is read the same");
 
 const asks = (body) => `pub enum Colour {\n    Red,\n    DarkBlue,\n    Green,\n}\nimpl Colour {\n    pub fn warm(self) -> bool {\n        ${body}\n    }\n}\n`;
 check(subset(asks("matches!(self, Colour::Red | Colour::Green)"), "Colour", "warm", ["red", "dark_blue", "green"]).join() === "red,green", "a question's variants come out by their names");

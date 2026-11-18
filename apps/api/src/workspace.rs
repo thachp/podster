@@ -85,6 +85,7 @@ mod objects;
 mod outputs;
 mod plan;
 mod planned;
+mod provenance;
 mod provisioning;
 mod public;
 mod public_claims;
@@ -695,6 +696,7 @@ fn handle_task_command_with(
         objects::drop_uploads_for_task(sql, &caller.id, kind_name(caller), task_id, now)?;
     }
     record_decision(sql, &decision, task.status, &caller.id, now)?;
+    provenance::record(sql, Some(&task), &decision, &caller.id, now)?;
     Ok(task_json(&decision.task))
 }
 
@@ -733,6 +735,7 @@ fn handle_create_task(
     store::insert_task(sql, &decision.task, now)?;
     outputs::name_on_create(sql, &decision.task, body)?;
     record_decision(sql, &decision, decision.task.status, &caller.id, now)?;
+    provenance::record(sql, None, &decision, &caller.id, now)?;
     let mut created = task_json(&decision.task);
     created["expected_output"] = outputs::of_task(sql, &decision.task.id, false)?;
     Ok(created)
@@ -2771,7 +2774,7 @@ mod queries {
             Value::Null
         };
         Ok(json!({
-            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "change": change, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
+            "task": task_json(&task), "provenance": super::provenance::of_task(sql, who, &task)?, "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "change": change, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))

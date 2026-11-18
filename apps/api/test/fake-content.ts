@@ -48,6 +48,7 @@ export const CONTENT_PARTITIONS = {
   default: { namespace: FAKE_CONTENT.namespace, kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" },
   "serve-entry": { namespace: "podster-test-apps-serve-entry", kvNamespace: "d2".repeat(16), control: "serve-entry.content-fake.example.com" },
   "custom-routing": { namespace: "podster-test-apps-custom-routing", kvNamespace: "d3".repeat(16), control: "custom-routing.content-fake.example.com" },
+  "custom-marker": { namespace: "podster-test-apps-custom-marker", kvNamespace: "d4".repeat(16), control: "custom-marker.content-fake.example.com" },
 } as const;
 export type ContentPartition = keyof typeof CONTENT_PARTITIONS;
 
@@ -335,6 +336,9 @@ async function fakeAppHost(request: Request, url: URL): Promise<Response> {
 export async function fakeContent(request: Request, from: ContentPartition = "default"): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url);
+  // A custom hostname a test said serves a marker (M6 step 8e): as the content Worker would for that host once its
+  // entry names a script, which here a test says outright. Only a host a test named, so no other call is taken for one.
+  if (url.pathname === MARKER_FILE && markerHosts.has(url.hostname) && !partitionNamed("control", url.hostname)) return fakeAppHost(request, url);
   // The marker and upload parts are kept by host and by script, not by partition, so any control host reaches them.
   const control = partitionNamed("control", url.hostname);
   if (control && url.pathname.startsWith("/marker-")) {

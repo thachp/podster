@@ -659,12 +659,12 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     };
     assert_eq!(scripts(&rolled), [Some("lab.rel_1"), None]);
     // Only a new claim, active at Cloudflare, opens it again, on the release last confirmed served.
-    let Some(reopened) = open_host(&confirmed.state, 1) else {
+    let Some(reopened) = open_host(&confirmed.state, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&reopened), [Some("lab.rel_2"), Some("lab.rel_2")]);
     assert!(reopened.hosts.iter().all(|h| !h.closed));
-    assert_eq!(open_host(&second, 2), None);
+    assert_eq!(open_host(&second, 2, false), None);
 }
 
 /// The first release confirmed served on the default host, with a closed custom host, then a second release committed
@@ -692,7 +692,7 @@ fn second_in_flight() -> (ServeState, CommitMark) {
 fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
     let (second, mark) = second_in_flight();
     // Opened in the window: the release last confirmed, never the unconfirmed one.
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [Some("lab.rel_2"), Some("lab.rel_1")]);
@@ -723,7 +723,7 @@ fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
 #[test]
 fn a_host_opened_mid_flight_stays_on_the_confirmed_release_when_the_marker_fails() {
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     let back = applied(&opened, &mark, "lab.rel_2");
@@ -739,7 +739,7 @@ fn a_host_opened_after_an_unpublish_serves_nothing() {
     // The unpublish takes the flight's mark from the state, so the release live before the commit is deleted too.
     assert!(delete.contains(&"lab.rel_1".to_owned()));
     assert!(delete.contains(&"lab.rel_2".to_owned()));
-    let Some(opened) = open_host(&down, 1) else {
+    let Some(opened) = open_host(&down, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [None, None]);
@@ -749,7 +749,7 @@ fn a_host_opened_after_an_unpublish_serves_nothing() {
 #[test]
 fn a_host_opened_before_any_release_was_served_serves_nothing() {
     let state = serving(None, 2, 1);
-    let Some(opened) = open_host(&state, 1) else {
+    let Some(opened) = open_host(&state, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [None, None]);
@@ -759,7 +759,7 @@ fn a_host_opened_before_any_release_was_served_serves_nothing() {
     else {
         unreachable!("refused");
     };
-    let Some(mid) = open_host(&first, 1) else {
+    let Some(mid) = open_host(&first, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&mid), [Some("lab.rel_1"), None]);
@@ -2014,7 +2014,7 @@ fn the_hourly_reconcile_deletes_only_what_fits_the_rule_and_no_room_claims() {
 fn a_late_success_after_a_set_back_confirms_nothing() {
     // Default A; B commits; a host opens; B's marker fails and B is set back and ordered deleted.
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     let back = applied(&opened, &mark, "lab.rel_2");
@@ -2046,7 +2046,7 @@ fn a_stale_success_after_a_later_release_confirms_nothing() {
 #[test]
 fn a_repeated_confirmation_changes_nothing_more() {
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     let Ok(first) = confirm_served(&opened, &mark, "lab.rel_2") else {
@@ -2144,7 +2144,7 @@ fn a_failed_rollback_never_orders_the_kept_script_deleted() {
 fn opening_a_host_and_catching_it_up_each_move_its_version() {
     let (second, mark) = second_in_flight();
     let before = second.hosts.get(1).map(|h| h.version);
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     let opened_version = opened.hosts.get(1).map(|h| h.version);
@@ -2238,7 +2238,7 @@ fn clearing_or_opening_a_host_mid_flight_leaves_the_flight_alone() {
     let (second, mark) = second_in_flight();
     let flight = second.in_flight.clone();
     assert!(flight.is_some());
-    let Some(opened) = open_host(&second, 1) else {
+    let Some(opened) = open_host(&second, 1, false) else {
         unreachable!("no host");
     };
     assert_eq!(opened.in_flight, flight);
@@ -2449,7 +2449,7 @@ fn a_stale_failure_with_an_old_mark_for_the_flights_own_script_leaves_the_flight
 #[test]
 fn the_default_host_is_never_opened_and_unpublish_always_deletes_the_flights_script() {
     let (second, mark) = second_in_flight();
-    assert_eq!(open_host(&second, 0), None);
+    assert_eq!(open_host(&second, 0, false), None);
     assert!(confirm_served(&second, &mark, "lab.rel_2").is_ok());
     // Even if no host names the flight's script any more, an unpublish deletes it.
     let mut odd = second.clone();

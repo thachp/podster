@@ -550,6 +550,26 @@ INSERT OR IGNORE INTO task_input_text (task_id, input, event_id, written_at)
 "
 CREATE TABLE IF NOT EXISTS hostname_recheck (request_id TEXT PRIMARY KEY REFERENCES hostname_request (id),
   rechecked_at INTEGER NOT NULL CHECK (typeof(rechecked_at) = 'integer')) WITHOUT ROWID;
+",
+// Step 56 (M6 step 8e): a custom host's marker, one row a custom host: the version, script and apply it is checking,
+// when the room first saw that switch (the marker's wait runs from it, so it must outlive an eviction), the fetch's
+// lease and attempts, when that host's own marker recorded the release served there, and its set-back and how many in a
+// row. A table, not columns, so the step runs again safely. Forward-only: a room with no row checks its custom host's
+// marker afresh on its next pass, as a new switch.
+"
+CREATE TABLE IF NOT EXISTS custom_marker (host TEXT PRIMARY KEY,
+  version INTEGER NOT NULL CHECK (typeof(version) = 'integer'),
+  script_name TEXT NOT NULL,
+  applied_at INTEGER,
+  switched_at INTEGER NOT NULL CHECK (typeof(switched_at) = 'integer'),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
+  next_at INTEGER,
+  leased_until INTEGER,
+  served_at INTEGER,
+  set_back_at INTEGER,
+  set_backs INTEGER NOT NULL DEFAULT 0 CHECK (typeof(set_backs) = 'integer' AND set_backs >= 0),
+  last_code TEXT,
+  updated_at INTEGER NOT NULL) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

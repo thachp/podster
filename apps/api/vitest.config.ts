@@ -288,6 +288,7 @@ const pool = (partition: ContentPartition) =>
 const OWN_PARTITION: Record<Exclude<ContentPartition, "default">, string> = {
   "serve-entry": "test/serve-entry.spec.ts",
   "custom-routing": "test/custom-routing.spec.ts",
+  "custom-marker": "test/custom-marker.spec.ts",
 };
 // bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
 const shared = { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] };

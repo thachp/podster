@@ -831,7 +831,9 @@ fn open_route(sql: &SqlStorage, hostname: &str, now: i64) -> R<bool> {
         .iter()
         .position(|host| host == hostname)
         .ok_or_else(|| ApiError::internal("a host that isn't in the serve state"))?;
-    let Some(after) = podster_core::release::open_host(&loaded.state, index) else {
+    // Never during a rollback's flight: the release last confirmed is the one rolled away from (ruling L1 on #448).
+    let rollback = release_rollback::flight_is_rollback(sql, &loaded.state)?;
+    let Some(after) = podster_core::release::open_host(&loaded.state, index, rollback) else {
         return Ok(false);
     };
     // Opened first, since a closed host can name no script; then the state core decided, whole.

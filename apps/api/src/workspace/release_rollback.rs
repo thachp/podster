@@ -56,6 +56,18 @@ pub(super) fn target_of(sql: &SqlStorage, release_id: &str) -> R<Option<String>>
     .and_then(|row| text(&row["rollback_to"])))
 }
 
+/// Whether the room's flight, if one is open, is a rollback's: its own record names a release it rolls back to. For
+/// `podster_core::release::open_host`, which opens no custom host then (the architect's ruling L1 on #448).
+pub(super) fn flight_is_rollback(
+    sql: &SqlStorage,
+    state: &podster_core::release::ServeState,
+) -> R<bool> {
+    match &state.in_flight {
+        Some(flight) => Ok(target_of(sql, &flight.release_id)?.is_some()),
+        None => Ok(false),
+    }
+}
+
 /// `POST releases/{release}/rollback`, in the room's transaction, after `Workspace::release_request_reads`. **Run only
 /// as the handler of `command_checked` whose recheck is `release_request::standing`,** as a request is.
 pub(super) fn handle(

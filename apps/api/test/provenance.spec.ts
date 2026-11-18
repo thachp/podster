@@ -384,11 +384,11 @@ describe("a task's provenance", () => {
     expect((await api(BOB, "POST", `${path}/submit`, { version: 2, note: "first" })).status).toBe(200);
     expect((await api(REVIEWER, "POST", `${path}/request-changes`, { submission_no: 1, reason: "fix" })).status).toBe(200);
     const before = await read(BOB, path);
-    // A room from before this step: no record of authors, two schema steps behind (step 55, after it, runs again
-    // safely).
+    // A room from before this step: no record of authors, three schema steps behind (steps 55 and 56, after it, run
+    // again safely).
     await inRoom(id, (sql) => {
       for (const table of ["task_input_author", "task_input_text", "task_requester_org"]) sql.exec(`DROP TABLE ${table}`);
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     const after = await read(BOB, path);
     const seen = inputs(after);
@@ -397,7 +397,7 @@ describe("a task's provenance", () => {
     expect(seen.instructions).toEqual(unknownInput("instructions"));
     expect(after.provenance.requester).toEqual({ id: LEAD.id, org: null, external: true, active: false });
     // The step runs again over its own tables harmlessly, so a renumbering on rebase can't break a room.
-    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 3"));
     expect((await read(BOB, path)).provenance).toEqual(after.provenance);
   });
 
@@ -407,7 +407,7 @@ describe("a task's provenance", () => {
     const path = `${tasks}/${t.id}`;
     await inRoom(id, (sql) => {
       for (const table of ["task_input_author", "task_input_text", "task_requester_org"]) sql.exec(`DROP TABLE ${table}`);
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     expect((await read(LEAD, path)).provenance.inputs).toEqual(["title", "instructions", "acceptance_criteria"].map(unknownInput));
     const edited = await api(LEAD, "POST", `${path}/update`, { version: t.version, title: "Design billing, v2" });
@@ -417,7 +417,7 @@ describe("a task's provenance", () => {
     expect(authors(seen.title)).toEqual([UNKNOWN, author(LEAD, false)]);
     // A task made after the step gets no unknown author from a rerun of it.
     const fresh = await create(LEAD, tasks, { assignee: BOB.id });
-    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 3"));
     for (const input of (await read(LEAD, `${tasks}/${fresh.id}`)).provenance.inputs) expect(authors(input)).toEqual([author(LEAD, false)]);
   });
 });

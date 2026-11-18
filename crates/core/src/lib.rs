@@ -13,6 +13,7 @@ pub mod app_requests;
 pub mod app_store;
 pub mod asset_links;
 pub mod baseline;
+pub mod custom_marker;
 pub mod expected_outputs;
 pub mod files;
 pub mod hostname_recheck;

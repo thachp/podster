@@ -29,6 +29,12 @@ It refuses, before changing anything, unless:
     set by hand on the deployed Worker isn't seen, and the deploy overwrites it from the file
   - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
     run is looked into, not deployed
+  - the API Worker on staging holds no secret named as a setting the API reads as plain configuration,
+    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_SUFFIX_RULES, CUSTOM_HOSTNAME_* or CONTENT_*. The API
+    reads those through env.var and crate::setting, which take a secret too, so one would switch a
+    feature on and survive every deploy. The names come from apps/api/src (scripts/setting-names.mjs),
+    and the secrets from a read-only list of staging's API Worker secrets after npm ci, which gives
+    names only. A list that can't be read is refused too
   - no D1 migration is pending on podster-api-staging or podster-gateway-staging, or
     --apply-migrations names exactly the pending set, by file name, such as
     --apply-migrations 0007_repo_room_index.sql. It then applies them first and lists again.
@@ -189,6 +195,26 @@ for app in $apps; do
   step "npm ci in apps/$app"
   (cd "apps/$app" && npm ci) || refuse "npm ci failed in apps/$app"
 done
+
+# --- no secret may hold a setting's name ---
+# The API reads its settings with env.var and crate::setting, which take any string binding, a secret included, and a
+# secret survives deploys unseen by the checks on wrangler.jsonc. The names are the code's own (scripts/setting-names.mjs).
+# `secret list` is read-only and gives names, never values; its output isn't printed.
+step "checking the API Worker's secret names"
+settings=$(node scripts/setting-names.mjs names apps/api/src 2>&1) \
+  || refuse "${settings:-scripts/setting-names.mjs could not read apps/api/src}"
+secrets_out=$(mktemp)
+secrets_err=$(mktemp)
+if ! (cd apps/api && npx wrangler secret list --format json --env staging) > "$secrets_out" 2> "$secrets_err"; then
+  # Why, from wrangler's stderr, with anything long enough to be a credential masked. The list itself isn't printed.
+  tail -n 10 "$secrets_err" | sed -E -e 's/[A-Za-z0-9_-]{40,}/[masked]/g' -e 's/^/        | /' >&2
+  rm -f "$secrets_out" "$secrets_err"
+  refuse "could not list the API Worker's secrets on staging, so whether one holds a setting's name isn't known"
+fi
+rm -f "$secrets_err"
+clash=$(node scripts/setting-names.mjs check apps/api/src < "$secrets_out" 2>&1) || { rm -f "$secrets_out"; refuse "${clash:-scripts/setting-names.mjs could not check the secret list}"; }
+rm -f "$secrets_out"
+echo "no secret holds any of: $(echo $settings)"
 
 # --- migrations ---
 # pending APP DATABASE: prints the file names wrangler lists as not yet applied, one per line.

@@ -116,6 +116,12 @@ if [ -n "$queue" ] && [ -s "$queue" ]; then
   exit 1
 fi
 case "$*" in
+  "wrangler secret list --format json --env staging")
+    # The API Worker's secret names, as wrangler prints them: $fix/secret-list, or a failure when its first line says so.
+    [ "$app" = api ] || { echo "stand-in wrangler: secret list in $app" >&2; exit 97; }
+    [ "$(sed -n 1p "$fix/secret-list")" = wrangler-fails ] && { echo "✘ [ERROR] Authentication error [code: 10000]" >&2; exit 1; }
+    cat "$fix/secret-list"
+    ;;
   "wrangler d1 migrations list "*" --remote --env staging")
     list="$fix/pending-$5"
     [ -f "$fix/applied-$5" ] && list="$fix/pending-after-$5"
@@ -173,7 +179,12 @@ fresh() {
   rm -f "$fix"/*
   healthy_staging
   mkdir -p "$tmp/seed/scripts" "$tmp/seed/apps/api/migrations" "$tmp/seed/apps/gateway/migrations" "$tmp/seed/apps/web"
-  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$scripts/requesters-rule.mjs" "$tmp/seed/scripts/"
+  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$scripts/requesters-rule.mjs" "$scripts/setting-names.mjs" "$tmp/seed/scripts/"
+  # The API's source as far as the secret check reads it: two modules that name settings, and one that names a secret.
+  mkdir -p "$tmp/seed/apps/api/src/workspace"
+  printf 'const SWITCH_VAR: &str = "RELEASES";\nfn on(env: &Env) -> bool { env.var(SWITCH_VAR).is_ok() }\n' > "$tmp/seed/apps/api/src/releases.rs"
+  printf 'const RULES: &str = "PUBLIC_SUFFIX_RULES";\nfn rules(env: &Env) -> Setting { crate::setting(env, RULES) }\n' > "$tmp/seed/apps/api/src/workspace/hostname.rs"
+  printf 'const KEY: &str = "A2A_TOKEN_KEY";\nfn key(env: &Env) -> Option<String> { env.secret(KEY).ok().map(|s| s.to_string()) }\n' > "$tmp/seed/apps/api/src/sealed.rs"
   mkdir -p "$tmp/seed/scripts/lib" && cp "$scripts/lib/rust-toolchain.sh" "$tmp/seed/scripts/lib/"
   # The API's configuration as staging has it: the switch on, and the list of who may ask beside it.
   api_config '"MANAGED_REPOSITORIES": "true", "REPOSITORY_REQUESTERS": "operators,test-people"' > "$tmp/seed/apps/api/wrangler.jsonc"
@@ -202,6 +213,8 @@ fresh() {
   echo "Current Version ID: cd068ed1-3873-43c6-b066-be36c66c7eff" > "$fix/version-gateway"
   echo "Current Version ID: 11111111-2222-4333-8444-555555555555" > "$fix/version-web"
   printf 'completed\tsuccess\n' > "$fix/main-ci"
+  # Staging's secrets, by name only: none of them a setting's.
+  echo '[{"name":"ASSERTION_KEYS","type":"secret_text"},{"name":"A2A_TOKEN_KEY","type":"secret_text"},{"name":"OPERATORS","type":"secret_text"}]' > "$fix/secret-list"
   # What the staging build wrote on 2026-11-10, less what the script doesn't read.
   web_config '.'
 }
@@ -250,7 +263,10 @@ check "  the web app isn't built or deployed" never_called 'run build|\[in web\]
 check "  each Worker's version ID is recorded" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
 check "  the gateway's too" said '^version podster-gateway-staging cd068ed1-3873-43c6-b066-be36c66c7eff$'
 check "  the probes run after the deploys, one line each" test "$(grep -c '^PASS ' "$tmp/out")" -eq 4
-check "  no secret or variable is set" never_called 'secret|--var|versions'
+check "  no secret or variable is set" test "$(grep -c -i -E 'secret|--var|versions' "$fix/calls")" -eq "$(grep -c -E '^npx wrangler secret list --format json --env staging \[in api\] ' "$fix/calls")"
+check "  the API Worker's secret names were listed once, read-only" test "$(grep -c 'secret list' "$fix/calls")" -eq 1
+check "  before anything was applied or deployed" before 'secret list' 'wrangler deploy --env staging \[in api\]'
+check "  and it says which names it checked, from the code" said '^no secret holds any of: PUBLIC_SUFFIX_RULES RELEASES$'
 check "  main's CI was asked about, for the commit being deployed" called "^gh run list --workflow ci.yml --branch main --event push --commit $(git -C "$work" rev-parse HEAD) "
 check "  before anything else ran" test "$(order '^gh run list')" -eq 1
 fresh
@@ -717,6 +733,58 @@ fresh
 
 check "the only codes it retries are 7403 and 10021" test "$(grep -c -E '7403 \| 10021\)' "$scripts/deploy-staging")" -eq 1
 
+# --- no secret on the API Worker may hold a setting's name (the deep review of #450, 2026-11-18) ---
+echo '[{"name":"OPERATORS","type":"secret_text"},{"name":"RELEASES","type":"secret_text"}]' > "$fix/secret-list"
+refused "a secret named RELEASES on the API Worker" 'holds a secret named RELEASES, which the API reads as a plain setting'
+echo '[{"name":"PUBLIC_SUFFIX_RULES","type":"secret_text"},{"name":"RELEASES","type":"secret_text"}]' > "$fix/secret-list"
+check "two secrets holding settings' names are refused, exit 1" deploy 1
+check "  and both are named" said 'REFUSE .*holds secrets named PUBLIC_SUFFIX_RULES, RELEASES,'
+check "  and nothing was applied or deployed" never_called "$changed_staging"
+check "  and no migration was even listed" never_called 'migrations list'
+fresh
+echo '[]' > "$fix/secret-list"
+check "with no secrets at all it deploys: exit 0" deploy 0
+fresh
+echo '[{"name":"A2A_TOKEN_KEY","type":"secret_text"}]' > "$fix/secret-list"
+check "a secret the code reads as a secret, by name, deploys: exit 0" deploy 0
+fresh
+printf 'wrangler-fails\n' > "$fix/secret-list"
+check "a secret list wrangler can't give is refused, exit 1" deploy 1
+check "  and says why" said "REFUSE  could not list the API Worker's secrets on staging"
+check "  passing on what wrangler said" said '^        \| .*Authentication error \[code: 10000\]$'
+check "  and nothing was applied or deployed" never_called "$changed_staging"
+fresh
+echo 'Not a list' > "$fix/secret-list"
+refused "a secret list that isn't wrangler's JSON" "secret list can't be read"
+echo '[{"type":"secret_text"}]' > "$fix/secret-list"
+refused "a secret list with an entry that has no name" "secret list can't be read"
+printf ' ⛅️ wrangler 4.157.0\n-------------------\n[{"name":"OPERATORS","type":"secret_text"}]\n' > "$fix/secret-list"
+check "a banner before the list is skipped: exit 0" deploy 0
+fresh
+printf ' ⛅️ wrangler 4.157.0\n[{"name":"RELEASES","type":"secret_text"}]\n' > "$fix/secret-list"
+refused "a banner before a list with RELEASES in it" 'holds a secret named RELEASES'
+rm "$tmp/seed/apps/api/src/releases.rs"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" "no release switch" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+refused "source that names no RELEASES, so the pattern or folder is wrong" 'gives no RELEASES among its setting names'
+check "the secret check never prints a value: the script prints only what setting-names.mjs says, never the list" \
+  test "$(grep -c -E 'cat "\$secrets_out"|echo "\$secrets_out"' "$scripts/deploy-staging")" -eq 0
+
+# The names from the API's real source: the release path's, and none the code reads as a secret or staging sets as one.
+real=$(node "$scripts/setting-names.mjs" names "$scripts/../apps/api/src")
+for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_SUFFIX_RULES CUSTOM_HOSTNAME_ZONE_ID CUSTOM_HOSTNAME_TOKEN \
+  CONTENT_ACCOUNT_ID CONTENT_DISPATCH_NAMESPACE CONTENT_KV_NAMESPACE_ID CONTENT_DOMAIN CONTENT_SCRIPTS_TOKEN \
+  CONTENT_ROUTING_TOKEN CONTENT_STORE_TOKEN; do
+  check "the real source gives $name" grep -q -x "$name" <<< "$real"
+done
+# Every secret docs/staging.md has the owner put on the API Worker stays out of the list, or the guard would refuse
+# every deploy.
+documented=$(sed -n -E 's/^cd apps\/api && npx wrangler secret put ([A-Z0-9_]+) --env staging$/\1/p; s/^npx wrangler secret put (ASSERTION_KEYS) --env staging$/\1/p' "$scripts/../docs/staging.md" | sort -u)
+check "docs/staging.md names the API's secrets, so the next check checks something" test "$(grep -c . <<< "$documented")" -ge 5
+for name in $documented; do
+  check "  the real source doesn't give $name, a documented secret" bash -c '! grep -q -x "$1" <<< "$2"' _ "$name" "$real"
+done
+
 # --- usage, and what the script can't do at all ---
 check "an unknown option is refused, exit 2" deploy 2 --env
 check "a stray argument is refused, exit 2" deploy 2 0007_repo_room_index.sql
@@ -730,7 +798,9 @@ script="$scripts/deploy-staging"
 check "the script never says 'production'" test "$(grep -c -i 'production' "$script")" -eq 0
 check "the only environment it names is staging" test "$(grep -o -E -- '--env[ =]+[^ )"]+|CLOUDFLARE_ENV=[A-Za-z]+' "$script" | sort -u | tr '\n' ' ')" = "--env staging CLOUDFLARE_ENV=staging "
 check "the one thing it asks GitHub is ci.yml's run on main" test "$(grep -o -E '(^|[ (])gh [a-z]+ [a-z]+' "$script" | sort -u | tr -d '(' | xargs)" = "gh run list"
-check "it has no command that sets a secret or a variable" test "$(grep -c -E 'wrangler[^|]* (secret|versions)|--var' "$script")" -eq 0
+check "it has no command that sets a secret or a variable, and lists secrets once, read-only" \
+  test "$(grep -E 'wrangler[^|]* (secret|versions)|--var' "$script" | grep -v '^ *#' | grep -c -v -E 'npx wrangler secret list --format json --env staging\)')" -eq 0
+check "  the one secret command is the list" test "$(grep -c -E 'npx wrangler secret list --format json --env staging\)' "$script")" -eq 1
 check "every deploy it runs is staging's, or the staging build's file" \
   test "$(grep -c -E 'npx wrangler deploy' "$script")" -eq "$(grep -c -E 'npx wrangler deploy (--env staging|--config dist/server/wrangler\.json)\)' "$script")"
 

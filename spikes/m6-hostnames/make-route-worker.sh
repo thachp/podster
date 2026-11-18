@@ -15,8 +15,13 @@ wrangler="$here/../../apps/gateway/node_modules/.bin/wrangler"
 cmd="${1:-}"
 dir="${2:-}"
 [ -n "$dir" ] || { echo "usage: $0 deploy|delete <scratch dir>" >&2; exit 2; }
-case "$dir" in "$here"*|"$(cd "$here/../.." && pwd)"*) echo "refusing: <dir> must be outside the repository" >&2; exit 2;; esac
-redact() { sed -E 's/[0-9a-f]{32}/<id>/g'; }
+# Resolve <dir> to an absolute path first, so a relative path can't pass the outside-the-repository check.
+case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
+parent="$(cd "$(dirname "$dir")" 2>/dev/null && pwd -P)" || { echo "refusing: <dir>'s parent folder must exist" >&2; exit 2; }
+dir="$parent/$(basename "$dir")"
+repo="$(cd "$here/../.." && pwd -P)"
+case "$dir/" in "$repo/"*) echo "refusing: <dir> must be outside the repository" >&2; exit 2;; esac
+redact() { sed -E 's/[0-9a-f]{32}/<id>/g; s/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<uuid>/g'; }
 run_wrangler() {
   (cd "$dir" && env -u CLOUDFLARE_API_TOKEN CI=true \
     CLOUDFLARE_ACCOUNT_ID="$(tr -d '\n ' < "$HOME/.podster/cloudflare-account-id.staging")" \

@@ -1,6 +1,6 @@
 # M6 spike D: custom hostnames
 
-**Status, 2026-11-18 UTC: the test Worker on the content zone ran 11:52:30 to 11:53:58 (run `0bd4a7`, [below](#the-test-worker-on-the-content-zone-2026-11-18-run-0bd4a7)); before it, the spike ran five times on the content zone `podster.site`, 10:39:24 to 10:52:16 UTC, by the owner's answers of 2026-11-17. The fourth run, `02dd4b`, followed the owner's record `spike.opster.dev CNAME fallback.podster.site`, proxied, on `opster.dev`, and took a custom hostname to `active` with its certificate; the fifth, `65c6f6`, repeated it with the probe's certificate checks on (below). Everything it created is deleted, confirmed by listing.**  It answers the parts of [spike D](../../docs/m6-plan.md#the-spikes) that need no customer DNS, and the items step 8b and 8c left owed to it. The answers and what they change are in the plan's [Spike D results](../../docs/m6-plan.md#spike-d-results-2026-11-18). Nothing builds on this folder.
+**Status, 2026-11-18 UTC: the test Worker on the content zone ran 11:52:30 to 11:53:58 (run `0bd4a7`, [below](#the-test-worker-on-the-content-zone-2026-11-18-run-0bd4a7)); before it, the spike ran five times on the content zone `podster.site`, 10:39:24 to 10:52:16 UTC, by the owner's answers of 2026-11-17. The fourth run, `02dd4b`, followed the owner's record `spike.opster.dev CNAME fallback.podster.site`, proxied, on `opster.dev`, and took a custom hostname to `active` with its certificate; the fifth, `65c6f6`, repeated it with the probe's certificate checks on (below). Everything it created is deleted, confirmed by listing.** It answers the parts of [spike D](../../docs/m6-plan.md#the-spikes) that need no customer DNS, and the items step 8b and 8c left owed to it. The answers and what they change are in the plan's [Spike D results](../../docs/m6-plan.md#spike-d-results-2026-11-18). Nothing builds on this folder.
 
 "The zone" is `podster.site`. "The account" is the one the zone is on, which is the staging account that also holds `podster.dev` and `opster.dev`. "The second account" is the one the owner opened for apps. Their IDs stay out of this repository.
 
@@ -11,7 +11,7 @@
 | `spike.mjs` | The runner. `hostnames` is the custom-hostname run; `pending` the edge probes around one pending hostname, on fresh connections; `validate` one hostname watched to `active` once the customer's record is in place; `doh` the resolver half; `probes` the edge alone; `cleanup` deletes by listing. Every command ends with the clean-up |
 | `guard.mjs`, `guard.test.mjs` | What the runner may send to Cloudflare, and an offline test of it |
 | `route-worker.mjs`, `make-route-worker.sh` | The test Worker routed `*/*` on the content zone, and the script that deploys and deletes it with wrangler. It writes the Worker, its config and its random key into a scratch folder outside the repository |
-| `results/results.jsonl` | Every step of the runs, redacted. Run `d8e31d` is `doh`, `c06765` is `hostnames`, `2bc8b6` is `pending`, `02dd4b` and `65c6f6` are `validate`, `0bd4a7` is `worker`, and `121876` and `7cfcac` are clean-ups around it |
+| `results/results.jsonl` | Every step of the runs, redacted. Run `d8e31d` is `doh`, `c06765` is `hostnames`, `2bc8b6` is `pending`, `02dd4b` and `65c6f6` are `validate`, `0bd4a7` is `worker`, and `83652b` (11:51:40 to 11:51:47, a fallback-origin check and clean-up), `121876` and `7cfcac` are clean-ups around it |
 
 ## How it calls Cloudflare
 
@@ -138,7 +138,7 @@ Nine names, each through Cloudflare's JSON endpoint by name and by `1.1.1.1`, an
 - **`node spike.mjs worker`** ran the checks.
 - **`delete`** removed the Worker and its route.
 
-The Worker (`route-worker.mjs`) answers every request with its host as it sees it and a few `cf` fields. It logs nothing. Run `121876` (11:51:44) is the clean-up's listing before the deploy, and run `7cfcac` (11:53:59) the one after; each read 0 custom hostnames and 0 spike scripts.
+The Worker (`route-worker.mjs`) answers every request with its host as it sees it and a few `cf` fields. It logs nothing. Runs `83652b` (11:51:40 to 11:51:47) and `121876` (11:51:44) are the clean-up's listings before the deploy, and run `7cfcac` (11:53:59) the one after; each read 0 custom hostnames and 0 spike scripts.
 
 | When (UTC) | What | Answer |
 | --- | --- | --- |
@@ -157,7 +157,7 @@ The Worker (`route-worker.mjs`) answers every request with its host as it sees i
 
 **Route propagation.** The deploy reported its trigger, `*/*` on `podster.site`, but probes about two seconds later still got the origin's `522`. At 11:53:49 the Worker answered. So the route went live somewhere in that window of under 80 seconds; when exactly wasn't measured.
 
-**The edge lagged a deletion.** 282 ms after the delete's `200`, and after the list already read the name gone, one request for `spike.opster.dev` still reached the Worker, with the custom hostname's own certificate. The next connection, 393 ms later, got `opster.dev`'s certificate. That is one request, from one place (SEA). How long the lag can last elsewhere is unknown.
+**The edge lagged a deletion.** 282 ms after the delete's `200`, and after the list already read the name gone, one request for `spike.opster.dev` still reached the Worker, with the custom hostname's own certificate. The next connection with that SNI, 393 ms later, was served `opster.dev`'s certificate. It was a mismatched pair (`Host` `fallback.podster.site`, refused `403`), so it shows only that the custom hostname's certificate was gone, not that a matching request would no longer reach the Worker: no matching request was made after that point. That is one request, from one place (SEA). How long the lag can last elsewhere is unknown.
 
 **After the run,** the owner's terminal recorded:
 - `wrangler delete`: "Successfully deleted spike-hostnames-route-f9717e".

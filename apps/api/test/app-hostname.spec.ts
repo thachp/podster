@@ -11,9 +11,9 @@ import { txtData } from "./fake-resolver";
 //
 // Each room is given its rows through the test pool, as in `release-config.spec.ts`: a public room with release on, a
 // ready repository and an app serving on its default host. Each room's content provider is switched off, so the
-// release path's gate is open and nothing reaches the provider's stand-in. Each is opted in to custom hostname claims,
-// which are closed everywhere else until 8b and 8d (`HOSTNAME_CLAIMS_COMPLETE`). The resolver is the stand-in in
-// `fake-resolver.ts`.
+// release path's gate is open and nothing reaches the provider's stand-in. Custom hostname claims are open, as they are
+// everywhere since 8b and 8d (`HOSTNAME_CLAIMS_COMPLETE`); a test build can still close them for a room. The resolver
+// is the stand-in in `fake-resolver.ts`.
 
 const BINDINGS = env as any;
 const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string };
@@ -90,8 +90,6 @@ async function room(org: string): Promise<Room> {
   await inRoom(id, (sql) => {
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", handle);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-    // Test builds only: claims are opened for this room. Every build without the feature has them closed.
-    sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
     for (const [who, role] of [[member, "member"], [admin, "admin"]] as const) sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, ?, ?, 1)", who.id, org, role, owner.id);
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/hostname', 'public', 'main', 'ready', ?, 1, 1, 1)", 987650100 + n, owner.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_ah_1', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", owner.id, admin.id);
@@ -586,14 +584,14 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     });
   });
 
-  it("is closed everywhere until claims are complete: without the test build's opt-in nothing is asked for, looked up or claimed, provider or not", async () => {
+  it("is open since claims are complete, and closed, as a test build can still close it, nothing is asked for, looked up or claimed, provider or not", async () => {
     const r = await room("org_ah_gate");
     const name = newName();
     const request = await askFor(r, name);
     await answerWith(name, request.challenge_value);
-    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_open"));
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"));
     const before = (await asked()).filter((line) => line.includes(name)).length;
-    // No provider, release switched on, a resolver and a Public Suffix List bound: still closed.
+    // Closed: no provider, release switched on, a resolver and a Public Suffix List bound, and still refused.
     expect(refusedBy(await switchedOn(() => ask(r, newName())))).toEqual([409, "release_not_available"]);
     await rewindLook(r);
     await pass(r);
@@ -620,22 +618,22 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "ended", end_reason: "hostname_unmapped" });
     expect((await claimState(name)).claim).toBeNull();
-    // Opted in, as a test build lets a room be, the same path asks and claims.
-    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)"));
+    // Open, as every build has it since claims are complete, the same path asks and claims.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_closed"));
     const again = await askFor(r, newName());
     await answerWith(again.hostname, again.challenge_value);
     await rewindLook(r);
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ id: again.id, state: "claimed" });
-    // One constant, false, set in one place, and the opt-in read only under the test build's feature.
+    // One constant, true, set in one place, and the test build's closing read only under its feature.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = false;");
+    expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = true;");
     expect(Object.values(sources).join("\n").match(/HOSTNAME_CLAIMS_COMPLETE: bool/g)).toHaveLength(1);
     // The room's method and the applier both read it through one function (8c).
     const method = sources["workspace/hostname.rs"].split("pub(super) fn hostname_claims_open")[1].split("\n    }\n")[0];
     expect(method).toMatch(/^\(&self\) -> bool \{\s*claims_open\(&self\.state\.storage\(\)\.sql\(\)\)\s*$/);
     const gate = sources["workspace/hostname.rs"].split("pub(super) fn claims_open")[1].split("\n}\n")[0];
-    expect(gate).toMatch(/if HOSTNAME_CLAIMS_COMPLETE \{\s*return true;\s*\}\s*#\[cfg\(feature = "failpoints"\)\][\s\S]*test_hostname_claims_open[\s\S]*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*\{\s*let _ = sql;\s*false\s*\}\s*$/);
+    expect(gate).toMatch(/^\(sql: &SqlStorage\) -> bool \{\s*\/\/[^\n]*\n\s*#\[cfg\(feature = "failpoints"\)\]\s*if rows\([\s\S]*'test_hostname_claims_closed'[\s\S]*\{\s*return false;\s*\}\s*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*let _ = sql;\s*HOSTNAME_CLAIMS_COMPLETE\s*$/);
   });
 
   it("refuses asking, and switching release on, where a provider is configured while the release path isn't complete", async () => {

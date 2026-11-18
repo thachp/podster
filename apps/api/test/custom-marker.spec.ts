@@ -95,7 +95,6 @@ async function room(org: string): Promise<Room> {
   const script = `${label}.${PREV}`;
   await inRoom(id, (sql) => {
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", `pub_${crypto.randomUUID().replace(/-/g, "")}`);
-    sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     sql.exec("CREATE TABLE test_custom_hostname_create_open (x INTEGER)");
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/marker', 'public', 'main', 'ready', ?, 1, 1, 1)", 987680100 + n, owner.id);

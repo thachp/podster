@@ -8,9 +8,10 @@ import { txtData } from "./fake-resolver";
 // committed claim (ADR 0010's "Custom domains", steps 5, 6 and 8). Cloudflare is the stand-in in `fake-hostnames.ts`,
 // whose answers are assumptions from the documentation: no spike has made a custom hostname.
 //
-// Each room is set up as in `app-hostname.spec.ts`: public, release on, an app serving on its default host, its content
-// provider switched off and custom hostname claims opened for it. Creating at Cloudflare is closed everywhere while
-// the release path isn't complete; a room is opened to it only by `createOpen`, which is a test build's opt-in.
+// Each room is set up as in `app-hostname.spec.ts`: public, release on, an app serving on its default host and its
+// content provider switched off. The gate on claims is open, as everywhere since claims are complete. Creating at
+// Cloudflare is closed everywhere while the release path isn't complete; a room is opened to it only by `createOpen`,
+// which is a test build's opt-in.
 
 const BINDINGS = env as any;
 const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string };
@@ -78,7 +79,6 @@ async function room(org: string): Promise<Room> {
   await inRoom(id, (sql) => {
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", `pub_${crypto.randomUUID().replace(/-/g, "")}`);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-    sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/custom', 'public', 'main', 'ready', ?, 1, 1, 1)", 987660100 + n, owner.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_ch_1', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", owner.id, owner.id);
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
@@ -483,5 +483,61 @@ describe("the hostname's object, for the long end (M6 step 8b)", () => {
   it("is bound to no provider for custom hostnames in any environment", () => {
     const wrangler: string = BINDINGS.TEST_API_WRANGLER;
     for (const name of ["CUSTOM_HOSTNAME_ZONE_ID", "CUSTOM_HOSTNAME_TOKEN"]) expect(wrangler.includes(name), name).toBe(false);
+  });
+});
+
+describe("the gate on claims, open while the release path isn't complete (M6 step 8)", () => {
+  it("opens nothing by itself: no ask where RELEASES is unset or a content provider is configured, no look while RELEASES is unset, and no create anywhere", async () => {
+    const r = await room("org_ch_claims_open");
+    const name = newName();
+    const looks = async () => ((await (await fetch("https://resolver-fake.example.com/asked")).json()) as string[]).filter((line) => line.includes(name)).length;
+    // RELEASES unset, as in every environment: the route can't be told from one nobody defined, and nothing is written.
+    const unset = await api(r.owner, "PUT", path(r), { hostname: name });
+    const nobody = await api(r.owner, "PUT", `${path(r)}x`, { hostname: name });
+    expect([unset.status, unset.code]).toEqual([nobody.status, nobody.code]);
+    expect(unset.code).toBe("not_found");
+    // RELEASES on and a content provider configured, while the release path isn't complete: refused as a route that
+    // isn't built, exactly as every release command is.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    const refused = await switchedOn(() => api(r.owner, "PUT", path(r), { hostname: name }));
+    expect([refused.status, refused.code]).toEqual([409, "release_not_available"]);
+    expect(await requestRow(r)).toBeNull();
+    expect(await events(r)).toEqual([]);
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    // RELEASES on with no content provider, the one place the release path's gate doesn't refuse: asked, and pending.
+    const request = (await switchedOn(() => api(r.owner, "PUT", path(r), { hostname: name }))).body.request;
+    await alarmQuiet(stub(r.room));
+    await answerWith(name, request.challenge_value);
+    const before = await looks();
+    // With RELEASES unset again, the proof job looks nothing up and asks for nothing, though the value is in DNS.
+    await due(r);
+    await quietPass(r);
+    expect(await looks()).toBe(before);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", claimed_at: null });
+    expect((await claimState(name)).claim).toBeNull();
+    // RELEASES on: the claim is given and committed, but nothing is made at Cloudflare while the release path isn't
+    // complete, pass after pass, with a provider for custom hostnames configured.
+    await step(r);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    for (let i = 0; i < 3; i++) await step(r);
+    expect(await cloudflare(name)).toEqual({ held: null, calls: [] });
+    expect(await providerRow(r)).toMatchObject({ create_sent_at: null, provider_id: null });
+    // Nothing routes: no custom host is made without the custom hostname at Cloudflare reading active.
+    expect(await all(r.room, "SELECT host FROM serve_state WHERE kind = 'custom'")).toEqual([]);
+    // The create's gate alone holds routing back, apart from the content provider being off: with a content provider
+    // configured and the name already reading active at Cloudflare, the room still creates and reads nothing, so no
+    // custom host is made and the claim stays as it was.
+    await inRoom(r.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    await setAtCloudflare(name, "active");
+    for (let i = 0; i < 3; i++) await step(r);
+    expect((await cloudflare(name)).calls).toEqual([]);
+    expect(await providerRow(r)).toMatchObject({ create_sent_at: null, provider_id: null, provider_status: null });
+    expect(await all(r.room, "SELECT host FROM serve_state WHERE kind = 'custom'")).toEqual([]);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    // The gate on claims is one constant, true, set in one place; the release path's stays false.
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = true;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
   });
 });

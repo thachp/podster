@@ -1168,9 +1168,10 @@ describe("the room's applier and its delete job", () => {
     await pass(a.room);
     expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 6, attempts: 0, last_code: null });
     await alarmQuiet(stub(a.room));
-    // A custom hostname that wants a script, in a room the gate on claims is closed for, which is every room but a
-    // test's opt-in: nothing is written for it, and an entry that is somehow there is removed (8c).
+    // A custom hostname that wants a script, in a room the gate on claims is closed for, as a test build can still
+    // close it: nothing is written for it, and an entry that is somehow there is removed (8c).
     await fake("/seed", { entries: { "app.example.org": a.served } });
+    await inRoom(a.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"));
     await inRoom(a.room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES ('app.example.org', 'custom', ?, 1, ?, ?, 1, 1)", a.label, rel(2), a.served));
     await pass(a.room);
     state = await held();
@@ -2079,8 +2080,10 @@ describe("an operator's suspension of a custom hostname", () => {
     await fake("/seed", { entries: { [c.hostname]: `${c.kept}@${c.hostname}` } });
     const summary = await reconcile("entries");
     expect(summary).toMatchObject({ code: "ok", listed: 2, changed: 1, unanswered: 0 });
-    // The room's own applier did the rest. The gate on claims is closed in this room, so its checks before a write
-    // refuse: it takes the entry out and refuses the host; the default host's entry, which matched, is untouched.
+    // The room's own applier did the rest. The gate on claims is closed in this room (a test build's closing), so its
+    // checks before a write refuse: it takes the entry out and refuses the host; the default host's entry, which
+    // matched, is untouched.
+    await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"));
     await pass(c.room);
     const state = await held();
     expect([state.entries[c.hostname], state.entries[c.host]]).toEqual([undefined, c.served]);

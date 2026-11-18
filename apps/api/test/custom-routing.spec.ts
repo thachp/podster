@@ -82,7 +82,6 @@ async function room(org: string): Promise<Room> {
   const script = `${label}.${PREV}`;
   await inRoom(id, (sql) => {
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", `pub_${crypto.randomUUID().replace(/-/g, "")}`);
-    sql.exec("CREATE TABLE test_hostname_claims_open (x INTEGER)");
     // Off only while the owner asks for the name: with release on and a provider, the release path's gate refuses
     // every release command, asking for a hostname among them, which `custom-hostname.spec.ts` shows.
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
@@ -472,7 +471,7 @@ describe("custom hostname routing (M6 step 8c)", () => {
         ["the room unpublished since the request", "hostname_unpublished", (c) => inRoom(c.r.room, (sql) => sql.exec("UPDATE hostname_provider SET release_epoch = 1"))],
         ["the room is no longer public", "release_needs_public_room", (c) => inRoom(c.r.room, (sql) => sql.exec("UPDATE workspace SET visibility = 'private'"))],
         ["the request isn't a committed claim", "hostname_not_claimed", (c) => inRoom(c.r.room, (sql) => sql.exec("UPDATE hostname_request SET state = 'ending'"))],
-        ["the gate on claims is closed", "hostname_claims_incomplete", (c) => inRoom(c.r.room, (sql) => sql.exec("DROP TABLE test_hostname_claims_open"))],
+        ["the gate on claims is closed", "hostname_claims_incomplete", (c) => inRoom(c.r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"))],
         ["the object's claim is ending", "claim_not_live", (c) => inClaim(c.name, (sql) => sql.exec("UPDATE claim SET state = 'ending' WHERE held = 1"))],
         ["the object's name is suspended", "claim_not_live", (c) => inClaim(c.name, (sql) => sql.exec("INSERT INTO suspension (singleton, reason, suspended_at) VALUES (1, 'abuse', 1)"))],
         ["the object holds another request's claim", "claim_not_live", (c) => inClaim(c.name, (sql) => sql.exec("UPDATE claim SET request_id = 'hnr_00000000000000000000000000000000' WHERE held = 1"))],

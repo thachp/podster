@@ -35,7 +35,8 @@ function room(opts: RoomOpts = {}) {
     room_id: ROOM,
     mode: opts.mode ?? "unattended",
     allowed_orgs: opts.allowed_orgs ?? [],
-    acknowledged: { trust_statement: opts.trust ?? false, public_room_warning: opts.warning ?? false },
+    // Every unattended room needs the trust statement (L3 on #455), so the helper accepts it unless a test says not.
+    acknowledged: { trust_statement: opts.trust ?? true, public_room_warning: opts.warning ?? false },
     ...opts.extra,
   };
 }
@@ -78,10 +79,10 @@ function requester(kind: Kind) {
   return { id: a.id ?? "p_req", org: a.org, external, active: a.active };
 }
 type InputName = "title" | "instructions" | "acceptance_criteria" | "change_request";
-function input(name: InputName, authors: ReturnType<typeof author>[], external?: boolean) {
+function input(name: InputName, authors: ReturnType<typeof author>[], external?: boolean, eventId = "ev_1") {
   const folded = authors.some((a) => a.external || !a.active || a.id === null);
   const entry: Record<string, unknown> = { input: name, external: external ?? folded, authors };
-  if (name === "change_request") entry.event_id = "ev_1";
+  if (name === "change_request") entry.event_id = eventId;
   return entry;
 }
 function provenance(opts: { visibility?: "private" | "public"; requester?: Kind; inputs?: Record<string, unknown>[] } = {}) {
@@ -93,8 +94,18 @@ function provenance(opts: { visibility?: "private" | "public"; requester?: Kind;
 }
 const TASK_REF = { id: TASK, workspace_id: ROOM };
 const BUDGET = { spent_today_micro_usd: 0, reserved_micro_usd: 0 };
+/** The prompt a caller would build for this provenance: the inputs it lists, and its change request's event. */
+function promptOf(p: unknown) {
+  try {
+    const inputs = (p as { inputs: { input: string; event_id?: string | null }[] }).inputs;
+    return { inputs: inputs.map((i) => i.input), change_request_event_id: inputs.find((i) => i.input === "change_request")?.event_id ?? null };
+  } catch {
+    return { inputs: ["title", "instructions"], change_request_event_id: null };
+  }
+}
 function decide(over: Partial<Parameters<typeof evaluate>[0]> = {}): Decision {
-  return evaluate({ config: config(), provenance: provenance(), task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW, ...over });
+  const prov = "provenance" in over ? over.provenance : provenance();
+  return evaluate({ config: config(), provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW, ...over });
 }
 
 describe("the default: ask first", () => {
@@ -186,20 +197,22 @@ describe("the least-trusted author decides (step 4's reviewer scenarios)", () =>
 });
 
 describe("the room split", () => {
-  it("B: the owner's own private room runs with no acknowledgement", () => {
+  it("B: the owner's own private room runs once the trust statement is accepted for it, and asks until then (L3)", () => {
     expect(decide({ provenance: provenance({ visibility: "private" }) }).outcome).toBe("run");
+    expect(decide({ config: config([room({ trust: false })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
+    expect(decide({ config: config([room({ trust: false, warning: true })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
   });
 
   it("A: a public room runs unattended only with the trust statement and the public-room warning both accepted for it", () => {
     const pub = provenance({ visibility: "public" });
-    expect(decide({ provenance: pub, config: config([room({})]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
+    expect(decide({ provenance: pub, config: config([room({ trust: false })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
     expect(decide({ provenance: pub, config: config([room({ trust: true })]) })).toMatchObject({ outcome: "ask", reason: "public_warning_not_accepted" });
-    expect(decide({ provenance: pub, config: config([room({ warning: true })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
+    expect(decide({ provenance: pub, config: config([room({ trust: false, warning: true })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
     expect(decide({ provenance: pub, config: config([room({ trust: true, warning: true })]) })).toMatchObject({ outcome: "run", reason: "unattended_eligible" });
   });
 
   it("A: a room configured for other organizations' authors needs the trust statement even when this task's authors are all internal", () => {
-    expect(decide({ config: config([room({ allowed_orgs: [GUEST] })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
+    expect(decide({ config: config([room({ allowed_orgs: [GUEST], trust: false })]) })).toMatchObject({ outcome: "ask", reason: "trust_statement_not_accepted" });
     expect(decide({ config: config([room({ allowed_orgs: [GUEST], trust: true })]) })).toMatchObject({ outcome: "run" });
   });
 
@@ -328,22 +341,38 @@ describe("malformed provenance fails closed", () => {
   });
 });
 
-// The rule, written out again independently, to check every combination against.
-function oracle(o: { mode: "ask" | "unattended"; allowed: string[]; trust: boolean; warning: boolean; visibility: "private" | "public"; actors: { org: string | null; id: string | null; external: boolean; active: boolean }[]; inputsExternal: boolean[] }): Decision["outcome"] {
-  const inScope = (org: string | null) => org === null || org === OWNER || o.allowed.includes(org);
-  if (o.actors.some((a) => !inScope(a.org))) return "refuse";
-  if (o.mode === "ask") return "ask";
-  const internal = (a: (typeof o.actors)[number]) => a.id !== null && a.org === OWNER && a.active && !a.external;
-  if (!o.actors.every(internal) || o.inputsExternal.some(Boolean)) return "ask";
-  if ((o.visibility === "public" || o.allowed.length > 0) && !o.trust) return "ask";
-  if (o.visibility === "public" && !o.warning) return "ask";
-  return "run";
+// The rule, written out again, to check every combination's outcome and reason against.
+type Actor = { org: string | null; id: string | null; external: boolean; active: boolean };
+type Ctx = "normal" | "unconfigured" | "stale" | "over_budget";
+function standingOf(a: Actor) {
+  if (a.id === null || a.org === null) return "unknown";
+  if (!a.active) return "inactive";
+  if (a.org !== OWNER || a.external) return "external";
+  return "internal";
+}
+function oracle(o: { ctx: Ctx; mode: "ask" | "unattended"; allowed: string[]; trust: boolean; warning: boolean; visibility: "private" | "public"; requester: Actor; inputs: { external: boolean; authors: Actor[] }[] }): [string, string] {
+  if (o.ctx === "stale") return ["refuse", "authority_stale"];
+  if (o.ctx === "unconfigured") return ["refuse", "room_not_configured"];
+  const inScope = (a: Actor) => a.org === null || a.org === OWNER || o.allowed.includes(a.org);
+  if (!inScope(o.requester)) return ["refuse", "requester_out_of_scope"];
+  if (o.inputs.some((i) => !i.authors.every(inScope))) return ["refuse", "author_out_of_scope"];
+  if (o.ctx === "over_budget") return ["refuse", "day_budget_exhausted"];
+  if (o.mode === "ask") return ["ask", "room_ask_first"];
+  const r = standingOf(o.requester);
+  if (r !== "internal") return ["ask", `requester_${r}`];
+  for (const i of o.inputs) for (const a of i.authors) { const s = standingOf(a); if (s !== "internal") return ["ask", `author_${s}`]; }
+  if (o.inputs.some((i) => i.external)) return ["ask", "author_external"];
+  if (!o.trust) return ["ask", "trust_statement_not_accepted"];
+  if (o.visibility === "public" && !o.warning) return ["ask", "public_warning_not_accepted"];
+  return ["run", "unattended_eligible"];
 }
 
 describe("every combination the rulings name", () => {
-  it("matches the rule for each actor kind in each position, each mode, visibility, scope and acknowledgement", () => {
+  it("matches the rule's outcome and reason for each actor kind in each position, mode, visibility, scope, acknowledgement, room, authority and budget", () => {
     let count = 0;
     const seen = new Set<string>();
+    const wrong: unknown[] = [];
+    for (const ctx of ["normal", "unconfigured", "stale", "over_budget"] as const)
     for (const mode of ["ask", "unattended"] as const)
       for (const allowed of [[], [GUEST]])
         for (const trust of [false, true])
@@ -360,19 +389,21 @@ describe("every combination the rulings name", () => {
                     ];
                     const prov = provenance({ visibility, requester: reqKind, inputs });
                     const cfg = config([room({ mode, allowed_orgs: allowed, trust, warning })]);
-                    const d = decide({ config: cfg, provenance: prov });
-                    const expected = oracle({
-                      mode, allowed, trust, warning, visibility,
-                      actors: [prov.requester, ...inputs.flatMap((i) => i.authors as ReturnType<typeof author>[])],
-                      inputsExternal: inputs.map((i) => i.external as boolean),
+                    const d = decide({
+                      config: cfg,
+                      provenance: prov,
+                      task: ctx === "unconfigured" ? { id: TASK, workspace_id: "room_other" } : TASK_REF,
+                      authority_fresh: ctx !== "stale",
+                      budget: ctx === "over_budget" ? { spent_today_micro_usd: 9_000_000, reserved_micro_usd: 0 } : BUDGET,
                     });
-                    expect({ mode, allowed, trust, warning, visibility, reqKind, position, kind, outcome: d.outcome }).toEqual({ mode, allowed, trust, warning, visibility, reqKind, position, kind, outcome: expected });
+                    const expected = oracle({ ctx, mode, allowed, trust, warning, visibility, requester: prov.requester, inputs: inputs as unknown as { external: boolean; authors: Actor[] }[] });
+                    if (d.outcome !== expected[0] || d.reason !== expected[1]) wrong.push({ ctx, mode, allowed, trust, warning, visibility, reqKind, position, kind, got: [d.outcome, d.reason], expected });
                     seen.add(`${d.outcome}:${d.reason}`);
                     count++;
                   }
-    expect(count).toBe(2 * 2 * 2 * 2 * 2 * KINDS.length * 4 * KINDS.length);
-    // Every reason a configured, fresh, in-budget task can get was reached.
-    for (const r of ["run:unattended_eligible", "ask:room_ask_first", "ask:author_external", "ask:author_unknown", "ask:author_inactive", "ask:requester_external", "ask:requester_unknown", "ask:requester_inactive", "ask:trust_statement_not_accepted", "ask:public_warning_not_accepted", "refuse:author_out_of_scope", "refuse:requester_out_of_scope"])
+    expect(wrong.slice(0, 5)).toEqual([]);
+    expect(count).toBe(4 * 2 * 2 * 2 * 2 * 2 * KINDS.length * 4 * KINDS.length);
+    for (const r of ["run:unattended_eligible", "ask:room_ask_first", "ask:author_external", "ask:author_unknown", "ask:author_inactive", "ask:requester_external", "ask:requester_unknown", "ask:requester_inactive", "ask:trust_statement_not_accepted", "ask:public_warning_not_accepted", "refuse:author_out_of_scope", "refuse:requester_out_of_scope", "refuse:room_not_configured", "refuse:authority_stale", "refuse:day_budget_exhausted"])
       expect(seen).toContain(r);
   });
 });
@@ -409,7 +440,8 @@ describe("property: no external, unknown or inactive author or requester ever yi
         if (rand() < 0.5) target.external = false;
       }
       const cfg = config([room({ mode: pick(["ask", "unattended"] as const), allowed_orgs: rand() < 0.5 ? [GUEST, STRANGER] : [], trust: rand() < 0.8, warning: rand() < 0.8 })], { owner_org: rand() < 0.95 ? OWNER : pick(anyOrg.filter((o) => o !== null) as string[]) });
-      const d = evaluate({ config: cfg, provenance: { room_visibility: pick(["private", "public"] as const), requester: req, inputs }, task: TASK_REF, authority_fresh: rand() < 0.9, budget: BUDGET, now: NOW });
+      const prov = { room_visibility: pick(["private", "public"] as const), requester: req, inputs };
+      const d = evaluate({ config: cfg, provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: rand() < 0.9, budget: BUDGET, now: NOW });
       if (d.outcome === "run") runs++;
       const actors = [req, ...inputs.flatMap((x) => x.authors as { id: string | null; org: string | null; active: boolean }[])];
       const hasUntrusted = actors.some((a) => a.id === null || a.org !== cfg.owner_org || !a.active) || inputs.some((x) => x.external) || req.external;
@@ -472,7 +504,7 @@ describe("run decisions: bound, single-use and expiring", () => {
 
   it("issues one for a run, for an ask only with the owner's approval, and never for a refusal", () => {
     const run = issueRunDecision(decide(), binding, NOW);
-    expect(run).toMatchObject({ ok: true, record: { mode: "unattended", expires_at: NOW + DECISION_TTL_MS, reserved_micro_usd: CAPS.spend_micro_usd, policy_revision: 3, consumed: false } });
+    expect(run).toMatchObject({ ok: true, record: { mode: "unattended", expires_at: NOW + DECISION_TTL_MS, reserved_micro_usd: CAPS.spend_micro_usd, consumed: false } });
     const asked = decide({ config: config([room({ mode: "ask" })]) });
     expect(issueRunDecision(asked, binding, NOW)).toMatchObject({ ok: false, reason: "owner_approval_needed" });
     expect(issueRunDecision(asked, binding, NOW, { approved_by_owner: true })).toMatchObject({ ok: true, record: { mode: "approved" } });
@@ -522,6 +554,169 @@ describe("run decisions: bound, single-use and expiring", () => {
     if (!approved.ok) throw new Error("not issued");
     expect(consumeRunDecision(approved.record, decide({ config: config([room({ mode: "ask" })]) }), binding, NOW + 1).ok).toBe(true);
     expect(consumeRunDecision(approved.record, decide({ authority_fresh: false }), binding, NOW + 1)).toMatchObject({ ok: false, reason: "refused" });
+  });
+});
+
+describe("the deep review of #455, ruled 2026-11-18", () => {
+  const binding: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 4, input_hash: "a".repeat(64), repository_id: "repo_1", base_commit: "b".repeat(40) };
+  const issue = (d: Decision, opts?: { approved_by_owner?: boolean }) => {
+    const issued = issueRunDecision(d, binding, NOW, opts);
+    if (!issued.ok) throw new Error(`not issued: ${issued.reason}`);
+    return issued.record;
+  };
+
+  it("M1 (P5): a decision is bound to every run fact, so tools, network, caps or outputs widened with no revision bump refuse it", () => {
+    const record = issue(decide());
+    expect(typeof record.facts_key).toBe("string");
+    const widened: [string, unknown][] = [
+      ["shell added", config([room({ extra: { tools: [...DEFAULT_TOOLS, "shell"] } })])],
+      ["a network host added", config([room({ extra: { network: ["example.com"] } })])],
+      ["max_tokens raised", config([room()], { caps: { ...CAPS, max_tokens: 8_192 } })],
+      ["turns raised", config([room()], { caps: { ...CAPS, turns: 41 } })],
+      ["run time raised", config([room()], { caps: { ...CAPS, run_time_ms: CAPS.run_time_ms + 1 } })],
+      ["output tokens raised", config([room()], { caps: { ...CAPS, output_tokens: 50_001 } })],
+      ["outputs shared", config([room({ extra: { outputs: "share" } })])],
+      ["workspace root moved", config([room()], { workspace_root: "/Users/owner/elsewhere" })],
+    ];
+    for (const [what, cfg] of widened) {
+      const fresh = decide({ config: cfg });
+      expect([what, fresh.outcome, (cfg as { revision: number }).revision]).toEqual([what, "run", 3]);
+      expect([what, consumeRunDecision(record, fresh, binding, NOW + 1)]).toEqual([what, { ok: false, reason: "facts_changed" }]);
+    }
+    expect(consumeRunDecision(record, decide(), binding, NOW + 1).ok).toBe(true);
+  });
+
+  it("M2 (P6): the inputs the prompt uses must be exactly those provenance lists, with the same change request", () => {
+    const base = [input("title", [author("internal")]), input("instructions", [author("internal")])];
+    const withCriteria = provenance({ inputs: [...base, input("acceptance_criteria", [author("internal")])] });
+    const withRequest = provenance({ inputs: [...base, input("change_request", [author("internal")], undefined, "ev_2")] });
+    const mismatched: [string, unknown, unknown][] = [
+      ["a present input with no provenance entry", provenance(), { inputs: ["title", "instructions", "acceptance_criteria"], change_request_event_id: null }],
+      ["an input provenance lists but the prompt leaves out", withCriteria, { inputs: ["title", "instructions"], change_request_event_id: null }],
+      ["inputs out of order", withCriteria, { inputs: ["instructions", "title", "acceptance_criteria"], change_request_event_id: null }],
+      ["a different change request", withRequest, { inputs: ["title", "instructions", "change_request"], change_request_event_id: "ev_1" }],
+      ["a change request with no event", withRequest, { inputs: ["title", "instructions", "change_request"], change_request_event_id: null }],
+      ["an event with no change request", provenance(), { inputs: ["title", "instructions"], change_request_event_id: "ev_2" }],
+      ["a change request whose provenance names no event", provenance({ inputs: [...base, { ...input("change_request", [author("internal")]), event_id: null }] }), { inputs: ["title", "instructions", "change_request"], change_request_event_id: null }],
+      ["a duplicate input", provenance(), { inputs: ["title", "instructions", "instructions"], change_request_event_id: null }],
+      ["an unknown input", provenance(), { inputs: ["title", "instructions", "thread"], change_request_event_id: null }],
+      ["no prompt", provenance(), undefined],
+      ["a prompt with an extra field", provenance(), { inputs: ["title", "instructions"], change_request_event_id: null, mode: "unattended" }],
+    ];
+    for (const [what, prov, prompt] of mismatched) expect([what, decide({ provenance: prov, prompt })]).toMatchObject([what, { outcome: "refuse", reason: "prompt_mismatch" }]);
+    const ok = decide({ provenance: withRequest });
+    expect(ok.facts).toMatchObject({ prompt_inputs: ["title", "instructions", "change_request"], change_request_event_id: "ev_2" });
+  });
+
+  it("M2: a change request that moves between issue and start refuses the decision (the race)", () => {
+    const base = [input("title", [author("internal")]), input("instructions", [author("internal")])];
+    const first = provenance({ inputs: [...base, input("change_request", [author("internal")], undefined, "ev_1")] });
+    const second = provenance({ inputs: [...base, input("change_request", [author("internal")], undefined, "ev_2")] });
+    const record = issue(decide({ provenance: first }));
+    expect(record.change_request_event_id).toBe("ev_1");
+    // The fresh read sees the newer request: the old prompt no longer matches it, and a prompt rebuilt from it is a new decision.
+    const stalePrompt = decide({ provenance: second, prompt: promptOf(first) });
+    expect(stalePrompt).toMatchObject({ outcome: "refuse", reason: "prompt_mismatch" });
+    expect(consumeRunDecision(record, stalePrompt, binding, NOW + 1)).toEqual({ ok: false, reason: "refused" });
+    expect(consumeRunDecision(record, decide({ provenance: second }), binding, NOW + 1)).toEqual({ ok: false, reason: "facts_changed" });
+  });
+
+  it("L1: optional fields are read as own properties only, whatever Object.prototype holds", () => {
+    const proto = Object.prototype as Record<string, unknown>;
+    const asked = { room_id: ROOM, allowed_orgs: [], acknowledged: { trust_statement: true, public_room_warning: true } };
+    const askDecision = decide({ config: config([room({ mode: "ask" })]) });
+    let results: unknown[];
+    try {
+      proto.mode = "unattended";
+      proto.tools = ["shell"];
+      proto.network = ["example.com"];
+      proto.outputs = "share";
+      proto.approved_by_owner = true;
+      proto.own_reservation_micro_usd = 9_000_000;
+      const d = decide({ config: config([asked]) });
+      results = [d.outcome, d.reason, d.facts?.tools, d.facts?.network, d.facts?.outputs, issueRunDecision(askDecision, binding, NOW), issueRunDecision(askDecision, binding, NOW, {}), decide({ budget: { spent_today_micro_usd: 8_000_001, reserved_micro_usd: 0 } }).reason];
+    } finally {
+      for (const k of ["mode", "tools", "network", "outputs", "approved_by_owner", "own_reservation_micro_usd"]) delete proto[k];
+    }
+    expect(results).toEqual(["ask", "room_ask_first", [...DEFAULT_TOOLS], [], "hold", { ok: false, reason: "owner_approval_needed" }, { ok: false, reason: "owner_approval_needed" }, "day_budget_exhausted"]);
+  });
+
+  it("L2: a stored record is checked whole before it is compared, and garbage refuses without throwing", () => {
+    const good = issue(decide());
+    const garbage: [string, unknown][] = [
+      ["null", null],
+      ["an empty object", {}],
+      ["a string", "record"],
+      ["an unknown mode", { ...good, mode: "auto" }],
+      ["a mode with a space", { ...good, mode: "approved " }],
+      ["an expiry not the lifetime after issue", { ...good, expires_at: good.expires_at + 1 }],
+      ["an expiry pushed far out", { ...good, expires_at: good.issued_at + 10 * DECISION_TTL_MS }],
+      ["a negative issue time", { ...good, issued_at: -1, expires_at: DECISION_TTL_MS - 1 }],
+      ["consumed as a string", { ...good, consumed: "false" }],
+      ["no facts key", { ...good, facts_key: undefined }],
+      ["a facts key that isn't a string", { ...good, facts_key: 7 }],
+      ["an extra field", { ...good, approved_by: "p_x" }],
+      ["an uppercase task", { ...good, task_id: "Task_1" }],
+      ["a bad input hash", { ...good, input_hash: "zz" }],
+      ["a bad reservation", { ...good, reserved_micro_usd: -5 }],
+      ["prompt inputs that aren't inputs", { ...good, prompt_inputs: ["title", "thread"] }],
+      ["a proxy that throws", new Proxy({}, { ownKeys() { throw new Error("boom"); }, get() { throw new Error("boom"); } })],
+    ];
+    for (const [what, record] of garbage) {
+      let out: unknown;
+      expect(() => { out = consumeRunDecision(record as never, decide(), binding, NOW + 1); }).not.toThrow();
+      expect([what, out]).toEqual([what, { ok: false, reason: "record_invalid" }]);
+    }
+    expect(consumeRunDecision({ ...good }, decide(), binding, NOW + 1).ok).toBe(true);
+  });
+
+  it("L5: the fresh evaluation at start leaves out this decision's own reservation, and no more", () => {
+    // Day cap 10, task cap 2, spent 4, reserved 6 of which 2 is this decision's own.
+    const tight = { spent_today_micro_usd: 4_000_000, reserved_micro_usd: 6_000_000 };
+    expect(decide({ budget: tight })).toMatchObject({ outcome: "refuse", reason: "day_budget_exhausted" });
+    expect(decide({ budget: { ...tight, own_reservation_micro_usd: 2_000_000 } })).toMatchObject({ outcome: "run" });
+    expect(decide({ budget: { ...tight, own_reservation_micro_usd: 1_999_999 } })).toMatchObject({ outcome: "refuse", reason: "day_budget_exhausted" });
+    expect(decide({ budget: { ...tight, own_reservation_micro_usd: 6_000_001 } })).toMatchObject({ outcome: "refuse", reason: "budget_invalid" });
+    expect(decide({ budget: { ...tight, own_reservation_micro_usd: -1 } })).toMatchObject({ outcome: "refuse", reason: "budget_invalid" });
+  });
+
+  it("L6: an uppercase room, workspace, task, organization or agent ID is refused", () => {
+    expect(decide({ task: { id: "Task_1", workspace_id: ROOM } })).toMatchObject({ reason: "task_invalid" });
+    expect(decide({ task: { id: TASK, workspace_id: "Room_1" } })).toMatchObject({ reason: "task_invalid" });
+    expect(decide({ config: config([{ ...room(), room_id: "Room_1" }]) })).toMatchObject({ reason: "config_invalid" });
+    expect(decide({ config: config([room()], { owner_org: "Org_owner" }) })).toMatchObject({ reason: "config_invalid" });
+    expect(decide({ config: config([room({ allowed_orgs: ["Org_guest"] })]) })).toMatchObject({ reason: "config_invalid" });
+    const upperAuthor = provenance({ inputs: [input("title", [{ ...author("internal"), id: "P_in0" } as never]), input("instructions", [author("internal")])] });
+    expect(decide({ provenance: upperAuthor })).toMatchObject({ reason: "provenance_invalid" });
+    expect(decide({ provenance: { ...provenance(), requester: { ...requester("internal"), org: "ORG_OWNER" } } })).toMatchObject({ reason: "provenance_invalid" });
+    expect(issueRunDecision(decide(), { ...binding, repository_id: "Repo_1" }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
+    expect(issueRunDecision(decide(), { ...binding, input_hash: "A".repeat(64) }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
+  });
+
+  it("L7: a named author has a numeric `written_at`, and only the unknown author a null one", () => {
+    const named = provenance({ inputs: [input("title", [{ ...author("internal"), written_at: null } as never]), input("instructions", [author("internal")])] });
+    expect(decide({ provenance: named })).toMatchObject({ reason: "provenance_invalid" });
+    const unknownWithTime = provenance({ inputs: [input("title", [{ ...author("unknown"), written_at: 5 } as never]), input("instructions", [author("internal")])] });
+    expect(decide({ provenance: unknownWithTime })).toMatchObject({ reason: "provenance_invalid" });
+  });
+
+  it("L7: inputs are copied to plain data once, so a getter can't answer differently on a second read", () => {
+    let reads = 0;
+    const flip = { id: "p_in0", org: OWNER, external: false, written_at: 1 } as Record<string, unknown>;
+    Object.defineProperty(flip, "active", { enumerable: true, get() { reads++; return reads === 1; } });
+    // Built by hand: the `input` helper would read the getter itself.
+    const prov = provenance({ inputs: [{ input: "title", external: false, authors: [flip] }, input("instructions", [author("internal")])] });
+    const d = evaluate({ config: config(), provenance: prov, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW });
+    expect(reads).toBe(1);
+    expect(d.outcome).toBe("run");
+  });
+
+  it("the ceilings are 25 USD a task and 250 USD a day (Proposed, for the owner to review)", () => {
+    expect(CEILINGS.spend_micro_usd).toBe(25_000_000);
+    expect(DAY_SPEND_CEILING_MICRO_USD).toBe(250_000_000);
+    expect(parsePolicyConfig(config([room()], { caps: { ...CAPS, spend_micro_usd: 25_000_001 } })).ok).toBe(false);
+    expect(parsePolicyConfig(config([room()], { day_caps: { spend_micro_usd: 250_000_001 } })).ok).toBe(false);
+    expect(parsePolicyConfig(config([room()], { caps: { ...CAPS, spend_micro_usd: 25_000_000 }, day_caps: { spend_micro_usd: 250_000_000 } })).ok).toBe(true);
   });
 });
 

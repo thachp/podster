@@ -3,8 +3,10 @@
  * Pure: it imports nothing, reads no clock (`now` is an input), uses no randomness and does no I/O. A test holds it so.
  *
  * Inputs: the owner's local configuration (rooms, the organizations allowed in each, run mode, tools, network, caps),
- * the task's IDs, its `provenance` from `get_task`, whether Runner's authority is fresh (`Poller.authorityFresh()`,
- * passed in as a value), the day's spend and reservations, and `now`. Output: ask, run or refuse, with a reason code.
+ * the task's IDs, its `provenance` from `get_task`, the inputs the prompt will be built from, whether Runner's authority
+ * is fresh (`Poller.authorityFresh()`, passed in as a value), the day's spend and reservations, and `now`. Output: ask,
+ * run or refuse, with a reason code. Every input is copied to plain data once, at entry, and read as own properties
+ * only, so a getter answers once and nothing on `Object.prototype` counts.
  *
  * - **Ask first is the default.** A room runs unattended only when the machine's owner set `mode: "unattended"` for that
  *   one room in this local configuration. There is no all-rooms setting, and nothing from Podster is read for the mode:
@@ -16,14 +18,24 @@
  * - **Scope.** A requester or author whose organization is named and is neither the owner's nor listed for the room is
  *   out of scope, and the task is refused (RUNNER.md: "Do not start; report the missing scope"). An unknown organization
  *   can't be scoped, so it asks.
- * - **The room split.** B: the owner's own private room runs with no acknowledgement. A: a public room, or a room
- *   configured for other organizations' authors, runs only once the owner accepted the trust statement for it, and a
- *   public room also the public-room warning (decision 232).
+ * - **The room split.** Every unattended room needs the owner to have accepted the trust statement for it, the residual
+ *   risk RUNNER.md asks every unattended setup to disclose (L3 on #455's review). A public room also needs the
+ *   public-room warning (decision 232).
+ * - **The prompt's inputs** must be exactly those `provenance` lists, in its order, and a change request exactly the one
+ *   whose `event_id` provenance names (M2 on #455's review). Steps 8 and 9 build the prompt from those inputs only, and
+ *   the change request from that event only.
  * - **Caps** on spend, run time, turns and output tokens, and the bounded `max_tokens` the broker writes into each
  *   request, are required, each a positive integer under a fixed ceiling, with no "none" (condition 3; spike B rulings 3
  *   and 5). A configuration lacking any of them is refused whole, as is anything else malformed.
  * - **Tools and network** are facts for step 9's adapter, which enforces them: no shell and no network unless listed by
  *   name (condition 2). The adapter's result tool is always named.
+ * - **Run decisions** are bound to every run fact, by a canonical form of the whole `RunFacts` (M1 on #455's review), and
+ *   to the task's version, input hash, repository and base. They are single-use and expire.
+ *
+ * **The caller serialises.** Runner must run evaluate-then-issue, and evaluate-then-consume, as one step each per Runner,
+ * with nothing else evaluating or reserving between them; the day's reservations it passes in are only right if so. At
+ * consume, it passes this decision's own reservation as `own_reservation_micro_usd`, so the fresh evaluation doesn't count
+ * it twice (L5 on #455's review).
  *
  * Agent content is data: task text is never an input here, only provenance IDs and organizations. A decision carries
  * IDs, codes, paths and hostnames only, so it can be logged by ID.
@@ -40,16 +52,16 @@ export const DEFAULT_TOOLS: readonly Tool[] = ["read", "search", "write", "edit"
 /** The SDK's structured result is itself a tool call, so the policy always names it (spike B ruling 2). */
 export const RESULT_TOOL = "StructuredOutput";
 
-/** Fixed ceilings. A cap can be set lower, never above, and never unset. */
+/** Fixed ceilings, **Proposed** for the owner to review. A cap can be set lower, never above, and never unset. */
 export const CEILINGS = {
-  spend_micro_usd: 100_000_000,
+  spend_micro_usd: 25_000_000,
   run_time_ms: 24 * 60 * 60 * 1000,
   turns: 1_000,
   output_tokens: 1_000_000,
   max_tokens: 32_000,
 } as const;
 export const MIN_RUN_TIME_MS = 60_000;
-export const DAY_SPEND_CEILING_MICRO_USD = 1_000_000_000;
+export const DAY_SPEND_CEILING_MICRO_USD = 250_000_000;
 /** How long a run decision may wait before it is used. */
 export const DECISION_TTL_MS = 10 * 60 * 1000;
 
@@ -58,7 +70,11 @@ const MAX_ORGS = 50;
 const MAX_HOSTS = 50;
 const MAX_AUTHORS = 1_000;
 const MAX_ROOT = 1_024;
-const ID = /^[A-Za-z0-9_-]{1,128}$/;
+const MAX_NODES = 200_000;
+const MAX_DEPTH = 8;
+const MAX_FACTS_KEY = 4 * 1024 * 1024;
+/** Podster's IDs are lower case (L6 on #455's review). */
+const ID = /^[a-z0-9_-]{1,128}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -90,6 +106,7 @@ export type PolicyConfig = {
 export type RefuseReason =
   | "config_invalid"
   | "provenance_invalid"
+  | "prompt_mismatch"
   | "task_invalid"
   | "budget_invalid"
   | "clock_invalid"
@@ -123,7 +140,11 @@ export type RunFacts = {
   outputs: "hold" | "share";
   policy_revision: number;
   room_visibility: "private" | "public";
-  /** Who wrote each input and the requester, as `id@org`, `?` for unknown; a run decision is bound to it. */
+  /** The inputs the prompt is built from, exactly those provenance lists, in its order. */
+  prompt_inputs: InputName[];
+  /** The change request the prompt uses, by its event; null when there is none. */
+  change_request_event_id: string | null;
+  /** Who wrote each input and the requester, as `id@org`, `?` for unknown. */
   requester: string;
   authors: { input: InputName; authors: string[] }[];
 };
@@ -138,11 +159,16 @@ export type EvaluateInput = {
   config: unknown;
   /** `get_task`'s `provenance`. */
   provenance: unknown;
+  /** The inputs the prompt will be built from: `{ inputs: [...names], change_request_event_id }`. */
+  prompt: unknown;
   /** The task, by its IDs. Anything else on it, its text included, is ignored. */
   task: unknown;
   /** `Poller.authorityFresh()`. Only `true` passes. */
   authority_fresh: unknown;
-  /** Spend counted today and budget reserved by runs in flight, in micro-USD. */
+  /**
+   * Spend counted today and budget reserved by runs not yet settled, in micro-USD; at consume, also this decision's own
+   * reservation as `own_reservation_micro_usd`, which is left out of the count.
+   */
   budget: unknown;
   now: unknown;
 };
@@ -151,11 +177,45 @@ type Obj = Record<string, unknown>;
 type Parsed<T> = { ok: true; value: T } | { ok: false; at: string };
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
 
+/**
+ * A plain-data copy: null-prototype objects of own enumerable keys, arrays, strings, numbers, booleans, null. Each
+ * property is read once. Anything else (a class instance, a function, too deep or too large) throws.
+ */
+function plain(v: unknown, depth: number, count: { n: number }): unknown {
+  count.n += 1;
+  if (count.n > MAX_NODES || depth > MAX_DEPTH) throw new Error("too_large");
+  if (v === null || v === undefined || typeof v === "string" || typeof v === "boolean" || typeof v === "number") return v;
+  if (Array.isArray(v)) {
+    const out: unknown[] = [];
+    const length = v.length;
+    if (length > MAX_NODES) throw new Error("too_large");
+    for (let i = 0; i < length; i++) out.push(plain(v[i], depth + 1, count));
+    return out;
+  }
+  if (typeof v === "object") {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) throw new Error("not_data");
+    const out: Obj = Object.create(null);
+    for (const key of Object.keys(v)) out[key] = plain((v as Obj)[key], depth + 1, count);
+    return out;
+  }
+  throw new Error("not_data");
+}
+const NOT_DATA = { not_data: true } as const;
+function copy(v: unknown): unknown {
+  try {
+    return plain(v, 0, { n: 0 });
+  } catch {
+    return NOT_DATA;
+  }
+}
+
 function isObj(v: unknown): v is Obj {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  if (typeof v !== "object" || v === null || Array.isArray(v) || v === NOT_DATA) return false;
   const proto = Object.getPrototypeOf(v);
   return proto === Object.prototype || proto === null;
 }
+const own = (o: Obj, k: string): unknown => (Object.hasOwn(o, k) ? o[k] : undefined);
 /** Exactly these keys, the optional ones allowed to be absent. */
 function keysAre(o: Obj, required: readonly string[], optional: readonly string[] = []): boolean {
   const keys = Object.keys(o);
@@ -164,6 +224,7 @@ function keysAre(o: Obj, required: readonly string[], optional: readonly string[
 const isId = (v: unknown): v is string => typeof v === "string" && ID.test(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const inRange = (v: unknown, min: number, max: number): v is number => isCount(v) && v >= min && v <= max;
+const isInput = (v: unknown): v is InputName => typeof v === "string" && (INPUTS as readonly string[]).includes(v);
 
 function uniqueList<T>(v: unknown, max: number, each: (x: unknown) => x is T): T[] | null {
   if (!Array.isArray(v) || v.length > max) return null;
@@ -184,6 +245,13 @@ function isRoot(v: unknown): v is string {
   return v.slice(1).split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
+/** Input names in the contract's order, title and instructions first, each once. */
+function isInputList(v: unknown): v is InputName[] {
+  if (!Array.isArray(v) || v.length < 2 || v.length > INPUTS.length || !v.every(isInput)) return false;
+  if (v[0] !== "title" || v[1] !== "instructions") return false;
+  return v.every((x, i) => i === 0 || INPUTS.indexOf(x) > INPUTS.indexOf(v[i - 1]));
+}
+
 function parseCaps(v: unknown): Parsed<Caps> {
   if (!isObj(v) || !keysAre(v, Object.keys(CEILINGS))) return fail("caps");
   const { spend_micro_usd, run_time_ms, turns, output_tokens, max_tokens } = v;
@@ -197,41 +265,46 @@ function parseCaps(v: unknown): Parsed<Caps> {
 
 function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "outputs"])) return fail("rooms[]");
-  if (!isId(v.room_id)) return fail("rooms[].room_id");
-  const mode = v.mode ?? "ask";
+  const roomId = own(v, "room_id");
+  if (!isId(roomId)) return fail("rooms[].room_id");
+  const mode = Object.hasOwn(v, "mode") ? v.mode : "ask";
   if (mode !== "ask" && mode !== "unattended") return fail("rooms[].mode");
-  const allowed = uniqueList(v.allowed_orgs, MAX_ORGS, isId);
+  const allowed = uniqueList(own(v, "allowed_orgs"), MAX_ORGS, isId);
   if (!allowed || allowed.includes(ownerOrg)) return fail("rooms[].allowed_orgs");
-  const tools = v.tools === undefined ? [...DEFAULT_TOOLS] : uniqueList(v.tools, TOOLS.length, isTool);
+  const tools = Object.hasOwn(v, "tools") ? uniqueList(v.tools, TOOLS.length, isTool) : [...DEFAULT_TOOLS];
   if (!tools) return fail("rooms[].tools");
-  const network = v.network === undefined ? [] : uniqueList(v.network, MAX_HOSTS, isHost);
+  const network = Object.hasOwn(v, "network") ? uniqueList(v.network, MAX_HOSTS, isHost) : [];
   if (!network) return fail("rooms[].network");
-  const outputs = v.outputs ?? "hold";
+  const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
-  const ack = v.acknowledged;
+  const ack = own(v, "acknowledged");
   if (!isObj(ack) || !keysAre(ack, ["trust_statement", "public_room_warning"])) return fail("rooms[].acknowledged");
-  if (typeof ack.trust_statement !== "boolean" || typeof ack.public_room_warning !== "boolean") return fail("rooms[].acknowledged");
-  return {
-    ok: true,
-    value: { room_id: v.room_id, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: ack.trust_statement, public_room_warning: ack.public_room_warning } },
-  };
+  const trust = own(ack, "trust_statement");
+  const warning = own(ack, "public_room_warning");
+  if (typeof trust !== "boolean" || typeof warning !== "boolean") return fail("rooms[].acknowledged");
+  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning } } };
 }
 
 /** Checks the owner's configuration whole. Anything missing, unknown or out of range refuses it: fail closed. */
-export function parsePolicyConfig(raw: unknown): Parsed<PolicyConfig> {
+export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
   try {
+    const raw = copy(input);
     if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"])) return fail("config");
     if (raw.version !== POLICY_VERSION) return fail("version");
-    if (!inRange(raw.revision, 1, Number.MAX_SAFE_INTEGER)) return fail("revision");
-    if (!isId(raw.owner_org)) return fail("owner_org");
+    const revision = raw.revision;
+    if (!inRange(revision, 1, Number.MAX_SAFE_INTEGER)) return fail("revision");
     const ownerOrg = raw.owner_org;
-    if (typeof raw.adapter !== "string" || !(ADAPTERS as readonly string[]).includes(raw.adapter)) return fail("adapter");
-    if (!isRoot(raw.workspace_root)) return fail("workspace_root");
+    if (!isId(ownerOrg)) return fail("owner_org");
+    const adapter = raw.adapter;
+    if (typeof adapter !== "string" || !(ADAPTERS as readonly string[]).includes(adapter)) return fail("adapter");
+    const root = raw.workspace_root;
+    if (!isRoot(root)) return fail("workspace_root");
     const caps = parseCaps(raw.caps);
     if (!caps.ok) return caps;
     const day = raw.day_caps;
     if (!isObj(day) || !keysAre(day, ["spend_micro_usd"])) return fail("day_caps");
-    if (!inRange(day.spend_micro_usd, caps.value.spend_micro_usd, DAY_SPEND_CEILING_MICRO_USD)) return fail("day_caps.spend_micro_usd");
+    const daySpend = day.spend_micro_usd;
+    if (!inRange(daySpend, caps.value.spend_micro_usd, DAY_SPEND_CEILING_MICRO_USD)) return fail("day_caps.spend_micro_usd");
     if (!Array.isArray(raw.rooms) || raw.rooms.length > MAX_ROOMS) return fail("rooms");
     const rooms: RoomPolicy[] = [];
     for (const r of raw.rooms) {
@@ -240,45 +313,45 @@ export function parsePolicyConfig(raw: unknown): Parsed<PolicyConfig> {
       if (rooms.some((x) => x.room_id === room.value.room_id)) return fail("rooms[].room_id");
       rooms.push(room.value);
     }
-    return {
-      ok: true,
-      value: { version: 1, revision: raw.revision, owner_org: ownerOrg, adapter: raw.adapter as Adapter, workspace_root: raw.workspace_root, caps: caps.value, day_caps: { spend_micro_usd: day.spend_micro_usd }, rooms },
-    };
+    return { ok: true, value: { version: 1, revision, owner_org: ownerOrg, adapter: adapter as Adapter, workspace_root: root, caps: caps.value, day_caps: { spend_micro_usd: daySpend }, rooms } };
   } catch {
     return fail("config");
   }
 }
 
 type Actor = { id: string | null; org: string | null; external: boolean; active: boolean };
-type Provenance = { room_visibility: "private" | "public"; requester: Actor & { id: string }; inputs: { input: InputName; external: boolean; authors: Actor[] }[] };
+type ProvenanceInput = { input: InputName; external: boolean; authors: Actor[]; event_id: string | null };
+type Provenance = { room_visibility: "private" | "public"; requester: Actor & { id: string }; inputs: ProvenanceInput[] };
 
 const isOrg = (v: unknown): v is string | null => v === null || isId(v);
 
 function parseAuthor(v: unknown): Actor | null {
   if (!isObj(v) || !keysAre(v, ["id", "org", "external", "active", "written_at"])) return null;
-  if (!(v.id === null || isId(v.id)) || !isOrg(v.org)) return null;
-  if (typeof v.external !== "boolean" || typeof v.active !== "boolean") return null;
-  if (!(v.written_at === null || isCount(v.written_at))) return null;
-  return { id: v.id, org: v.org, external: v.external, active: v.active };
+  const { id, org, external, active } = v;
+  if (!(id === null || isId(id)) || !isOrg(org)) return null;
+  if (typeof external !== "boolean" || typeof active !== "boolean") return null;
+  // A named author has a time; only the unknown author has none (L7 on #455's review).
+  if (id === null ? v.written_at !== null : !isCount(v.written_at)) return null;
+  return { id, org, external, active };
 }
 
 /** Checks `get_task`'s provenance against the contract's `TaskProvenance`, strictly. */
 function parseProvenance(v: unknown): Provenance | null {
   if (!isObj(v) || !keysAre(v, ["room_visibility", "requester", "inputs"])) return null;
-  if (v.room_visibility !== "private" && v.room_visibility !== "public") return null;
+  const visibility = v.room_visibility;
+  if (visibility !== "private" && visibility !== "public") return null;
   const r = v.requester;
-  if (!isObj(r) || !keysAre(r, ["id", "org", "external", "active"]) || !isId(r.id) || !isOrg(r.org)) return null;
-  if (typeof r.external !== "boolean" || typeof r.active !== "boolean") return null;
-  if (!Array.isArray(v.inputs) || v.inputs.length < 2 || v.inputs.length > INPUTS.length) return null;
-  const inputs: Provenance["inputs"] = [];
-  let last = -1;
+  if (!isObj(r) || !keysAre(r, ["id", "org", "external", "active"])) return null;
+  const { id, org, external, active } = r;
+  if (!isId(id) || !isOrg(org) || typeof external !== "boolean" || typeof active !== "boolean") return null;
+  if (!Array.isArray(v.inputs)) return null;
+  const inputs: ProvenanceInput[] = [];
   for (const i of v.inputs) {
     if (!isObj(i) || !keysAre(i, ["input", "external", "authors"], ["event_id"])) return null;
-    const at = INPUTS.indexOf(i.input as InputName);
-    if (at <= last) return null;
-    last = at;
-    if (Object.hasOwn(i, "event_id") && (i.input !== "change_request" || !(i.event_id === null || isId(i.event_id)))) return null;
-    if (typeof i.external !== "boolean") return null;
+    const name = i.input;
+    if (!isInput(name) || typeof i.external !== "boolean") return null;
+    const hasEvent = Object.hasOwn(i, "event_id");
+    if (hasEvent && (name !== "change_request" || !(i.event_id === null || isId(i.event_id)))) return null;
     if (!Array.isArray(i.authors) || i.authors.length < 1 || i.authors.length > MAX_AUTHORS) return null;
     const authors: Actor[] = [];
     for (const a of i.authors) {
@@ -286,10 +359,22 @@ function parseProvenance(v: unknown): Provenance | null {
       if (!author) return null;
       authors.push(author);
     }
-    inputs.push({ input: i.input as InputName, external: i.external, authors });
+    inputs.push({ input: name, external: i.external, authors, event_id: hasEvent ? (i.event_id as string | null) : null });
   }
-  if (inputs[0].input !== "title" || inputs[1].input !== "instructions") return null;
-  return { room_visibility: v.room_visibility, requester: { id: r.id, org: r.org, external: r.external, active: r.active }, inputs };
+  if (!isInputList(inputs.map((i) => i.input))) return null;
+  return { room_visibility: visibility, requester: { id, org, external, active }, inputs };
+}
+
+/** The prompt's inputs must be exactly provenance's, and its change request exactly the event provenance names. */
+function promptMatches(v: unknown, prov: Provenance): { inputs: InputName[]; event: string | null } | null {
+  if (!isObj(v) || !keysAre(v, ["inputs", "change_request_event_id"])) return null;
+  const names = v.inputs;
+  const event = v.change_request_event_id;
+  if (!isInputList(names) || names.length !== prov.inputs.length || !names.every((n, i) => n === prov.inputs[i].input)) return null;
+  const request = prov.inputs.find((i) => i.input === "change_request");
+  if (request === undefined) return event === null ? { inputs: [...names], event: null } : null;
+  if (!isId(event) || request.event_id !== event) return null;
+  return { inputs: [...names], event };
 }
 
 /** How Runner reads one actor against the owner's organization. The first that applies, in this order. */
@@ -310,19 +395,27 @@ export function evaluate(input: EvaluateInput): Decision {
 }
 
 function decide(input: EvaluateInput): Decision {
-  const parsed = parsePolicyConfig(input.config);
+  const given = copy(input);
+  if (!isObj(given)) return { outcome: "refuse", reason: "config_invalid" };
+  const parsed = parsePolicyConfig(own(given, "config"));
   if (!parsed.ok) return { outcome: "refuse", reason: "config_invalid" };
   const config = parsed.value;
-  if (!isCount(input.now)) return { outcome: "refuse", reason: "clock_invalid" };
-  const t = input.task;
-  if (!isObj(t) || !isId(t.id) || !isId(t.workspace_id)) return { outcome: "refuse", reason: "task_invalid" };
-  const ids = { task_id: t.id, workspace_id: t.workspace_id };
-  if (input.authority_fresh !== true) return { outcome: "refuse", reason: "authority_stale", ...ids };
-  const prov = parseProvenance(input.provenance);
+  const now = own(given, "now");
+  if (!isCount(now)) return { outcome: "refuse", reason: "clock_invalid" };
+  const t = own(given, "task");
+  if (!isObj(t) || !isId(own(t, "id")) || !isId(own(t, "workspace_id"))) return { outcome: "refuse", reason: "task_invalid" };
+  const ids = { task_id: t.id as string, workspace_id: t.workspace_id as string };
+  if (own(given, "authority_fresh") !== true) return { outcome: "refuse", reason: "authority_stale", ...ids };
+  const prov = parseProvenance(own(given, "provenance"));
   if (!prov) return { outcome: "refuse", reason: "provenance_invalid", ...ids };
-  const b = input.budget;
-  if (!isObj(b) || !keysAre(b, ["spent_today_micro_usd", "reserved_micro_usd"]) || !isCount(b.spent_today_micro_usd) || !isCount(b.reserved_micro_usd))
-    return { outcome: "refuse", reason: "budget_invalid", ...ids };
+  const prompt = promptMatches(own(given, "prompt"), prov);
+  if (!prompt) return { outcome: "refuse", reason: "prompt_mismatch", ...ids };
+  const b = own(given, "budget");
+  if (!isObj(b) || !keysAre(b, ["spent_today_micro_usd", "reserved_micro_usd"], ["own_reservation_micro_usd"])) return { outcome: "refuse", reason: "budget_invalid", ...ids };
+  const spent = b.spent_today_micro_usd;
+  const reserved = b.reserved_micro_usd;
+  const ownReservation = Object.hasOwn(b, "own_reservation_micro_usd") ? b.own_reservation_micro_usd : 0;
+  if (!isCount(spent) || !isCount(reserved) || !isCount(ownReservation) || ownReservation > reserved) return { outcome: "refuse", reason: "budget_invalid", ...ids };
 
   const room = config.rooms.find((r) => r.room_id === ids.workspace_id);
   if (!room) return { outcome: "refuse", reason: "room_not_configured", ...ids };
@@ -331,7 +424,7 @@ function decide(input: EvaluateInput): Decision {
   if (!inScope(prov.requester)) return { outcome: "refuse", reason: "requester_out_of_scope", ...ids };
   if (prov.inputs.some((i) => !i.authors.every(inScope))) return { outcome: "refuse", reason: "author_out_of_scope", ...ids };
 
-  if (b.spent_today_micro_usd + b.reserved_micro_usd + config.caps.spend_micro_usd > config.day_caps.spend_micro_usd)
+  if (spent + (reserved - ownReservation) + config.caps.spend_micro_usd > config.day_caps.spend_micro_usd)
     return { outcome: "refuse", reason: "day_budget_exhausted", ...ids };
 
   const requesterStanding = standing(prov.requester, config.owner_org);
@@ -351,6 +444,8 @@ function decide(input: EvaluateInput): Decision {
     outputs: room.outputs === "share" && allInternal && !isPublic ? "share" : "hold",
     policy_revision: config.revision,
     room_visibility: prov.room_visibility,
+    prompt_inputs: prompt.inputs,
+    change_request_event_id: prompt.event,
     requester: label(prov.requester),
     authors: prov.inputs.map((i) => ({ input: i.input, authors: i.authors.map(label) })),
   };
@@ -366,9 +461,19 @@ function decide(input: EvaluateInput): Decision {
   }
   // Every author reads as internal here, so only the server's own flag on an input is left: it wins too.
   if (!allInternal) return ask("author_external");
-  if ((isPublic || room.allowed_orgs.length > 0) && !room.acknowledged.trust_statement) return ask("trust_statement_not_accepted");
+  if (!room.acknowledged.trust_statement) return ask("trust_statement_not_accepted");
   if (isPublic && !room.acknowledged.public_room_warning) return ask("public_warning_not_accepted");
   return { outcome: "run", reason: "unattended_eligible", ...ids, facts };
+}
+
+/** One string for a value, its object keys sorted, so two equal fact sets always give the same form. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (typeof v === "object" && v !== null) {
+    const o = v as Obj;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v) ?? "null";
 }
 
 /** What a run decision is bound to beyond the policy's facts: the task's version, its inputs' hash, repository and base. */
@@ -383,29 +488,51 @@ export type RunBinding = {
 };
 export type RunDecisionRecord = RunBinding & {
   mode: "unattended" | "approved";
-  adapter: Adapter;
-  policy_revision: number;
-  room_visibility: "private" | "public";
-  requester: string;
-  authors: RunFacts["authors"];
+  prompt_inputs: InputName[];
+  change_request_event_id: string | null;
+  /** The canonical form of the whole `RunFacts` the decision was made on (M1 on #455's review). */
+  facts_key: string;
   reserved_micro_usd: number;
   issued_at: number;
   expires_at: number;
   consumed: boolean;
 };
 export type IssueRefusal = "refused" | "owner_approval_needed" | "binding_invalid" | "clock_invalid";
-export type ConsumeRefusal = "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "binding_changed" | "facts_changed" | "record_invalid";
+export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "binding_changed" | "facts_changed";
 
-function bindingOk(b: unknown): b is RunBinding {
-  if (!isObj(b) || !keysAre(b, ["task_id", "workspace_id", "task_version", "input_hash", "repository_id", "base_commit"])) return false;
-  if (!isId(b.task_id) || !isId(b.workspace_id) || !isCount(b.task_version)) return false;
-  if (typeof b.input_hash !== "string" || !HEX64.test(b.input_hash)) return false;
-  if (b.repository_id === null) return b.base_commit === null;
-  return isId(b.repository_id) && typeof b.base_commit === "string" && COMMIT.test(b.base_commit);
+const BINDING_KEYS = ["task_id", "workspace_id", "task_version", "input_hash", "repository_id", "base_commit"] as const;
+
+function bindingOf(v: unknown, extra: readonly string[] = []): RunBinding | null {
+  if (!isObj(v) || !keysAre(v, [...BINDING_KEYS, ...extra])) return null;
+  const { task_id, workspace_id, task_version, input_hash, repository_id, base_commit } = v;
+  if (!isId(task_id) || !isId(workspace_id) || !isCount(task_version)) return null;
+  if (typeof input_hash !== "string" || !HEX64.test(input_hash)) return null;
+  if (repository_id === null) {
+    if (base_commit !== null) return null;
+  } else if (!isId(repository_id) || typeof base_commit !== "string" || !COMMIT.test(base_commit)) return null;
+  return { task_id, workspace_id, task_version, input_hash, repository_id: repository_id as string | null, base_commit: base_commit as string | null };
 }
 
-const sameAuthors = (a: RunFacts["authors"], b: RunFacts["authors"]) =>
-  a.length === b.length && a.every((x, i) => x.input === b[i].input && x.authors.length === b[i].authors.length && x.authors.every((y, j) => y === b[i].authors[j]));
+const RECORD_KEYS = ["mode", "prompt_inputs", "change_request_event_id", "facts_key", "reserved_micro_usd", "issued_at", "expires_at", "consumed"] as const;
+
+/** A stored record, checked whole before anything compares it (L2 on #455's review). */
+function parseRecord(raw: unknown): RunDecisionRecord | null {
+  const v = copy(raw);
+  const binding = bindingOf(v, RECORD_KEYS);
+  if (!binding || !isObj(v)) return null;
+  const { mode, prompt_inputs, change_request_event_id, facts_key, reserved_micro_usd, issued_at, expires_at, consumed } = v;
+  if (mode !== "unattended" && mode !== "approved") return null;
+  if (!isInputList(prompt_inputs)) return null;
+  if (prompt_inputs.includes("change_request") ? !isId(change_request_event_id) : change_request_event_id !== null) return null;
+  if (typeof facts_key !== "string" || facts_key.length < 2 || facts_key.length > MAX_FACTS_KEY) return null;
+  if (!inRange(reserved_micro_usd, 1, CEILINGS.spend_micro_usd)) return null;
+  if (!isCount(issued_at) || expires_at !== issued_at + DECISION_TTL_MS) return null;
+  if (typeof consumed !== "boolean") return null;
+  return { ...binding, mode, prompt_inputs: [...prompt_inputs], change_request_event_id: change_request_event_id as string | null, facts_key, reserved_micro_usd, issued_at, expires_at, consumed };
+}
+
+const isDecision = (d: unknown): d is Decision & { outcome: "ask" | "run" } =>
+  isObj(d) && (d.outcome === "ask" || d.outcome === "run") && isId(d.task_id) && isId(d.workspace_id) && isObj(d.facts);
 
 /**
  * A run decision for a `run`, or for an `ask` the owner approved on this machine. Never for a refusal. Single-use, it
@@ -413,67 +540,60 @@ const sameAuthors = (a: RunFacts["authors"], b: RunFacts["authors"]) =>
  */
 export function issueRunDecision(decision: Decision, binding: RunBinding, now: number, opts: { approved_by_owner?: boolean } = {}):
   { ok: true; record: RunDecisionRecord } | { ok: false; reason: IssueRefusal } {
-  if (decision.outcome === "refuse") return { ok: false, reason: "refused" };
-  if (decision.outcome === "ask" && opts.approved_by_owner !== true) return { ok: false, reason: "owner_approval_needed" };
-  if (!isCount(now)) return { ok: false, reason: "clock_invalid" };
-  if (!bindingOk(binding) || binding.task_id !== decision.task_id || binding.workspace_id !== decision.workspace_id) return { ok: false, reason: "binding_invalid" };
-  const f = decision.facts;
-  return {
-    ok: true,
-    record: {
-      task_id: binding.task_id,
-      workspace_id: binding.workspace_id,
-      task_version: binding.task_version,
-      input_hash: binding.input_hash,
-      repository_id: binding.repository_id,
-      base_commit: binding.base_commit,
-      mode: decision.outcome === "run" ? "unattended" : "approved",
-      adapter: f.adapter,
-      policy_revision: f.policy_revision,
-      room_visibility: f.room_visibility,
-      requester: f.requester,
-      authors: f.authors.map((x) => ({ input: x.input, authors: [...x.authors] })),
-      reserved_micro_usd: f.caps.spend_micro_usd,
-      issued_at: now,
-      expires_at: now + DECISION_TTL_MS,
-      consumed: false,
-    },
-  };
+  try {
+    const d = copy(decision);
+    if (!isDecision(d)) return { ok: false, reason: "refused" };
+    const o = copy(opts);
+    const approved = isObj(o) && own(o, "approved_by_owner") === true;
+    if (d.outcome === "ask" && !approved) return { ok: false, reason: "owner_approval_needed" };
+    if (!isCount(now)) return { ok: false, reason: "clock_invalid" };
+    const b = bindingOf(copy(binding));
+    if (!b || b.task_id !== d.task_id || b.workspace_id !== d.workspace_id) return { ok: false, reason: "binding_invalid" };
+    const f = d.facts;
+    return {
+      ok: true,
+      record: {
+        ...b,
+        mode: d.outcome === "run" ? "unattended" : "approved",
+        prompt_inputs: [...f.prompt_inputs],
+        change_request_event_id: f.change_request_event_id,
+        facts_key: canonical(f),
+        reserved_micro_usd: f.caps.spend_micro_usd,
+        issued_at: now,
+        expires_at: now + DECISION_TTL_MS,
+        consumed: false,
+      },
+    };
+  } catch {
+    return { ok: false, reason: "refused" };
+  }
 }
 
 /**
- * Spends a run decision at the run's start, against a fresh `evaluate` on a fresh `get_task` and the binding as it now
- * stands: every run passes policy, not just the first. Any change to the task, its version, inputs, authors, room
- * visibility, adapter, repository, base or the policy's revision refuses it; so does an unattended decision whose fresh
- * evaluation no longer says `run`. Returns the record marked consumed, for the caller to store before starting.
+ * Spends a run decision at the run's start, against a fresh `evaluate` on a fresh `get_task` (with this decision's own
+ * reservation passed as `own_reservation_micro_usd`) and the binding as it now stands: every run passes policy, not just
+ * the first. Any difference in the run facts, whatever the policy's revision says, or in the task, its version, input
+ * hash, repository or base, refuses it; so does an unattended decision whose fresh evaluation no longer says `run`.
+ * Returns the record marked consumed, for the caller to store before starting.
  */
-export function consumeRunDecision(record: RunDecisionRecord, fresh: Decision, binding: RunBinding, now: number):
+export function consumeRunDecision(stored: RunDecisionRecord, fresh: Decision, binding: RunBinding, now: number):
   { ok: true; record: RunDecisionRecord } | { ok: false; reason: ConsumeRefusal } {
-  if (!isObj(record) || !isCount(record.issued_at) || !isCount(record.expires_at)) return { ok: false, reason: "record_invalid" };
-  if (!isCount(now) || now < record.issued_at) return { ok: false, reason: "clock_invalid" };
-  if (record.consumed !== false) return { ok: false, reason: "consumed" };
-  if (now > record.expires_at) return { ok: false, reason: "expired" };
-  if (fresh.outcome === "refuse") return { ok: false, reason: "refused" };
-  if (record.mode === "unattended" && fresh.outcome !== "run") return { ok: false, reason: "no_longer_eligible" };
-  if (!bindingOk(binding)) return { ok: false, reason: "binding_changed" };
-  const sameBinding =
-    binding.task_id === record.task_id &&
-    binding.workspace_id === record.workspace_id &&
-    binding.task_version === record.task_version &&
-    binding.input_hash === record.input_hash &&
-    binding.repository_id === record.repository_id &&
-    binding.base_commit === record.base_commit &&
-    fresh.task_id === record.task_id &&
-    fresh.workspace_id === record.workspace_id;
-  if (!sameBinding) return { ok: false, reason: "binding_changed" };
-  const f = fresh.facts;
-  const sameFacts =
-    f.adapter === record.adapter &&
-    f.policy_revision === record.policy_revision &&
-    f.room_visibility === record.room_visibility &&
-    f.requester === record.requester &&
-    f.caps.spend_micro_usd === record.reserved_micro_usd &&
-    sameAuthors(f.authors, record.authors);
-  if (!sameFacts) return { ok: false, reason: "facts_changed" };
-  return { ok: true, record: { ...record, authors: record.authors.map((x) => ({ input: x.input, authors: [...x.authors] })), consumed: true } };
+  try {
+    const record = parseRecord(stored);
+    if (!record) return { ok: false, reason: "record_invalid" };
+    if (!isCount(now) || now < record.issued_at) return { ok: false, reason: "clock_invalid" };
+    if (record.consumed) return { ok: false, reason: "consumed" };
+    if (now > record.expires_at) return { ok: false, reason: "expired" };
+    const d = copy(fresh);
+    if (!isDecision(d)) return { ok: false, reason: "refused" };
+    if (record.mode === "unattended" && d.outcome !== "run") return { ok: false, reason: "no_longer_eligible" };
+    const b = bindingOf(copy(binding));
+    if (!b) return { ok: false, reason: "binding_changed" };
+    const same = BINDING_KEYS.every((k) => b[k] === record[k]) && d.task_id === record.task_id && d.workspace_id === record.workspace_id;
+    if (!same) return { ok: false, reason: "binding_changed" };
+    if (canonical(d.facts) !== record.facts_key) return { ok: false, reason: "facts_changed" };
+    return { ok: true, record: { ...record, consumed: true } };
+  } catch {
+    return { ok: false, reason: "record_invalid" };
+  }
 }

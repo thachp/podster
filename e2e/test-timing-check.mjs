@@ -84,7 +84,8 @@
 // test-timing-allow.json lists the findings that stay. Each entry has its category (the file's header defines them),
 // its reason, `owed: true` where it is a debt rather than right, and `count`, how many findings it covers. An entry
 // that isn't owed (a poll, or a stand-in's own failure bound) may say `calls_allowed: true`, which allows the calls to
-// the helper its sleep is in, and to helpers that call only such helpers. It is
+// the helper its sleep is in, and to helpers that call only such helpers, a helper file's export imported by a spec
+// among them, judged in its own file. It is
 // reviewed like code, and the check keeps it honest: an entry matches by file, rule, `where` (the enclosing test's
 // title path, or the enclosing function's name) and the text of its line, and must match exactly `count` findings. So
 // a new copy of an allowed line fails, an entry can't be re-pointed at the same text in another test or function, and
@@ -227,7 +228,7 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     }
     return titles.length ? titles.join(" > ") : named ? `function ${named}` : "(module)";
   };
-  const report = (node, rule, text) => found.push({ line: at(node.loc.start.line, node.loc.start.column), rule, text, where: where(node), fn: innermostName(node) });
+  const report = (node, rule, text, more = {}) => found.push({ line: at(node.loc.start.line, node.loc.start.column), rule, text, where: where(node), fn: innermostName(node), ...more });
 
   // What a name is given where it's declared: the nearest enclosing block, function or module that declares it.
   // `undefined` for a name declared nowhere in the file (a global), null for one that is but can't be followed.
@@ -266,6 +267,13 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
   const promisedName = (id) => {
     const d = declaration(id);
     return d?.kind === "import" && PROMISES.test(d.from);
+  };
+  /** The helper file's export an imported name is, when that export sleeps: `{ via, viaFile }`, for the allow-list. */
+  const sleepyExport = (id) => {
+    const d = declaration(id);
+    if (d?.kind !== "import" || !path || !d.from.startsWith(".")) return null;
+    const helper = helpers.get(resolveImport(path, d.from));
+    return helper?.sleepers.has(d.imported) && helper.file ? { via: d.imported, viaFile: helper.file } : null;
   };
   const sleepyImport = (id) => {
     const d = declaration(id);
@@ -402,7 +410,10 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     else if (node.callee.type === "Identifier" && node.arguments.length && SLEEPY.test(node.callee.name)) what = `a call to ${node.callee.name}(), named like a sleep`;
     else if (node.callee.type === "MemberExpression" && node.arguments.length && SLEEPY.test(propertyName(node.callee) ?? "")) what = `a call to ${propertyName(node.callee)}(), named like a sleep`;
     if (!what) continue;
-    report(node, "sleep", what);
+    // A helper file's export is named with its file, so the allow-list can judge it as it judges a helper here. A name
+    // like a sleep is a sleep whatever its file says, and names nothing.
+    const exported = what.endsWith("imported as a sleep") && !SLEEPY.test(declaration(node.callee)?.imported ?? "") ? sleepyExport(node.callee) : null;
+    report(node, "sleep", what, exported ?? {});
     // Both the nearest named function and the outermost one sleep: an exported helper whose sleep sits in a named
     // callback inside it is a sleeper where it's imported.
     for (const fn of [innermostName(node), enclosingName(node)]) if (fn) sleeping.add(fn);
@@ -604,11 +615,17 @@ export function judge(all, allow, categories = null) {
   // are allowed, which only an entry that isn't owed (a poll) may say.
   // Every sleep inside the helper must be allowed that way: by such an entry, or as a call to a helper that is.
   const callsAllowed = (g) => allow.some((entry) => entry.calls_allowed === true && entry.owed === false && matches(entry, g));
+  // A helper is named by its file and name: one in this file (`via`), or a helper file's export (`via` and `viaFile`).
   const helperOk = (file, name, seen) => {
     const inside = all.filter((g) => g.file === file && g.rule === "sleep" && g.fn === name);
-    return inside.length > 0 && inside.every((g) => callsAllowed(g) || (g.via && !seen.has(g.via) && helperOk(file, g.via, new Set([...seen, g.via]))));
+    return inside.length > 0 && inside.every((g) => {
+      if (callsAllowed(g)) return true;
+      if (!g.via) return false;
+      const key = `${g.viaFile ?? file}#${g.via}`;
+      return !seen.has(key) && helperOk(g.viaFile ?? file, g.via, new Set([...seen, key]));
+    });
   };
-  const viaHelper = (f) => Boolean(f.via) && helperOk(f.file, f.via, new Set([f.via]));
+  const viaHelper = (f) => Boolean(f.via) && helperOk(f.viaFile ?? f.file, f.via, new Set([`${f.viaFile ?? f.file}#${f.via}`]));
   const allowed = all.filter((f) => allow.some((entry) => matches(entry, f)) || viaHelper(f));
   const failing = all.filter((f) => !allowed.includes(f));
   const stale = allow.filter((entry) => all.filter((f) => matches(entry, f)).length !== (entry.count ?? 1));
@@ -659,6 +676,11 @@ async function selfTest() {
     const sleepers = [...helper.sleepers].sort();
     const helpers = new Map([["/t/run.ts", { sleepers: helper.sleepers, rooms: new Set() }]]);
     await expect(`sleep: an exported helper whose sleep is in a named callback sleeps where it's imported (sleepers ${JSON.stringify(sleepers)})`, 'import { waitForRun, settle as calm } from "./run.ts";\nimport { sleep as nap } from "./other.ts";\nit("a", async () => { await waitForRun("x"); });\nit("b", async () => { await waitForRun(); await calm(); });\nit("c", async () => { await nap(); });\nit("d", async () => { await sleep(); });\n', ["3: sleep", "4: sleep", "4: sleep", "5: sleep"], { api: true, path: "/t/x.spec.ts", helpers });
+    // A call to a helper file's export that sleeps names the export and its file, so its entries can be read there.
+    const named = await analyze('import { settle } from "./run.ts";\nawait settle();\n', { path: "/t/y.spec.ts", helpers: new Map([["/t/run.ts", { sleepers: helper.sleepers, rooms: new Set(), file: "t/run.ts" }]]) });
+    const viaOk = named.found.length === 1 && named.found[0].via === "settle" && named.found[0].viaFile === "t/run.ts";
+    if (!viaOk) failures.push("sleep: a call to an imported helper's export names the export and its file");
+    console.log(`${viaOk ? "ok  " : "FAIL"} sleep: a call to an imported helper's export names the export and its file${viaOk ? "" : `: got ${JSON.stringify(named.found)}`}`);
     const has = sleepers.includes("waitForRun") && sleepers.includes("tick") && sleepers.includes("settle");
     if (!has) failures.push("sleep: both the named callback and the exported helper around it are sleepers");
     console.log(`${has ? "ok  " : "FAIL"} sleep: both the named callback and the exported helper around it are sleepers${has ? "" : `: got ${JSON.stringify(sleepers)}`}`);
@@ -759,6 +781,17 @@ async function selfTest() {
   allowCase("an owed helper's entry can't allow its calls: each call is listed or fails", [entry({ owed: true, calls_allowed: true })], { allowed: 1, failing: 2, stale: 0, unreasoned: 1 }, [...all, call]);
   allowCase("without calls_allowed, a new call to an allowed helper fails", [entry()], { allowed: 1, failing: 2, stale: 0, unreasoned: 0 }, [...all, call]);
   allowCase("an entry can't be re-pointed: the allowed poll gone, the same text in a test fails", [entry()], { allowed: 0, failing: 2, stale: 1, unreasoned: 0 }, [{ ...all[0], where: "rooms > waits" }, all[1]]);
+  // An imported helper's export, as an in-file helper: its calls are allowed only when every sleep inside it, in its own
+  // file, is allowed by an entry that says calls_allowed and isn't owed, or is a call to a helper that is.
+  const pollThere = { file: "h.ts", line: 3, rule: "sleep", where: "function poll", fn: "poll", code: "await x();" };
+  const serveThere = { file: "h.ts", line: 9, rule: "sleep", where: "function serve", fn: "serve", code: "await poll();", via: "poll" };
+  const imported = { file: "a.spec.ts", line: 4, rule: "sleep", where: "t4", fn: null, code: "await serve();", via: "serve", viaFile: "h.ts" };
+  const thereEntry = (more) => entry({ file: "h.ts", ...more });
+  allowCase("a call to an imported export is allowed when the export's only sleep is a calls_allowed poll in its own file", [thereEntry({ calls_allowed: true })], { allowed: 3, failing: 0, stale: 0, unreasoned: 0 }, [pollThere, serveThere, imported]);
+  allowCase("without calls_allowed on the export's poll, a call to the imported export fails", [thereEntry()], { allowed: 1, failing: 2, stale: 0, unreasoned: 0 }, [pollThere, serveThere, imported]);
+  allowCase("an owed poll in the export's file doesn't allow the imported call", [thereEntry({ owed: true, calls_allowed: true })], { allowed: 1, failing: 2, stale: 0, unreasoned: 1 }, [pollThere, serveThere, imported]);
+  allowCase("an imported export with another sleep besides the allowed poll fails where it's imported", [thereEntry({ calls_allowed: true })], { allowed: 2, failing: 2, stale: 0, unreasoned: 0 }, [pollThere, serveThere, imported, { file: "h.ts", line: 10, rule: "sleep", where: "function serve", fn: "serve", code: "await nap(5);" }]);
+  allowCase("the same export name in the spec's own file doesn't stand in for the imported one", [entry({ calls_allowed: true })], { allowed: 1, failing: 3, stale: 0, unreasoned: 0 }, [all[0], { ...pollThere }, serveThere, imported]);
   if (!failures.length) {
     console.log("\ntest-timing-check self-test: all passed");
     return 0;

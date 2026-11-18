@@ -77,7 +77,8 @@ async function uploadGate(url: URL) {
   return answer();
 }
 
-async function fakeHook(request: Request) {
+/** `partition` is the calling project's partition of the content provider's stand-in (`pool` below). */
+async function fakeHook(request: Request, partition: ContentPartition) {
   // GitHub, for provisioning (M5 step 4): a fake, so nothing ever reaches the real one. Its calls carry tokens, so they
   // stay out of the hook log.
   // The release job's read-only App is a stand-in of its own, asked first: what isn't that App's is left to the other.
@@ -94,7 +95,7 @@ async function fakeHook(request: Request) {
   const stores = await fakeStores(request);
   if (stores) return stores;
   // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
-  const content = await fakeContent(request);
+  const content = await fakeContent(request, partition);
   if (content) return content;
   // The resolver a room's proof job reads a custom hostname's challenge from (M6 step 8): a stand-in, so nothing ever
   // asks a real one.
@@ -160,7 +161,7 @@ const pool = (partition: ContentPartition) =>
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
-        outboundService: fakeHook,
+        outboundService: (request: Request) => fakeHook(request, partition),
         queueProducers: { WAKE: { queueName: "podster-wake-test" }, SCAN: { queueName: "podster-scan-test" }, A2A: { queueName: "podster-a2a-test" } },
         // The test pool can't run the real consumer. This one records what actually crosses the queue.
         workers: [
@@ -169,7 +170,7 @@ const pool = (partition: ContentPartition) =>
             modules: true,
             script: `export default { async queue(batch) { for (const message of batch.messages) { await fetch("https://hook-record.example.com/__queue", { method: "POST", body: JSON.stringify(message.body) }); message.ack(); } } };`,
             compatibilityDate: "2026-08-01",
-            outboundService: fakeHook,
+            outboundService: (request: Request) => fakeHook(request, partition),
             queueConsumers: { "podster-wake-test": { maxBatchTimeout: 0.05 }, "podster-scan-test": { maxBatchTimeout: 0.05 }, "podster-a2a-test": { maxBatchTimeout: 0.05 } },
           },
         ],

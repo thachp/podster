@@ -175,6 +175,8 @@ describe("custom hostname routing (M6 step 8c)", () => {
     beforeEach(async () => { await content("/reset", {}); });
     afterEach(async () => {
       for (const id of made.splice(0)) await alarmQuiet(stub(id));
+      // Any provider call outside this file's own partition, or one nothing answers, is told here as unexpected.
+      expect((await held()).calls.filter((call) => call.name.startsWith("unexpected "))).toEqual([]);
     });
 
     it("runs in its own partition of the content provider's stand-in", () => {

@@ -54,10 +54,10 @@ export type ContentPartition = keyof typeof CONTENT_PARTITIONS;
 type Op = "script.get" | "script.delete" | "script.list" | "script.bindings" | "entry.put" | "entry.get" | "entry.delete" | "entry.list";
 /**
  * How one kind of call misbehaves, for its next `times` calls. `lost` does the work and then answers nothing useful;
- * `stale` answers a read with the opposite of what is held; `delayMs` alone answers properly, late, so a test can
- * change the room while the call is out.
+ * `stale` answers a read with the opposite of what is held. **There is no scripted delay:** a test that wants a call
+ * held while it changes the room sets a gate and lets it go, so nothing here waits on the clock.
  */
-type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; flip?: boolean; delayMs?: number };
+type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; flip?: boolean };
 
 /**
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
@@ -110,12 +110,11 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const envelope = (result: unknown) => ({ success: true, errors: [], messages: [], result });
 const failure = (status: number, code: number, message: string) => json({ success: false, errors: [{ code, message }], messages: [], result: null }, status);
 
-async function takeFault(faults: Fault[], op: Op) {
+function takeFault(faults: Fault[], op: Op) {
   const fault = faults.find((f) => f.op === op && f.times > 0);
   if (!fault) return undefined;
   fault.times -= 1;
-  if (fault.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
-  // A delay alone isn't a failure: the call is then answered as it would have been.
+  // A fault that says none of these isn't one: the call is answered as it would have been.
   return fault.lost || fault.stale || fault.flip || fault.status ? fault : undefined;
 }
 
@@ -186,12 +185,11 @@ function takeUploadFault(script: string, op: UploadOp) {
 }
 const html = () => new Response("<!doctype html><title>Sign in</title>", { status: 200, headers: { "content-type": "text/html" } });
 
-/** Every partition's dispatch namespace, as a pattern: an upload in any of them is this part's, kept by script. */
-const ANY_NAMESPACE = `(${Object.values(CONTENT_PARTITIONS).map((p) => p.namespace).join("|")})`;
-
-async function fakeUpload(request: Request, url: URL): Promise<Response | null> {
+/** An upload is this part's only in the calling partition's own namespace; any other is unexpected, below. */
+async function fakeUpload(request: Request, url: URL, from: ContentPartition): Promise<Response | null> {
   const bearer = request.headers.get("authorization");
-  const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${ANY_NAMESPACE}/scripts/([^/]+)/assets-upload-session$`));
+  const own = `(${CONTENT_PARTITIONS[from].namespace})`;
+  const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${own}/scripts/([^/]+)/assets-upload-session$`));
   if (session && request.method === "POST") {
     const script = decodeURIComponent(session[2]);
     const held = upload(script);
@@ -246,10 +244,9 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     if (finished) return done(201, json({ success: true, errors: null, messages: null, result: { jwt: completion } }, 201));
     return done(202, json({ success: true, errors: null, messages: null, result: {} }, 202));
   }
-  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${ANY_NAMESPACE}/scripts/([^/]+)$`));
-  // A script the namespace's own partition holds is that partition's, read below.
-  const namespaceState = script ? stateOf(partitionNamed("namespace", script[1])!) : undefined;
-  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[2])) && !namespaceState!.scripts.has(decodeURIComponent(script[2]))) {
+  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${own}/scripts/([^/]+)$`));
+  // A script the partition's own set holds is read below, from that set.
+  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[2])) && !stateOf(from).scripts.has(decodeURIComponent(script[2]))) {
     const name = decodeURIComponent(script[2]);
     const held = upload(name);
     const done = (status: number, response: Response) => { held.calls.push({ op: "read", status }); return response; };
@@ -330,7 +327,12 @@ async function fakeAppHost(request: Request, url: URL): Promise<Response> {
   return new Response("not found", { status: 404 });
 }
 
-export async function fakeContent(request: Request): Promise<Response | null> {
+/**
+ * `from` is the partition whose test project made the call: each project's outbound service says so
+ * (`vitest.config.ts`). A provider call is answered only in that partition's own namespaces; any other, or a path or
+ * method nothing answers, is told to `from` as unexpected, so a spec that reads its calls sees it.
+ */
+export async function fakeContent(request: Request, from: ContentPartition = "default"): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url);
   // The marker and upload parts are kept by host and by script, not by partition, so any control host reaches them.
@@ -374,7 +376,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     return json({ error: "unknown" }, 404);
   }
   if (url.hostname === "api.cloudflare.com") {
-    const uploaded = await fakeUpload(request, url);
+    const uploaded = await fakeUpload(request, url, from);
     if (uploaded) return uploaded;
   }
   if (control) {
@@ -417,12 +419,14 @@ export async function fakeContent(request: Request): Promise<Response | null> {
 
   const bearer = request.headers.get("authorization");
   const account = `/client/v4/accounts/${FAKE_CONTENT.account}`;
-  // The partition is the one whose namespace the path names. A path naming none is unexpected, and told in the default.
+  // The partition is the caller's, and only if the path names its own namespace. A path naming another partition's, or
+  // none, is unexpected, and told to the caller.
   const scriptsPath = url.pathname.match(new RegExp(`^${account}/workers/dispatch/namespaces/([^/]+)/scripts(?:/([^/]+)(/bindings)?)?$`));
   const keysPath = url.pathname.match(new RegExp(`^${account}/storage/kv/namespaces/([^/]+)/(?:keys|values/([^/]+))$`));
-  const partition = (scriptsPath && partitionNamed("namespace", scriptsPath[1])) || (keysPath && partitionNamed("kvNamespace", keysPath[1])) || undefined;
-  const { scripts, bindings, entries, calls, faults, gates } = stateOf(partition ?? "default");
-  const { namespace, kvNamespace } = CONTENT_PARTITIONS[(partition ?? "default") as ContentPartition];
+  const { namespace, kvNamespace } = CONTENT_PARTITIONS[from];
+  const partition = (scriptsPath?.[1] === namespace || keysPath?.[1] === kvNamespace) ? from : undefined;
+  const { scripts, bindings, entries, calls, faults, gates } = stateOf(from);
+  const unexpected = (status: number) => calls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status });
   const script = partition && scriptsPath?.[2] !== undefined && !scriptsPath[3] ? scriptsPath : null;
   const entry = partition && keysPath?.[2] !== undefined ? keysPath : null;
   const bound = partition && scriptsPath?.[3] ? scriptsPath : null;
@@ -435,7 +439,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   if (partition && url.pathname === `${account}/workers/dispatch/namespaces/${namespace}/scripts` && request.method === "GET") {
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.list", "", failure(403, 10000, "Authentication error"));
     await passGate("script.list", gates);
-    const fault = await takeFault(faults, "script.list");
+    const fault = takeFault(faults, "script.list");
     if (fault) return answer("script.list", "", failure(fault.status ?? 500, 10001, "fault"));
     const listed = [...scripts].sort().map((id) => ({ id, tag: "tag-test", has_assets: false, deployment_id: "" }));
     const { scriptsUnlisted } = stateOf(partition);
@@ -444,7 +448,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   if (partition && url.pathname === `${account}/storage/kv/namespaces/${kvNamespace}/keys` && request.method === "GET") {
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer("entry.list", "", failure(403, 10000, "Authentication error"));
     await passGate("entry.list", gates);
-    const fault = await takeFault(faults, "entry.list");
+    const fault = takeFault(faults, "entry.list");
     if (fault) return answer("entry.list", "", failure(fault.status ?? 500, 10001, "fault"));
     const limit = Number(url.searchParams.get("limit") ?? 1000);
     const cursor = url.searchParams.get("cursor");
@@ -472,11 +476,11 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   if (script) {
     const name = decodeURIComponent(script[2]);
     const op: Op | null = request.method === "GET" ? "script.get" : request.method === "DELETE" ? "script.delete" : null;
-    if (!op) return failure(405, 10405, "Method not allowed");
+    if (!op) { unexpected(405); return failure(405, 10405, "Method not allowed"); }
     // The scripts token only: the routing token can't touch a script.
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer(op, name, failure(403, 10000, "Authentication error"));
     await passGate(op, gates);
-    const fault = await takeFault(faults, op);
+    const fault = takeFault(faults, op);
     if (fault && !fault.lost) return answer(op, name, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "script.get") {
       const body = envelope({ namespace_id: "ns-test", namespace_name: namespace, script: scripts.has(name) ? { id: name, tag: "tag-test" } : null });
@@ -491,11 +495,11 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   if (entry) {
     const host = decodeURIComponent(entry[2]);
     const op: Op | null = request.method === "PUT" ? "entry.put" : request.method === "GET" ? "entry.get" : request.method === "DELETE" ? "entry.delete" : null;
-    if (!op) return failure(405, 10405, "Method not allowed");
+    if (!op) { unexpected(405); return failure(405, 10405, "Method not allowed"); }
     // The routing token only: the scripts token can't write what a host serves.
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer(op, host, failure(403, 10000, "Authentication error"));
     await passGate(op, gates);
-    const fault = await takeFault(faults, op);
+    const fault = takeFault(faults, op);
     if (fault && !fault.lost && !fault.stale && !fault.flip) return answer(op, host, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "entry.put") {
       entries.set(host, await request.text());
@@ -515,6 +519,6 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     return answer(op, host, value === undefined ? failure(404, 10009, "key not found") : new Response(value, { status: 200 }));
   }
   // Any other path on the provider's API: a wrong account, a wrong namespace, or a call nothing should make.
-  stateOf("default").calls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status: 404 });
+  unexpected(404);
   return failure(404, 7003, "No route for the URI");
 }

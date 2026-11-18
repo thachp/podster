@@ -1,5 +1,5 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // M6 stage 1: the serve entry's mark that the script it names carries code (`podster_core::serve_entry`). The
 // provider writes the mark only when told a release carries code: since S3 of the store plan, the applier tells it so
@@ -42,6 +42,10 @@ const CUSTOM = FIXTURE.custom_entry_host;
 
 describe("the provider's serve entry", () => {
   beforeEach(async () => { await fake("/reset"); });
+  // Any provider call outside this file's own partition, or one nothing answers, is told here as unexpected.
+  afterEach(async () => {
+    expect(((await fake("/state")).calls as { name: string }[]).filter((call) => call.name.startsWith("unexpected "))).toEqual([]);
+  });
 
   it("runs in its own partition of the content provider's stand-in", () => {
     expect([FAKE.partition, FAKE.control]).toEqual(["serve-entry", "serve-entry.content-fake.example.com"]);

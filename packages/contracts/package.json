@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node check.mjs && node error-codes.test.mjs && node core-sets.test.mjs && node provenance-checks.test.mjs"
+    "test": "node check.mjs && node error-codes.test.mjs && node core-sets.test.mjs && node provenance-checks.test.mjs && node security-classes.test.mjs"
   },
   "devDependencies": {
     "yaml": "2.8.1"

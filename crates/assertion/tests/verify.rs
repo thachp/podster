@@ -391,3 +391,105 @@ fn a_provider_delivery_is_checked_like_any_other() {
         Err(AssertionError::BadSignature)
     );
 }
+
+fn redeem_claims() -> Value {
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "pairing_redeem", "agent_id": "agt_session_1", "key_thumbprint": "k".repeat(43),
+        "proof_jti": "p-1", "proof_exp": NOW + 60, "body_sha256": "cd".repeat(32), "jti": "r1", "iat": NOW, "exp": NOW + 60 })
+}
+
+#[test]
+fn only_the_redeem_route_takes_a_pairing_redeem() {
+    let token = sign(&redeem_claims());
+    let redeem = podster_assertion::verify_pairing_redeem(&token, &keys(), NOW).unwrap();
+    assert_eq!(redeem.agent_id, "agt_session_1");
+    assert_eq!(redeem.key_thumbprint, "k".repeat(43));
+    assert_eq!(redeem.proof_jti, "p-1");
+    assert_eq!(redeem.proof_exp, NOW + 60);
+    assert_eq!(redeem.body_sha256, "cd".repeat(32));
+    // It names no one, so no other route takes it.
+    assert_eq!(verify(&token, &keys(), NOW), Err(AssertionError::Malformed));
+    assert!(matches!(
+        verify_room_page_caller(&token, &keys(), NOW),
+        Err(AssertionError::Malformed)
+    ));
+    assert_eq!(
+        podster_assertion::verify_provider_delivery(&token, &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+    // And the redeem route takes nothing else.
+    for other in [claims(), public_claims(), delivery_claims()] {
+        assert_eq!(
+            podster_assertion::verify_pairing_redeem(&sign(&other), &keys(), NOW),
+            Err(AssertionError::Malformed)
+        );
+    }
+}
+
+#[test]
+fn a_pairing_redeem_is_checked_like_any_other() {
+    let check = |c: &Value| podster_assertion::verify_pairing_redeem(&sign(c), &keys(), NOW);
+    let set = |field: &str, value: Value| {
+        let mut c = redeem_claims();
+        c[field] = value;
+        c
+    };
+    let mut expired = redeem_claims();
+    expired["iat"] = json!(NOW - 100);
+    expired["exp"] = json!(NOW - 40);
+    assert_eq!(check(&expired), Err(AssertionError::Expired));
+    assert_eq!(
+        check(&set("exp", json!(NOW + 600))),
+        Err(AssertionError::LifetimeTooLong)
+    );
+    assert_eq!(
+        check(&set("aud", json!("someone-else"))),
+        Err(AssertionError::WrongAudience)
+    );
+    // A thumbprint that isn't 43 base64url characters, a bad body hash, an empty or overlong proof ID, a proof already
+    // past its expiry, and anything naming someone are all malformed.
+    for (field, value) in [
+        ("key_thumbprint", json!("k".repeat(42))),
+        ("key_thumbprint", json!("k".repeat(44))),
+        ("key_thumbprint", json!(format!("{}+", "k".repeat(42)))),
+        ("body_sha256", json!("CD".repeat(32))),
+        ("body_sha256", json!("cd".repeat(31))),
+        ("proof_jti", json!("")),
+        ("proof_jti", json!("p".repeat(129))),
+        ("proof_exp", json!(NOW - 10)),
+        // A proof the API would have to remember for more than five minutes.
+        ("proof_exp", json!(NOW + 301)),
+        ("agent_id", json!("")),
+        ("agent_id", json!("agt has space")),
+        ("agent_id", json!(format!("agt_{}", "a".repeat(125)))),
+        ("jti", json!("")),
+        ("sub", json!("per_1")),
+        ("org", json!("org_1")),
+    ] {
+        assert_eq!(
+            check(&set(field, value)),
+            Err(AssertionError::Malformed),
+            "{field}"
+        );
+    }
+    // Five minutes ahead is the limit, and is taken.
+    assert!(check(&set("proof_exp", json!(NOW + 300))).is_ok());
+    for field in [
+        "agent_id",
+        "key_thumbprint",
+        "proof_jti",
+        "proof_exp",
+        "body_sha256",
+        "jti",
+        "kind",
+    ] {
+        let mut c = redeem_claims();
+        c.as_object_mut().unwrap().remove(field);
+        assert_eq!(check(&c), Err(AssertionError::Malformed), "{field}");
+    }
+    let header = json!({ "alg": "EdDSA", "kid": "k1" });
+    let forged = sign_raw(&header, &redeem_claims(), &key(2));
+    assert_eq!(
+        podster_assertion::verify_pairing_redeem(&forged, &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+}

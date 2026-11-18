@@ -18,6 +18,7 @@ pub mod files;
 pub mod hostname_recheck;
 pub mod hostname_requests;
 pub mod hostnames;
+pub mod pairing;
 pub mod provider_deliveries;
 pub mod provisioning;
 pub mod public_claims;

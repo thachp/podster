@@ -15,6 +15,7 @@ use worker::*;
 type R<T> = std::result::Result<T, ApiError>;
 
 mod a2a_endpoint;
+pub mod pairing;
 mod participation;
 mod public_claims;
 
@@ -1825,6 +1826,9 @@ impl Principal {
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         let path = req.path();
+        if pairing::handles(&path) {
+            return self.pairing(&path, req).await;
+        }
         match path.as_str() {
             "/internal/org-room-reserve" => {
                 let body: Value = req.json().await?;
@@ -2454,6 +2458,10 @@ impl Principal {
                     return Err(ApiError::not_allowed());
                 }
                 return Ok(connection_json(&existing));
+            }
+            // A pairing session's agent is made only by its activation (M7 step 5(a)).
+            if pairing::holds_session(&sql)? {
+                return Err(ApiError::not_allowed());
             }
             let (store, id, created) = (sql.clone(), agent_id.clone(), now_ms());
             // Together, because a schema with no connection row could never be registered again.

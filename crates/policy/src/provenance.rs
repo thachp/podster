@@ -27,16 +27,27 @@ pub fn is_external(author_org: Option<&str>, reader_org: &str) -> bool {
     }
 }
 
-/// Whether a prompt input counts as external to the reader: if any author who ever wrote it is, or if who wrote its
-/// present words isn't known. Every author is kept, so the last writer can't hide an earlier one, and an input with no
-/// recorded author at all is external.
-pub fn input_external(authors_external: &[bool], unknown: bool) -> bool {
-    unknown || authors_external.is_empty() || authors_external.iter().any(|external| *external)
+/// Whether a prompt input counts as external to the reader: if any author who ever wrote it is external, or is no longer
+/// active, or if any write's author isn't known. `authors` is each author's `(external, active)`. Every author is kept, so
+/// the last writer can't hide an earlier one (F1), and inactivity is folded in here, one fail-closed answer for every
+/// reader rather than one left to Runner (G2). An input with no recorded author at all is external.
+pub fn input_external(authors: &[(bool, bool)], unknown: bool) -> bool {
+    unknown
+        || authors.is_empty()
+        || authors
+            .iter()
+            .any(|(external, active)| *external || !active)
+}
+
+/// Whether the requester counts as external to the reader: unless they were recorded in the reader's organization when
+/// they became requester and are still active there (G2).
+pub fn requester_external(recorded_org: Option<&str>, reader_org: &str, active: bool) -> bool {
+    is_external(recorded_org, reader_org) || !active
 }
 
 /// Whether an author, or the requester, is active: a current participant of the room, held now in the organization
-/// recorded when they wrote or took the part. Read from the room's current state each time. Runner's run policy treats
-/// someone who isn't as external (M7 step 7); the server decides nothing from it.
+/// recorded when they wrote or took the part. Read from the room's current state each time. An input or requester with
+/// someone who isn't is external in the answer (G2); the server authorizes nothing from it.
 pub fn author_active(
     participant: bool,
     held_org: Option<&str>,

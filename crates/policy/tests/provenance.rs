@@ -87,15 +87,25 @@ fn an_author_is_external_unless_the_reader_shares_a_known_organization() {
 }
 
 #[test]
-fn an_input_is_external_if_any_author_is_or_one_is_unknown() {
-    assert!(!input_external(&[false], false));
-    assert!(!input_external(&[false, false], false));
-    // The last writer can't launder an earlier external author (the review's F1).
-    assert!(input_external(&[true, false], false));
-    assert!(input_external(&[false, true], false));
+fn an_input_is_external_if_any_author_is_external_inactive_or_unknown() {
+    // (external, active) for each author.
+    assert!(!input_external(&[(false, true)], false));
+    assert!(!input_external(&[(false, true), (false, true)], false));
+    // The last writer can't launder an earlier external author (F1).
+    assert!(input_external(&[(true, true), (false, true)], false));
+    // An author no longer here makes it external too, on the server's answer (G2).
+    assert!(input_external(&[(false, false), (false, true)], false));
     // Unknown words, or no author at all, count as external.
-    assert!(input_external(&[false], true));
+    assert!(input_external(&[(false, true)], true));
     assert!(input_external(&[], false));
+}
+
+#[test]
+fn a_requester_is_external_unless_of_the_reader_s_organization_and_still_here() {
+    assert!(!requester_external(Some("org_a"), "org_a", true));
+    assert!(requester_external(Some("org_a"), "org_a", false));
+    assert!(requester_external(Some("org_b"), "org_a", true));
+    assert!(requester_external(None, "org_a", true));
 }
 
 #[test]

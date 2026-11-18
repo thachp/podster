@@ -1050,7 +1050,7 @@ components:
       type: object
       additionalProperties: false
       required: [room_visibility, requester, inputs]
-      description: "M7 step 4 (decision 228): where a task's prompt came from, for Runner's run policy, which lets the least-trusted author of any input decide (RUNNER.md). The room records each author from the command that wrote the input, never from anything a client sends, keeps every author an input ever had, and shows this only to someone who may read the task, through oversight too. It is a read only: nothing on the server authorizes from it, and no request takes any of it. `external` compares organizations only. Only `get_task` returns it."
+      description: "M7 step 4 (decision 228): where a task's prompt came from, for Runner's run policy, which lets the least-trusted author of any input decide (RUNNER.md). The room records each author from the command that wrote the input, never from anything a client sends, keeps every author an input ever had, and shows this only to someone who may read the task, through oversight too. It is a read only: nothing on the server authorizes from it, and no request takes any of it. An author's `external` compares organizations only; an input's and the requester's `external` also count anyone unknown or no longer active, one fail-closed answer. Only `get_task` returns it."
       properties:
         room_visibility: { type: string, enum: [private, public], description: "The room's visibility as it stands." }
         requester:
@@ -1060,7 +1060,7 @@ components:
           properties:
             id: { type: string }
             org: { type: [string, "null"], description: "The organization the room held the requester in when they became requester, by creating the task or by a change of requester. Null if none was recorded, as for a task made before this was." }
-            external: { type: boolean, description: "Compares organizations only: true unless `org` is the reader's organization. Always true when `org` is null." }
+            external: { type: boolean, description: "True unless `org` is the reader's organization and the requester is `active`. Always true when `org` is null." }
             active: { type: boolean, description: "Whether the requester is, as the room stands now, a current participant held in `org`." }
         inputs:
           type: array
@@ -1072,11 +1072,11 @@ components:
             required: [input, external, authors]
             properties:
               input: { type: string, enum: [title, instructions, acceptance_criteria, change_request] }
-              external: { type: boolean, description: "True if any author is external, an unknown author included." }
+              external: { type: boolean, description: "True if any author is external, unknown or not `active`: one fail-closed answer for the reader." }
               authors:
                 type: array
                 minItems: 1
-                description: "Everyone who ever wrote this input, in the order they first did, each once; none is removed while the task exists. When who wrote the present words isn't recorded (words changed by a path that records no author, a change request whose record isn't the latest, or a task made before this was recorded), an unknown author with a null `id` is added after the others."
+                description: "Everyone who ever wrote this input, in the order they first did, once for each organization they wrote it under; none is removed while the task exists. When who wrote the present words isn't recorded (words changed by a path that records no author, a change request whose record isn't the latest, or a task made before this was recorded), an unknown author with a null `id` is listed. Once a write finds such words, the unknown author stays for good, even after later recorded edits."
                 items:
               type: object
               additionalProperties: false
@@ -1085,7 +1085,7 @@ components:
                 id: { type: [string, "null"], description: "Null for an unknown author: who wrote the present words isn't recorded." }
                 org: { type: [string, "null"], description: "The organization the room held them in when they wrote it. Null if none was recorded." }
                 external: { type: boolean, description: "Compares organizations only: true unless `org` is the reader's organization. Always true for an unknown author." }
-                active: { type: boolean, description: "Whether they are, as the room stands now, a current participant held in `org`. False once they leave, are revoked or are held in another organization, and for an unknown author. Runner's run policy treats false as external (M7 step 7); the server decides nothing from it." }
+                active: { type: boolean, description: "Whether they are, as the room stands now, a current participant held in `org`. False once they leave, are revoked or are held in another organization, and for an unknown author. A false here makes the input `external`; the server authorizes nothing from it." }
                 written_at: { type: [integer, "null"], description: "When they last wrote it, in milliseconds. Null for an unknown author." }
               event_id: { type: [string, "null"], description: "For `change_request` only: the ID of the latest `task.changes_requested` history entry, whose `reason` is the request." }
     Task:

@@ -55,34 +55,79 @@ export function provenanceInRequests(api) {
 }
 
 const TEXT_COLUMNS = /\b(title|instructions|acceptance_criteria)\b/;
-const PROVENANCE_TABLES = /\b(INSERT|UPDATE|REPLACE|DELETE)\b[^"]*\b(task_input_author|task_input_text|task_requester_org)\b/;
-const TASK_WRITE = /\b(INSERT INTO task \(|UPDATE task SET)[^"]*/g;
+const PROVENANCE_TABLE = /\b(task_input_author|task_input_text|task_requester_org)\b/;
+// Every SQL form that writes rows of `task`: INSERT, INSERT OR …, REPLACE, UPDATE and UPDATE OR ….
+const TASK_WRITE = /\b(INSERT( OR \w+)? INTO|REPLACE INTO|UPDATE( OR \w+)?) task\b(?!_)/i;
 
 /** The name of the function a position in Rust source is in: the last `fn name` before it. */
 const enclosing = (text, at) => [...text.slice(0, at).matchAll(/\bfn (\w+)/g)].at(-1)?.[1];
 
 /**
+ * Every string literal in Rust source, as `{ at, text }` with its whitespace collapsed, so a statement split over lines
+ * reads whole. Comments, char literals and raw strings are told apart from strings, so a quote in a comment or a `'"'`
+ * can't pair with another.
+ */
+export function rustLiterals(source) {
+  const found = [];
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    if (c === "/" && source[i + 1] === "/") { i = source.indexOf("\n", i); if (i < 0) break; continue; }
+    if (c === "/" && source[i + 1] === "*") { const end = source.indexOf("*/", i + 2); i = end < 0 ? source.length : end + 2; continue; }
+    const raw = (c === "r" || c === "b") && !/\w/.test(source[i - 1] ?? "") ? source.slice(i, i + 40).match(/^b?r(#*)"/) : null;
+    if (raw) {
+      const close = `"${raw[1]}`;
+      const end = source.indexOf(close, i + raw[0].length);
+      const stop = end < 0 ? source.length : end;
+      found.push({ at: i, text: source.slice(i + raw[0].length, stop).replace(/\s+/g, " ") });
+      i = stop + close.length;
+      continue;
+    }
+    if (c === "'") {
+      const char = source.slice(i, i + 12).match(/^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'\n])'/);
+      i += char ? char[0].length : 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < source.length && source[j] !== '"') j += source[j] === "\\" ? 2 : 1;
+      found.push({ at: i, text: source.slice(i + 1, j).replace(/\\\n\s*/g, "").replace(/\\n/g, " ").replace(/\s+/g, " ") });
+      i = j + 1;
+      continue;
+    }
+    i++;
+  }
+  return found;
+}
+
+/** Whether a task write's literal names its own columns, or is a piece of SQL built with `format!` or concatenation. */
+const builtFromPieces = (statement) =>
+  statement.includes("{") || /\bSET\s*$/i.test(statement) || (/\bSET\b/i.test(statement) && !/\bSET\s+\w+\s*=/i.test(statement)) || (/\bINTO task\b/i.test(statement) && !/\bINTO task\s*\([^)]*\)/i.test(statement));
+
+/**
  * Where a task's prompt text is written, and where its provenance is recorded. `files` is `[{ path, text }]` of the API's
- * Rust sources, paths relative to the repository. The text columns are written only by `store.rs`'s `insert_task` and
+ * Rust sources, paths relative to the repository. Each string literal is read whole, across lines (G4). The text
+ * columns are written, by any of INSERT, INSERT OR REPLACE, REPLACE or UPDATE, only by `store.rs`'s `insert_task` and
  * `save_task`; `insert_task` is called only by `handle_create_task`; that function and `handle_task_command_with`, the
- * only path that decides an update, each record the provenance; and only `workspace/provenance.rs` writes its tables,
- * apart from their migration. `save_task` is called from other paths too, which change no prompt text; were one to, the
+ * only path that decides an update, each record the provenance; and only `workspace/provenance.rs` names its tables,
+ * apart from their migration, so no SQL built with `format!` or concatenation elsewhere reaches them. A task write elsewhere
+ * built from pieces is refused, since what it writes can't be read. `save_task` is called from other paths too, which change no prompt text; were one to, the
  * text's hash no longer matches and the input reads as unknown, so this guard and that one back each other up.
  */
 export function promptWrites(files) {
   const problems = [];
   for (const { path, text } of files) {
     const migrationsEnd = path === "apps/api/src/store.rs" ? text.indexOf('"];') : -1;
-    for (const found of text.matchAll(TASK_WRITE)) {
-      if (!TEXT_COLUMNS.test(found[0])) continue;
-      const fn = enclosing(text, found.index);
-      if (path !== "apps/api/src/store.rs" || !["insert_task", "save_task"].includes(fn)) problems.push(`${path}: ${fn ?? "?"} writes a task's prompt text outside store.rs's insert_task and save_task`);
-    }
-    for (const line of text.split("\n").map((l, n) => [l, n])) {
-      if (!PROVENANCE_TABLES.test(line[0])) continue;
-      const at = text.split("\n").slice(0, line[1]).join("\n").length;
-      if (path === "apps/api/src/workspace/provenance.rs" || (migrationsEnd >= 0 && at < migrationsEnd)) continue;
-      problems.push(`${path}:${line[1] + 1}: only workspace/provenance.rs writes a task's provenance`);
+    for (const { at, text: statement } of rustLiterals(text)) {
+      const fn = enclosing(text, at);
+      const inMigrations = migrationsEnd >= 0 && at < migrationsEnd;
+      // A provenance table is named only by its module and its migration: no other SQL, whole or in pieces, reaches it.
+      if (PROVENANCE_TABLE.test(statement) && path !== "apps/api/src/workspace/provenance.rs" && !inMigrations) problems.push(`${path}: ${fn ?? "?"} names a task's provenance table; only workspace/provenance.rs may`);
+      if (!TASK_WRITE.test(statement)) continue;
+      const allowed = path === "apps/api/src/store.rs" && ["insert_task", "save_task"].includes(fn);
+      if (allowed) continue;
+      if (TEXT_COLUMNS.test(statement)) problems.push(`${path}: ${fn ?? "?"} writes a task's prompt text outside store.rs's insert_task and save_task`);
+      else if (builtFromPieces(statement)) problems.push(`${path}: ${fn ?? "?"} writes a task with SQL built from pieces, which this check can't read`);
     }
     for (const found of text.matchAll(/\binsert_task\(/g)) {
       // Its own definition isn't a call.

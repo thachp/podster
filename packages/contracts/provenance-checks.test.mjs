@@ -42,5 +42,23 @@ check(promptWrites([...good, { path: "apps/api/src/workspace/x.rs", text: `fn sn
 check(promptWrites([good[0], workspace("", "provenance::record(sql);"), good[2]]).some((p) => p.includes("handle_create_task")), "a create path that records no provenance is found");
 check(promptWrites([good[0], workspace("provenance::record(sql);", ""), good[2]]).some((p) => p.includes("handle_task_command_with")), "a command path that records no provenance is found");
 
+// G4: whole statements, every write form, and SQL built from pieces.
+const sneaks = {
+  "a prompt column on a later line of a multi-line statement": `fn sneak() {\n    exec(sql, "UPDATE task\n      SET due_at = ?,\n          instructions = ? WHERE id = ?");\n}\n`,
+  "INSERT OR REPLACE INTO task": `fn sneak() {\n    exec(sql, "INSERT OR REPLACE INTO task (id, title) VALUES (?, ?)");\n}\n`,
+  "REPLACE INTO task": `fn sneak() {\n    exec(sql, "REPLACE INTO task (id, acceptance_criteria) VALUES (?, ?)");\n}\n`,
+  "UPDATE OR REPLACE task": `fn sneak() {\n    exec(sql, "UPDATE OR REPLACE task SET title = ? WHERE id = ?");\n}\n`,
+  "a task write whose columns are built with format!": `fn sneak() {\n    exec(sql, &format!("UPDATE task SET {} = ? WHERE id = ?", col));\n}\n`,
+  "a task write whose columns are concatenated": `fn sneak() {\n    exec(sql, &("UPDATE task SET ".to_string() + col + " = ?"));\n}\n`,
+  "INSERT OR REPLACE INTO a provenance table": `fn sneak() {\n    exec(sql, "INSERT OR REPLACE INTO task_input_text (task_id) VALUES (?)");\n}\n`,
+  "an UPDATE of a provenance table across lines": `fn sneak() {\n    exec(sql, "UPDATE\n  task_requester_org SET org = NULL");\n}\n`,
+  "a provenance table named in format!": `fn sneak() {\n    exec(sql, &format!("DELETE FROM {} WHERE task_id = ?", "task_input_author"));\n}\n`,
+  "a provenance table named in a concatenation": `fn sneak() {\n    exec(sql, &("UPDATE ".to_string() + "task_input_text" + " SET written_at = 0"));\n}\n`,
+};
+for (const [what, text] of Object.entries(sneaks)) {
+  check(promptWrites([...good, { path: "apps/api/src/workspace/x.rs", text }]).length > 0, `${what} is found`);
+}
+check(promptWrites([...good, { path: "apps/api/src/workspace/x.rs", text: `fn fine() {\n    exec(sql, "UPDATE task\n      SET duration_days = ? WHERE id = ?");\n}\n` }]).length === 0, "a multi-line write of other columns passes");
+
 if (failed) { console.error(`provenance-checks selftest: ${failed} failed`); process.exit(1); }
 console.log("provenance-checks selftest passed");

@@ -181,6 +181,29 @@ describe("a task's provenance", () => {
     const body = await read(BOB, path);
     expect(body.provenance.requester).toEqual({ id: LEAD.id, org: LEAD.org, external: true, active: false });
     for (const input of body.provenance.inputs) expect(authors(input)).toEqual([author(LEAD, true, false)]);
+    // To the room's own organization too: an author or requester no longer here makes the answer external (G2).
+    const own = await read(REVIEWER, path);
+    expect(own.provenance.requester).toEqual({ id: LEAD.id, org: LEAD.org, external: true, active: false });
+    for (const input of own.provenance.inputs) {
+      expect(input.external, input.input).toBe(true);
+      expect(authors(input)).toEqual([author(LEAD, false, false)]);
+    }
+  });
+
+  it("keeps each author and organization pair, so someone held under another organization is listed under both (G3)", async () => {
+    const { id, tasks } = await room();
+    const t = await create(LEAD, tasks, { assignee: BOB.id });
+    const path = `${tasks}/${t.id}`;
+    const first = await api(ADMIN, "POST", `${path}/update`, { version: t.version, instructions: "First edit" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    // The same person, now held in the room under another organization, edits again.
+    await inRoom(id, (sql) => sql.exec("UPDATE member SET org_id = 'org_pv2' WHERE principal_id = ?", ADMIN.id));
+    const moved = { ...ADMIN, org: "org_pv2" };
+    const second = await api(moved, "POST", `${path}/update`, { version: first.body.version, instructions: "Second edit" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    const seen = inputs(await read(LEAD, path));
+    expect(authors(seen.instructions)).toEqual([author(LEAD, false), author(ADMIN, false, false), author(moved, true)]);
+    expect(seen.instructions.external).toBe(true);
   });
 
   it("names every change request's author and the latest one's history entry", async () => {
@@ -275,15 +298,40 @@ describe("a task's provenance", () => {
     expect((await read(BOB, `${tasks}/${t.id}`)).provenance.room_visibility).toBe("public");
   });
 
-  it("shows inputs and a requester nobody recorded as unknown and external, even to the room's own organization", async () => {
+  it("shows a requester and words nobody recorded as unknown and external, keeping the authors it has", async () => {
     const { id, tasks } = await room();
     const t = await create(LEAD, tasks, { assignee: BOB.id, acceptance_criteria: "Tests pass" });
     await inRoom(id, (sql) => {
-      for (const table of ["task_input_author", "task_input_text", "task_requester_org"]) sql.exec(`DELETE FROM ${table} WHERE task_id = ?`, t.id);
+      for (const table of ["task_input_text", "task_requester_org"]) sql.exec(`DELETE FROM ${table} WHERE task_id = ?`, t.id);
     });
     const body = await read(LEAD, `${tasks}/${t.id}`);
     expect(body.provenance.requester).toEqual({ id: LEAD.id, org: null, external: true, active: false });
-    expect(body.provenance.inputs).toEqual(["title", "instructions", "acceptance_criteria"].map(unknownInput));
+    for (const input of body.provenance.inputs) {
+      expect(input.external, input.input).toBe(true);
+      expect(authors(input)).toEqual([author(LEAD, false), UNKNOWN]);
+    }
+  });
+
+  it("never removes an author once recorded (G1)", async () => {
+    const { id, tasks } = await room();
+    const t = await create(LEAD, tasks, { assignee: BOB.id });
+    const refused = await inRoom(id, (sql) => { try { sql.exec("DELETE FROM task_input_author WHERE task_id = ?", t.id); return null; } catch (e) { return String(e); } });
+    expect(String(refused)).toMatch(/kept/);
+    expect(authors(inputs(await read(LEAD, `${tasks}/${t.id}`)).title)).toEqual([author(LEAD, false)]);
+  });
+
+  it("keeps an unknown author after a recorded edit of words a path changed without one (G1)", async () => {
+    const { id, tasks } = await room();
+    const t = await create(LEAD, tasks, { assignee: BOB.id });
+    const path = `${tasks}/${t.id}`;
+    await inRoom(id, (sql) => sql.exec("UPDATE task SET instructions = 'Something else entirely' WHERE id = ?", t.id));
+    // The requester edits the changed words: the unknown change before it isn't washed out.
+    const edited = await api(LEAD, "POST", `${path}/update`, { version: t.version, instructions: "Write the design, properly" });
+    expect(edited.status, JSON.stringify(edited.body)).toBe(200);
+    const seen = inputs(await read(LEAD, path));
+    expect(seen.instructions.external).toBe(true);
+    expect(authors(seen.instructions)).toEqual([author(LEAD, false), UNKNOWN]);
+    expect(seen.title.external).toBe(false);
   });
 
   it("adds an unknown author, keeping the others, when the words changed by a path that names none", async () => {
@@ -327,5 +375,25 @@ describe("a task's provenance", () => {
     // The step runs again over its own tables harmlessly, so a renumbering on rebase can't break a room.
     await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
     expect((await read(BOB, path)).provenance).toEqual(after.provenance);
+  });
+
+  it("marks an existing task's inputs unknown on migration, and an internal edit afterwards still reads external (G1)", async () => {
+    const { id, tasks } = await room();
+    const t = await create(LEAD, tasks, { assignee: BOB.id, acceptance_criteria: "Tests pass" });
+    const path = `${tasks}/${t.id}`;
+    await inRoom(id, (sql) => {
+      for (const table of ["task_input_author", "task_input_text", "task_requester_org"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect((await read(LEAD, path)).provenance.inputs).toEqual(["title", "instructions", "acceptance_criteria"].map(unknownInput));
+    const edited = await api(LEAD, "POST", `${path}/update`, { version: t.version, title: "Design billing, v2" });
+    expect(edited.status, JSON.stringify(edited.body)).toBe(200);
+    const seen = inputs(await read(LEAD, path));
+    expect(seen.title.external).toBe(true);
+    expect(authors(seen.title)).toEqual([UNKNOWN, author(LEAD, false)]);
+    // A task made after the step gets no unknown author from a rerun of it.
+    const fresh = await create(LEAD, tasks, { assignee: BOB.id });
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
+    for (const input of (await read(LEAD, `${tasks}/${fresh.id}`)).provenance.inputs) expect(authors(input)).toEqual([author(LEAD, false)]);
   });
 });

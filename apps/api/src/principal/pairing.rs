@@ -7,8 +7,10 @@
 //!   A person starts at most `podster_core::pairing::MAX_STARTS` an hour, counted on their own Principal before the
 //!   session is made; a count that can't be read refuses the start.
 //! - **Redeem:** Runner's code, with the thumbprint of a key whose proof of possession the gateway checked, under the
-//!   gateway's `pairing_redeem` assertion and nothing else. The proof's ID is spent here. Every refusal answers the same
-//!   `not_allowed`, wrong codes are counted, and the fifth locks the session for good.
+//!   gateway's `pairing_redeem` assertion and nothing else, which names this session's agent. The proof's ID is checked
+//!   on every redemption of a session and spent there; a session that doesn't exist writes nothing, so nothing is kept for
+//!   it. Every refusal, a replay and a proof for another session included, answers the same `not_allowed`, wrong codes are
+//!   counted, and the fifth locks the session for good.
 //! - **Activate:** the starter confirms the thumbprint they were shown, while they still administer the organization in a
 //!   membership older than the session. Only then does the agent's connection exist.
 //!
@@ -201,7 +203,8 @@ pub async fn redeem(mut req: Request, env: Env, agent: &str) -> R<Response> {
     if verifier(&text) != proof.body_sha256 {
         return Err(ApiError::invalid_assertion());
     }
-    if !is_agent_id(agent) {
+    // A proof is for the one session it names (M2): sent to any other, it's refused like every other refusal.
+    if !is_agent_id(agent) || proof.agent_id != agent {
         return Err(ApiError::not_allowed());
     }
     let body: Value = serde_json::from_str(&text).map_err(|_| ApiError::invalid_argument())?;
@@ -210,7 +213,7 @@ pub async fn redeem(mut req: Request, env: Env, agent: &str) -> R<Response> {
         .filter(|c| decide::valid_code(c))
         .ok_or_else(ApiError::invalid_argument)?;
     let offered = json!({
-        "verifier": verifier(code), "key_thumbprint": proof.key_thumbprint, "proof_jti": proof.proof_jti,
+        "agent_id": proof.agent_id, "verifier": verifier(code), "key_thumbprint": proof.key_thumbprint, "proof_jti": proof.proof_jti,
         "proof_expires_at": proof.proof_exp.saturating_mul(1000),
     });
     relay(call(&env, agent, REDEEM, &offered, None).await?).await
@@ -456,22 +459,31 @@ impl Principal {
         if !holds_session(&sql)? {
             return Err(ApiError::not_allowed());
         }
+        let named = text(&body["agent_id"]).ok_or_else(ApiError::invalid_argument)?;
         let offered = text(&body["verifier"]).ok_or_else(ApiError::invalid_argument)?;
         let thumbprint = text(&body["key_thumbprint"]).ok_or_else(ApiError::invalid_argument)?;
         let proof = text(&body["proof_jti"]).ok_or_else(ApiError::invalid_argument)?;
         let proof_expires_at = int(&body["proof_expires_at"]);
         let store = sql.clone();
         let done = self.in_transaction(move || {
+            // Spent proofs go once they expire, on every redemption, and the assertion keeps that within five minutes (L2).
             exec(&store, "DELETE FROM pairing_proof WHERE expires_at < ?", vec![now.into()])?;
+            let row = session_row(&store)?.ok_or_else(ApiError::not_allowed)?;
+            let actor = format!("key:{thumbprint}");
+            // A replay is refused like every other refusal, and its pruning still commits (L1).
             if !rows(&store, "SELECT jti FROM pairing_proof WHERE jti = ?", vec![proof.as_str().into()])?.is_empty() {
-                return Err(ApiError::jwt_replay());
+                record(&store, "pairing.refused", &actor, Some("proof_replayed"), now)?;
+                return Ok(json!({ "refused": true }));
             }
             exec(&store, "INSERT INTO pairing_proof (jti, expires_at) VALUES (?, ?)", vec![proof.as_str().into(), proof_expires_at.into()])?;
-            let row = session_row(&store)?.ok_or_else(ApiError::not_allowed)?;
+            // The Worker checked this already; the session checks it again against its own agent.
+            if row["agent_id"].as_str() != Some(named.as_str()) {
+                record(&store, "pairing.refused", &actor, Some("other_session"), now)?;
+                return Ok(json!({ "refused": true }));
+            }
             let stored = row["code_verifier"].as_str().unwrap_or_default();
             let matches = decide::verifiers_match(stored.as_bytes(), offered.as_bytes());
             let Decision { next, outcome } = decide::redeem(&session_of(&row)?, now, matches, &thumbprint);
-            let actor = format!("key:{thumbprint}");
             match outcome {
                 Outcome::Redeemed => {
                     save(&store, &next, now)?;

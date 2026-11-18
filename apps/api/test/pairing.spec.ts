@@ -38,12 +38,13 @@ async function sha256Hex(text: string) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-type Proof = { thumbprint?: string; proofJti?: string; proofExp?: number; bodyHash?: string; extra?: Record<string, unknown> };
-/** The gateway's redemption assertion: it checked a proof signed by the key with this thumbprint, over this proof ID. */
+type Proof = { agent?: string; thumbprint?: string; proofJti?: string; proofExp?: number; bodyHash?: string; extra?: Record<string, unknown> };
+/** The gateway's redemption assertion: it checked a proof signed by the key with this thumbprint, over this proof ID, for this session. */
 async function redeemAssertion(body: string, proof: Proof = {}) {
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({
     kind: "pairing_redeem",
+    agent_id: proof.agent ?? "agt_unnamed",
     key_thumbprint: proof.thumbprint ?? KEY,
     proof_jti: proof.proofJti ?? crypto.randomUUID(),
     proof_exp: proof.proofExp ?? now + 60,
@@ -65,7 +66,7 @@ const person = async (who: Person, method: string, path: string, body?: unknown)
 
 async function redeem(agent: string, code: string, proof: Proof = {}) {
   const body = JSON.stringify({ code });
-  return call(await redeemAssertion(body, proof), "POST", `/v1/pairing/${agent}/redeem`, body);
+  return call(await redeemAssertion(body, { agent, ...proof }), "POST", `/v1/pairing/${agent}/redeem`, body);
 }
 
 // Base64url, as the plugin's enrollment token and an RFC 7638 thumbprint are.
@@ -214,8 +215,54 @@ describe("redeeming the code", () => {
     const proofJti = crypto.randomUUID();
     expect((await redeem(agent, code, { proofJti })).status).toBe(200);
     const replay = await redeem(agent, code, { proofJti });
-    expect(replay.status).toBe(401);
-    expect(replay.code).toBe("jwt_replay");
+    // The same answer as every other refusal, so a replay tells nothing (L1).
+    expect(replay.status).toBe(403);
+    expect(replay.code).toBe("not_allowed");
+    // A replay of a refused proof is refused the same way, and a replay to a session that doesn't exist too.
+    const other = await start(admin());
+    const wrongJti = crypto.randomUUID();
+    expect((await redeem(other.agent, newCode(), { proofJti: wrongJti })).code).toBe("not_allowed");
+    expect((await redeem(other.agent, newCode(), { proofJti: wrongJti })).code).toBe("not_allowed");
+    const nobody = `agt_${"cd".repeat(16)}`;
+    const ghostJti = crypto.randomUUID();
+    for (let n = 0; n < 2; n++) {
+      const ghost = await redeem(nobody, newCode(), { proofJti: ghostJti });
+      expect(ghost.status).toBe(403);
+      expect(ghost.code).toBe("not_allowed");
+    }
+    expect(await tables(nobody)).toEqual([]);
+  });
+
+  it("refuses a proof made for another session, even with that session's right code (M2)", async () => {
+    const who = admin();
+    const first = await start(who);
+    const second = await start(who);
+    const body = JSON.stringify({ code: second.code });
+    // The proof names the first session; it's sent to the second, with the second's code.
+    const crossed = await call(await redeemAssertion(body, { agent: first.agent }), "POST", `/v1/pairing/${second.agent}/redeem`, body);
+    expect(crossed.status).toBe(403);
+    expect(crossed.code).toBe("not_allowed");
+    for (const agent of [first.agent, second.agent]) {
+      expect((await person(who, "GET", `/v1/pairing/${agent}`)).body).toMatchObject({ status: "pending", key_thumbprint: null, attempts_left: 5 });
+    }
+    // Made for the second, it's taken.
+    expect((await redeem(second.agent, second.code)).status).toBe(200);
+  });
+
+  it("forgets spent proofs once they expire, and refuses a proof that would live more than five minutes (L2)", async () => {
+    const { agent, code } = await start(admin());
+    await runInDurableObject(principal(agent), (_: any, state: any) => {
+      state.storage.sql.exec("INSERT INTO pairing_proof (jti, expires_at) VALUES ('old-1', ?), ('old-2', ?)", Date.now() - 1, Date.now() - 60_000);
+    });
+    expect((await redeem(agent, newCode())).code).toBe("not_allowed");
+    const kept = await runInDurableObject(principal(agent), (_: any, state: any) => state.storage.sql.exec("SELECT jti FROM pairing_proof").toArray().map((r: any) => r.jti));
+    expect(kept).toHaveLength(1);
+    expect(kept).not.toContain("old-1");
+    expect(kept).not.toContain("old-2");
+    const now = Math.floor(Date.now() / 1000);
+    const tooLong = await redeem(agent, code, { proofExp: now + 360 });
+    expect(tooLong.code).toBe("invalid_assertion");
+    expect((await redeem(agent, code, { proofExp: now + 290 })).status).toBe(200);
   });
 
   it("never lets another key take a code that's spent", async () => {

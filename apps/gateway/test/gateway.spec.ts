@@ -248,6 +248,18 @@ describe("people and organizations", () => {
     }
   });
 
+  it("the dashboard can't reach Runner pairing through the API path: only the gateway's own pairing routes may (M7 step 5)", async () => {
+    const a = await signUp();
+    const agent = `agt_${"ab".repeat(16)}`;
+    for (const [method, path] of [["POST", "/v1/pairing"], ["GET", `/v1/pairing/${agent}`], ["POST", `/v1/pairing/${agent}/activate`], ["POST", `/v1/pairing/${agent}/cancel`], ["POST", `/v1/pairing/${agent}/redeem`], ["GET", "/v1/pairing"], ["POST", "/v1/pairings"]]) {
+      const res = await dashboard(a, method, path, method === "GET" ? undefined : { org_id: a.org, plugin_host_id: "host_x", code: "A".repeat(43), key_thumbprint: "K".repeat(43) });
+      expect(res.status, `${method} ${path}`).toBe(404);
+      expect((await res.json<any>()).error.code, `${method} ${path}`).toBe("not_found");
+    }
+    expect(allowedPassthrough("/v1/pairing")).toBe(false);
+    expect(allowedPassthrough(`/v1/pairing/${agent}/activate`)).toBe(false);
+  });
+
   it("password sign-in is off unless a test environment turns it on", async () => {
     const auth = createAuth({ ...e, ENABLE_PASSWORD_SIGNIN: undefined });
     await expect(auth.api.signUpEmail({ body: { email: `${unique("q")}@example.test`, password: "local-test-password-123", name: "x" } })).rejects.toThrow();

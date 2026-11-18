@@ -393,7 +393,7 @@ fn a_provider_delivery_is_checked_like_any_other() {
 }
 
 fn redeem_claims() -> Value {
-    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "pairing_redeem", "key_thumbprint": "k".repeat(43),
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "pairing_redeem", "agent_id": "agt_session_1", "key_thumbprint": "k".repeat(43),
         "proof_jti": "p-1", "proof_exp": NOW + 60, "body_sha256": "cd".repeat(32), "jti": "r1", "iat": NOW, "exp": NOW + 60 })
 }
 
@@ -401,6 +401,7 @@ fn redeem_claims() -> Value {
 fn only_the_redeem_route_takes_a_pairing_redeem() {
     let token = sign(&redeem_claims());
     let redeem = podster_assertion::verify_pairing_redeem(&token, &keys(), NOW).unwrap();
+    assert_eq!(redeem.agent_id, "agt_session_1");
     assert_eq!(redeem.key_thumbprint, "k".repeat(43));
     assert_eq!(redeem.proof_jti, "p-1");
     assert_eq!(redeem.proof_exp, NOW + 60);
@@ -455,6 +456,11 @@ fn a_pairing_redeem_is_checked_like_any_other() {
         ("proof_jti", json!("")),
         ("proof_jti", json!("p".repeat(129))),
         ("proof_exp", json!(NOW - 10)),
+        // A proof the API would have to remember for more than five minutes.
+        ("proof_exp", json!(NOW + 301)),
+        ("agent_id", json!("")),
+        ("agent_id", json!("agt has space")),
+        ("agent_id", json!(format!("agt_{}", "a".repeat(125)))),
         ("jti", json!("")),
         ("sub", json!("per_1")),
         ("org", json!("org_1")),
@@ -465,7 +471,10 @@ fn a_pairing_redeem_is_checked_like_any_other() {
             "{field}"
         );
     }
+    // Five minutes ahead is the limit, and is taken.
+    assert!(check(&set("proof_exp", json!(NOW + 300))).is_ok());
     for field in [
+        "agent_id",
         "key_thumbprint",
         "proof_jti",
         "proof_exp",

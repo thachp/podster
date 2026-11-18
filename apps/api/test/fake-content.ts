@@ -35,6 +35,22 @@ export const FAKE_CONTENT = {
   routingToken: "test-routing-token-0000000000",
 };
 
+/**
+ * One partition of the stand-in for each spec file that must never meet another's state (the plan's owed per-file
+ * isolation): its own dispatch namespace, its own serve entries' KV namespace and its own control host. A call is held
+ * to the partition its path's namespace names, and `vitest.config.ts` gives each such spec file a test project of its
+ * own that binds only its partition's namespaces. Every other spec file shares the default partition, as before. The
+ * account, the tokens and the domain are the same for all, so nothing else in a build differs.
+ *
+ * What stays shared: the upload part and the app hosts below, which were already kept by script and by host.
+ */
+export const CONTENT_PARTITIONS = {
+  default: { namespace: FAKE_CONTENT.namespace, kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" },
+  "serve-entry": { namespace: "podster-test-apps-serve-entry", kvNamespace: "d2".repeat(16), control: "serve-entry.content-fake.example.com" },
+  "custom-routing": { namespace: "podster-test-apps-custom-routing", kvNamespace: "d3".repeat(16), control: "custom-routing.content-fake.example.com" },
+} as const;
+export type ContentPartition = keyof typeof CONTENT_PARTITIONS;
+
 type Op = "script.get" | "script.delete" | "script.list" | "script.bindings" | "entry.put" | "entry.get" | "entry.delete" | "entry.list";
 /**
  * How one kind of call misbehaves, for its next `times` calls. `lost` does the work and then answers nothing useful;
@@ -43,22 +59,30 @@ type Op = "script.get" | "script.delete" | "script.list" | "script.bindings" | "
  */
 type Fault = { op: Op; times: number; status?: number; lost?: boolean; stale?: boolean; flip?: boolean; delayMs?: number };
 
-let scripts = new Set<string>();
-/** What a script's bindings read answers as its `result`, by script; anything a test seeds, as it is. */
-let bindings = new Map<string, unknown>();
-let entries = new Map<string, string>();
-let calls: { op: Op; name: string; status: number }[] = [];
-let faults: Fault[] = [];
-/** When set, the scripts' list says there are this many more scripts than it holds. */
-let scriptsUnlisted = 0;
-/** When set, the keys' list answers with no `result_info` at all. */
-let keysNoInfo = false;
 /**
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
  */
 type Gate = { op: Op | UploadOp | "marker"; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
-let gates: Gate[] = [];
+/** Everything a partition holds: what a reset clears, a state read reads, and the lists answer from. */
+type State = {
+  scripts: Set<string>;
+  /** What a script's bindings read answers as its `result`, by script; anything a test seeds, as it is. */
+  bindings: Map<string, unknown>;
+  entries: Map<string, string>;
+  calls: { op: Op; name: string; status: number }[];
+  faults: Fault[];
+  /** When set, the scripts' list says there are this many more scripts than it holds. */
+  scriptsUnlisted: number;
+  /** When set, the keys' list answers with no `result_info` at all. */
+  keysNoInfo: boolean;
+  gates: Gate[];
+};
+const empty = (): State => ({ scripts: new Set(), bindings: new Map(), entries: new Map(), calls: [], faults: [], scriptsUnlisted: 0, keysNoInfo: false, gates: [] });
+const states = new Map<string, State>(Object.keys(CONTENT_PARTITIONS).map((name) => [name, empty()]));
+const stateOf = (name: string) => states.get(name)!;
+const partitionNamed = (field: "namespace" | "kvNamespace" | "control", value: string) =>
+  Object.entries(CONTENT_PARTITIONS).find(([, p]) => p[field] === value)?.[0];
 /** Well under the provider module's call limit, `CALL_TIMEOUT_MS`, which a test pins against this. */
 export const GATE_LIMIT_MS = 2000;
 function newGate(op: Op | UploadOp | "marker"): Gate {
@@ -68,8 +92,8 @@ function newGate(op: Op | UploadOp | "marker"): Gate {
   const released = new Promise<void>((resolve) => { release = resolve; });
   return { op, taken: false, expired: false, arrived, markArrived, released, release };
 }
-/** `held` is where the gate is kept: the global list `/reset` clears, or one upload's own. */
-async function passGate(op: Op | UploadOp | "marker", held: Gate[] = gates) {
+/** `held` is where the gate is kept: a partition's list, which its `/reset` clears, or one upload's or host's own. */
+async function passGate(op: Op | UploadOp | "marker", held: Gate[]) {
   const gate = held.find((g) => g.op === op && !g.taken);
   if (!gate) return;
   gate.taken = true;
@@ -86,7 +110,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const envelope = (result: unknown) => ({ success: true, errors: [], messages: [], result });
 const failure = (status: number, code: number, message: string) => json({ success: false, errors: [{ code, message }], messages: [], result: null }, status);
 
-async function takeFault(op: Op) {
+async function takeFault(faults: Fault[], op: Op) {
   const fault = faults.find((f) => f.op === op && f.times > 0);
   if (!fault) return undefined;
   fault.times -= 1;
@@ -162,11 +186,14 @@ function takeUploadFault(script: string, op: UploadOp) {
 }
 const html = () => new Response("<!doctype html><title>Sign in</title>", { status: 200, headers: { "content-type": "text/html" } });
 
+/** Every partition's dispatch namespace, as a pattern: an upload in any of them is this part's, kept by script. */
+const ANY_NAMESPACE = `(${Object.values(CONTENT_PARTITIONS).map((p) => p.namespace).join("|")})`;
+
 async function fakeUpload(request: Request, url: URL): Promise<Response | null> {
   const bearer = request.headers.get("authorization");
-  const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)/assets-upload-session$`));
+  const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${ANY_NAMESPACE}/scripts/([^/]+)/assets-upload-session$`));
   if (session && request.method === "POST") {
-    const script = decodeURIComponent(session[1]);
+    const script = decodeURIComponent(session[2]);
     const held = upload(script);
     const done = (status: number, response: Response, manifest?: Manifest) => { held.calls.push({ op: "session", status, manifest }); return response; };
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
@@ -219,9 +246,11 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     if (finished) return done(201, json({ success: true, errors: null, messages: null, result: { jwt: completion } }, 201));
     return done(202, json({ success: true, errors: null, messages: null, result: {} }, 202));
   }
-  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)$`));
-  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[1])) && !scripts.has(decodeURIComponent(script[1]))) {
-    const name = decodeURIComponent(script[1]);
+  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${ANY_NAMESPACE}/scripts/([^/]+)$`));
+  // A script the namespace's own partition holds is that partition's, read below.
+  const namespaceState = script ? stateOf(partitionNamed("namespace", script[1])!) : undefined;
+  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[2])) && !namespaceState!.scripts.has(decodeURIComponent(script[2]))) {
+    const name = decodeURIComponent(script[2]);
     const held = upload(name);
     const done = (status: number, response: Response) => { held.calls.push({ op: "read", status }); return response; };
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
@@ -230,12 +259,12 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
     if (fault?.shape === "html") return done(200, html());
     // A script object that names another script, or none: never this one.
-    if (fault?.shape === "other_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: { id: `${name}x`, tag: "tag-test" } })));
-    if (fault?.shape === "no_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: { tag: "tag-test" } })));
-    return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: held.written ? { id: name, tag: "tag-test" } : null })));
+    if (fault?.shape === "other_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: script[1], script: { id: `${name}x`, tag: "tag-test" } })));
+    if (fault?.shape === "no_id") return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: script[1], script: { tag: "tag-test" } })));
+    return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: script[1], script: held.written ? { id: name, tag: "tag-test" } : null })));
   }
   if (script && request.method === "PUT") {
-    const name = decodeURIComponent(script[1]);
+    const name = decodeURIComponent(script[2]);
     const held = upload(name);
     const form = await request.formData();
     const parts = [...form.keys()];
@@ -304,7 +333,9 @@ async function fakeAppHost(request: Request, url: URL): Promise<Response> {
 export async function fakeContent(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url);
-  if (url.hostname === "content-fake.example.com" && url.pathname.startsWith("/marker-")) {
+  // The marker and upload parts are kept by host and by script, not by partition, so any control host reaches them.
+  const control = partitionNamed("control", url.hostname);
+  if (control && url.pathname.startsWith("/marker-")) {
     const held = markerHost(url.searchParams.get("host") ?? "");
     if (url.pathname === "/marker-serve") {
       const body = (await request.json()) as { script?: string; body?: string; status?: number };
@@ -318,7 +349,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (url.pathname === "/marker-release" && gate) { gate.release(); return json({ ok: true }); }
     return json({ error: "unknown" }, 404);
   }
-  if (url.hostname === "content-fake.example.com" && url.pathname.startsWith("/upload-")) {
+  if (control && url.pathname.startsWith("/upload-")) {
     const name = url.searchParams.get("script") ?? "";
     if (url.pathname === "/upload-fault") { upload(name).faults.push((await request.json()) as UploadFault); return json({ ok: true }); }
     if (url.pathname === "/upload-bucket-size") { upload(name).bucketSize = Number(url.searchParams.get("size")); return json({ ok: true }); }
@@ -346,37 +377,31 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     const uploaded = await fakeUpload(request, url);
     if (uploaded) return uploaded;
   }
-  if (url.hostname === "content-fake.example.com") {
+  if (control) {
+    const state = stateOf(control);
     if (url.pathname === "/reset") {
-      scripts = new Set();
-      bindings = new Map();
-      entries = new Map();
-      calls = [];
-      faults = [];
-      scriptsUnlisted = 0;
-      keysNoInfo = false;
-      for (const gate of gates) gate.release();
-      gates = [];
+      for (const gate of state.gates) gate.release();
+      states.set(control, empty());
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
       const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean; bindings?: Record<string, unknown> };
-      for (const [name, list] of Object.entries(body.bindings ?? {})) bindings.set(name, list);
-      if (body.keysNoInfo !== undefined) keysNoInfo = body.keysNoInfo;
-      if (body.scriptsUnlisted !== undefined) scriptsUnlisted = body.scriptsUnlisted;
-      for (const name of body.scripts ?? []) scripts.add(name);
-      for (const [host, value] of Object.entries(body.entries ?? {})) entries.set(host, value);
+      for (const [name, list] of Object.entries(body.bindings ?? {})) state.bindings.set(name, list);
+      if (body.keysNoInfo !== undefined) state.keysNoInfo = body.keysNoInfo;
+      if (body.scriptsUnlisted !== undefined) state.scriptsUnlisted = body.scriptsUnlisted;
+      for (const name of body.scripts ?? []) state.scripts.add(name);
+      for (const [host, value] of Object.entries(body.entries ?? {})) state.entries.set(host, value);
       return json({ ok: true });
     }
     if (url.pathname === "/fault") {
-      faults.push((await request.json()) as Fault);
+      state.faults.push((await request.json()) as Fault);
       return json({ ok: true });
     }
     if (url.pathname === "/gate") {
-      gates.push(newGate(((await request.json()) as { op: Op }).op));
-      return json({ id: gates.length - 1 });
+      state.gates.push(newGate(((await request.json()) as { op: Op }).op));
+      return json({ id: state.gates.length - 1 });
     }
-    const gate = gates[Number(url.searchParams.get("id") ?? -1)];
+    const gate = state.gates[Number(url.searchParams.get("id") ?? -1)];
     if (url.pathname === "/arrived" && gate) {
       await gate.arrived;
       return json({ ok: true });
@@ -385,33 +410,41 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       gate.release();
       return json({ ok: true });
     }
-    if (url.pathname === "/state") return json({ scripts: [...scripts].sort(), entries: Object.fromEntries([...entries].sort()), calls, expiredGates: gates.filter((gate) => gate.expired).length });
+    if (url.pathname === "/state") return json({ scripts: [...state.scripts].sort(), entries: Object.fromEntries([...state.entries].sort()), calls: state.calls, expiredGates: state.gates.filter((gate) => gate.expired).length });
     return json({ error: "unknown" }, 404);
   }
   if (url.hostname !== "api.cloudflare.com") return null;
 
   const bearer = request.headers.get("authorization");
-  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)$`));
-  const entry = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/storage/kv/namespaces/${FAKE_CONTENT.kvNamespace}/values/([^/]+)$`));
-  const bound = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)/bindings$`));
+  const account = `/client/v4/accounts/${FAKE_CONTENT.account}`;
+  // The partition is the one whose namespace the path names. A path naming none is unexpected, and told in the default.
+  const scriptsPath = url.pathname.match(new RegExp(`^${account}/workers/dispatch/namespaces/([^/]+)/scripts(?:/([^/]+)(/bindings)?)?$`));
+  const keysPath = url.pathname.match(new RegExp(`^${account}/storage/kv/namespaces/([^/]+)/(?:keys|values/([^/]+))$`));
+  const partition = (scriptsPath && partitionNamed("namespace", scriptsPath[1])) || (keysPath && partitionNamed("kvNamespace", keysPath[1])) || undefined;
+  const { scripts, bindings, entries, calls, faults, gates } = stateOf(partition ?? "default");
+  const { namespace, kvNamespace } = CONTENT_PARTITIONS[(partition ?? "default") as ContentPartition];
+  const script = partition && scriptsPath?.[2] !== undefined && !scriptsPath[3] ? scriptsPath : null;
+  const entry = partition && keysPath?.[2] !== undefined ? keysPath : null;
+  const bound = partition && scriptsPath?.[3] ? scriptsPath : null;
   const answer = (op: Op, name: string, response: Response) => {
     calls.push({ op, name, status: response.status });
     return response;
   };
 
   // The two lists. Each takes its own token only, as the calls on one script and one entry do.
-  if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts` && request.method === "GET") {
+  if (partition && url.pathname === `${account}/workers/dispatch/namespaces/${namespace}/scripts` && request.method === "GET") {
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.list", "", failure(403, 10000, "Authentication error"));
-    await passGate("script.list");
-    const fault = await takeFault("script.list");
+    await passGate("script.list", gates);
+    const fault = await takeFault(faults, "script.list");
     if (fault) return answer("script.list", "", failure(fault.status ?? 500, 10001, "fault"));
     const listed = [...scripts].sort().map((id) => ({ id, tag: "tag-test", has_assets: false, deployment_id: "" }));
+    const { scriptsUnlisted } = stateOf(partition);
     return answer("script.list", "", json(scriptsUnlisted ? { ...envelope(listed), result_info: { count: listed.length, total_count: listed.length + scriptsUnlisted } } : envelope(listed)));
   }
-  if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/storage/kv/namespaces/${FAKE_CONTENT.kvNamespace}/keys` && request.method === "GET") {
+  if (partition && url.pathname === `${account}/storage/kv/namespaces/${kvNamespace}/keys` && request.method === "GET") {
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer("entry.list", "", failure(403, 10000, "Authentication error"));
-    await passGate("entry.list");
-    const fault = await takeFault("entry.list");
+    await passGate("entry.list", gates);
+    const fault = await takeFault(faults, "entry.list");
     if (fault) return answer("entry.list", "", failure(fault.status ?? 500, 10001, "fault"));
     const limit = Number(url.searchParams.get("limit") ?? 1000);
     const cursor = url.searchParams.get("cursor");
@@ -419,15 +452,15 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (cursor !== null && !cursor.startsWith("after:")) return answer("entry.list", cursor, failure(400, 10029, "invalid cursor"));
     const rest = [...entries.keys()].sort().filter((key) => cursor === null || key > cursor.slice("after:".length));
     const page = rest.slice(0, limit);
-    if (keysNoInfo) return answer("entry.list", cursor ?? "", json(envelope(page.map((name) => ({ name })))));
+    if (stateOf(partition).keysNoInfo) return answer("entry.list", cursor ?? "", json(envelope(page.map((name) => ({ name })))));
     return answer("entry.list", cursor ?? "", json({ ...envelope(page.map((name) => ({ name }))), result_info: { count: page.length, cursor: rest.length > page.length ? `after:${page[page.length - 1]}` : "" } }));
   }
 
   if (bound && request.method === "GET") {
-    const name = decodeURIComponent(bound[1]);
+    const name = decodeURIComponent(bound[2]);
     // The scripts token only, as every call on a script.
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.bindings", name, failure(403, 10000, "Authentication error"));
-    await passGate("script.bindings");
+    await passGate("script.bindings", gates);
     // A status fault only, taken with no delay: this read has no use for a late answer.
     const fault = faults.find((f) => f.op === "script.bindings" && f.times > 0);
     if (fault) fault.times -= 1;
@@ -437,16 +470,16 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   }
 
   if (script) {
-    const name = decodeURIComponent(script[1]);
+    const name = decodeURIComponent(script[2]);
     const op: Op | null = request.method === "GET" ? "script.get" : request.method === "DELETE" ? "script.delete" : null;
     if (!op) return failure(405, 10405, "Method not allowed");
     // The scripts token only: the routing token can't touch a script.
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer(op, name, failure(403, 10000, "Authentication error"));
-    await passGate(op);
-    const fault = await takeFault(op);
+    await passGate(op, gates);
+    const fault = await takeFault(faults, op);
     if (fault && !fault.lost) return answer(op, name, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "script.get") {
-      const body = envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: scripts.has(name) ? { id: name, tag: "tag-test" } : null });
+      const body = envelope({ namespace_id: "ns-test", namespace_name: namespace, script: scripts.has(name) ? { id: name, tag: "tag-test" } : null });
       return answer(op, name, json(body));
     }
     if (url.searchParams.get("force") !== "true") return answer(op, name, failure(400, 10400, "force is required"));
@@ -456,13 +489,13 @@ export async function fakeContent(request: Request): Promise<Response | null> {
   }
 
   if (entry) {
-    const host = decodeURIComponent(entry[1]);
+    const host = decodeURIComponent(entry[2]);
     const op: Op | null = request.method === "PUT" ? "entry.put" : request.method === "GET" ? "entry.get" : request.method === "DELETE" ? "entry.delete" : null;
     if (!op) return failure(405, 10405, "Method not allowed");
     // The routing token only: the scripts token can't write what a host serves.
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer(op, host, failure(403, 10000, "Authentication error"));
-    await passGate(op);
-    const fault = await takeFault(op);
+    await passGate(op, gates);
+    const fault = await takeFault(faults, op);
     if (fault && !fault.lost && !fault.stale && !fault.flip) return answer(op, host, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "entry.put") {
       entries.set(host, await request.text());
@@ -482,6 +515,6 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     return answer(op, host, value === undefined ? failure(404, 10009, "key not found") : new Response(value, { status: 200 }));
   }
   // Any other path on the provider's API: a wrong account, a wrong namespace, or a call nothing should make.
-  calls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status: 404 });
+  stateOf("default").calls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status: 404 });
   return failure(404, 7003, "No route for the URI");
 }

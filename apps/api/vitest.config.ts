@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
-import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
+import { CONTENT_PARTITIONS, type ContentPartition, FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fake-github-release.ts";
 import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
@@ -152,8 +152,11 @@ function contractRoutes() {
   return routes;
 }
 
-export default defineConfig({
-  plugins: [
+/**
+ * The Workers pool for one partition of the content provider's stand-in: the same in every way but the content
+ * provider's two namespaces, which only this partition's calls name (`CONTENT_PARTITIONS` in test/fake-content.ts).
+ */
+const pool = (partition: ContentPartition) =>
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
@@ -214,8 +217,8 @@ export default defineConfig({
           // The content provider's configuration (M6 step 4(a)), pointing at the stand-in. Test values: no environment
           // binds any of these names, and the real ones are the owner's to set.
           CONTENT_ACCOUNT_ID: FAKE_CONTENT.account,
-          CONTENT_DISPATCH_NAMESPACE: FAKE_CONTENT.namespace,
-          CONTENT_KV_NAMESPACE_ID: FAKE_CONTENT.kvNamespace,
+          CONTENT_DISPATCH_NAMESPACE: CONTENT_PARTITIONS[partition].namespace,
+          CONTENT_KV_NAMESPACE_ID: CONTENT_PARTITIONS[partition].kvNamespace,
           CONTENT_DOMAIN: FAKE_CONTENT.domain,
           CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
           CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
@@ -225,7 +228,8 @@ export default defineConfig({
           // Test builds only: the store reconcile's own account at D1's stand-in (S5's second PR), so the hourly passes
           // `takedown.spec.ts` runs never touch the databases `app-store.spec.ts` keeps beside it. A test value.
           TEST_STORE_RECONCILE_ACCOUNT: FAKE_STORES.reconcileAccount,
-          TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
+          // The stand-in's values as this project sees them, with its own partition's namespaces and control host.
+          TEST_FAKE_CONTENT: JSON.stringify({ ...FAKE_CONTENT, ...CONTENT_PARTITIONS[partition], partition }),
           // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in, and a few of the Public
           // Suffix List's rules, in the list's own format. Test values: no environment binds either name.
           HOSTNAME_RESOLVER_URL: FAKE_RESOLVER.url,
@@ -268,8 +272,27 @@ export default defineConfig({
           TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
         },
       },
-    }),
-  ],
-  // bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
-  test: { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] },
+    });
+
+/**
+ * The spec files that own a partition of the content provider's stand-in, each run as a project of its own so its
+ * resets, seeds and reads never meet another file's. Every other spec file is in the default project and partition.
+ */
+const OWN_PARTITION: Record<Exclude<ContentPartition, "default">, string> = {
+  "serve-entry": "test/serve-entry.spec.ts",
+  "custom-routing": "test/custom-routing.spec.ts",
+};
+// bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
+const shared = { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] };
+
+export default defineConfig({
+  test: {
+    projects: [
+      { plugins: [pool("default")], test: { ...shared, name: "api", include: ["test/**/*.spec.ts"], exclude: Object.values(OWN_PARTITION) } },
+      ...Object.entries(OWN_PARTITION).map(([partition, file]) => ({
+        plugins: [pool(partition as ContentPartition)],
+        test: { ...shared, name: partition, include: [file] },
+      })),
+    ],
+  },
 });

@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmQuiet, clearAlarm, manualAlarms, runAlarm } from "./alarm";
 import { txtData } from "./fake-resolver";
 
@@ -11,10 +11,13 @@ import { txtData } from "./fake-resolver";
 // every write, the object last; what was read and fails takes the entry down; what couldn't be read writes nothing.
 //
 // Each room is set up as in `custom-hostname.spec.ts`, with its content provider on, so the applier writes to the
-// stand-in in `fake-content.ts`. These run inside `takedown.spec.ts` ([`customRoutingCases`]), which owns that stand-in. Cloudflare's custom hostnames are the stand-in in `fake-hostnames.ts`.
+// stand-in in `fake-content.ts`, in a partition of its own (`CONTENT_PARTITIONS`): this file's test project binds the
+// partition's namespaces, and it drives the stand-in through the partition's control host, so no other spec file's reset
+// reaches its entries. *From 8c until the stand-in was partitioned these ran inside `takedown.spec.ts`.* Cloudflare's
+// custom hostnames are the stand-in in `fake-hostnames.ts`.
 
 const BINDINGS = env as any;
-const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string };
+const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string; control: string; partition: string };
 let key: any;
 type Who = { id: string; org: string; adminOrgs?: string[] };
 const OPERATOR: Who = { id: "per_operator_one", org: "org_cr_ops" };
@@ -47,7 +50,7 @@ const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation()
 const answerWith = (name: string, value: string) => fetch("https://resolver-fake.example.com/set", { method: "POST", body: JSON.stringify({ name: `_podster-challenge.${name}`, answer: { body: { Status: 0, Answer: [{ name: `_podster-challenge.${name}`, type: 16, data: txtData(value) }] } } }) });
 const cloudflareCalls = async (name: string) => ((await (await fetch(`https://hostnames-fake.example.com/state?hostname=${name}`)).json()) as { calls: string[] }).calls;
 const setAtCloudflare = (name: string, status: string | null) => fetch(`https://hostnames-fake.example.com/set?hostname=${name}`, { method: "POST", body: JSON.stringify({ status }) });
-const content = (path: string, body?: unknown) => fetch(`https://content-fake.example.com${path}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
+const content = (path: string, body?: unknown) => fetch(`https://${FAKE.control}${path}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
 type Held = { entries: Record<string, string>; calls: { op: string; name: string; status: number }[] };
 const held = async () => (await (await content("/state")).json()) as Held;
 const entryCalls = async (name: string) => (await held()).calls.filter((call) => call.name === name).map((call) => call.op);
@@ -164,18 +167,19 @@ async function fresh() {
   await inModeration((sql) => { for (const table of ["takedown_finding", "reconcile_pass", "reconcile_failure"]) sql.exec(`DELETE FROM ${table}`); });
 }
 
-/**
- * The cases, registered inside `takedown.spec.ts`: they share the content provider's stand-in with that file, whose
- * state lives in the test runner and is reset before each of its tests, so the two must never run side by side. That
- * file's own hooks reset the stand-in before each case and make the D1 schema; these add their own rooms' quieting.
- */
-export function customRoutingCases() {
-  describe("custom hostname routing (M6 step 8c)", () => {
+describe("custom hostname routing (M6 step 8c)", () => {
     beforeAll(async () => {
       key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
+      for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
     });
+    beforeEach(async () => { await content("/reset", {}); });
     afterEach(async () => {
       for (const id of made.splice(0)) await alarmQuiet(stub(id));
+    });
+
+    it("runs in its own partition of the content provider's stand-in", () => {
+      expect([FAKE.partition, FAKE.control]).toEqual(["custom-routing", "custom-routing.content-fake.example.com"]);
+      expect([BINDINGS.CONTENT_DISPATCH_NAMESPACE, BINDINGS.CONTENT_KV_NAMESPACE_ID]).toEqual(["podster-test-apps-custom-routing", "d3".repeat(16)]);
     });
 
     describe("routing a custom hostname (M6 step 8c)", () => {
@@ -530,4 +534,3 @@ export function customRoutingCases() {
       });
     });
   });
-}

@@ -8,12 +8,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 // write and read are reached through the test-only route `/test/serve-entry`, against the content provider's stand-in
 // (`fake-content.ts`), and held to the fixture that core and the content Worker are tested against.
 //
-// *Since S3:* these cases are registered inside `takedown.spec.ts` (`serveEntryCases`), as `custom-routing.cases.ts`'s
-// are. Both reset and seed the stand-in's serve entries, which live in the test runner, so as two spec files run side by
-// side one read the other's reset (an entry seeded here read `absent`). In one file they run in turn.
+// This file has a partition of the stand-in to itself (`CONTENT_PARTITIONS` in `fake-content.ts`): its test project
+// binds the partition's namespaces, and it drives the stand-in through the partition's control host, so its resets and
+// seeds never meet another spec file's. *From S3 until the stand-in was partitioned these cases ran inside
+// `takedown.spec.ts`, since one file's reset wiped the other's entries.*
 
 const BINDINGS = env as any;
-const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string };
+const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string; control: string; partition: string };
 const FIXTURE = JSON.parse(BINDINGS.TEST_SERVE_FIXTURE) as {
   code_mark: string;
   custom_entry_host: string;
@@ -28,7 +29,7 @@ const FIXTURE = JSON.parse(BINDINGS.TEST_SERVE_FIXTURE) as {
   invalid_code_custom_entries: string[];
 };
 
-const fake = (path: string, body: unknown = {}) => fetch(`https://content-fake.example.com${path}`, { method: "POST", body: JSON.stringify(body) }).then((res) => res.json() as Promise<any>);
+const fake = (path: string, body: unknown = {}) => fetch(`https://${FAKE.control}${path}`, { method: "POST", body: JSON.stringify(body) }).then((res) => res.json() as Promise<any>);
 const entries = async () => (await fake("/state")).entries as Record<string, string>;
 async function provider(body: Record<string, unknown>) {
   const res = await SELF.fetch("https://api.internal/test/serve-entry", { method: "POST", body: JSON.stringify(body) });
@@ -39,9 +40,13 @@ const labelOf = (script: string) => script.slice(0, script.indexOf("."));
 const defaultHost = (script: string) => `${labelOf(script)}.${FAKE.domain}`;
 const CUSTOM = FIXTURE.custom_entry_host;
 
-export function serveEntryCases() {
 describe("the provider's serve entry", () => {
   beforeEach(async () => { await fake("/reset"); });
+
+  it("runs in its own partition of the content provider's stand-in", () => {
+    expect([FAKE.partition, FAKE.control]).toEqual(["serve-entry", "serve-entry.content-fake.example.com"]);
+    expect([BINDINGS.CONTENT_DISPATCH_NAMESPACE, BINDINGS.CONTENT_KV_NAMESPACE_ID]).toEqual(["podster-test-apps-serve-entry", "d2".repeat(16)]);
+  });
 
   it("writes a static entry exactly as before, and marks one only when told its release carries code", async () => {
     for (const script of FIXTURE.valid_script_names) {
@@ -123,4 +128,3 @@ describe("the provider's serve entry", () => {
     expect(provider).not.toMatch(/dead_code[^\n]*\n\s*pub\(crate\) async fn write_entry_as/);
   });
 });
-}

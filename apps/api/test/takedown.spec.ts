@@ -4,9 +4,7 @@ import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, clearAlarm, manualAlarms, nextAlarm, runAlarm, runtimeAlarms } from "./alarm";
-import { customRoutingCases } from "./custom-routing.cases";
 import { scriptBindingsCases } from "./script-bindings.cases";
-import { serveEntryCases } from "./serve-entry.cases";
 import { storeReconcileCases } from "./store-reconcile.cases";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
@@ -2593,12 +2591,8 @@ describe("the two reconciles", () => {
   });
 });
 
-// M6 step 8c's cases: here, so they never run beside this file's resets of the content provider's stand-in.
-customRoutingCases();
-// The provider's serve-entry route (M6 stage 1, #415 and S3): here for the same reason.
-serveEntryCases();
-// Rule 3(b)'s check of each app script's bindings (S5 of the store plan): here for the same reason, with this file's
-// helpers.
+// Rule 3(b)'s check of each app script's bindings (S5 of the store plan): here, with this file's helpers, which reset
+// and read the default partition of the content provider's stand-in.
 scriptBindingsCases({
   BINDINGS, FAKE, app, fresh, reconcile, fake, fault, held, found, findings, inRoom, inModeration, all, one, configRow, serveRows,
   deleteRows, pass, lift: (label: string) => lift(label), switchedOn, stub,

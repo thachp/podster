@@ -492,7 +492,7 @@ export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
   // An upload's bytes have their own path, and this one would read them all into memory.
-  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads") && !path.startsWith("/v1/files");
+  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads") && !path.startsWith("/v1/files") && !path.startsWith("/v1/pairing");
 }
 
 /**

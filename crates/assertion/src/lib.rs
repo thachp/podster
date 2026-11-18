@@ -312,3 +312,80 @@ pub fn verify_provider_delivery(
     check_lifetime(delivery.iat, delivery.exp, now)?;
     Ok(delivery)
 }
+
+/// The gateway's assertion for one Runner pairing redemption (M7 step 5; decision 222). It names no person or
+/// organization, so it carries nothing to authorize: it says only that the gateway verified a proof signed by the key
+/// whose RFC 7638 thumbprint is `key_thumbprint`, over the proof's own fresh `proof_jti` (which the API spends, so the
+/// proof can't be replayed, until `proof_exp`), for the session of `agent_id` and no other, and binds the exact body the
+/// gateway passed on. The session decides the rest. Only [`verify_pairing_redeem`] accepts it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingRedeem {
+    kind: String,
+    /// The session the proof was made for: the redemption route refuses it for any other.
+    pub agent_id: String,
+    pub key_thumbprint: String,
+    pub proof_jti: String,
+    /// When the proof stops being accepted, in seconds.
+    pub proof_exp: i64,
+    /// Lowercase hex SHA-256 of the body the gateway sent with this assertion.
+    pub body_sha256: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    // Checked before this is read. Named so `deny_unknown_fields` lets them through.
+    #[serde(rename = "aud")]
+    _aud: String,
+    #[serde(rename = "iss")]
+    _iss: String,
+}
+
+/// The longest proof ID the API spends.
+pub const MAX_PROOF_JTI_BYTES: usize = 128;
+/// The furthest ahead a proof may expire, in seconds, so the API never has to remember a spent proof for longer.
+pub const MAX_PROOF_LIFETIME_SECS: i64 = 300;
+const MAX_AGENT_ID_BYTES: usize = 128;
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// For the pairing redemption route alone: the assertion with exactly `kind`, `agent_id`, `key_thumbprint`, `proof_jti`, `proof_exp`,
+/// `body_sha256`, `jti`, `iat`, `exp`, `aud` and `iss`, and nothing else. An identity, a public assertion or a provider
+/// delivery is refused here, as malformed, and this one is refused everywhere else.
+pub fn verify_pairing_redeem(
+    token: &str,
+    keys: &KeySet,
+    now: i64,
+) -> Result<PairingRedeem, AssertionError> {
+    let claims = verified_claims(token, keys)?;
+    let redeem: PairingRedeem =
+        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+    let thumbprint_ok = redeem.key_thumbprint.len() == 43
+        && redeem
+            .key_thumbprint
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if redeem.kind != "pairing_redeem"
+        || !thumbprint_ok
+        || redeem.proof_jti.is_empty()
+        || redeem.proof_jti.len() > MAX_PROOF_JTI_BYTES
+        || redeem.proof_exp <= now
+        || redeem.proof_exp > now.saturating_add(MAX_PROOF_LIFETIME_SECS)
+        || redeem.agent_id.is_empty()
+        || redeem.agent_id.len() > MAX_AGENT_ID_BYTES
+        || !redeem
+            .agent_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        || redeem.jti.is_empty()
+        || !is_sha256_hex(&redeem.body_sha256)
+    {
+        return Err(AssertionError::Malformed);
+    }
+    check_lifetime(redeem.iat, redeem.exp, now)?;
+    Ok(redeem)
+}

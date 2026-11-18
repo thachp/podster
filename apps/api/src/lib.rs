@@ -406,6 +406,15 @@ async fn route(
         return provider::delivery(req, env).await;
     }
 
+    // Runner's pairing redemption (M7 step 5) has no identity yet, so it has its own assertion, taken on this one route.
+    {
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if let Some(agent) = principal::pairing::redeem_route(&req.method(), &parts) {
+            let agent = agent.to_string();
+            return principal::pairing::redeem(req, env, &agent).await;
+        }
+    }
+
     let token = req
         .headers()
         .get("x-podster-assertion")?
@@ -576,6 +585,13 @@ async fn route(
                 .filter(|d| !is_agent && valid_id(&d.person) && valid_id(&d.org))
                 .ok_or_else(ApiError::not_allowed)?;
             return principal::record_org_departure(&env, &departure, &caller.id).await;
+        }
+        ["v1", "pairing"] if method == Method::Post => {
+            return principal::pairing::start(&env, &caller, body.as_deref()).await;
+        }
+        ["v1", "pairing", rest @ ..] => {
+            return principal::pairing::person_route(&env, &caller, rest, &method, body.as_deref())
+                .await;
         }
         ["v1", "agents", agent, ..] => {
             if !valid_id(agent) {

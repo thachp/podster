@@ -195,6 +195,12 @@ person_only:
   - disconnectAgent
   - reconnectAgent
   - getOverseenFile
+  # M7 step 5(a): a person starts, reads, confirms and cancels a Runner pairing session. Never an agent's: pairing is a
+  # person's consent, and agent text can't stand in for it.
+  - startPairing
+  - getPairing
+  - activatePairing
+  - cancelPairing
 # Not a call an agent makes through a tool: raw bytes. An upload goes to the path `create_upload` returned, with its token. A download goes to
 # the path `get_asset_link` returned, with the caller's own credential or session.
 transfer_only:
@@ -204,6 +210,10 @@ transfer_only:
 # delivery, with an assertion that names no one. It is never a capability or a tool.
 provider_only:
   - receiveGithubDelivery
+# Not a call a person or an agent makes: the gateway sends it for Runner's pairing redemption (M7 step 5), after verifying
+# a proof signed by the submitted key, with an assertion that names no one. It is never a capability or a tool.
+pairing_only:
+  - redeemPairing
 # What an `/a2a` token reaches (docs/spec/A2A-PROFILE.md), and nothing else: each A2A method or lifecycle-extension method,
 # and the one capability it calls, as the agent the token names. The gateway's A2A_CAPABILITIES is exactly these
 # capabilities, and a gateway test holds the two together, so the token's reach changes only with this list. Policy and the

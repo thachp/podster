@@ -312,6 +312,8 @@ jobs:
       - run: scripts/test/merge-gate-selftest
       - run: scripts/test/deploy-staging-selftest
       - run: scripts/test/with-pinned-rust-selftest
+      # Each suite's API build and its stamp: a build with other features, or changed since, fails the suite by name.
+      - run: node scripts/build-api-worker.mjs --self-test
       - run: scripts/test/staging-probes-selftest
       # The content Worker's deploy (M6 step 4(b)): every refusal makes no changing call, the token is in no argument
       # or output, and --deploy needs a terminal. It deploys nothing.

@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // M6 step 2 (ADR 0010): release's contract and state, and nothing that deploys, routes or serves. Every M6 route answers
 // as a missing one while release is switched off, which is everywhere, and `release_not_available` where a test switches
@@ -55,6 +56,28 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDIN
 const claimStub = (hostname: string) => BINDINGS.HOSTNAME_CLAIM.get(BINDINGS.HOSTNAME_CLAIM.idFromName(hostname));
 const inClaim = <T>(hostname: string, fn: (sql: any) => T) => runInDurableObject(claimStub(hostname), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const refuses = (run: () => unknown) => { try { run(); return false; } catch { return true; } };
+const roomStub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+
+/** Every room this file made, quieted after each test so no alarm of one reaches a later test. */
+const made: string[] = [];
+afterEach(async () => {
+  for (const id of made.splice(0)) await alarmQuiet(roomStub(id));
+});
+
+/**
+ * A room whose alarms are the test's (`manualAlarms`). Tests here write rows straight into the room, and a room's job
+ * acts on such rows: its hostname upkeep ends a pending request whose 72 hours are over, which a request written with
+ * `requested_at: 1` is. Left to the runtime, the alarm a new room sets ran beside the test and could end the first open
+ * request before the test inserted the second, so the room took both. `prepare` runs in the room first, before the
+ * alarms are the test's.
+ */
+async function makeRoom(prepare?: (sql: any) => unknown) {
+  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id as string;
+  made.push(id);
+  if (prepare) await inRoom(id, prepare);
+  await manualAlarms(roomStub(id));
+  return id;
+}
 
 /** Release switched on for the test Worker, as no deployment is, while `run` runs. */
 async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
@@ -83,7 +106,7 @@ describe("M6's routes, none of them built", () => {
   });
 
   it("can't be told from a path nobody defined while release is switched off, by anyone", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const room = await makeRoom();
     const version = async () => (await api(OWNER, "GET", `/v1/workspaces/${room}`)).body.policy_version;
     for (const who of [MEMBER, REVOKED]) expect((await api(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role: "member", policy_version: await version() })).status, who.id).toBe(200);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${room}/members/${REVOKED.id}`, { policy_version: await version() })).status).toBe(200);
@@ -120,7 +143,7 @@ describe("M6's routes, none of them built", () => {
   });
 
   it("switched on, refuse an agent and a non-operator, and otherwise say release isn't available", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const room = await makeRoom();
     // The stop is set and lifted below. Its key at the provider is this object's to write: with no provider for it
     // here, nothing reaches the stand-in that the takedown tests share.
     await runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_content_provider_off (x INTEGER)"));
@@ -174,7 +197,7 @@ describe("M6's routes, none of them built", () => {
   });
 
   it("change nothing in the room, switched on or off", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const room = await makeRoom();
     const counts = () => inRoom(room, (sql) => ["release_config", "release", "app_label", "serve_state", "hostname_request", "unpublish", "event", "outbox"].map((table) => sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n));
     const before = await counts();
     await switchedOn(async () => {
@@ -193,14 +216,10 @@ describe("the room's release state (M6 step 2)", () => {
   const scriptOf = (release: string, label = LABEL) => `${label}.${release}`;
   /**
    * A room for the state's own tests. They write rows no command would, and read them back. The room's applier (step
-   * 4(a)) keeps its own record beside each host it looks at, and a room's alarm runs a moment after it is made, so it
-   * has no provider here: it then looks at nothing, and the rows are only what a test wrote.
+   * 4(a)) keeps its own record beside each host it looks at, so it has no provider here: it then looks at nothing. Its
+   * alarms are the test's (`makeRoom`), so no job runs beside a test, and the rows are only what a test wrote.
    */
-  const newRoom = async () => {
-    const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id as string;
-    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
-    return id;
-  };
+  const newRoom = () => makeRoom((sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
   const run = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(query, ...values)));
   const one = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => sql.exec(query, ...values).one());
   const label = (room: string, name = LABEL, current: number | null = 1, retired: number | null = null) => run(room, "INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, ?, 1, ?)", name, current, retired);

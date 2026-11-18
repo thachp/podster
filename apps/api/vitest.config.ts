@@ -10,6 +10,12 @@ import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
 import { FAKE_HOSTNAMES, fakeHostnames } from "./test/fake-hostnames.ts";
 import { FAKE_STORES, fakeStores } from "./test/fake-stores.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
+import { assertApiBuild } from "../../scripts/build-api-worker.mjs";
+
+// wrangler.jsonc's `main` is build/index.js, which npm's pretest builds with failpoints. Anything else that writes there
+// (wrangler deploy, e2e/run-local.mjs, a plain worker-build) leaves a build the failpoint tests fail on confusingly, so
+// a build with other features, or changed since it was made, stops the run here instead.
+assertApiBuild(new URL("./build/", import.meta.url), ["failpoints"], "npm run pretest (in apps/api)");
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");

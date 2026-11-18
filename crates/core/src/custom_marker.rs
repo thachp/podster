@@ -145,8 +145,13 @@ pub fn custom_set_back(
 
 /// A custom host set back at `set_back_version` opens again, through `release::open_host`, on the release the room last
 /// confirmed served, if nothing moved since: it is still open, serves nothing, and is at exactly the version the
-/// set-back wrote. `None` otherwise.
-pub fn custom_reopen(state: &ServeState, host: usize, set_back_version: u64) -> Option<ServeState> {
+/// set-back wrote. `None` otherwise, and during a rollback's flight (`flight_is_rollback`, as `open_host` reads it).
+pub fn custom_reopen(
+    state: &ServeState,
+    host: usize,
+    set_back_version: u64,
+    flight_is_rollback: bool,
+) -> Option<ServeState> {
     if host == 0 {
         return None;
     }
@@ -154,7 +159,7 @@ pub fn custom_reopen(state: &ServeState, host: usize, set_back_version: u64) -> 
     if target.closed || target.script.is_some() || Some(target.version) != bump(set_back_version) {
         return None;
     }
-    open_host(state, host)
+    open_host(state, host, flight_is_rollback)
 }
 
 /// The wait before a custom host set back `set_backs` times in a row is opened again: [`REOPEN_FIRST_MS`], doubling

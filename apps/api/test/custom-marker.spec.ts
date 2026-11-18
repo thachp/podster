@@ -183,6 +183,35 @@ const confirmNext = (r: Room) => inRoom(r.room, (sql) => {
   sql.exec("UPDATE serve_state SET flight_version = NULL, flight_before = NULL");
 });
 
+
+/** A rollback from `PREV` (R2) back to an earlier release (R1), committed and waiting for its marker on the default host.
+ * Only the default host is written: the flight's mark leaves each custom host as it was, as a commit leaves a closed one. */
+const OLD = `rel_${"3a".repeat(16)}`;
+const ROLL = `rel_${"4b".repeat(16)}`;
+const startRollback = async (r: Room) => {
+  const older = `${r.label}.${OLD}`;
+  await content("/seed", { scripts: [older] });
+  await inRoom(r.room, (sql) => {
+    const release = (id: string, state: string, script: string, scriptRelease: string) => sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+         VALUES (?, ?, ?, ?, 3, 2, 'tsk_cm_1', ?, ?, ?, 0, ?, 0, 0, 0)`, id, SHA, state, r.label, script, scriptRelease, r.owner.id, r.owner.id);
+    release(OLD, "replaced", older, OLD);
+    release(ROLL, "live", older, OLD);
+    sql.exec("INSERT INTO release_rollback (release_id, rollback_to) VALUES (?, ?)", ROLL, OLD);
+    sql.exec("UPDATE release_config SET kept_previous = NULL, in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 2, in_flight_at = 3", ROLL, older);
+    sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, flight_version = version + 1, flight_before = script_name, version = version + 1 WHERE kind = 'default'", OLD, older);
+    sql.exec("INSERT OR IGNORE INTO release_script_kind (release_id, script_name, kind, recorded_at) VALUES (?, ?, 'static', 1)", OLD, older);
+  });
+  return older;
+};
+/** The rollback's marker came back on the default host: the rollback is served, R2 replaced, the flight over. */
+const settleRollback = (r: Room) => inRoom(r.room, (sql) => {
+  sql.exec("UPDATE release SET state = 'served', served_at = 4 WHERE id = ?", ROLL);
+  sql.exec("UPDATE release SET state = 'replaced' WHERE id = ?", PREV);
+  sql.exec("UPDATE release_config SET in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL, in_flight_at = NULL, kept_previous = ?", r.script);
+  sql.exec("UPDATE serve_state SET flight_version = NULL, flight_before = NULL");
+});
+
 describe("a custom hostname's marker (M6 step 8e)", () => {
   beforeAll(async () => {
     key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
@@ -412,6 +441,89 @@ describe("a custom hostname's marker (M6 step 8e)", () => {
       await at(r, T + 10 * WAIT);
       await pass(r);
       expect((await fetches(name)).fetches).toBe(1);
+    });
+  });
+
+  describe("the architect's rulings on #448, 2026-11-18", () => {
+    it("L1: a set-back host isn't reopened while a rollback is in flight, so the release rolled away from is never written", async () => {
+      const { r, name } = await routed("org_cm_l1_reopen");
+      await markerOn(r);
+      await pass(r);
+      await at(r, T + WAIT);
+      await pass(r);
+      await applyDue(r);
+      await pass(r);
+      const setBack = await customRow(r, name);
+      expect([setBack.script_name, (await held()).entries[name]]).toEqual([null, undefined]);
+      const older = await startRollback(r);
+      // The reopening's wait runs out while the rollback waits for its marker: it waits again, and the host serves nothing.
+      await at(r, T + WAIT + MINUTE);
+      await applyDue(r);
+      await pass(r);
+      expect(await customRow(r, name)).toEqual(setBack);
+      expect(await markerRow(r, name)).toMatchObject({ next_at: T + WAIT + 2 * MINUTE, last_code: "custom_marker_reopen_waiting" });
+      await applyDue(r);
+      await pass(r);
+      expect((await held()).entries[name]).toBeUndefined();
+      // The flight settles: reopened on the release rolled back to, never on the one rolled away from.
+      await settleRollback(r);
+      await at(r, T + WAIT + 2 * MINUTE);
+      await pass(r);
+      expect(await customRow(r, name)).toMatchObject({ script_name: older, closed: 0 });
+      await applyDue(r);
+      await pass(r);
+      expect((await held()).entries[name]).toBe(`${older}@${name}`);
+    });
+
+    it("L1: routing doesn't open a custom host while a rollback is in flight (8c's start), and opens it once the flight settles", async () => {
+      const { r, name } = await routed("org_cm_l1_route");
+      // Cloudflare's status is read and isn't active: the host closes and its entry comes down.
+      await setAtCloudflare(name, "pending");
+      await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = ?", Date.now() - 7 * 3600_000));
+      await pass(r);
+      await applyDue(r);
+      await pass(r);
+      const closed = await customRow(r, name);
+      expect([closed.closed, (await held()).entries[name]]).toEqual([1, undefined]);
+      const older = await startRollback(r);
+      // Active again while the rollback waits for its marker: routing reads every check holding, and still opens nothing.
+      await setAtCloudflare(name, "active");
+      await step(r);
+      expect(await customRow(r, name)).toEqual(closed);
+      await applyDue(r);
+      await pass(r);
+      expect((await held()).entries[name]).toBeUndefined();
+      // The flight settles: opened on the release rolled back to.
+      await settleRollback(r);
+      await step(r);
+      expect(await customRow(r, name)).toMatchObject({ script_name: older, closed: 0 });
+      await applyDue(r);
+      await pass(r);
+      expect((await held()).entries[name]).toBe(`${older}@${name}`);
+    });
+
+    it("I2: a switch left pending while the job was idle starts its wait again on resuming, and is fetched before any set-back", async () => {
+      const { r, name } = await routed("org_cm_i2");
+      await serve(name, { status: 404 });
+      await markerOn(r);
+      await pass(r);
+      expect(await markerRow(r, name)).toMatchObject({ switched_at: T, next_at: T + POLL });
+      // Release off for the deployment past the wait's end: idle, nothing fetched, nothing set back.
+      await at(r, T + WAIT);
+      await quietPass(r);
+      const IDLE = 10 * MINUTE;
+      expect(await markerRow(r, name)).toMatchObject({ switched_at: T, next_at: T + WAIT + IDLE, last_code: "custom_marker_idle" });
+      expect([(await fetches(name)).fetches, (await customRow(r, name)).script_name]).toEqual([1, r.script]);
+      // Resumed: the switch's wait starts again from now, and the marker is fetched, not set back unseen.
+      const resumed = T + WAIT + IDLE;
+      await at(r, resumed);
+      await pass(r);
+      expect(await markerRow(r, name)).toMatchObject({ switched_at: resumed, set_back_at: null, last_code: "custom_marker_awaiting" });
+      expect([(await fetches(name)).fetches, (await customRow(r, name)).script_name]).toEqual([2, r.script]);
+      await serve(name, { body: body(PREV) });
+      await at(r, resumed + POLL);
+      await pass(r);
+      expect(await markerRow(r, name)).toMatchObject({ served_at: resumed + POLL });
     });
   });
 

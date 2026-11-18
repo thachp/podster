@@ -4,7 +4,9 @@
 //! shown to the millisecond.
 
 use podster_core::custom_marker::*;
-use podster_core::release::{DesiredServe, ServeState, MARKER_WAIT_MS};
+use podster_core::release::{
+    open_host, CommitMark, DesiredServe, InFlight, ServeState, MARKER_WAIT_MS,
+};
 use podster_core::release_marker::MARKER_POLL_MS;
 
 const NOW: i64 = 1_900_000_000_000;
@@ -165,23 +167,23 @@ fn the_set_back_takes_only_that_custom_host_to_nothing_and_only_at_exactly_what_
 #[test]
 fn a_set_back_custom_host_reopens_on_the_release_last_confirmed_only_if_nothing_moved_since() {
     let s = custom_set_back(&state(), 1, 4, SCRIPT).expect("set back");
-    let reopened = custom_reopen(&s, 1, 4).expect("reopened");
+    let reopened = custom_reopen(&s, 1, 4, false).expect("reopened");
     assert_eq!(reopened.hosts[1], host(Some(SCRIPT), 6, false));
     assert_eq!(reopened.hosts[0], s.hosts[0]);
     // Moved since the set-back: closed, written by a commit, or at another version. Nothing is reopened.
-    assert_eq!(custom_reopen(&s, 1, 3), None);
-    assert_eq!(custom_reopen(&s, 0, 6), None);
+    assert_eq!(custom_reopen(&s, 1, 3, false), None);
+    assert_eq!(custom_reopen(&s, 0, 6, false), None);
     let mut closed = s.clone();
     closed.hosts[1] = host(None, 6, true);
-    assert_eq!(custom_reopen(&closed, 1, 5), None);
+    assert_eq!(custom_reopen(&closed, 1, 5, false), None);
     let mut written = s.clone();
     written.hosts[1] = host(Some(BEFORE), 5, false);
-    assert_eq!(custom_reopen(&written, 1, 4), None);
+    assert_eq!(custom_reopen(&written, 1, 4, false), None);
     // An unpublished room has no release confirmed: it reopens on nothing, which serves nothing.
     let mut unpublished = s.clone();
     unpublished.hosts[0] = host(None, 8, false);
     assert_eq!(
-        custom_reopen(&unpublished, 1, 4).map(|s| s.hosts[1].clone()),
+        custom_reopen(&unpublished, 1, 4, false).map(|s| s.hosts[1].clone()),
         Some(host(None, 6, false))
     );
 }
@@ -194,4 +196,33 @@ fn the_reopen_waits_a_minute_doubling_to_an_hour() {
         vec![60_000, 60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000, 3_600_000, 3_600_000]
     );
     assert_eq!(reopen_wait_ms(u32::MAX), 3_600_000);
+}
+
+/// The architect's ruling L1 on #448, 2026-11-18: during a rollback's flight, the release last confirmed is the one being
+/// rolled away from, so no custom host opens on it, by routing's start or by a reopening after a set-back.
+#[test]
+fn no_custom_host_opens_while_a_rollback_is_in_flight() {
+    let set_back = custom_set_back(&state(), 1, 4, SCRIPT).expect("set back");
+    // A rollback from `SCRIPT` back to `BEFORE`, waiting for its marker on the default host.
+    let mut rolling = set_back.clone();
+    rolling.hosts[0] = host(Some(BEFORE), 8, false);
+    rolling.in_flight = Some(InFlight {
+        release_id: "rel_4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b".to_owned(),
+        script: BEFORE.to_owned(),
+        mark: CommitMark {
+            epoch: 2,
+            versions: vec![Some(8), None],
+            before: vec![Some(SCRIPT.to_owned()), None],
+        },
+    });
+    assert_eq!(custom_reopen(&rolling, 1, 4, true), None);
+    assert_eq!(open_host(&rolling, 1, true), None);
+    // The same flight read as an ordinary commit's opens on the release before it, which is what a commit keeps.
+    assert_eq!(
+        open_host(&rolling, 1, false).map(|s| s.hosts[1].clone()),
+        Some(host(Some(SCRIPT), 6, false))
+    );
+    // With no flight, the flag changes nothing.
+    assert!(custom_reopen(&set_back, 1, 4, true).is_some());
+    assert!(open_host(&set_back, 1, true).is_some());
 }

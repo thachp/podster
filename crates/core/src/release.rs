@@ -1135,10 +1135,15 @@ pub fn waiting_entry_keeps(
 /// between a commit and its marker it never takes the unconfirmed script. When that marker comes back,
 /// [`confirm_served`] moves it to the confirmed release with every other open host; if it doesn't, the set-back leaves
 /// it where it is. `None` if there's no such host, or its version can't go up.
-pub fn open_host(state: &ServeState, host: usize) -> Option<ServeState> {
+///
+/// **Never during a rollback's flight** (the architect's ruling L1 on #448, 2026-11-18): the release last confirmed is
+/// then the one being rolled away from, so opening a host on it would serve what the rollback is for taking down.
+/// `flight_is_rollback` is whether the flight's own record is a rollback's, from the room's rows, as for
+/// [`waiting_entry_keeps`]. The host stays as it is until the flight settles.
+pub fn open_host(state: &ServeState, host: usize, flight_is_rollback: bool) -> Option<ServeState> {
     // The default host isn't a custom hostname: it is never opened, as it is never cleared. Opening it mid-flight would
     // put it back on the confirmed release and make the flight's own confirm stale.
-    if host == 0 {
+    if host == 0 || (flight_is_rollback && state.in_flight.is_some()) {
         return None;
     }
     let target = state.hosts.get(host)?;

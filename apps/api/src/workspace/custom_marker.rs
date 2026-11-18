@@ -23,7 +23,11 @@
 //!   **set back:** that host alone goes to nothing, so its applier takes the entry down, and the release stays served
 //!   on its default host.
 //! - **Again:** a set-back host, if nothing moved since, is opened on the release last confirmed served after a wait
-//!   that doubles from a minute to an hour (`reopen_wait_ms`), while routing's local checks hold, and checked again.
+//!   that doubles from a minute to an hour (`reopen_wait_ms`), while routing's local checks hold and no rollback is in
+//!   flight (the architect's ruling L1 on #448), and checked again.
+//! - **What `served_at` means** (the architect's ruling I1 on #448, 2026-11-18): only that something answering at this
+//!   name returned the public marker. It never authorizes anything, and is never shown as proof that the room serves
+//!   the name.
 //!
 //! Logs carry the room's and the hostname request's IDs and codes. The host is never logged.
 use super::release_recheck::release_now;
@@ -41,8 +45,10 @@ use podster_core::release_rollback::marker_release;
 const MOVED: &str = "custom_marker_moved";
 /// `last_code` when a set-back host was opened again.
 const REOPENED: &str = "custom_marker_reopened";
-/// `last_code` when a set-back host's reopening waits, routing's local checks not holding.
+/// `last_code` when a set-back host's reopening waits: routing's local checks don't hold, or a rollback is in flight.
 const REOPEN_WAITING: &str = "custom_marker_reopen_waiting";
+/// `last_code` on a pending switch while the job may not run: on resuming, its wait starts again (ruling I2 on #448).
+const IDLE: &str = "custom_marker_idle";
 
 /// Test builds only: the job runs in a room a test gave `test_custom_marker`, which also stands for the gate on the
 /// release path being open for it. Every other test's room is as it was before 8e. Always on in a deployment, where
@@ -214,7 +220,14 @@ fn reopen(sql: &SqlStorage, row: &Value, claims_open: bool, now: i64) -> R<()> {
     let host = row["host"].as_str().unwrap_or_default();
     let set_backs = u32::try_from(int(&row["set_backs"]).max(1)).unwrap_or(u32::MAX);
     let (route, _) = super::custom_hostname::route_local_for(sql, host, claims_open)?;
-    if route != CustomRoute::Serve {
+    let loaded = takedown::load(sql)?;
+    // During a rollback's flight the release last confirmed is the one rolled away from: the reopening waits until the
+    // flight settles (the architect's ruling L1 on #448, 2026-11-18).
+    let rollback = match &loaded {
+        Some(loaded) => release_rollback::flight_is_rollback(sql, &loaded.state)?,
+        None => false,
+    };
+    if route != CustomRoute::Serve || rollback {
         set_row(
             sql,
             host,
@@ -225,13 +238,13 @@ fn reopen(sql: &SqlStorage, row: &Value, claims_open: bool, now: i64) -> R<()> {
         log(sql, host, "reopen_waiting", Some(REOPEN_WAITING));
         return Ok(());
     }
-    let loaded = takedown::load(sql)?;
     let after = loaded.as_ref().and_then(|loaded| {
         let index = loaded.hosts.iter().position(|name| name == host)?;
         custom_reopen(
             &loaded.state,
             index,
             takedown::from_stored(int(&row["m_version"])),
+            rollback,
         )
     });
     exec(
@@ -300,11 +313,18 @@ pub(super) fn plan(sql: &SqlStorage, claims_open: bool, now: i64) -> R<Vec<Lease
             if waiting {
                 continue;
             }
-            (
-                int(&row["switched_at"]),
-                int(&row["attempts"]),
-                int(&row["set_backs"]),
-            )
+            // Resumed from idle: the switch's wait starts again from now (ruling I2 on #448).
+            let switched_at = if row["last_code"].as_str() == Some(IDLE) {
+                exec(
+                    sql,
+                    "UPDATE custom_marker SET switched_at = ?, last_code = NULL, updated_at = ? WHERE host = ?",
+                    vec![now.into(), now.into(), host.as_str().into()],
+                )?;
+                now
+            } else {
+                int(&row["switched_at"])
+            };
+            (switched_at, int(&row["attempts"]), int(&row["set_backs"]))
         } else {
             // A switch the room sees for the first time: the marker's wait runs from now. A set-back count in a row is
             // kept, so a host that keeps failing waits longer each time.
@@ -428,8 +448,15 @@ pub(super) fn next_due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
 const DUE_FLOOR_MS: i64 = 1_000;
 
 /// While the job may not run (release off for the deployment, no content provider, the gate closed), every wait due
-/// now is put off by the driver's idle wait, so the alarm doesn't keep coming back for it.
+/// now is put off by the driver's idle wait, so the alarm doesn't keep coming back for it. A switch still waiting for
+/// its marker is marked idle, so on resuming its wait starts again and it is fetched before any set-back: a host is
+/// never set back on a wait that ran out while nothing could fetch (the architect's ruling I2 on #448, 2026-11-18).
 fn idle(sql: &SqlStorage, now: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE custom_marker SET last_code = ? WHERE next_at IS NOT NULL AND next_at <= ? AND served_at IS NULL AND set_back_at IS NULL",
+        vec![IDLE.into(), now.into()],
+    )?;
     exec(
         sql,
         "UPDATE custom_marker SET next_at = ?, leased_until = NULL, updated_at = ? WHERE next_at IS NOT NULL AND next_at <= ?",

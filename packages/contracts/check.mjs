@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
+import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -160,7 +161,7 @@ const releaseEnums = {
   "AppDataDeletion.data": core.dataStates.join(), "AppDataDeletion.cause": [...core.deleteCauses, null].join(),
 };
 const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
-const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses, "task_input_author.input": core.promptInputs };
+const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses, "task_input_author.input": core.promptInputs, "task_input_text.input": core.promptInputs };
 for (const [at, expected] of Object.entries(columns)) {
   const [table, column] = at.split(".");
   try {
@@ -174,11 +175,10 @@ if (provenance?.additionalProperties !== false || provenance?.properties?.inputs
 if (provenance?.properties?.inputs?.items?.properties?.input?.enum?.join() !== core.promptInputs.join()) problems.push(`TaskProvenance.inputs.input: must be exactly core's ${core.promptInputs.join()}`);
 if (provenance?.properties?.room_visibility?.enum?.join() !== "private,public") problems.push("TaskProvenance.room_visibility: must be exactly private,public");
 if (api.components.responses.TaskDetail?.content?.["application/json"]?.schema?.properties?.provenance?.$ref !== "#/components/schemas/TaskProvenance") problems.push("TaskDetail.provenance: must be the TaskProvenance schema");
-for (const [id, { op }] of operations) {
-  const body = op.requestBody?.content?.["application/json"]?.schema;
-  const named = JSON.stringify(body?.$ref ? api.components.schemas[body.$ref.split("/").pop()] : body ?? {});
-  if (/TaskProvenance|"provenance"|author_org|requester_org/.test(named)) problems.push(`${id}: no request may name a provenance, an author or an organization for one`);
-}
+// No command may take a provenance or an author, however deep its schema puts the name (F5), and only the room's recorded
+// command paths write a task's prompt text or its provenance (F6). provenance-checks.test.mjs shows each finds what it must.
+problems.push(...provenanceInRequests(api));
+problems.push(...promptWrites(readSources(new URL("../../", import.meta.url).pathname).rust));
 // The claim object's own table takes its states from core too.
 const claims = readFileSync(new URL("apps/api/src/hostname_claim.rs", root), "utf8");
 try {

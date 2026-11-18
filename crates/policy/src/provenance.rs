@@ -26,3 +26,21 @@ pub fn is_external(author_org: Option<&str>, reader_org: &str) -> bool {
         _ => true,
     }
 }
+
+/// Whether a prompt input counts as external to the reader: if any author who ever wrote it is, or if who wrote its
+/// present words isn't known. Every author is kept, so the last writer can't hide an earlier one, and an input with no
+/// recorded author at all is external.
+pub fn input_external(authors_external: &[bool], unknown: bool) -> bool {
+    unknown || authors_external.is_empty() || authors_external.iter().any(|external| *external)
+}
+
+/// Whether an author, or the requester, is active: a current participant of the room, held now in the organization
+/// recorded when they wrote or took the part. Read from the room's current state each time. Runner's run policy treats
+/// someone who isn't as external (M7 step 7); the server decides nothing from it.
+pub fn author_active(
+    participant: bool,
+    held_org: Option<&str>,
+    recorded_org: Option<&str>,
+) -> bool {
+    participant && recorded_org.is_some() && held_org == recorded_org
+}

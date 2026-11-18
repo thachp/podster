@@ -65,3 +65,19 @@ pub fn written(before: Option<&Task>, decision: &Decision) -> Vec<PromptInput> {
         .filter(|i| changed(*i))
         .collect()
 }
+
+/// Whether `decision` made someone the task's requester: its creation, or a change of requester. The room records the
+/// requester's organization then, so it means the same as an input author's: the organization when they took the part.
+pub fn requester_set(before: Option<&Task>, decision: &Decision) -> bool {
+    before.is_none_or(|b| b.requester != decision.task.requester)
+}
+
+/// The longest author ID or organization the room records, as its column checks allow.
+pub const MAX_AUTHOR_BYTES: usize = 128;
+
+/// Whether the room can record this author. A command whose author it can't record is refused before anything is written,
+/// rather than failing on the table's checks partway through. An empty organization is never recorded: say none instead.
+pub fn recordable_author(id: &str, org: Option<&str>) -> bool {
+    let fits = |s: &str| !s.is_empty() && s.len() <= MAX_AUTHOR_BYTES;
+    fits(id) && org.is_none_or(fits)
+}

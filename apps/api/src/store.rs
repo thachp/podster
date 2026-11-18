@@ -489,24 +489,43 @@ CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY RE
   store_id TEXT NOT NULL CHECK (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*'),
   recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
 ",
-// Step 54 (M7 step 4, decision 228): who last wrote each of a task's prompt inputs, from the command that wrote it, for the
-// provenance `get_task` shows Runner's run policy. A title, instructions or criteria row keeps the SHA-256 of the words its
-// author wrote, so a read names that author only while the words are still theirs. A change request's row names its
-// `task.changes_requested` event, whose reason is the request. Only the latest change request is backfilled, from that event,
-// which is exact; nothing else is guessed, so a task's inputs from before this step read as unknown, which run policy treats
-// as the least trusted. Every statement is safe to run again, so a renumbering on rebase can't break a room.
+// Step 54 (M7 step 4, decision 228, and the architect's rulings on #443's reviews): who wrote each of a task's prompt
+// inputs, from the commands that wrote them, for the provenance `get_task` shows Runner's run policy. `task_input_author`
+// keeps every author of an input, each once, and none is ever removed, so a later writer can't hide an earlier one (F1).
+// `task_input_text` keeps the latest write: the SHA-256 of the words written, so a read counts the record only while the
+// words are still those, or for a change request the `task.changes_requested` event it was, counted only while that is the
+// task's latest (F2). `task_requester_org` keeps the requester's organization as of when they took the part (F3). Only change
+// requests are backfilled, from their events, which is exact; nothing else is guessed, so a task's other inputs and its
+// requester from before this step read as unknown, which counts as external. Every statement is safe to run again, so a
+// renumbering on rebase can't break a room.
 "
 CREATE TABLE IF NOT EXISTS task_input_author (task_id TEXT NOT NULL,
   input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
   author_id TEXT NOT NULL CHECK (length(author_id) BETWEEN 1 AND 128),
   author_org TEXT CHECK (author_org IS NULL OR length(author_org) BETWEEN 1 AND 128),
+  first_written_at INTEGER NOT NULL CHECK (typeof(first_written_at) = 'integer'),
+  written_at INTEGER NOT NULL CHECK (typeof(written_at) = 'integer' AND written_at >= first_written_at),
+  PRIMARY KEY (task_id, input, author_id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS task_input_text (task_id TEXT NOT NULL,
+  input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
   text_sha256 TEXT CHECK (text_sha256 IS NULL OR (length(text_sha256) = 64 AND text_sha256 NOT GLOB '*[^0-9a-f]*')),
   event_id TEXT CHECK (event_id IS NULL OR length(event_id) BETWEEN 1 AND 128),
   written_at INTEGER NOT NULL CHECK (typeof(written_at) = 'integer'),
   CHECK ((input = 'change_request') = (event_id IS NOT NULL)), CHECK ((input = 'change_request') = (text_sha256 IS NULL)),
   PRIMARY KEY (task_id, input)) WITHOUT ROWID;
-INSERT OR IGNORE INTO task_input_author (task_id, input, author_id, author_org, event_id, written_at)
-  SELECT e.task_id, 'change_request', e.actor_id, NULLIF(e.actor_org, ''), e.id, e.created_at FROM event e
+CREATE TABLE IF NOT EXISTS task_requester_org (task_id TEXT PRIMARY KEY,
+  requester_id TEXT NOT NULL CHECK (length(requester_id) BETWEEN 1 AND 128),
+  org TEXT CHECK (org IS NULL OR length(org) BETWEEN 1 AND 128),
+  recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
+INSERT OR IGNORE INTO task_input_author (task_id, input, author_id, author_org, first_written_at, written_at)
+  SELECT e.task_id, 'change_request', e.actor_id,
+    (SELECT NULLIF(l.actor_org, '') FROM event l WHERE l.task_id = e.task_id AND l.actor_id = e.actor_id AND l.type = 'task.changes_requested'
+       AND length(l.actor_org) <= 128 ORDER BY l.seq DESC LIMIT 1),
+    min(e.created_at), max(e.created_at)
+  FROM event e WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL AND length(e.actor_id) BETWEEN 1 AND 128
+  GROUP BY e.task_id, e.actor_id;
+INSERT OR IGNORE INTO task_input_text (task_id, input, event_id, written_at)
+  SELECT e.task_id, 'change_request', e.id, e.created_at FROM event e
   WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL
     AND e.seq = (SELECT max(seq) FROM event WHERE task_id = e.task_id AND type = 'task.changes_requested');
 "];

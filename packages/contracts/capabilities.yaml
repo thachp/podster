@@ -16,8 +16,8 @@ capabilities:
   link_asset: { kind: command, operation: linkFile }
   unlink_asset: { kind: command, operation: unlinkFile }
   list_tasks: { kind: query, operation: listTasks }
-  # M7 step 4 (decision 228): get_task also answers the task's provenance, who wrote each prompt input and from which
-  # organization, for Runner's run policy. A read the caller could already make; it adds no capability and authorizes nothing.
+  # M7 step 4 (decision 228): get_task also answers the task's provenance, everyone who wrote each prompt input and from
+  # which organization, for Runner's run policy. A read the caller could already make; it adds no capability and authorizes nothing.
   get_task: { kind: query, operation: getTask }
   list_outputs: { kind: query, operation: listOutputs }
   list_output_versions: { kind: query, operation: listOutputVersions }

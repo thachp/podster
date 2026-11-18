@@ -171,3 +171,44 @@ fn a_change_request_writes_the_change_request_and_nothing_else() {
     .unwrap();
     assert_eq!(written(Some(&submitted.task), &changes), [ChangeRequest]);
 }
+
+#[test]
+fn the_requester_is_set_on_creation_and_by_a_change_of_requester_only() {
+    use podster_core::task_inputs::requester_set;
+    let start = created(Some("Tests pass"));
+    assert!(requester_set(None, &start));
+    let edit = update(
+        &start,
+        TaskPatch {
+            title: Some("Design v2".into()),
+            ..TaskPatch::default()
+        },
+    );
+    assert!(!requester_set(Some(&start.task), &edit));
+    let moved = decide(
+        &start.task,
+        "per_admin",
+        Command::SetRequester {
+            version: start.task.version,
+            requester: "agt_coord".into(),
+        },
+        &Observed::default(),
+    )
+    .unwrap();
+    assert!(requester_set(Some(&start.task), &moved));
+}
+
+#[test]
+fn an_author_is_recorded_only_within_the_room_s_bounds() {
+    use podster_core::task_inputs::{recordable_author, MAX_AUTHOR_BYTES};
+    let max = "a".repeat(MAX_AUTHOR_BYTES);
+    let over = "a".repeat(MAX_AUTHOR_BYTES + 1);
+    assert!(recordable_author("agt_x", Some("org_a")));
+    assert!(recordable_author("agt_x", None));
+    assert!(recordable_author(&max, Some(&max)));
+    assert!(!recordable_author(&over, Some("org_a")));
+    assert!(!recordable_author("agt_x", Some(&over)));
+    assert!(!recordable_author("", Some("org_a")));
+    // An empty organization is recorded as none, never as an empty string.
+    assert!(!recordable_author("agt_x", Some("")));
+}

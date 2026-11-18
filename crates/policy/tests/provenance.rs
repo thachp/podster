@@ -85,3 +85,28 @@ fn an_author_is_external_unless_the_reader_shares_a_known_organization() {
     assert!(is_external(Some(""), "org_a"));
     assert!(is_external(Some(""), ""));
 }
+
+#[test]
+fn an_input_is_external_if_any_author_is_or_one_is_unknown() {
+    assert!(!input_external(&[false], false));
+    assert!(!input_external(&[false, false], false));
+    // The last writer can't launder an earlier external author (the review's F1).
+    assert!(input_external(&[true, false], false));
+    assert!(input_external(&[false, true], false));
+    // Unknown words, or no author at all, count as external.
+    assert!(input_external(&[false], true));
+    assert!(input_external(&[], false));
+}
+
+#[test]
+fn an_author_is_active_only_while_held_in_the_organization_recorded() {
+    assert!(author_active(true, Some("org_a"), Some("org_a")));
+    // Left the room, or revoked.
+    assert!(!author_active(false, Some("org_a"), Some("org_a")));
+    // Held now in another organization than the one they wrote under.
+    assert!(!author_active(true, Some("org_b"), Some("org_a")));
+    // No organization recorded, or none held now.
+    assert!(!author_active(true, Some("org_a"), None));
+    assert!(!author_active(true, None, Some("org_a")));
+    assert!(!author_active(true, None, None));
+}

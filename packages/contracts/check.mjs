@@ -160,12 +160,24 @@ const releaseEnums = {
   "AppDataDeletion.data": core.dataStates.join(), "AppDataDeletion.cause": [...core.deleteCauses, null].join(),
 };
 const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
-const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses };
+const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses, "task_input_author.input": core.promptInputs };
 for (const [at, expected] of Object.entries(columns)) {
   const [table, column] = at.split(".");
   try {
     if (columnCheck(store, table, column).join() !== expected.join()) problems.push(`${at}: the room's column check must be exactly core's ${expected.join()}`);
   } catch (error) { problems.push(error.message); }
+}
+// M7 step 4 (decision 228): a task's provenance names core's prompt inputs, in core's order, and nothing else. It is a
+// read: closed, on `get_task` alone, and no command takes any of it.
+const provenance = api.components.schemas.TaskProvenance;
+if (provenance?.additionalProperties !== false || provenance?.properties?.inputs?.items?.additionalProperties !== false) problems.push("TaskProvenance: isn't closed");
+if (provenance?.properties?.inputs?.items?.properties?.input?.enum?.join() !== core.promptInputs.join()) problems.push(`TaskProvenance.inputs.input: must be exactly core's ${core.promptInputs.join()}`);
+if (provenance?.properties?.room_visibility?.enum?.join() !== "private,public") problems.push("TaskProvenance.room_visibility: must be exactly private,public");
+if (api.components.responses.TaskDetail?.content?.["application/json"]?.schema?.properties?.provenance?.$ref !== "#/components/schemas/TaskProvenance") problems.push("TaskDetail.provenance: must be the TaskProvenance schema");
+for (const [id, { op }] of operations) {
+  const body = op.requestBody?.content?.["application/json"]?.schema;
+  const named = JSON.stringify(body?.$ref ? api.components.schemas[body.$ref.split("/").pop()] : body ?? {});
+  if (/TaskProvenance|"provenance"|author_org|requester_org/.test(named)) problems.push(`${id}: no request may name a provenance, an author or an organization for one`);
 }
 // The claim object's own table takes its states from core too.
 const claims = readFileSync(new URL("apps/api/src/hostname_claim.rs", root), "utf8");

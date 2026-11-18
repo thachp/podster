@@ -536,7 +536,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
-    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `files` lists each submission's stored files, with `submission_no`, `id`, `label`, `name`, `size`, `sha256`, `media_type`, `state`, `download_path`, which is null unless the caller may download it now, `from` (`id` and `org` of whoever submitted it), `external`, true when that organization isn't the caller's, and `created_at`. Each has `submitted` true. After them come the caller's own files for this task that no submission names yet, with `submitted` false, a null `submission_no` and `label`, and no `from` or `external`: uploads still arriving, scanning, ready, blocked and failed, so a reload still shows what counts toward the cap. An upload whose grant ended with no attempt under way can't arrive, so it isn't listed. Nobody else sees those. Through oversight, each file has only `id`, `submitted`, `submission_no`, `name`, `state` and a null `download_path`. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and so does `files`, except that the reviewer named on the task gets all of its submitted files, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist. Each history entry, and each message, has `origin`: `a2a_remote` when a read of the agent's own A2A endpoint made it (ADR 0007), otherwise null. Only the room sets it, and it grants nothing", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `files` lists each submission's stored files, with `submission_no`, `id`, `label`, `name`, `size`, `sha256`, `media_type`, `state`, `download_path`, which is null unless the caller may download it now, `from` (`id` and `org` of whoever submitted it), `external`, true when that organization isn't the caller's, and `created_at`. Each has `submitted` true. After them come the caller's own files for this task that no submission names yet, with `submitted` false, a null `submission_no` and `label`, and no `from` or `external`: uploads still arriving, scanning, ready, blocked and failed, so a reload still shows what counts toward the cap. An upload whose grant ended with no attempt under way can't arrive, so it isn't listed. Nobody else sees those. Through oversight, each file has only `id`, `submitted`, `submission_no`, `name`, `state` and a null `download_path`. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and so does `files`, except that the reviewer named on the task gets all of its submitted files, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist. Each history entry, and each message, has `origin`: `a2a_remote` when a read of the agent's own A2A endpoint made it (ADR 0007), otherwise null. Only the room sets it, and it grants nothing. `provenance` (M7 step 4) names the requester's organization, the room's visibility and who last wrote each prompt input, each with `external`: see `TaskProvenance`. It authorizes nothing", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/plan:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get: { operationId: getPlan, tags: [queries], parameters: [{ name: scope, in: query, required: false, schema: { type: string, enum: [unfinished] }, description: "`unfinished` lists only unfinished tasks. `complete` is then always false, because finished tasks are left out, so don't work out a finish from it. Someone who sees the whole room still gets every unfinished task, each one's whole predecessor list and `plan_revision`, so it's enough to edit from, and a predecessor that's finished shows only as an ID in `edges`. Someone limited to their own tasks gets those of their tasks that are unfinished, and only edges with both ends among them. It shows them only tasks they're named on, and it has no per-column cut, so someone named on over 3,001 tasks can see an older one of their own here that the default read leaves out. Any other value gets `invalid_argument`" }], summary: "One read with `forecast`, a `PlanForecast` that every viewer gets, and `start`, `{ date, timezone }` or null, only for someone who can have a forecast. One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, or with more than 5,000 finished tasks' edges. A read holds unfinished tasks first, then the newest finished ones, so someone who sees the whole room always gets every task whose plan can change, and each one's whole predecessor list, even if a predecessor is too old to be listed. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
@@ -1020,6 +1020,7 @@ components:
             required: [task, submissions, artifacts, messages, history, visible]
             properties:
               task: { $ref: "#/components/schemas/Task" }
+              provenance: { $ref: "#/components/schemas/TaskProvenance" }
               expected_output: { type: [object, "null"], description: "The expected output this task works toward, as `id`, `title` and `removed`, or null.", properties: { id: { type: string }, title: { type: string }, removed: { type: boolean } } }
               change: { $ref: "#/components/schemas/TaskChange", description: "Absent while managed repositories are switched off, even for a task that got a change while they were on." }
               submissions: { type: array, items: { type: object } }
@@ -1045,6 +1046,42 @@ components:
         head_sha: { type: [string, "null"], pattern: "^([0-9a-f]{40}|[0-9a-f]{64})$", description: "A full commit ID. Used only to find which change to read again, never recorded as a head." }
     OperatorReason: { type: object, additionalProperties: false, required: [reason], properties: { reason: { type: string, enum: [spam, abuse, illegal, impersonation, privacy, other], description: "The reason code, recorded with the action" } } }
     TaskStatus: { type: string, enum: [open, offered, accepted, submitted, completed, canceled] }
+    TaskProvenance:
+      type: object
+      additionalProperties: false
+      required: [room_visibility, requester, inputs]
+      description: "M7 step 4 (decision 228): where a task's prompt came from, for Runner's run policy, which lets the least-trusted author of any input decide (RUNNER.md). The room records each author from the command that wrote the input, never from anything a client sends, and shows this only to someone who may read the task, through oversight too. It is a read only: nothing on the server authorizes from it, and no request takes any of it. `external` is true unless the person or organization named is the reader's own; an author the room has no record of is `from: null` and external. Only `get_task` returns it."
+      properties:
+        room_visibility: { type: string, enum: [private, public], description: "The room's visibility as it stands." }
+        requester:
+          type: object
+          additionalProperties: false
+          required: [id, org, external]
+          properties:
+            id: { type: string }
+            org: { type: [string, "null"], description: "The organization the room holds the requester in, or null if it holds none." }
+            external: { type: boolean }
+        inputs:
+          type: array
+          maxItems: 4
+          description: "One entry for each prompt input the task has, in this order: `title`, `instructions`, `acceptance_criteria` while the task has criteria, and `change_request` once a reviewer has asked for changes, naming the latest. A title, instructions or criteria author is named only while the words are still the ones they wrote: words changed any other way read as unknown. The words themselves are the task's, and a change request's are its history entry's `reason`."
+          items:
+            type: object
+            additionalProperties: false
+            required: [input, from, external, written_at]
+            properties:
+              input: { type: string, enum: [title, instructions, acceptance_criteria, change_request] }
+              from:
+                type: [object, "null"]
+                additionalProperties: false
+                required: [id, org]
+                description: "Who last wrote this input, and the organization the room held them in when they did. Null when the room has no record of who wrote these words, such as for a task made before this was recorded."
+                properties:
+                  id: { type: string }
+                  org: { type: [string, "null"] }
+              external: { type: boolean, description: "True unless `from.org` is the reader's organization. Always true when `from` is null." }
+              written_at: { type: [integer, "null"], description: "When it was written, in milliseconds. Null with `from`." }
+              event_id: { type: [string, "null"], description: "For `change_request` only: the ID of the history entry, a `task.changes_requested` event, whose `reason` is the request." }
     Task:
       type: object
       required: [id, title, instructions, requester, reviewer, status, version]

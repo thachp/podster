@@ -38,6 +38,7 @@ pub mod serve_entry;
 pub mod store_reconcile;
 pub mod submission_files;
 pub mod task_change;
+pub mod task_inputs;
 pub mod write_budget;
 
 pub const MAX_ARTIFACTS: usize = 10;

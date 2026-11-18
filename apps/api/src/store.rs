@@ -488,6 +488,27 @@ CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY RE
   label TEXT NOT NULL REFERENCES app_label (label),
   store_id TEXT NOT NULL CHECK (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*'),
   recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
+",
+// Step 54 (M7 step 4, decision 228): who last wrote each of a task's prompt inputs, from the command that wrote it, for the
+// provenance `get_task` shows Runner's run policy. A title, instructions or criteria row keeps the SHA-256 of the words its
+// author wrote, so a read names that author only while the words are still theirs. A change request's row names its
+// `task.changes_requested` event, whose reason is the request. Only the latest change request is backfilled, from that event,
+// which is exact; nothing else is guessed, so a task's inputs from before this step read as unknown, which run policy treats
+// as the least trusted. Every statement is safe to run again, so a renumbering on rebase can't break a room.
+"
+CREATE TABLE IF NOT EXISTS task_input_author (task_id TEXT NOT NULL,
+  input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
+  author_id TEXT NOT NULL CHECK (length(author_id) BETWEEN 1 AND 128),
+  author_org TEXT CHECK (author_org IS NULL OR length(author_org) BETWEEN 1 AND 128),
+  text_sha256 TEXT CHECK (text_sha256 IS NULL OR (length(text_sha256) = 64 AND text_sha256 NOT GLOB '*[^0-9a-f]*')),
+  event_id TEXT CHECK (event_id IS NULL OR length(event_id) BETWEEN 1 AND 128),
+  written_at INTEGER NOT NULL CHECK (typeof(written_at) = 'integer'),
+  CHECK ((input = 'change_request') = (event_id IS NOT NULL)), CHECK ((input = 'change_request') = (text_sha256 IS NULL)),
+  PRIMARY KEY (task_id, input)) WITHOUT ROWID;
+INSERT OR IGNORE INTO task_input_author (task_id, input, author_id, author_org, event_id, written_at)
+  SELECT e.task_id, 'change_request', e.actor_id, NULLIF(e.actor_org, ''), e.id, e.created_at FROM event e
+  WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL
+    AND e.seq = (SELECT max(seq) FROM event WHERE task_id = e.task_id AND type = 'task.changes_requested');
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the
@@ -840,6 +861,26 @@ fn mark_public_index(sql: &SqlStorage, kind: &str, event_id: &str) -> R<()> {
     )
 }
 
+/// The organization the room holds someone in: the room's own for its owner, otherwise their member row's, kept after they
+/// leave. `None` for someone the room never held. Events record their actor's by this, and so does a task's provenance.
+pub fn principal_org(sql: &SqlStorage, id: &str) -> R<Option<String>> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id FROM workspace",
+        vec![],
+    )?;
+    Ok(match room.first() {
+        Some(r) if r["owner_person_id"].as_str() == Some(id) => text(&r["owner_org_id"]),
+        _ => rows(
+            sql,
+            "SELECT org_id FROM member WHERE principal_id = ?",
+            vec![id.into()],
+        )?
+        .first()
+        .and_then(|m| text(&m["org_id"])),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_event_with_id(
     sql: &SqlStorage,
@@ -852,23 +893,7 @@ fn record_event_with_id(
     now: i64,
 ) -> R<String> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
-    let actor_org = {
-        let room = rows(
-            sql,
-            "SELECT owner_person_id, owner_org_id FROM workspace",
-            vec![],
-        )?;
-        match room.first() {
-            Some(r) if r["owner_person_id"].as_str() == Some(actor) => text(&r["owner_org_id"]),
-            _ => rows(
-                sql,
-                "SELECT org_id FROM member WHERE principal_id = ?",
-                vec![actor.into()],
-            )?
-            .first()
-            .and_then(|m| text(&m["org_id"])),
-        }
-    };
+    let actor_org = principal_org(sql, actor)?;
     exec(sql, "INSERT INTO event (id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at, subject_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
         event_id.as_str().into(), kind.into(), actor.into(), opt(&actor_org), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
         transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),

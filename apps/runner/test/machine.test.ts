@@ -233,6 +233,25 @@ describe("Runner's own source", () => {
     }
   });
 
+  it("takes the home's lock for pair, run and forget, before anything else they do (decision 227)", async () => {
+    const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
+    const main = cli.slice(cli.indexOf("async function main("), cli.indexOf("async function locked("));
+    expect(main).toMatch(/command !== "pair" && command !== "run" && command !== "forget"/);
+    expect(main.indexOf("acquireLock(home)")).toBeGreaterThan(-1);
+    expect(main.indexOf("acquireLock(home)")).toBeLessThan(main.indexOf("locked(command"));
+    // Every command that touches keys or the records is inside `locked`, after the lock.
+    const after = cli.slice(cli.indexOf("async function locked("));
+    for (const command of ["forget", "pair", "run"]) expect(after).toContain(`command === "${command}"`);
+    expect(main).not.toMatch(/command === "(forget|pair|run)"/);
+  });
+
+  it("keeps the lifecycle's core free of the machine: no node: import, so it runs as tested against the real gateway", async () => {
+    for (const file of ["lifecycle.ts", "prompt.ts", "runs.ts", "adapter.ts", "policy.ts"]) {
+      const text = await readFile(new URL(`apps/runner/src/core/${file}`, repo), "utf8");
+      expect([file, /from "node:/.test(text)]).toEqual([file, false]);
+    }
+  });
+
   it("never takes a code as an argument on the command line", async () => {
     const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
     expect(cli).not.toMatch(/option\(args, "code"\)/);

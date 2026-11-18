@@ -10,6 +10,31 @@ import { emptyState, type RunnerState, type StateStore } from "../core/state.js"
 
 const FILE = "state.json";
 
+/**
+ * Writes `text` as `home/name`, whole or not at all: a new file, flushed, renamed over the old one, and the folder
+ * flushed. The folder is owner-only (700) and the file readable by its owner only (600).
+ */
+export async function writeWhole(home: string, name: string, text: string): Promise<void> {
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  await chmod(home, 0o700);
+  const path = join(home, name);
+  const temporary = `${path}.${process.pid}.tmp`;
+  const file = await open(temporary, "w", 0o600);
+  try {
+    await file.writeFile(text);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  await rename(temporary, path);
+  const folder = await open(home, "r");
+  try {
+    await folder.sync();
+  } finally {
+    await folder.close();
+  }
+}
+
 export class FileStateStore implements StateStore {
   readonly home: string;
 
@@ -40,23 +65,7 @@ export class FileStateStore implements StateStore {
   }
 
   async save(state: RunnerState): Promise<void> {
-    await mkdir(this.home, { recursive: true, mode: 0o700 });
-    await chmod(this.home, 0o700);
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    const file = await open(temporary, "w", 0o600);
-    try {
-      await file.writeFile(JSON.stringify(state));
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temporary, this.path);
-    const folder = await open(this.home, "r");
-    try {
-      await folder.sync();
-    } finally {
-      await folder.close();
-    }
+    await writeWhole(this.home, FILE, JSON.stringify(state));
   }
 
   /** Deletes the record. */

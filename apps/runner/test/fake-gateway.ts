@@ -27,6 +27,27 @@ export type Scripted = number | "network";
 
 export type Task = { id: string; status: string; version: number; assignee: string | null; title?: string; instructions?: string };
 
+/** A task as `get_task` answers it, for the lifecycle's tests. */
+export type Detail = {
+  workspace_id: string;
+  task: { id: string; title: string; instructions: string; acceptance_criteria: string | null; requester: string; reviewer: string; assignee: string | null; status: string; version: number };
+  provenance: unknown;
+  history: Record<string, unknown>[];
+  /** Anything else the answer carries, which the prompt must never take. */
+  extra?: Record<string, unknown>;
+};
+
+/** A refusal a capability answers with, in the gateway's own shape. */
+class Refusal extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(status: number, code: string) {
+    super(code);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export class FakeGateway {
   /** The real gateway's code refusal shape, `{ error: { code } }`. */
   redeemScript: Scripted[] = [];
@@ -59,6 +80,14 @@ export class FakeGateway {
   tasks: Record<string, Task[]> = {};
   /** Workspaces whose listing refuses, as one the agent left would. */
   refusedWorkspaces = new Set<string>();
+  /** Tasks as `get_task` answers them, by task ID. */
+  details: Record<string, Detail> = {};
+  /** Each command's stored answer by its idempotency key, as the API keeps them. */
+  readonly stored = new Map<string, unknown>();
+  /** Capabilities whose next answer is applied, then lost on the way back, as a dropped connection would. */
+  loseAnswers: string[] = [];
+  /** Every call fails at the network, as Podster unreachable would. */
+  unreachable = false;
   /** Run when a capability is called, before it answers: lets a test act as the person mid-wait. */
   onCall: ((capability: string) => void | Promise<void>) | null = null;
 
@@ -127,6 +156,7 @@ export class FakeGateway {
     if (url.pathname === "/api/auth/capability/execute") {
       const capability = String(body.capability);
       const args = (body.arguments ?? {}) as Record<string, unknown>;
+      if (this.unreachable) throw new TypeError("fetch failed");
       this.calls.push({ capability, arguments: args });
       await this.onCall?.(capability);
       const scripted = this.scripted(this.executeScript);
@@ -138,7 +168,19 @@ export class FakeGateway {
       if (this.session === "revoked" || this.session === "canceled") return Response.json({ error: "agent_revoked", message: "Agent has been revoked." }, { status: 403 });
       if (this.session !== "confirmed") return Response.json({ message: "agent_unclaimed" }, { status: 403 });
       if (capability === "list_tasks" && this.refusedWorkspaces.has(String(args.workspace_id))) return Response.json({ message: "not_found", code: "not_found" }, { status: 404 });
-      return Response.json({ data: this.answer(capability, args) });
+      let data: unknown;
+      try {
+        data = this.answer(capability, args);
+      } catch (error) {
+        if (error instanceof Refusal) return Response.json({ error: { code: error.code } }, { status: error.status });
+        throw error;
+      }
+      const lost = this.loseAnswers.indexOf(capability);
+      if (lost >= 0) {
+        this.loseAnswers.splice(lost, 1);
+        throw new TypeError("fetch failed");
+      }
+      return Response.json({ data });
     }
     return Response.json({ error: { code: "not_found" } }, { status: 404 });
   }) as typeof fetch;
@@ -157,6 +199,32 @@ export class FakeGateway {
       const after = typeof args.after === "number" ? args.after : this.acked;
       const limit = typeof args.limit === "number" ? args.limit : 10;
       return { events: this.events.filter((e) => e.seq > after).slice(0, limit), acked_seq: this.acked, unread: 0, dropped: this.dropped };
+    }
+    if (capability === "get_task") {
+      const detail = this.details[String(args.task_id)];
+      if (!detail || detail.workspace_id !== args.workspace_id) throw new Refusal(404, "not_found");
+      return { task: structuredClone(detail.task), provenance: structuredClone(detail.provenance), history: structuredClone(detail.history), submissions: [], artifacts: [], messages: [], visible: { submissions: "all", conversation: true }, ...structuredClone(detail.extra ?? {}) };
+    }
+    if (capability === "accept_task" || capability === "decline_task" || capability === "release_task") {
+      const key = `${capability}:${String(args.idempotency_key)}`;
+      if (typeof args.idempotency_key !== "string" || args.idempotency_key.length === 0) throw new Refusal(400, "idempotency_key_required");
+      // A replay answers what the first answered, whatever the task has done since.
+      if (this.stored.has(key)) return structuredClone(this.stored.get(key));
+      const detail = this.details[String(args.task_id)];
+      if (!detail || detail.workspace_id !== args.workspace_id || detail.task.assignee !== this.identity) throw new Refusal(403, "not_allowed");
+      if (args.version !== detail.task.version) throw new Refusal(409, "version_conflict");
+      const from = capability === "release_task" ? "accepted" : "offered";
+      if (detail.task.status !== from) throw new Refusal(409, "invalid_transition");
+      if (capability !== "accept_task" && !(typeof args.reason === "string" && args.reason.length > 0)) throw new Refusal(400, "invalid_argument");
+      detail.task.version += 1;
+      if (capability === "accept_task") detail.task.status = "accepted";
+      else {
+        detail.task.status = "open";
+        detail.task.assignee = null;
+      }
+      detail.history.push({ id: `evt_h${detail.history.length + 1}`, type: capability === "accept_task" ? "task.accepted" : capability === "decline_task" ? "task.declined" : "task.released", reason: args.reason ?? null, actor_id: this.identity });
+      this.stored.set(key, structuredClone(detail.task));
+      return structuredClone(detail.task);
     }
     if (capability === "ack_inbox") {
       this.acked = Math.max(this.acked, Number(args.up_to));

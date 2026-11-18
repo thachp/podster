@@ -566,12 +566,12 @@ describe("room schema step 45, on a room with jobs on record", () => {
       sql.exec("INSERT INTO release_job (release_id, updated_at) VALUES (?, ?)", PREV, T - 1);
       const newest = sql.exec("SELECT version FROM schema_version").one().version as number;
       // Before step 46 too, which only adds `release_uncertain`, step 47, which only adds `hostname_provider`, and step
-      // 48, 49, 50, 51 and 52, which only add tables if they aren't there and so run again as they are, step 53,
-      // which rebuilds the record of an app's store and runs again as it is, and step 54, which only adds the recheck's
-      // record if it isn't there, so all ten run.
+      // 48, 49, 50, 51 and 52, which only add tables if they aren't there and so run again as they are, step 53, which
+      // rebuilds the record of an app's store and runs again as it is, and steps 54 and 55, which only add tables if they
+      // aren't there, so all eleven run.
       sql.exec("DROP TABLE hostname_provider");
       sql.exec("DROP TABLE release_uncertain");
-      sql.exec("UPDATE schema_version SET version = version - 10");
+      sql.exec("UPDATE schema_version SET version = version - 11");
       return newest;
     });
     const before = await inRoom(r.room, (sql) => sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray());

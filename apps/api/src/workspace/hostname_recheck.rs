@@ -12,9 +12,9 @@
 //! custom hostname is deleted at Cloudflare and read until gone, the applier confirms the entry gone, and only then is
 //! the claim freed.
 //!
-//! **A look needs the gate on claims open, a resolver and the room's own facts read** (`no_look`); without any of them
-//! the look is recorded as no answer, by its code (an unread fact's is `standing_unknown`), so it never ends a claim
-//! quickly and a claim nobody can look at ends after seven days. **It doesn't wait on the release switches:** it only keeps or takes down, and switching release off is
+//! **A look needs the gate on claims open and a resolver** (`no_look`), **and the room's own facts read** (checked in
+//! `recheck_if_due`, from `claimed_upkeep`'s read, as `standing_unknown`). Without any of them the look is recorded as
+//! no answer, by its code, so it never ends a claim quickly and a claim nobody can look at ends after seven days. **It doesn't wait on the release switches:** it only keeps or takes down, and switching release off is
 //! an unpublish, which ends the claim on its own.
 //!
 //! Logs carry the room's and the request's IDs and a code, never a hostname or a challenge's value.

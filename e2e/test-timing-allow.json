@@ -1092,19 +1092,6 @@
    "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
   },
   {
-   "file": "apps/api/test/releases.spec.ts",
-   "rule": "unquieted",
-   "where": "M6's routes, none of them built > can't be told from a path nobody defined while release is switched off, by anyone",
-   "category": "R",
-   "owed": true,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    84
-   ],
-   "code": "const room: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
-   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Left out of the rooms PR because the release switch's PR C is changing this file; fix it the same way (a file-level list of the rooms it makes and an afterEach that quiets each) once PR C has merged."
-  },
-  {
    "file": "apps/api/test/fake-content.ts",
    "rule": "sleep",
    "where": "function passGate",
@@ -1197,16 +1184,6 @@
    "listed_at": "fix/test-rooms-alarms-manual",
    "code": "const created = await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" });",
    "reason": "Twelve tests wait for delivery, index projection or a sweep that the runtime's own firing of the room's alarm does, and failed under manualAlarms. Owed: manualAlarms in the room helper, with those tests passing for what they wait on or giving their room back with runtimeAlarms."
-  },
-  {
-   "file": "apps/api/test/releases.spec.ts",
-   "rule": "runtime-alarms",
-   "where": "M6's routes, none of them built > can't be told from a path nobody defined while release is switched off, by anyone",
-   "category": "M",
-   "owed": true,
-   "listed_at": "fix/test-rooms-alarms-manual",
-   "code": "const room: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
-   "reason": "Makes rooms inside its tests with no room helper and quiets none (its `unquieted` entry, also owed). Owed with that fix: one room helper that ends with manualAlarms."
   },
   {
    "file": "apps/api/test/scanning.spec.ts",

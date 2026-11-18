@@ -489,7 +489,60 @@ CREATE TABLE IF NOT EXISTS release_store_binding (release_id TEXT PRIMARY KEY RE
   store_id TEXT NOT NULL CHECK (length(store_id) = 36 AND store_id NOT GLOB '*[^0-9a-f-]*'),
   recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
 ",
-// Step 54 (M6 step 8d): a committed claim's daily recheck records when it last looked, one row a request, so the next
+// Step 54 (M7 step 4, decision 228, and the architect's rulings on #443's reviews and re-review): who wrote each of a
+// task's prompt inputs, from the commands that wrote them, for the provenance `get_task` shows Runner's run policy.
+// `task_input_author` keeps every author and organization pair that ever wrote an input (F1, G3), and a lasting unknown
+// author, `unknown` 1 with an empty ID and organization, wherever a write found words nobody recorded (G1). No row of it
+// is ever removed or rewritten: triggers refuse a delete, and any update but of `written_at` (H1). An organization of
+// none is kept as an empty string, since it is part of the key.
+// `task_input_text` keeps the latest write: the SHA-256 of the words written, or for a change request its
+// `task.changes_requested` event (F2). `task_requester_org` keeps the requester's organization as of when they took the
+// part (F3). Every existing task's title, instructions and criteria get the unknown author, since nobody's writes were
+// recorded before this step, unless the step already recorded that input; change requests are backfilled from their events,
+// which is exact. Every statement is safe to run again, so a renumbering on rebase can't break a room.
+"
+CREATE TABLE IF NOT EXISTS task_input_author (task_id TEXT NOT NULL,
+  input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
+  author_id TEXT NOT NULL CHECK (length(author_id) <= 128),
+  author_org TEXT NOT NULL CHECK (length(author_org) <= 128),
+  unknown INTEGER NOT NULL DEFAULT 0 CHECK (unknown IN (0, 1)),
+  first_written_at INTEGER NOT NULL CHECK (typeof(first_written_at) = 'integer'),
+  written_at INTEGER NOT NULL CHECK (typeof(written_at) = 'integer' AND written_at >= first_written_at),
+  CHECK ((unknown = 1) = (author_id = '')), CHECK (unknown = 0 OR author_org = ''),
+  PRIMARY KEY (task_id, input, author_id, author_org)) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS task_input_author_kept BEFORE DELETE ON task_input_author
+  BEGIN SELECT RAISE(ABORT, 'a task input author is kept'); END;
+CREATE TRIGGER IF NOT EXISTS task_input_author_unchanged BEFORE UPDATE ON task_input_author
+  WHEN NEW.task_id IS NOT OLD.task_id OR NEW.input IS NOT OLD.input OR NEW.author_id IS NOT OLD.author_id
+    OR NEW.author_org IS NOT OLD.author_org OR NEW.unknown IS NOT OLD.unknown OR NEW.first_written_at IS NOT OLD.first_written_at
+  BEGIN SELECT RAISE(ABORT, 'a task input author is kept as written'); END;
+CREATE TABLE IF NOT EXISTS task_input_text (task_id TEXT NOT NULL,
+  input TEXT NOT NULL CHECK (input IN ('title', 'instructions', 'acceptance_criteria', 'change_request')),
+  text_sha256 TEXT CHECK (text_sha256 IS NULL OR (length(text_sha256) = 64 AND text_sha256 NOT GLOB '*[^0-9a-f]*')),
+  event_id TEXT CHECK (event_id IS NULL OR length(event_id) BETWEEN 1 AND 128),
+  written_at INTEGER NOT NULL CHECK (typeof(written_at) = 'integer'),
+  CHECK ((input = 'change_request') = (event_id IS NOT NULL)), CHECK ((input = 'change_request') = (text_sha256 IS NULL)),
+  PRIMARY KEY (task_id, input)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS task_requester_org (task_id TEXT PRIMARY KEY,
+  requester_id TEXT NOT NULL CHECK (length(requester_id) BETWEEN 1 AND 128),
+  org TEXT CHECK (org IS NULL OR length(org) BETWEEN 1 AND 128),
+  recorded_at INTEGER NOT NULL CHECK (typeof(recorded_at) = 'integer')) WITHOUT ROWID;
+INSERT OR IGNORE INTO task_input_author (task_id, input, author_id, author_org, unknown, first_written_at, written_at)
+  SELECT t.id, i.input, '', '', 1, t.created_at, t.created_at
+  FROM task t JOIN (SELECT 'title' AS input UNION ALL SELECT 'instructions' UNION ALL SELECT 'acceptance_criteria') i
+  WHERE (i.input <> 'acceptance_criteria' OR t.acceptance_criteria IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM task_input_text x WHERE x.task_id = t.id AND x.input = i.input);
+INSERT OR IGNORE INTO task_input_author (task_id, input, author_id, author_org, first_written_at, written_at)
+  SELECT e.task_id, 'change_request', e.actor_id, COALESCE(e.actor_org, ''), min(e.created_at), max(e.created_at)
+  FROM event e WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL
+    AND length(e.actor_id) BETWEEN 1 AND 128 AND length(COALESCE(e.actor_org, '')) <= 128
+  GROUP BY e.task_id, e.actor_id, COALESCE(e.actor_org, '');
+INSERT OR IGNORE INTO task_input_text (task_id, input, event_id, written_at)
+  SELECT e.task_id, 'change_request', e.id, e.created_at FROM event e
+  WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL
+    AND e.seq = (SELECT max(seq) FROM event WHERE task_id = e.task_id AND type = 'task.changes_requested');
+",
+// Step 55 (M6 step 8d): a committed claim's daily recheck records when it last looked, one row a request, so the next
 // look waits a day whatever that look said. Its last match is `proved_at` and its first definite no since is
 // `definite_no_since`, both on the request since step 2. A table, not a column, so the step runs again safely: SQLite
 // can't add a column only if it is missing. Forward-only: an open claim has no row, so its first recheck is a day after
@@ -849,6 +902,26 @@ fn mark_public_index(sql: &SqlStorage, kind: &str, event_id: &str) -> R<()> {
     )
 }
 
+/// The organization the room holds someone in: the room's own for its owner, otherwise their member row's, kept after they
+/// leave. `None` for someone the room never held. Events record their actor's by this, and so does a task's provenance.
+pub fn principal_org(sql: &SqlStorage, id: &str) -> R<Option<String>> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id FROM workspace",
+        vec![],
+    )?;
+    Ok(match room.first() {
+        Some(r) if r["owner_person_id"].as_str() == Some(id) => text(&r["owner_org_id"]),
+        _ => rows(
+            sql,
+            "SELECT org_id FROM member WHERE principal_id = ?",
+            vec![id.into()],
+        )?
+        .first()
+        .and_then(|m| text(&m["org_id"])),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_event_with_id(
     sql: &SqlStorage,
@@ -861,23 +934,7 @@ fn record_event_with_id(
     now: i64,
 ) -> R<String> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
-    let actor_org = {
-        let room = rows(
-            sql,
-            "SELECT owner_person_id, owner_org_id FROM workspace",
-            vec![],
-        )?;
-        match room.first() {
-            Some(r) if r["owner_person_id"].as_str() == Some(actor) => text(&r["owner_org_id"]),
-            _ => rows(
-                sql,
-                "SELECT org_id FROM member WHERE principal_id = ?",
-                vec![actor.into()],
-            )?
-            .first()
-            .and_then(|m| text(&m["org_id"])),
-        }
-    };
+    let actor_org = principal_org(sql, actor)?;
     exec(sql, "INSERT INTO event (id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at, subject_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
         event_id.as_str().into(), kind.into(), actor.into(), opt(&actor_org), task_id.map_or(V::Null, V::from), transition.reason.map_or(V::Null, V::from),
         transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),

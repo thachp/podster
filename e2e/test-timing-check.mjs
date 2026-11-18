@@ -75,9 +75,12 @@
 // - a busy loop on the clock (`while (Date.now() < until) {}`), which waits without a timer;
 // - a margin checked with `if` and `throw`, or with `assert`, rather than `expect`;
 // - a sleep inside a package's code, or in a file outside the two test folders;
-// - a call to a helper that sleeps, made from another file, unless the helper is exported (by name, as the default,
-//   or re-exported with `export { a } from` or `export * from`) and imported by name, as the default, or as a
-//   namespace whose member is called (`m.f()`); `export * as m from`, and a namespace passed on or destructured, pass;
+// - a call to a helper that sleeps, made from another file, unless the export is a function declaration, a function or
+//   arrow held by a `const`, or a name bound to one of those (exported by name, as the default, or re-exported with
+//   `export { a } from` or `export * from`), and it is imported by name, as the default, or as a namespace whose member
+//   is called (`m.f()`). These pass: `export * as m from`; a namespace passed on or destructured; an export wrapped in a
+//   higher-order function (`export const poll = wrap(...)`, `export default wrap(...)`); a sleep in an object's method
+//   (`helpers.poll()`); and one in a class's static method (`Rooms.poll()`);
 // - a clock read inside a helper function and returned to the test;
 // - a room made through a Durable Object's own routes (`stub.fetch("https://workspace/internal/...")`), through a
 //   `Request` object, or with the method or path computed at run time, or through a helper file's export reached by a

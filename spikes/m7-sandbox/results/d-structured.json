@@ -1,0 +1,179 @@
+{
+  "scenario": "d-structured",
+  "id": "d-structured",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.02,
+    "turns": 8,
+    "ms": 120000
+  },
+  "sdkCaps": {
+    "maxTurns": 6
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_01JD1PxT2k66ZkWyn7dWcC5W",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1279
+    },
+    {
+      "toolUseId": "toolu_01GLh7KPTh9iVMWo7BtrrSUX",
+      "tool": "StructuredOutput",
+      "allow": true,
+      "rule": "tool-allowed",
+      "t": 2247
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_01JD1PxT2k66ZkWyn7dWcC5W",
+      "tool": "mcp__task__sh",
+      "t": 1271
+    },
+    {
+      "toolUseId": "toolu_01GLh7KPTh9iVMWo7BtrrSUX",
+      "tool": "StructuredOutput",
+      "t": 2246
+    }
+  ],
+  "executions": [
+    {
+      "tool": "mcp__task__sh",
+      "t": 1290
+    }
+  ],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=6",
+      "--model=claude-haiku-5-5",
+      "--json-schema={\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"string\",\"enum\":[\"done\",\"failed\"]},\"summary\":{\"type\":\"string\",\"maxLength\":200},\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":10}},\"required\":[\"status\",\"summary\",\"files\"],\"additionalProperties\":false}",
+      "--allowedTools=mcp__task__sh,StructuredOutput",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "StructuredOutput",
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": [
+      "cc-plugin-agents-md",
+      "cc-plugin-privacy",
+      "cc-plugin-plugin-authoring"
+    ],
+    "outputStyle": "default"
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 3,
+    "totalCostUsd": 0.000181595,
+    "stopReason": "tool_use",
+    "permissionDenials": [],
+    "hasStructuredOutput": true,
+    "durationMs": 2021
+  },
+  "times": {
+    "timerStartAt": 4,
+    "processExitAt": 2267,
+    "iteratorEndAt": 2268
+  },
+  "assistantMessages": 2,
+  "errors": [],
+  "broker": {
+    "requests": 2,
+    "completed": 2,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.000181595,
+    "tokens": {
+      "input": 4,
+      "output": 191,
+      "cacheWrite": 509,
+      "cacheRead": 2207
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 2
+    },
+    "canarySeen": false
+  },
+  "analysis": {
+    "sdkResult": "success",
+    "structuredPresent": true,
+    "structuredType": "object",
+    "status": "done",
+    "summaryLength": 55,
+    "filesClaimed": 1,
+    "claimedFilesExist": true,
+    "runnerBound": {
+      "ok": true,
+      "problems": [],
+      "size": 113
+    },
+    "pass": true
+  },
+  "ranAt": "2026-11-18T11:01:06.288Z"
+}

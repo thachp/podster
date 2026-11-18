@@ -1,0 +1,770 @@
+{
+  "scenario": "b-sdk-usd",
+  "id": "b-sdk-usd",
+  "mode": "outside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.05,
+    "turns": 70,
+    "ms": 300000
+  },
+  "sdkCaps": {
+    "maxBudgetUsd": 0.003,
+    "maxTurns": 70
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_01TYJGbSDg1prRajoDWNugX3",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1713
+    },
+    {
+      "toolUseId": "toolu_01G3T7vrVYJSr1gpiQrkkP2X",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#1",
+      "t": 2405
+    },
+    {
+      "toolUseId": "toolu_017AG6Jtym6T1CeJjnB3sUDK",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#2",
+      "t": 3084
+    },
+    {
+      "toolUseId": "toolu_01Kamac5xoYf2ptQpQtQYfht",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#3",
+      "t": 3839
+    },
+    {
+      "toolUseId": "toolu_0149z5X6JcKcYUPJGuoLY1gA",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#4",
+      "t": 4538
+    },
+    {
+      "toolUseId": "toolu_01GHEPobTK13mNw4zuH58hXU",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#5",
+      "t": 5354
+    },
+    {
+      "toolUseId": "toolu_0143Pp2xBiyiCA32hkZsKQEA",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#6",
+      "t": 6148
+    },
+    {
+      "toolUseId": "toolu_01TEmb5cBysXVpcFj959h7mD",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#7",
+      "t": 6988
+    },
+    {
+      "toolUseId": "toolu_01LuPfDsDc41AfaUvRUP4dJL",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#8",
+      "t": 7788
+    },
+    {
+      "toolUseId": "toolu_017fmK3yNGsCS9MntnnSwHP1",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#9",
+      "t": 8560
+    },
+    {
+      "toolUseId": "toolu_012KLhaFeCmKEApgJwxLopy1",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#10",
+      "t": 9260
+    },
+    {
+      "toolUseId": "toolu_01GNMtEGogx9LLQeSqc3Saxm",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#11",
+      "t": 10064
+    },
+    {
+      "toolUseId": "toolu_017Vrq3gW91JeKwdxEKZdzoz",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#12",
+      "t": 10862
+    },
+    {
+      "toolUseId": "toolu_01Wkvhtek8rduruDonNT4p2f",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#13",
+      "t": 11662
+    },
+    {
+      "toolUseId": "toolu_01JKpVUwhxicug7RKvi7Pg2W",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#14",
+      "t": 12430
+    },
+    {
+      "toolUseId": "toolu_01DG2RD89o9ynPXKfsB9QFUm",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#15",
+      "t": 13170
+    },
+    {
+      "toolUseId": "toolu_01AM994iPnwLVzkeUFvdN3h3",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#16",
+      "t": 13861
+    },
+    {
+      "toolUseId": "toolu_01MTkbqc6cfPmXdXJ67NTVhm",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#17",
+      "t": 14665
+    },
+    {
+      "toolUseId": "toolu_01JzGnuECSFpZz9tJPv6mqX3",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#18",
+      "t": 15395
+    },
+    {
+      "toolUseId": "toolu_017w7F9XFVe591fkDkGsVcYd",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#19",
+      "t": 16129
+    },
+    {
+      "toolUseId": "toolu_019NHwS9SMZ3o9w3FVHbn4GE",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#20",
+      "t": 16877
+    },
+    {
+      "toolUseId": "toolu_01AkdXR6o2BR94BYQNtv17Tk",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#21",
+      "t": 17632
+    },
+    {
+      "toolUseId": "toolu_01Tqpw7t3n8dSVzHEcpngKKx",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#22",
+      "t": 18410
+    },
+    {
+      "toolUseId": "toolu_01QYXaXhd6kbek1WdazJPbTJ",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#23",
+      "t": 19195
+    },
+    {
+      "toolUseId": "toolu_01F1CDKza2WgEpd6BvM8uN1m",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#24",
+      "t": 19982
+    },
+    {
+      "toolUseId": "toolu_015fv74CBQ3aALjQWoi93QkA",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#25",
+      "t": 20776
+    },
+    {
+      "toolUseId": "toolu_019mrV9qx55jydFcWsJRydcQ",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#26",
+      "t": 21558
+    },
+    {
+      "toolUseId": "toolu_01GXzWcEcAapevDXg2QKgEkc",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#27",
+      "t": 22291
+    },
+    {
+      "toolUseId": "toolu_016hHH8EAHmv5bze4GXMzSpV",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#28",
+      "t": 23004
+    },
+    {
+      "toolUseId": "toolu_0196w6VAx3aR9Bb3s6eRZq5w",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#29",
+      "t": 23808
+    },
+    {
+      "toolUseId": "toolu_01GEbPQ8CD4gbMGayadsaMMZ",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#30",
+      "t": 24573
+    },
+    {
+      "toolUseId": "toolu_01TZEPKSdv5Md3eK4kMCFbkn",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#31",
+      "t": 25376
+    },
+    {
+      "toolUseId": "toolu_01K216rZ5uMroH3HiDP9dS6U",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#32",
+      "t": 26172
+    },
+    {
+      "toolUseId": "toolu_01S1xf2qWeJLn1RB1JVMZKGv",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#33",
+      "t": 26950
+    },
+    {
+      "toolUseId": "toolu_01Bg52jianseoLNGV9Uo3QFj",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#34",
+      "t": 27710
+    },
+    {
+      "toolUseId": "toolu_01GgW2pZsGiYdPuZQzHdu8Xy",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#35",
+      "t": 28521
+    },
+    {
+      "toolUseId": "toolu_01SkLxvZpSwLrtbZh3siQieu",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#36",
+      "t": 29280
+    },
+    {
+      "toolUseId": "toolu_017LTnkUP47MKVagZ5DdqXQK",
+      "tool": "mcp__task__sh",
+      "allow": true,
+      "rule": "command#37",
+      "t": 30028
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_01TYJGbSDg1prRajoDWNugX3",
+      "tool": "mcp__task__sh",
+      "t": 1702
+    },
+    {
+      "toolUseId": "toolu_01G3T7vrVYJSr1gpiQrkkP2X",
+      "tool": "mcp__task__sh",
+      "t": 2404
+    },
+    {
+      "toolUseId": "toolu_017AG6Jtym6T1CeJjnB3sUDK",
+      "tool": "mcp__task__sh",
+      "t": 3082
+    },
+    {
+      "toolUseId": "toolu_01Kamac5xoYf2ptQpQtQYfht",
+      "tool": "mcp__task__sh",
+      "t": 3836
+    },
+    {
+      "toolUseId": "toolu_0149z5X6JcKcYUPJGuoLY1gA",
+      "tool": "mcp__task__sh",
+      "t": 4535
+    },
+    {
+      "toolUseId": "toolu_01GHEPobTK13mNw4zuH58hXU",
+      "tool": "mcp__task__sh",
+      "t": 5351
+    },
+    {
+      "toolUseId": "toolu_0143Pp2xBiyiCA32hkZsKQEA",
+      "tool": "mcp__task__sh",
+      "t": 6146
+    },
+    {
+      "toolUseId": "toolu_01TEmb5cBysXVpcFj959h7mD",
+      "tool": "mcp__task__sh",
+      "t": 6986
+    },
+    {
+      "toolUseId": "toolu_01LuPfDsDc41AfaUvRUP4dJL",
+      "tool": "mcp__task__sh",
+      "t": 7786
+    },
+    {
+      "toolUseId": "toolu_017fmK3yNGsCS9MntnnSwHP1",
+      "tool": "mcp__task__sh",
+      "t": 8558
+    },
+    {
+      "toolUseId": "toolu_012KLhaFeCmKEApgJwxLopy1",
+      "tool": "mcp__task__sh",
+      "t": 9258
+    },
+    {
+      "toolUseId": "toolu_01GNMtEGogx9LLQeSqc3Saxm",
+      "tool": "mcp__task__sh",
+      "t": 10063
+    },
+    {
+      "toolUseId": "toolu_017Vrq3gW91JeKwdxEKZdzoz",
+      "tool": "mcp__task__sh",
+      "t": 10860
+    },
+    {
+      "toolUseId": "toolu_01Wkvhtek8rduruDonNT4p2f",
+      "tool": "mcp__task__sh",
+      "t": 11659
+    },
+    {
+      "toolUseId": "toolu_01JKpVUwhxicug7RKvi7Pg2W",
+      "tool": "mcp__task__sh",
+      "t": 12428
+    },
+    {
+      "toolUseId": "toolu_01DG2RD89o9ynPXKfsB9QFUm",
+      "tool": "mcp__task__sh",
+      "t": 13168
+    },
+    {
+      "toolUseId": "toolu_01AM994iPnwLVzkeUFvdN3h3",
+      "tool": "mcp__task__sh",
+      "t": 13860
+    },
+    {
+      "toolUseId": "toolu_01MTkbqc6cfPmXdXJ67NTVhm",
+      "tool": "mcp__task__sh",
+      "t": 14662
+    },
+    {
+      "toolUseId": "toolu_01JzGnuECSFpZz9tJPv6mqX3",
+      "tool": "mcp__task__sh",
+      "t": 15394
+    },
+    {
+      "toolUseId": "toolu_017w7F9XFVe591fkDkGsVcYd",
+      "tool": "mcp__task__sh",
+      "t": 16128
+    },
+    {
+      "toolUseId": "toolu_019NHwS9SMZ3o9w3FVHbn4GE",
+      "tool": "mcp__task__sh",
+      "t": 16875
+    },
+    {
+      "toolUseId": "toolu_01AkdXR6o2BR94BYQNtv17Tk",
+      "tool": "mcp__task__sh",
+      "t": 17631
+    },
+    {
+      "toolUseId": "toolu_01Tqpw7t3n8dSVzHEcpngKKx",
+      "tool": "mcp__task__sh",
+      "t": 18408
+    },
+    {
+      "toolUseId": "toolu_01QYXaXhd6kbek1WdazJPbTJ",
+      "tool": "mcp__task__sh",
+      "t": 19193
+    },
+    {
+      "toolUseId": "toolu_01F1CDKza2WgEpd6BvM8uN1m",
+      "tool": "mcp__task__sh",
+      "t": 19981
+    },
+    {
+      "toolUseId": "toolu_015fv74CBQ3aALjQWoi93QkA",
+      "tool": "mcp__task__sh",
+      "t": 20774
+    },
+    {
+      "toolUseId": "toolu_019mrV9qx55jydFcWsJRydcQ",
+      "tool": "mcp__task__sh",
+      "t": 21557
+    },
+    {
+      "toolUseId": "toolu_01GXzWcEcAapevDXg2QKgEkc",
+      "tool": "mcp__task__sh",
+      "t": 22289
+    },
+    {
+      "toolUseId": "toolu_016hHH8EAHmv5bze4GXMzSpV",
+      "tool": "mcp__task__sh",
+      "t": 23003
+    },
+    {
+      "toolUseId": "toolu_0196w6VAx3aR9Bb3s6eRZq5w",
+      "tool": "mcp__task__sh",
+      "t": 23807
+    },
+    {
+      "toolUseId": "toolu_01GEbPQ8CD4gbMGayadsaMMZ",
+      "tool": "mcp__task__sh",
+      "t": 24572
+    },
+    {
+      "toolUseId": "toolu_01TZEPKSdv5Md3eK4kMCFbkn",
+      "tool": "mcp__task__sh",
+      "t": 25375
+    },
+    {
+      "toolUseId": "toolu_01K216rZ5uMroH3HiDP9dS6U",
+      "tool": "mcp__task__sh",
+      "t": 26171
+    },
+    {
+      "toolUseId": "toolu_01S1xf2qWeJLn1RB1JVMZKGv",
+      "tool": "mcp__task__sh",
+      "t": 26948
+    },
+    {
+      "toolUseId": "toolu_01Bg52jianseoLNGV9Uo3QFj",
+      "tool": "mcp__task__sh",
+      "t": 27708
+    },
+    {
+      "toolUseId": "toolu_01GgW2pZsGiYdPuZQzHdu8Xy",
+      "tool": "mcp__task__sh",
+      "t": 28519
+    },
+    {
+      "toolUseId": "toolu_01SkLxvZpSwLrtbZh3siQieu",
+      "tool": "mcp__task__sh",
+      "t": 29277
+    },
+    {
+      "toolUseId": "toolu_017LTnkUP47MKVagZ5DdqXQK",
+      "tool": "mcp__task__sh",
+      "t": 30026
+    }
+  ],
+  "executions": [
+    {
+      "tool": "mcp__task__sh",
+      "t": 1730
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 2409
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 3090
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 3843
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 4542
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 5358
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 6152
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 6992
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 7792
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 8563
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 9264
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 10068
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 10865
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 11667
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 12434
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 13173
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 13865
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 14669
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 15398
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 16133
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 16881
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 17636
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 18414
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 19198
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 19986
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 20780
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 21561
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 22295
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 23007
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 23812
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 24577
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 25379
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 26174
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 26954
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 27714
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 28523
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 29284
+    },
+    {
+      "tool": "mcp__task__sh",
+      "t": 30032
+    }
+  ],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=70",
+      "--max-budget-usd=0.003",
+      "--model=claude-haiku-5-5",
+      "--allowedTools=mcp__task__sh",
+      "--tools=",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME",
+      "PATH",
+      "TMPDIR"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "mcp__task__sh",
+      "mcp__task__write"
+    ],
+    "mcpServers": [
+      "task:connected"
+    ],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": [
+      "cc-plugin-agents-md",
+      "cc-plugin-privacy",
+      "cc-plugin-plugin-authoring"
+    ],
+    "outputStyle": "default"
+  },
+  "result": {
+    "subtype": "error_max_budget_usd",
+    "isError": true,
+    "numTurns": 39,
+    "totalCostUsd": 0.0030892450000000004,
+    "stopReason": "end_turn",
+    "permissionDenials": [],
+    "hasStructuredOutput": false,
+    "durationMs": 30844
+  },
+  "times": {
+    "processExitAt": 31334,
+    "iteratorEndAt": 31336
+  },
+  "assistantMessages": 41,
+  "errors": [
+    "Error:Claude Code returned an error result: Reached maximum budget ($0.003)"
+  ],
+  "broker": {
+    "requests": 39,
+    "completed": 39,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.0030892450000000004,
+    "tokens": {
+      "input": 78,
+      "output": 2303,
+      "cacheWrite": 5129,
+      "cacheRead": 128882
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 39
+    },
+    "canarySeen": false
+  },
+  "analysis": {
+    "kind": "usd",
+    "cap": 0.003,
+    "stoppedBy": "error_max_budget_usd",
+    "sdkResult": "error_max_budget_usd",
+    "sdkReportedUsd": 0.0030892450000000004,
+    "sdkNumTurns": 39,
+    "brokerUsd": 0.0030892450000000004,
+    "brokerUsdAtStop": null,
+    "brokerRequests": 39,
+    "brokerRefusedAfterStop": 0,
+    "cutInFlight": 0,
+    "toolCallsDecided": 38,
+    "toolExecutions": 38,
+    "executionsAfterStop": 0,
+    "allowDecisionsAfterStop": 0,
+    "ms": {
+      "stopAt": null,
+      "iteratorEnd": 31336,
+      "processExit": 31334
+    },
+    "overshootUsd": 0.00008924500000000038,
+    "overshootPct": 2.974833333333346,
+    "containerRunningAfter": "true"
+  },
+  "ranAt": "2026-11-18T10:56:16.481Z"
+}

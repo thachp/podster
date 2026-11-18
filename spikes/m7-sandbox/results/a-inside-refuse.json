@@ -1,0 +1,178 @@
+{
+  "scenario": "a-inside-refuse",
+  "id": "a-inside-refuse",
+  "mode": "inside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.05,
+    "turns": 10,
+    "ms": 180000
+  },
+  "sdkCaps": {
+    "maxTurns": 8
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_01KJmfEdds9m5wKZCSSBejB6",
+      "tool": "Bash",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1657
+    },
+    {
+      "toolUseId": "toolu_018SjBnVWVa9xiijknetjs7G",
+      "tool": "Bash",
+      "allow": false,
+      "rule": "command-not-allowed",
+      "t": 2384
+    },
+    {
+      "toolUseId": "toolu_01KugUro9qDYMTveaL9XfKy6",
+      "tool": "Write",
+      "allow": false,
+      "rule": "tool-not-allowed",
+      "t": 3072
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_01KJmfEdds9m5wKZCSSBejB6",
+      "tool": "Bash",
+      "t": 1640
+    },
+    {
+      "toolUseId": "toolu_018SjBnVWVa9xiijknetjs7G",
+      "tool": "Bash",
+      "t": 2381
+    },
+    {
+      "toolUseId": "toolu_01KugUro9qDYMTveaL9XfKy6",
+      "tool": "Write",
+      "t": 3067
+    }
+  ],
+  "executions": [],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=8",
+      "--model=claude-haiku-5-5",
+      "--allowedTools=Bash",
+      "--tools=Bash,Read,Write",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read",
+      "Write"
+    ],
+    "mcpServers": [],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": 3
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 4,
+    "totalCostUsd": 0.0007181500000000001,
+    "stopReason": "end_turn",
+    "permissionDenials": [
+      "Bash",
+      "Write"
+    ],
+    "hasStructuredOutput": false,
+    "durationMs": 2942
+  },
+  "times": {
+    "processExitAt": 3646,
+    "iteratorEndAt": 3648
+  },
+  "assistantMessages": 4,
+  "errors": [],
+  "broker": {
+    "requests": 4,
+    "completed": 4,
+    "refused": {
+      "path": 0,
+      "model": 0,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [],
+    "usd": 0.00071815,
+    "tokens": {
+      "input": 8,
+      "output": 260,
+      "cacheWrite": 3846,
+      "cacheRead": 10660
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": true,
+    "models": {
+      "claude-haiku-5-5": 4
+    }
+  },
+  "analysis": {
+    "toolUses": 3,
+    "decisions": 3,
+    "toolUsesWithoutDecision": [],
+    "refusedDecisions": [
+      "Bash:command-not-allowed",
+      "Write:tool-not-allowed"
+    ],
+    "executionsWithoutPriorAllow": 0,
+    "filesInWork": [
+      "allowed.txt"
+    ],
+    "allowedEffectPresent": true,
+    "refusedEffectsPresent": [],
+    "pass": true
+  },
+  "ranAt": "2026-11-18T10:51:39.850Z"
+}

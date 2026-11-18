@@ -1,0 +1,331 @@
+{
+  "scenario": "c-probe-model",
+  "id": "c-probe-model",
+  "mode": "inside",
+  "sdkLock": "refuse",
+  "model": "claude-haiku-5-5",
+  "caps": {
+    "usd": 0.02,
+    "turns": 5,
+    "ms": 120000
+  },
+  "sdkCaps": {
+    "maxTurns": 4
+  },
+  "decisions": [
+    {
+      "toolUseId": "toolu_015rAPJM1vRgiFzzNkFkKwFK",
+      "tool": "Bash",
+      "allow": true,
+      "rule": "command#0",
+      "t": 1489
+    }
+  ],
+  "toolUses": [
+    {
+      "toolUseId": "toolu_015rAPJM1vRgiFzzNkFkKwFK",
+      "tool": "Bash",
+      "t": 1480
+    }
+  ],
+  "executions": [],
+  "spawn": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "--verbose",
+      "--input-format",
+      "--effort=low",
+      "--max-turns=4",
+      "--model=claude-haiku-5-5",
+      "--allowedTools=Bash",
+      "--tools=Bash,Read,Write",
+      "--setting-sources=",
+      "--strict-mcp-config",
+      "--permission-mode=dontAsk",
+      "--no-session-persistence"
+    ],
+    "sdkEnvNames": [
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "PATH"
+    ],
+    "childEnvNames": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_SDK_READS_SESSION_STATE",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "HOME"
+    ]
+  },
+  "init": {
+    "claudeCodeVersion": "2.1.327",
+    "model": "claude-haiku-5-5",
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read",
+      "Write"
+    ],
+    "mcpServers": [],
+    "slashCommands": 44,
+    "agents": [
+      "claude",
+      "Explore",
+      "general-purpose",
+      "Plan",
+      "statusline-setup"
+    ],
+    "skills": 16,
+    "plugins": 3
+  },
+  "result": {
+    "subtype": "success",
+    "isError": false,
+    "numTurns": 2,
+    "totalCostUsd": 0.000209985,
+    "stopReason": "end_turn",
+    "permissionDenials": [],
+    "hasStructuredOutput": false,
+    "durationMs": 2114
+  },
+  "times": {
+    "processExitAt": 2741,
+    "iteratorEndAt": 2743
+  },
+  "assistantMessages": 2,
+  "errors": [],
+  "broker": {
+    "requests": 3,
+    "completed": 3,
+    "refused": {
+      "path": 1,
+      "model": 1,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [
+      "GET /v1/models"
+    ],
+    "usd": 0.000211385,
+    "tokens": {
+      "input": 13,
+      "output": 104,
+      "cacheWrite": 781,
+      "cacheRead": 6046
+    },
+    "stopped": null,
+    "usdAtStop": null,
+    "inFlightAtStop": 0,
+    "cutInFlight": 0,
+    "sawAuthorizationHeader": false,
+    "clientKeyPlaceholderOnly": false,
+    "models": {
+      "claude-haiku-5-5": 3
+    }
+  },
+  "probe": {
+    "keyAnywhereInProbeOutput": false,
+    "identity": {
+      "Uid": "1000\t1000\t1000\t1000",
+      "Gid": "1000\t1000\t1000\t1000",
+      "CapEff": "0000000000000000",
+      "CapBnd": "0000000000000000",
+      "NoNewPrivs": "1",
+      "Seccomp": "2"
+    },
+    "envNames": [
+      "AI_AGENT",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL",
+      "CLAUDECODE",
+      "CLAUDE_AGENT_SDK_VERSION",
+      "CLAUDE_CODE_CHILD_NOTES_DIR",
+      "CLAUDE_CODE_CHILD_SESSION",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENTRYPOINT",
+      "CLAUDE_CODE_EXECPATH",
+      "CLAUDE_CODE_MESSAGING_SOCKET",
+      "CLAUDE_CODE_MESSAGING_TOKEN",
+      "CLAUDE_CODE_SESSION_ATTENDED",
+      "CLAUDE_CODE_SESSION_ID",
+      "CLAUDE_CONFIG_DIR",
+      "CLAUDE_EFFORT",
+      "CLAUDE_PID",
+      "COREPACK_ENABLE_AUTO_PIN",
+      "DISABLE_AUTOUPDATER",
+      "DISABLE_ERROR_REPORTING",
+      "DISABLE_TELEMETRY",
+      "GIT_EDITOR",
+      "HOME",
+      "HOSTNAME",
+      "NODE_VERSION",
+      "NoDefaultCurrentDirectoryInExePath",
+      "PATH",
+      "PWD",
+      "SHELL",
+      "SHLVL",
+      "YARN_VERSION",
+      "_"
+    ],
+    "envHasAnthropicKeyShape": false,
+    "envHasPlaceholderOnly": true,
+    "files": {
+      "/Users": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<home>": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<home>/.podster": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<home>/.podster/anthropic-spike-b.key": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<home>/.ssh": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<home>/.claude": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "/host_mnt": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "/root": {
+        "ok": false,
+        "code": "EACCES"
+      },
+      "/home": {
+        "ok": true,
+        "kind": "dir",
+        "entries": 2
+      },
+      "/home/task": {
+        "ok": true,
+        "kind": "dir",
+        "entries": 1
+      },
+      "/var/run/docker.sock": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "/run/docker.sock": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "<scratch>/tasks/c-b2": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "/work-b": {
+        "ok": false,
+        "code": "ENOENT"
+      },
+      "/opt/claude/claude": {
+        "ok": true,
+        "kind": "file"
+      },
+      "/work": {
+        "ok": true,
+        "kind": "dir",
+        "entries": 2
+      },
+      "/home/task/.claude": {
+        "ok": true,
+        "kind": "dir",
+        "entries": 6
+      }
+    },
+    "procs": {
+      "visible": 4,
+      "environReadable": 4,
+      "environHasAnthropicKeyShape": false,
+      "otherTaskProcessSeen": false
+    },
+    "writes": {
+      "/etc/probe": "EROFS",
+      "/usr/probe": "EROFS",
+      "/probe-root": "EROFS",
+      "/work/.probe-write": true,
+      "/tmp/probe": true,
+      "/opt/claude/probe": "EROFS"
+    },
+    "dns": {
+      "api.anthropic.com": "EAI_AGAIN",
+      "example.com": "EAI_AGAIN",
+      "host.docker.internal": "EAI_AGAIN",
+      "relay": "resolved"
+    },
+    "net": {
+      "1.1.1.1:443": "ENETUNREACH",
+      "8.8.8.8:53": "ENETUNREACH",
+      "169.254.169.254:80": "ENETUNREACH",
+      "host.docker.internal:22": "EAI_AGAIN",
+      "host.docker.internal:0": "EAI_AGAIN",
+      "172.17.0.1:0": "ENETUNREACH",
+      "192.168.65.254:0": "ENETUNREACH",
+      "relay:8080": "open"
+    },
+    "broker": {
+      "getModels": 404,
+      "otherModel": 403,
+      "allowedModel": 200
+    },
+    "mountPoints": [
+      "/",
+      "/proc",
+      "/dev",
+      "/dev/pts",
+      "/sys",
+      "/sys/fs/cgroup",
+      "/dev/mqueue",
+      "/dev/shm",
+      "/tmp",
+      "/work",
+      "/probe",
+      "/home/task",
+      "/etc/resolv.conf",
+      "/etc/hostname",
+      "/etc/hosts",
+      "/opt/claude/claude",
+      "/proc/bus",
+      "/proc/fs",
+      "/proc/irq",
+      "/proc/sys",
+      "/proc/sysrq-trigger",
+      "/proc/interrupts",
+      "/proc/kcore",
+      "/proc/keys",
+      "/proc/timer_list",
+      "/proc/scsi",
+      "/sys/firmware"
+    ]
+  },
+  "analysis": {
+    "ranAsChildOfClaude": true,
+    "keyReachable": false,
+    "sawPlaceholderNotKey": true,
+    "claudeStateReadable": true,
+    "pass": true
+  },
+  "ranAt": "2026-11-18T10:54:00.766Z"
+}

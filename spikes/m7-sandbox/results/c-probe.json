@@ -1,0 +1,433 @@
+{
+  "scenario": "c-probe",
+  "inside": {
+    "probe": {
+      "keyAnywhereInProbeOutput": false,
+      "identity": {
+        "Uid": "1000\t1000\t1000\t1000",
+        "Gid": "1000\t1000\t1000\t1000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "0000000000000000",
+        "NoNewPrivs": "1",
+        "Seccomp": "2"
+      },
+      "envNames": [
+        "HOME",
+        "HOSTNAME",
+        "NODE_VERSION",
+        "PATH",
+        "YARN_VERSION"
+      ],
+      "envHasAnthropicKeyShape": false,
+      "envHasPlaceholderOnly": false,
+      "files": {
+        "/Users": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.podster": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.podster/anthropic-spike-b.key": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.ssh": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.claude": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/host_mnt": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/root": {
+          "ok": false,
+          "code": "EACCES"
+        },
+        "/home": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 2
+        },
+        "/home/task": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 0
+        },
+        "/var/run/docker.sock": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/run/docker.sock": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<scratch>/tasks/c-b": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/work-b": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/opt/claude/claude": {
+          "ok": true,
+          "kind": "file"
+        },
+        "/work": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 0
+        },
+        "/home/task/.claude": {
+          "ok": false,
+          "code": "ENOENT"
+        }
+      },
+      "procs": {
+        "visible": 2,
+        "environReadable": 2,
+        "environHasAnthropicKeyShape": false,
+        "otherTaskProcessSeen": false
+      },
+      "writes": {
+        "/etc/probe": "EROFS",
+        "/usr/probe": "EROFS",
+        "/probe-root": "EROFS",
+        "/work/.probe-write": true,
+        "/tmp/probe": true,
+        "/opt/claude/probe": "EROFS"
+      },
+      "dns": {
+        "api.anthropic.com": "EAI_AGAIN",
+        "example.com": "EAI_AGAIN",
+        "host.docker.internal": "EAI_AGAIN",
+        "relay": "resolved"
+      },
+      "net": {
+        "1.1.1.1:443": "ENETUNREACH",
+        "8.8.8.8:53": "ENETUNREACH",
+        "169.254.169.254:80": "ENETUNREACH",
+        "host.docker.internal:22": "EAI_AGAIN",
+        "host.docker.internal:53237": "EAI_AGAIN",
+        "172.17.0.1:53237": "ENETUNREACH",
+        "192.168.65.254:53237": "ENETUNREACH",
+        "relay:8080": "open"
+      },
+      "broker": {
+        "getModels": 404,
+        "otherModel": 403,
+        "allowedModel": 200
+      },
+      "mountPoints": [
+        "/",
+        "/proc",
+        "/dev",
+        "/dev/pts",
+        "/sys",
+        "/sys/fs/cgroup",
+        "/dev/mqueue",
+        "/dev/shm",
+        "/tmp",
+        "/probe",
+        "/work",
+        "/home/task",
+        "/etc/resolv.conf",
+        "/etc/hostname",
+        "/etc/hosts",
+        "/opt/claude/claude",
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/timer_list",
+        "/proc/scsi",
+        "/sys/firmware"
+      ]
+    },
+    "container": {
+      "keyInInspect": false,
+      "envNames": [
+        "HOME",
+        "NODE_VERSION",
+        "PATH",
+        "YARN_VERSION"
+      ],
+      "mounts": [
+        {
+          "to": "/work",
+          "from": "own task folder",
+          "rw": true
+        },
+        {
+          "to": "/opt/claude/claude",
+          "from": "claude binary (ro)",
+          "rw": false
+        },
+        {
+          "to": "/probe",
+          "from": "probe (ro)",
+          "rw": false
+        }
+      ],
+      "user": "1000:1000",
+      "capDrop": [
+        "ALL"
+      ],
+      "readOnlyRoot": true,
+      "securityOpt": [
+        "no-new-privileges"
+      ],
+      "network": [
+        "m7b-internal"
+      ],
+      "privileged": false
+    }
+  },
+  "outside": {
+    "probe": {
+      "keyAnywhereInProbeOutput": false,
+      "identity": {
+        "Uid": "1000\t1000\t1000\t1000",
+        "Gid": "1000\t1000\t1000\t1000",
+        "CapEff": "0000000000000000",
+        "CapBnd": "0000000000000000",
+        "NoNewPrivs": "1",
+        "Seccomp": "2"
+      },
+      "envNames": [
+        "HOME",
+        "HOSTNAME",
+        "NODE_VERSION",
+        "PATH",
+        "YARN_VERSION"
+      ],
+      "envHasAnthropicKeyShape": false,
+      "envHasPlaceholderOnly": false,
+      "files": {
+        "/Users": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.podster": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.podster/anthropic-spike-b.key": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.ssh": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<home>/.claude": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/host_mnt": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/root": {
+          "ok": false,
+          "code": "EACCES"
+        },
+        "/home": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 2
+        },
+        "/home/task": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 0
+        },
+        "/var/run/docker.sock": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/run/docker.sock": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "<scratch>/tasks/c-b": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/work-b": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/opt/claude/claude": {
+          "ok": false,
+          "code": "ENOENT"
+        },
+        "/work": {
+          "ok": true,
+          "kind": "dir",
+          "entries": 0
+        },
+        "/home/task/.claude": {
+          "ok": false,
+          "code": "ENOENT"
+        }
+      },
+      "procs": {
+        "visible": 2,
+        "environReadable": 2,
+        "environHasAnthropicKeyShape": false,
+        "otherTaskProcessSeen": false
+      },
+      "writes": {
+        "/etc/probe": "EROFS",
+        "/usr/probe": "EROFS",
+        "/probe-root": "EROFS",
+        "/work/.probe-write": true,
+        "/tmp/probe": true,
+        "/opt/claude/probe": "ENOENT"
+      },
+      "dns": {
+        "api.anthropic.com": "EAI_AGAIN",
+        "example.com": "EAI_AGAIN",
+        "host.docker.internal": "EAI_AGAIN",
+        "relay": "EAI_AGAIN"
+      },
+      "net": {
+        "1.1.1.1:443": "ENETUNREACH",
+        "8.8.8.8:53": "ENETUNREACH",
+        "169.254.169.254:80": "ENETUNREACH",
+        "host.docker.internal:22": "EAI_AGAIN",
+        "host.docker.internal:53237": "EAI_AGAIN",
+        "172.17.0.1:53237": "ENETUNREACH",
+        "192.168.65.254:53237": "ENETUNREACH",
+        "relay:8080": "EAI_AGAIN"
+      },
+      "broker": {},
+      "mountPoints": [
+        "/",
+        "/proc",
+        "/dev",
+        "/dev/pts",
+        "/sys",
+        "/sys/fs/cgroup",
+        "/dev/mqueue",
+        "/dev/shm",
+        "/tmp",
+        "/work",
+        "/probe",
+        "/home/task",
+        "/etc/resolv.conf",
+        "/etc/hostname",
+        "/etc/hosts",
+        "/proc/bus",
+        "/proc/fs",
+        "/proc/irq",
+        "/proc/sys",
+        "/proc/sysrq-trigger",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/timer_list",
+        "/proc/scsi",
+        "/sys/firmware"
+      ]
+    },
+    "container": {
+      "keyInInspect": false,
+      "envNames": [
+        "HOME",
+        "NODE_VERSION",
+        "PATH",
+        "YARN_VERSION"
+      ],
+      "mounts": [
+        {
+          "to": "/work",
+          "from": "own task folder",
+          "rw": true
+        },
+        {
+          "to": "/probe",
+          "from": "probe (ro)",
+          "rw": false
+        }
+      ],
+      "user": "1000:1000",
+      "capDrop": [
+        "ALL"
+      ],
+      "readOnlyRoot": true,
+      "securityOpt": [
+        "no-new-privileges"
+      ],
+      "network": [
+        "none"
+      ],
+      "privileged": false
+    }
+  },
+  "relay": {
+    "keyInInspect": false,
+    "envNames": [
+      "NODE_VERSION",
+      "PATH",
+      "YARN_VERSION"
+    ],
+    "mounts": [],
+    "user": "1000:1000",
+    "capDrop": [
+      "ALL"
+    ],
+    "readOnlyRoot": true,
+    "securityOpt": null,
+    "network": [
+      "bridge",
+      "m7b-internal"
+    ],
+    "privileged": false
+  },
+  "broker": {
+    "requests": 1,
+    "refused": {
+      "path": 1,
+      "model": 1,
+      "stopped": 0,
+      "turns": 0
+    },
+    "refusedPaths": [
+      "GET /v1/models"
+    ],
+    "usd": 0.0000014,
+    "clientKeyPlaceholderOnly": false
+  },
+  "analysis": {
+    "keyReachable": false,
+    "homeReachable": false,
+    "otherTaskReachable": false,
+    "insideNetOnlyRelay": true,
+    "outsideNetNone": true,
+    "brokerPathsRefused": true,
+    "taskCanSpendThroughBroker": true,
+    "nonOwnMounts": [],
+    "pass": true
+  },
+  "ranAt": "2026-11-18T10:53:56.769Z"
+}

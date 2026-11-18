@@ -541,6 +541,15 @@ INSERT OR IGNORE INTO task_input_text (task_id, input, event_id, written_at)
   SELECT e.task_id, 'change_request', e.id, e.created_at FROM event e
   WHERE e.type = 'task.changes_requested' AND e.task_id IS NOT NULL
     AND e.seq = (SELECT max(seq) FROM event WHERE task_id = e.task_id AND type = 'task.changes_requested');
+",
+// Step 55 (M6 step 8d): a committed claim's daily recheck records when it last looked, one row a request, so the next
+// look waits a day whatever that look said. Its last match is `proved_at` and its first definite no since is
+// `definite_no_since`, both on the request since step 2. A table, not a column, so the step runs again safely: SQLite
+// can't add a column only if it is missing. Forward-only: an open claim has no row, so its first recheck is a day after
+// its proof.
+"
+CREATE TABLE IF NOT EXISTS hostname_recheck (request_id TEXT PRIMARY KEY REFERENCES hostname_request (id),
+  rechecked_at INTEGER NOT NULL CHECK (typeof(rechecked_at) = 'integer')) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

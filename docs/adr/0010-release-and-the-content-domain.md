@@ -400,6 +400,7 @@ A client never names an account, a namespace, a script or a host label. All four
    - **A definite no:** the name's own authoritative servers answered, and the value isn't there. Two such answers in a row, at least 24 hours apart, end the claim. So a record that was removed can leave its hostname routed for up to about two days.
    - **No answer:** the resolver failed, or timed out, or couldn't reach the name's servers. That by itself never ends a claim quickly, since Podster's own trouble mustn't take a customer's domain down. But a claim with no successful proof for 7 days ends. So a name whose DNS has stopped answering can stay routed for up to 7 days.
    - A successful proof resets both.
+   - *Amendment, 2026-11-18, for the owner to review (the deep review of PR #444, L1):* "two such answers in a row" means two definite noes with no successful proof between them. A lookup that gave no answer between them doesn't reset the count.
 8. **A claim ends** when the room unpublishes, removes the mapping, or fails the recheck; when Cloudflare reports the hostname `moved`; and when an operator suspends the hostname. In every case step 6 runs. A suspended name stays suspended after its claim is gone, and no room can challenge for it until an operator lifts that.
 
 **Refused in `crates/core`:** `podster.dev`, the content domain, a subdomain of either, an IP address, a single-label name, a wildcard name, a public suffix itself, and a name an operator has suspended.

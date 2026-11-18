@@ -1793,8 +1793,9 @@ describe("an operator's suspension of a custom hostname", () => {
       // The room's epoch, as a request records it (8b): without it the claim reads as unpublished since, and ends.
       sql.exec("INSERT INTO hostname_provider (request_id, release_epoch) SELECT ?, release_epoch FROM release_config", request);
       // This room isn't public, so 8b's job would end the claim on its next turn, which is `custom-hostname.spec.ts`'s
-      // to show. Its last try is set a day ahead, so no turn of it comes while these tests run.
-      sql.exec("UPDATE hostname_request SET checked_at = ? WHERE id = ?", Date.now() + 24 * 3600_000, request);
+      // to show. Its last try is set a day ahead, so no turn of it comes while these tests run, and its proof is now,
+      // so its daily recheck (8d), `hostname-recheck.spec.ts`'s to show, isn't due either.
+      sql.exec("UPDATE hostname_request SET checked_at = ?, proved_at = ? WHERE id = ?", Date.now() + 24 * 3600_000, Date.now(), request);
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, flight_version, flight_before, updated_at) VALUES (?, 'custom', ?, 1, ?, ?, 3, ?, ?, 1)",
         hostname, a.label, opts.flight ? rel(3) : rel(2), serving, opts.flight ? 3 : null, opts.flight ? a.served : null);
       sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 3, ?, 1, 1)", hostname, serving);

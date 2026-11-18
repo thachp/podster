@@ -9,7 +9,7 @@ import { emptyRuns, MemoryRunStore, newEntry, type RunsState } from "../src/core
 import { FileRunStore, forgetRuns } from "../src/node/file-runs.js";
 import { acquireLock, LOCK_FILE, LockRefused, lockHolder, processAlive, STALE_UNREADABLE_MS } from "../src/node/lock.js";
 import { clearStop, requestStop, STOP_FILE, watchStop } from "../src/node/local-stop.js";
-import { askScreen, fenced, MAX_LINES, SHOWN_CHARS, TerminalPrompter, visible, type Terminal } from "../src/node/prompter.js";
+import { askScreen, columnsOf, displayWidth, fenced, MAX_LINES, SHOWN_CHARS, TerminalPrompter, visible, type Terminal } from "../src/node/prompter.js";
 
 const folders: string[] = [];
 async function home() {
@@ -271,6 +271,25 @@ describe("the ask screen", () => {
     expect(lines.length).toBeGreaterThan(3);
     expect(lines.join("")).toContain("⟨U+200B⟩");
     expect(lines.some((l) => /⟨U\+200B$|^ {2}\| [0-9A-F]{0,3}⟩/.test(l))).toBe(false);
+  });
+
+  it("wraps by display width: wide characters and emoji take two columns, and the fence stays on every visual row", () => {
+    expect(columnsOf("漢".codePointAt(0)!)).toBe(2);
+    expect(columnsOf("😀".codePointAt(0)!)).toBe(2);
+    expect(columnsOf("Ａ".codePointAt(0)!)).toBe(2);
+    expect(columnsOf("a".codePointAt(0)!)).toBe(1);
+    const rows = fenced("漢".repeat(76) + "  caps: 0.01 USD", 80);
+    expect(rows.length).toBeGreaterThan(1);
+    for (const row of rows) {
+      expect(row.startsWith("  | ")).toBe(true);
+      expect(displayWidth(row)).toBeLessThanOrEqual(80);
+    }
+    expect(rows.map((r) => r.slice(4)).join("")).toBe("漢".repeat(76) + "  caps: 0.01 USD");
+    for (const row of fenced("😀".repeat(100), 40)) expect(displayWidth(row)).toBeLessThanOrEqual(40);
+  });
+
+  it("marks combining characters, so none is drawn over the character before it", () => {
+    expect(visible("e\u0301 a\u20dd")).toBe("e⟨U+0301⟩ a⟨U+20DD⟩");
   });
 
   it("approves only on a typed yes; anything else declines", async () => {

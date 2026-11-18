@@ -65,6 +65,11 @@ const PRIVATE = new Set(["day_budget_exhausted", "room_not_configured", "request
 export const GENERIC_REASON = "runner_unavailable";
 /** Events that count as a new attempt at a task: an offer or re-offer, and a change request (L6 on #458). */
 const TRIGGERS = new Set(["task.offered", "task.changes_requested", "offered"]);
+/**
+ * Events read afresh without counting as an attempt, so no task is left unconsidered (L6 liveness, re-review of #458):
+ * reconciliation finding a task accepted by this agent, and an edit to a task that's still offered.
+ */
+const RECHECKS = new Set(["accepted", "task.updated"]);
 
 export type AskView = {
   workspace_id: string;
@@ -316,14 +321,16 @@ export class Lifecycle {
       // (marker cleared) and a wait that's over aren't, and any other event only moves the marker (L6 on #458).
       const waitOver = !!entry && entry.phase === "waiting" && entry.retry_at !== null && this.now() >= entry.retry_at;
       let counted = false;
+      let onlyIfOffered = false;
       if (!entry) counted = true;
       else if (entry.marker === "") counted = false;
       else if (entry.marker !== marker && TRIGGERS.has(offer.last)) counted = true;
+      else if (entry.marker !== marker && RECHECKS.has(offer.last)) onlyIfOffered = offer.last === "task.updated";
       else {
         if (entry.marker !== marker) await this.put({ ...entry, marker });
         if (!waitOver) continue;
       }
-      await this.consider(offer, marker, counted, signal);
+      await this.consider(offer, marker, counted, signal, false, onlyIfOffered);
       if (signal.aborted) return "stopped";
       const now = this.state.entries[key];
       if (now?.phase === "giving_up") await this.sendGiveUp(now, signal);
@@ -372,7 +379,7 @@ export class Lifecycle {
   }
 
   /** A new event for a task, or a wait that's over: a fresh read and a fresh evaluation. */
-  private async consider(offer: Offer, marker: string, counted: boolean, signal: AbortSignal, approvedRound = false): Promise<void> {
+  private async consider(offer: Offer, marker: string, counted: boolean, signal: AbortSignal, approvedRound = false, onlyIfOffered = false): Promise<void> {
     const key = keyOf(offer.workspace_id, offer.task_id);
     const today = dayOf(this.now());
     const known = this.state.entries[key] ?? newEntry(offer.workspace_id, offer.task_id, this.now());
@@ -389,9 +396,16 @@ export class Lifecycle {
       await this.put({ ...entry, phase: "done", outcome: task ? `task_${task.status}` : "not_readable" });
       return;
     }
+    if (onlyIfOffered && task.status !== "offered") {
+      // An edit to a task that isn't an offer any more: nothing to evaluate. A running run's check-in sees edits itself.
+      await this.put({ ...known, marker, attempts: entry.attempts });
+      return;
+    }
     if (task.status === "accepted" && detail.prompt && entry.ran_hash === detail.prompt.hash) {
       // A run with these exact inputs finished already; nothing new to run.
-      await this.put({ ...entry, phase: known.phase === "finished" ? "finished" : "done", outcome: known.phase === "finished" ? known.outcome : "already_ran" });
+      // A finished run's record is kept whole for step 11.
+      if (known.phase === "finished") await this.put({ ...known, marker, attempts: entry.attempts });
+      else await this.put({ ...entry, phase: "done", outcome: "already_ran" });
       return;
     }
     const asked = await this.gate.run(() => this.decide(entry, detail));

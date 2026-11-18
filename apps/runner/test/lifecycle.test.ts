@@ -851,4 +851,50 @@ describe("the rulings on #458's review", () => {
     await t.pass();
     expect(t.entry("tsk_four")).toMatchObject({ phase: "waiting", outcome: "config_invalid" });
   });
+
+  it("L6 liveness: reconciliation finding the task accepted by this agent reads it afresh, without counting an attempt", async () => {
+    const t = await setup(policyConfig("ask"));
+    t.offer(detail("tsk_one"));
+    t.prompter.answers = ["later", "later"];
+    await t.pass();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "waiting", outcome: "owner_later", attempts: { count: 1 } });
+    // Accepted for this agent by another of its clients; a reconciliation lists it as accepted.
+    const d = t.gateway.details.tsk_one;
+    d.task.status = "accepted";
+    d.task.version = 2;
+    t.gateway.tasks[ROOM] = [{ id: "tsk_one", status: "accepted", version: 2, assignee: AGENT }];
+    t.clock.at += 301_000; // past the grace period, so the next poll reconciles; the ask's 10-minute wait isn't over
+    await t.pass();
+    expect(t.poller.record.offers[`${ROOM}/tsk_one`].last).toBe("accepted");
+    expect(t.prompter.asked).toHaveLength(2);
+    expect(t.entry("tsk_one").attempts.count).toBe(1);
+  });
+
+  it("L6 liveness: an edit to a task that's still offered reads it afresh, without counting; one that isn't offered changes nothing", async () => {
+    const t = await setup(policyConfig("ask"));
+    t.offer(detail("tsk_one"));
+    t.prompter.answers = ["later", "later"];
+    await t.pass();
+    const d = t.gateway.details.tsk_one;
+    d.task.instructions = "Edited words";
+    d.task.version = 2;
+    t.gateway.offer(ROOM, "tsk_one", "task.updated");
+    await t.pass();
+    expect(t.prompter.asked.map((v) => v.inputs[1].text)).toEqual([WORDS, "Edited words"]);
+    expect(t.entry("tsk_one").attempts.count).toBe(1);
+
+    // A finished task's edit: read, nothing evaluated, its record kept whole.
+    const u = await setup();
+    u.offer(detail("tsk_one"));
+    await u.pass();
+    const finished = u.entry("tsk_one");
+    expect(finished.phase).toBe("finished");
+    u.gateway.details.tsk_one.task.title = "Renamed";
+    u.gateway.details.tsk_one.task.version += 1;
+    u.gateway.offer(ROOM, "tsk_one", "task.updated");
+    await u.pass();
+    expect(u.policyCalls.filter((c) => c.fn === "evaluate")).toHaveLength(2);
+    expect(u.entry("tsk_one")).toMatchObject({ phase: "finished", consumed: finished.consumed, ran_hash: finished.ran_hash });
+    expect(u.adapter.starts).toHaveLength(1);
+  });
 });

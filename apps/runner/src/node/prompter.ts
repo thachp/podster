@@ -10,7 +10,8 @@
  *   that wouldn't show is written as a visible mark such as `⟨U+200B⟩`: control and format characters, Unicode tag
  *   characters (U+E0000 to U+E007F), zero-width characters, every space but the plain one, line and paragraph separators,
  *   and unassigned, private-use and surrogate code points. Only a plain line feed breaks a line. Each line is fenced with
- *   `|` and wrapped to the terminal's width, with the fence on every piece.
+ *   `|` and wrapped to the terminal's width in columns (wide characters and emoji count two), with the fence on every
+ *   piece. Combining marks are marks too, so no character is drawn over another.
  * - **A prompt too long to show whole can't be approved here.** Runner won't run text the owner hasn't seen: the owner
  *   may only decline it, or leave it waiting.
  * - **A local stop abandons the question** (L1 on #458).
@@ -26,7 +27,44 @@ export const MAX_LINES = 400;
 const FENCE = "  | ";
 const MIN_WIDTH = 24;
 
-const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Z}]/u;
+/** Characters shown as a mark: they wouldn't show, or (combining marks) would change the character before them. */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Z}\p{Mn}\p{Me}]/u;
+
+/**
+ * Code points a terminal shows two columns wide: East Asian Wide and Fullwidth characters and emoji, as a small built-in
+ * table (re-review of #458). Ranges are inclusive, sorted. A character outside them is one column; every character that
+ * would take none is a mark already.
+ */
+const WIDE: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f], [0x231a, 0x231b], [0x2329, 0x232a], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1],
+  [0x26aa, 0x26ab], [0x26bd, 0x26be], [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b],
+  [0x2728, 0x2728], [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55], [0x2e80, 0x303e],
+  [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
+  [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x16fe0, 0x16fe4],
+  [0x17000, 0x18aff], [0x1b000, 0x1b2ff], [0x1f004, 0x1f004], [0x1f0cf, 0x1f0cf], [0x1f18e, 0x1f18e],
+  [0x1f191, 0x1f19a], [0x1f200, 0x1f251], [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f900, 0x1f9ff],
+  [0x1fa70, 0x1faff], [0x20000, 0x3fffd],
+];
+
+/** Columns one character takes on a terminal. */
+export function columnsOf(cp: number): number {
+  let low = 0;
+  let high = WIDE.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const [from, to] = WIDE[mid];
+    if (cp < from) high = mid - 1;
+    else if (cp > to) low = mid + 1;
+    else return 2;
+  }
+  return 1;
+}
+
+/** Columns a string takes on a terminal. */
+export const displayWidth = (text: string) => [...text].reduce((n, ch) => n + columnsOf(ch.codePointAt(0) as number), 0);
 const mark = (cp: number) => `⟨U+${cp.toString(16).toUpperCase().padStart(4, "0")}⟩`;
 
 /** The words with every character that wouldn't show written as a visible mark. Line feeds and plain spaces stay. */
@@ -41,14 +79,14 @@ export function visible(text: string): string {
   return out;
 }
 
-/** Splits a line into pieces of at most `size` characters, never inside a mark. */
+/** Splits a line into pieces of at most `size` columns, never inside a mark. */
 function wrap(line: string, size: number): string[] {
   const tokens = line.match(/⟨U\+[0-9A-F]{4,6}⟩|[\s\S]/gu) ?? [];
   const pieces: string[] = [];
   let piece = "";
   let length = 0;
   for (const token of tokens) {
-    const tokenLength = [...token].length;
+    const tokenLength = displayWidth(token);
     if (length > 0 && length + tokenLength > size) {
       pieces.push(piece);
       piece = "";
@@ -61,7 +99,7 @@ function wrap(line: string, size: number): string[] {
   return pieces;
 }
 
-/** One input's words, fenced and wrapped to `width`. */
+/** One input's words, fenced and wrapped so each row, fence included, fits `width` columns. */
 export function fenced(text: string, width = 80): string[] {
   const size = Math.max(MIN_WIDTH, width) - FENCE.length;
   return visible(text)

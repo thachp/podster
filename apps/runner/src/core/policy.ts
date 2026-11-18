@@ -35,7 +35,8 @@
  * **The caller serialises.** Runner must run evaluate-then-issue, and evaluate-then-consume, as one step each per Runner,
  * with nothing else evaluating or reserving between them; the day's reservations it passes in are only right if so. At
  * consume, it passes this decision's own reservation as `own_reservation_micro_usd`, so the fresh evaluation doesn't count
- * it twice (L5 on #455's review).
+ * it twice (L5 on #455's review). The decision says what it left out, and consume refuses anything but none or the
+ * record's own `reserved_micro_usd`, so a caller can't leave out more (L5, bound 2026-11-18).
  *
  * Agent content is data: task text is never an input here, only provenance IDs and organizations. A decision carries
  * IDs, codes, paths and hostnames only, so it can be logged by ID.
@@ -73,8 +74,17 @@ const MAX_ROOT = 1_024;
 const MAX_NODES = 200_000;
 const MAX_DEPTH = 8;
 const MAX_FACTS_KEY = 4 * 1024 * 1024;
-/** Podster's IDs are lower case (L6 on #455's review). */
+/**
+ * Room, workspace, task, organization, repository and event IDs are lower case, since they reach paths and path-like
+ * comparisons (L6 on #455's review, narrowed 2026-11-18). An agent's ID reaches the policy only as a requester or an
+ * author, so it is read as an actor ID below, and compared exactly.
+ */
 const ID = /^[a-z0-9_-]{1,128}$/;
+/**
+ * A requester's or author's ID: a person's is `per_` plus Better Auth's mixed-case ID (`personId` in
+ * apps/gateway/src/index.ts). Only ever compared exactly, never used in a path.
+ */
+const ACTOR_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -151,8 +161,8 @@ export type RunFacts = {
 
 export type Decision =
   | { outcome: "refuse"; reason: RefuseReason; task_id?: string; workspace_id?: string; facts?: undefined }
-  | { outcome: "ask"; reason: AskReason; task_id: string; workspace_id: string; facts: RunFacts }
-  | { outcome: "run"; reason: RunReason; task_id: string; workspace_id: string; facts: RunFacts };
+  | { outcome: "ask"; reason: AskReason; task_id: string; workspace_id: string; facts: RunFacts; excluded_reservation_micro_usd: number }
+  | { outcome: "run"; reason: RunReason; task_id: string; workspace_id: string; facts: RunFacts; excluded_reservation_micro_usd: number };
 
 export type EvaluateInput = {
   /** The owner's configuration, as read from Runner's local file: checked here, so a malformed one refuses. */
@@ -222,6 +232,7 @@ function keysAre(o: Obj, required: readonly string[], optional: readonly string[
   return required.every((k) => Object.hasOwn(o, k)) && keys.every((k) => required.includes(k) || optional.includes(k));
 }
 const isId = (v: unknown): v is string => typeof v === "string" && ID.test(v);
+const isActorId = (v: unknown): v is string => typeof v === "string" && ACTOR_ID.test(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const inRange = (v: unknown, min: number, max: number): v is number => isCount(v) && v >= min && v <= max;
 const isInput = (v: unknown): v is InputName => typeof v === "string" && (INPUTS as readonly string[]).includes(v);
@@ -328,7 +339,7 @@ const isOrg = (v: unknown): v is string | null => v === null || isId(v);
 function parseAuthor(v: unknown): Actor | null {
   if (!isObj(v) || !keysAre(v, ["id", "org", "external", "active", "written_at"])) return null;
   const { id, org, external, active } = v;
-  if (!(id === null || isId(id)) || !isOrg(org)) return null;
+  if (!(id === null || isActorId(id)) || !isOrg(org)) return null;
   if (typeof external !== "boolean" || typeof active !== "boolean") return null;
   // A named author has a time; only the unknown author has none (L7 on #455's review).
   if (id === null ? v.written_at !== null : !isCount(v.written_at)) return null;
@@ -343,7 +354,7 @@ function parseProvenance(v: unknown): Provenance | null {
   const r = v.requester;
   if (!isObj(r) || !keysAre(r, ["id", "org", "external", "active"])) return null;
   const { id, org, external, active } = r;
-  if (!isId(id) || !isOrg(org) || typeof external !== "boolean" || typeof active !== "boolean") return null;
+  if (!isActorId(id) || !isOrg(org) || typeof external !== "boolean" || typeof active !== "boolean") return null;
   if (!Array.isArray(v.inputs)) return null;
   const inputs: ProvenanceInput[] = [];
   for (const i of v.inputs) {
@@ -449,7 +460,9 @@ function decide(input: EvaluateInput): Decision {
     requester: label(prov.requester),
     authors: prov.inputs.map((i) => ({ input: i.input, authors: i.authors.map(label) })),
   };
-  const ask = (reason: AskReason): Decision => ({ outcome: "ask", reason, ...ids, facts });
+  // The reservation left out of the day's count, so consume can hold it to the decision's own (L5, bound 2026-11-18).
+  const excluded = { excluded_reservation_micro_usd: ownReservation };
+  const ask = (reason: AskReason): Decision => ({ outcome: "ask", reason, ...ids, facts, ...excluded });
 
   if (room.mode !== "unattended") return ask("room_ask_first");
   if (requesterStanding !== "internal") return ask(`requester_${requesterStanding}`);
@@ -463,7 +476,7 @@ function decide(input: EvaluateInput): Decision {
   if (!allInternal) return ask("author_external");
   if (!room.acknowledged.trust_statement) return ask("trust_statement_not_accepted");
   if (isPublic && !room.acknowledged.public_room_warning) return ask("public_warning_not_accepted");
-  return { outcome: "run", reason: "unattended_eligible", ...ids, facts };
+  return { outcome: "run", reason: "unattended_eligible", ...ids, facts, ...excluded };
 }
 
 /** One string for a value, its object keys sorted, so two equal fact sets always give the same form. */
@@ -498,7 +511,7 @@ export type RunDecisionRecord = RunBinding & {
   consumed: boolean;
 };
 export type IssueRefusal = "refused" | "owner_approval_needed" | "binding_invalid" | "clock_invalid";
-export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "binding_changed" | "facts_changed";
+export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "reservation_mismatch" | "binding_changed" | "facts_changed";
 
 const BINDING_KEYS = ["task_id", "workspace_id", "task_version", "input_hash", "repository_id", "base_commit"] as const;
 
@@ -532,7 +545,7 @@ function parseRecord(raw: unknown): RunDecisionRecord | null {
 }
 
 const isDecision = (d: unknown): d is Decision & { outcome: "ask" | "run" } =>
-  isObj(d) && (d.outcome === "ask" || d.outcome === "run") && isId(d.task_id) && isId(d.workspace_id) && isObj(d.facts);
+  isObj(d) && (d.outcome === "ask" || d.outcome === "run") && isId(d.task_id) && isId(d.workspace_id) && isObj(d.facts) && isCount(d.excluded_reservation_micro_usd);
 
 /**
  * A run decision for a `run`, or for an `ask` the owner approved on this machine. Never for a refusal. Single-use, it
@@ -587,6 +600,9 @@ export function consumeRunDecision(stored: RunDecisionRecord, fresh: Decision, b
     const d = copy(fresh);
     if (!isDecision(d)) return { ok: false, reason: "refused" };
     if (record.mode === "unattended" && d.outcome !== "run") return { ok: false, reason: "no_longer_eligible" };
+    // The fresh evaluation may leave out this decision's own reservation, as the record holds it, and nothing else.
+    const excluded = d.excluded_reservation_micro_usd;
+    if (excluded !== 0 && excluded !== record.reserved_micro_usd) return { ok: false, reason: "reservation_mismatch" };
     const b = bindingOf(copy(binding));
     if (!b) return { ok: false, reason: "binding_changed" };
     const same = BINDING_KEYS.every((k) => b[k] === record[k]) && d.task_id === record.task_id && d.workspace_id === record.workspace_id;

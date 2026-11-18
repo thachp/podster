@@ -680,17 +680,52 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
     expect(decide({ budget: { ...tight, own_reservation_micro_usd: -1 } })).toMatchObject({ outcome: "refuse", reason: "budget_invalid" });
   });
 
-  it("L6: an uppercase room, workspace, task, organization or agent ID is refused", () => {
+  it("L5, bound 2026-11-18: consume refuses a fresh evaluation that left out any reservation but this decision's own", () => {
+    const tight = { spent_today_micro_usd: 4_000_000, reserved_micro_usd: 6_000_000 };
+    const record = issue(decide());
+    expect(record.reserved_micro_usd).toBe(2_000_000);
+    // The reviewer's scenario: day cap 10, spent 4, reserved 6, own 2, and the caller passes 6.
+    const overstated = decide({ budget: { ...tight, own_reservation_micro_usd: 6_000_000 } });
+    expect(overstated.outcome).toBe("run");
+    expect(consumeRunDecision(record, overstated, binding, NOW + 1)).toEqual({ ok: false, reason: "reservation_mismatch" });
+    expect(consumeRunDecision(record, decide({ budget: { ...tight, own_reservation_micro_usd: 1_000_000, reserved_micro_usd: 1_000_000 } }), binding, NOW + 1)).toEqual({ ok: false, reason: "reservation_mismatch" });
+    expect(consumeRunDecision(record, decide({ budget: { ...tight, own_reservation_micro_usd: 2_000_000 } }), binding, NOW + 1).ok).toBe(true);
+    // Leaving nothing out counts more, never less, so it is allowed.
+    expect(consumeRunDecision(record, decide(), binding, NOW + 1).ok).toBe(true);
+  });
+
+  it("L6, narrowed 2026-11-18: an uppercase room, workspace, task, organization or repository ID, or input hash, is refused", () => {
     expect(decide({ task: { id: "Task_1", workspace_id: ROOM } })).toMatchObject({ reason: "task_invalid" });
     expect(decide({ task: { id: TASK, workspace_id: "Room_1" } })).toMatchObject({ reason: "task_invalid" });
     expect(decide({ config: config([{ ...room(), room_id: "Room_1" }]) })).toMatchObject({ reason: "config_invalid" });
     expect(decide({ config: config([room()], { owner_org: "Org_owner" }) })).toMatchObject({ reason: "config_invalid" });
     expect(decide({ config: config([room({ allowed_orgs: ["Org_guest"] })]) })).toMatchObject({ reason: "config_invalid" });
-    const upperAuthor = provenance({ inputs: [input("title", [{ ...author("internal"), id: "P_in0" } as never]), input("instructions", [author("internal")])] });
-    expect(decide({ provenance: upperAuthor })).toMatchObject({ reason: "provenance_invalid" });
     expect(decide({ provenance: { ...provenance(), requester: { ...requester("internal"), org: "ORG_OWNER" } } })).toMatchObject({ reason: "provenance_invalid" });
     expect(issueRunDecision(decide(), { ...binding, repository_id: "Repo_1" }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
     expect(issueRunDecision(decide(), { ...binding, input_hash: "A".repeat(64) }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
+  });
+
+  it("L6, narrowed: a real person's mixed-case ID as requester and author runs in an otherwise eligible room", () => {
+    // `per_` plus Better Auth's mixed-case alphanumeric ID (apps/gateway/src/index.ts, `personId`).
+    const person = "per_aB3dEfGh7JkLmN0pQrStUvWxYz12";
+    const human = { id: person, org: OWNER, external: false, active: true, written_at: 1_700_000_000_000 };
+    const prov = { ...provenance({ inputs: [input("title", [human]), input("instructions", [author("internal"), human])] }), requester: { id: person, org: OWNER, external: false, active: true } };
+    const d = decide({ provenance: prov });
+    expect([d.outcome, d.reason]).toEqual(["run", "unattended_eligible"]);
+    expect(d.facts?.requester).toBe(`${person}@${OWNER}`);
+    // Compared exactly: the same letters in another case are another author.
+    const record = issue(d);
+    const recased = { ...prov, inputs: [input("title", [{ ...human, id: person.toLowerCase() }]), prov.inputs[1]] };
+    expect(consumeRunDecision(record, decide({ provenance: recased }), binding, NOW + 1)).toEqual({ ok: false, reason: "facts_changed" });
+    for (const bad of ["per_aB3/dE", "per aB3", "", "x".repeat(129)])
+      expect([bad, decide({ provenance: { ...prov, requester: { ...prov.requester, id: bad } } }).reason]).toEqual([bad, "provenance_invalid"]);
+  });
+
+  it("L6, narrowed: the case-collision probe (P7) is still refused for workspace and task IDs", () => {
+    for (const task of [{ id: TASK, workspace_id: ROOM.toUpperCase() }, { id: TASK, workspace_id: "Room_1" }, { id: TASK.toUpperCase(), workspace_id: ROOM }, { id: "Task_1", workspace_id: ROOM }])
+      expect([task, decide({ task })]).toMatchObject([task, { outcome: "refuse", reason: "task_invalid" }]);
+    expect(issueRunDecision(decide(), { ...binding, workspace_id: "ROOM_1" }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
+    expect(issueRunDecision(decide(), { ...binding, task_id: "TASK_1" }, NOW)).toEqual({ ok: false, reason: "binding_invalid" });
   });
 
   it("L7: a named author has a numeric `written_at`, and only the unknown author a null one", () => {

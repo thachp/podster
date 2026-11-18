@@ -19,6 +19,7 @@ import { clampGrace, clampInterval, DEFAULT_GRACE_MS, DEFAULT_INTERVAL_MS, Polle
 import { lineLogger, systemClock } from "../core/runtime.js";
 import { RunnerStorage } from "../core/storage.js";
 import { FileStateStore } from "./file-state.js";
+import { readHidden } from "./hidden-input.js";
 import { systemKeychain } from "./keychain.js";
 
 const USAGE = `Podster Runner (M7 step 6: pairing and the inbox loop; it runs no task yet)
@@ -84,11 +85,14 @@ async function main(argv: string[]) {
     if (!gateway || !agent) throw new Error("pair needs --gateway and --agent");
     const origin = gatewayOrigin(gateway);
     const secrets = systemKeychain(home);
+    const record = await state.load();
+    const resuming = record.agent_id === agent && record.stopped === null && (record.phase === "registered" || record.phase === "redeemed");
+    const prompt = "Paste the code Podster showed, then press Enter: ";
+    // At a terminal the code is read without echo (L5), before the line reader for the consent question exists.
+    const typed = resuming || !process.stdin.isTTY ? undefined : (await readHidden(prompt, process.stdin as never, process.stdout)).trim();
     const input = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY });
     try {
-      const record = await state.load();
-      const resuming = record.agent_id === agent && record.stopped === null && (record.phase === "registered" || record.phase === "redeemed");
-      const code = resuming ? undefined : (await input.question("Paste the code Podster showed, then press Enter: ")).trim();
+      const code = resuming ? undefined : (typed ?? (await input.question(prompt)).trim());
       const result = await pair(
         {
           origin,

@@ -1,6 +1,7 @@
 // The small pieces: reading the gateway's refusals, the thumbprint, the gateway's origin, the log, and the key store.
 import { generateKeypair } from "@auth/agent";
 import { describe, expect, it } from "vitest";
+import { RUNNER_CAPABILITIES } from "../src/core/capabilities.js";
 import { codeFrom, errorFrom, GatewayError, meaningOf } from "../src/core/errors.js";
 import { gatewayFetch, gatewayOrigin } from "../src/core/gateway.js";
 import { logLine } from "../src/core/runtime.js";
@@ -119,6 +120,44 @@ describe("the key store, behind the SDK's Storage", () => {
     await expect(storage.setHostIdentity({ keypair: made, createdAt: 1 })).rejects.toThrow(/refused/);
     await storage.setHostIdentity({ keypair: installed, createdAt: 2 });
     expect((await storage.getHostIdentity())?.createdAt).toBe(2);
+  });
+
+  it("stores only what Runner needs of an agent connection: IDs, issuer, keypair and the granted names (H1 on #454)", async () => {
+    const secrets = new MemorySecretStore();
+    const storage = new RunnerStorage(secrets);
+    const agentKeypair = await generateKeypair();
+    // As the plugin answers it: every grant with its description and schemas, about 14 KB in all.
+    const schema = { type: "object", properties: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`field_${i}`, { type: "string", description: "x".repeat(40) }])) };
+    const capabilityGrants = RUNNER_CAPABILITIES.map((capability, i) => ({ capability, status: (i === 3 ? "pending" : "active") as "active" | "pending", description: "d".repeat(300), input: schema, output: schema }));
+    const full = { agentId: "plg_1", hostId: "host_1", hostName: "Podster Runner", providerName: "podster", issuer: "https://podster.dev/api/auth", mode: "delegated" as const, agentKeypair, capabilityGrants, createdAt: 5 };
+    expect(JSON.stringify(full).length).toBeGreaterThan(12_000);
+    await storage.setAgentConnection("plg_1", full);
+    const stored = secrets.values.get("agent:plg_1") as string;
+    expect(stored.length).toBeLessThan(1_500);
+    const read = await storage.getAgentConnection("plg_1");
+    expect(read).toMatchObject({ agentId: "plg_1", hostId: "host_1", issuer: "https://podster.dev/api/auth", mode: "delegated", agentKeypair });
+    expect(read?.capabilityGrants).toEqual(RUNNER_CAPABILITIES.filter((_, i) => i !== 3).map((capability) => ({ capability, status: "active" })));
+    expect(stored).not.toContain("ddd");
+  });
+
+  it("names an agent in its index before writing its item, so a failed write is still deleted by deleteAll", async () => {
+    const secrets = new MemorySecretStore();
+    const set = secrets.set.bind(secrets);
+    secrets.set = async (name, value) => {
+      // A truncated copy lands, then the write fails, as the keychain did.
+      if (name.startsWith("agent:")) {
+        await set(name, value.slice(0, 40));
+        throw new Error("the keychain couldn't store Runner's key");
+      }
+      await set(name, value);
+    };
+    const storage = new RunnerStorage(secrets);
+    const agentKeypair = await generateKeypair();
+    await expect(storage.setAgentConnection("plg_1", { agentId: "plg_1", hostId: "h", providerName: "p", issuer: "i", mode: "delegated", agentKeypair, capabilityGrants: [], createdAt: 1 })).rejects.toThrow();
+    expect(JSON.parse(secrets.values.get("agents") as string)).toEqual(["plg_1"]);
+    expect(secrets.values.has("agent:plg_1")).toBe(true);
+    await storage.deleteAll();
+    expect(secrets.values.size).toBe(0);
   });
 
   it("keeps discovery documents in memory only, never in the keychain", async () => {

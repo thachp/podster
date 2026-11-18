@@ -82,10 +82,26 @@ export class RunnerStorage implements Storage {
     return this.read<AgentConnection>(agentName(agentId));
   }
 
+  /**
+   * Stores the agent's connection, slimmed to what Runner uses (H1 on #454): its IDs, issuer, mode, keypair and the names
+   * of its active grants. The plugin's answer also carries each grant's description and schemas, about 14 KB in all,
+   * which is more than macOS's keychain tool takes on one line; Runner reads those from the gateway when it needs them.
+   * The agent is named in the index first, so a write that fails part way is still found and deleted by `deleteAll`.
+   */
   async setAgentConnection(agentId: string, connection: AgentConnection): Promise<void> {
-    await this.secrets.set(agentName(agentId), JSON.stringify(connection));
     const ids = (await this.read<string[]>(AGENTS)) ?? [];
     if (!ids.includes(agentId)) await this.secrets.set(AGENTS, JSON.stringify([...ids, agentId]));
+    const slim: AgentConnection = {
+      agentId: connection.agentId,
+      hostId: connection.hostId,
+      providerName: connection.providerName,
+      issuer: connection.issuer,
+      mode: connection.mode,
+      agentKeypair: connection.agentKeypair,
+      capabilityGrants: connection.capabilityGrants.filter((grant) => grant.status === "active").map((grant) => ({ capability: grant.capability, status: "active" })),
+      createdAt: connection.createdAt,
+    };
+    await this.secrets.set(agentName(agentId), JSON.stringify(slim));
   }
 
   async deleteAgentConnection(agentId: string): Promise<void> {

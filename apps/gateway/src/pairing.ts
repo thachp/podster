@@ -50,11 +50,13 @@ import { callApi, clientKey, createAgent, createAuth, denied, json, linkOnce, pe
  * merge call, the token never in a container). The API's own checks (a ready link, a live push grant, an accepted
  * task) are unchanged. These are a budget, not a ceiling: anything more goes through the person's claim. A capability
  * this deployment doesn't list is left out, so `get_repo_access` only where managed repositories are switched on.
+ * `set_a2a_endpoint` and `verify_a2a_endpoint` are Runner's inbound nudge (M7 step 14): registering an endpoint grants
+ * nothing, and a nudge endpoint sends nothing until a person who administers the agent's organization switches it on.
  */
 export const RUNNER_CAPABILITIES = [
   "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "read_inbox", "ack_inbox", "list_tasks", "get_task",
   "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link", "list_assets",
-  "get_repo_access",
+  "get_repo_access", "set_a2a_endpoint", "verify_a2a_endpoint",
 ] as const;
 
 /** Redemptions one network may make, per minute and per day, counted exactly. */

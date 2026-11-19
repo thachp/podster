@@ -9,9 +9,10 @@ import { Connection } from "../../runner/src/core/connection";
 import { HELD_STATUS, Lifecycle } from "../../runner/src/core/lifecycle";
 import { sha256Hex } from "../../runner/src/core/prompt";
 import { MemoryRunStore } from "../../runner/src/core/runs";
+import { NudgeBell, NudgeEndpoint, registerNudge, verifyNudge } from "../../runner/src/core/nudge";
 import { pair, type PairingDeps, type PairingNotice } from "../../runner/src/core/pairing";
 import { Poller } from "../../runner/src/core/poller";
-import type { Clock } from "../../runner/src/core/runtime";
+import { systemClock, type Clock } from "../../runner/src/core/runtime";
 import { MemoryStateStore } from "../../runner/src/core/state";
 import { MemorySecretStore, RunnerStorage } from "../../runner/src/core/storage";
 import type { Env } from "../src/index";
@@ -382,5 +383,74 @@ describe("Runner's core against the gateway", () => {
     const all = [...logged, ...machine.lines].join("\n");
     expect(all).not.toMatch(/Ignore your rules|Untrusted words|Please add a test|Fixed the build|sk-ant-/);
     expect(all).not.toMatch(/eyJ[A-Za-z0-9_-]{10,}/);
+  });
+
+  it("registers Runner's nudge endpoint, answers the API's challenge with Runner's own endpoint code, and only the owner switches it on (M7 step 14)", async () => {
+    const person = await signUp();
+    const { agent, code } = await startPairing(person);
+    const clock = new PersonClock();
+    const machine = runner(clock);
+    let confirmed = false;
+    clock.onWait = async () => {
+      if (confirmed) return;
+      const session = await dash(person, "GET", `/pairing/${agent}`);
+      if (!session.body.runner_ready) return;
+      expect((await dash(person, "POST", `/pairing/${agent}/activate`, { key_thumbprint: session.body.key_thumbprint })).status).toBe(200);
+      confirmed = true;
+    };
+    expect((await pair(machine.deps, { agentId: agent, code })).outcome).toBe("connected");
+    clock.onWait = null;
+    const poller = await Poller.open({ ...machine.deps, intervalMs: 5_000, graceMs: 600_000 });
+    const storage = new RunnerStorage(machine.secrets);
+    const lines: string[] = [];
+    const log: Parameters<typeof registerNudge>[3] = (at, outcome, fields) => void lines.push(JSON.stringify({ at, outcome, ...fields }));
+
+    // The owner's public address. The test config parks the API's requests to it for this test to answer.
+    const url = "https://runner-nudge.example.com/podster/nudge";
+    const registered = await registerNudge(poller, storage, url, log);
+    expect(registered).toMatchObject({ control: "unverified", nudge_on: false, registration: { url, agent_id: agent, version: 1 } });
+    const secret = registered.registration.secret;
+    expect(secret).toMatch(/^a2asec_[0-9a-f]{64}$/);
+    expect(await storage.getNudge()).toEqual(registered.registration);
+    // Not verified, so the owner can't switch it on yet.
+    const early = await dash(person, "PUT", `/agents/${agent}/a2a-endpoint/nudge`, { on: true, version: 1 });
+    expect([early.status, early.body.error.code]).toEqual([409, "endpoint_unverified"]);
+
+    // Runner's own endpoint answers what reaches the owner's address, signature first, on the real clock as the API's.
+    const bell = new NudgeBell();
+    const endpoint = new NudgeEndpoint({ registration: () => registered.registration, path: "/podster/nudge", clock: systemClock, log, bell });
+    const relay = (e as unknown as { NUDGE_RELAY: Fetcher }).NUDGE_RELAY;
+    const answerOne = async () => {
+      const next = await relay.fetch("https://relay.test/next");
+      expect(next.status).toBe(200);
+      const item = await next.json<{ id: string; url: string; headers: [string, string][]; body: string }>();
+      const answer = await endpoint.handle(new Request(item.url, { method: "POST", headers: item.headers, body: item.body }));
+      const back = await relay.fetch(`https://relay.test/answer/${item.id}`, { method: "POST", headers: { "x-status": String(answer.status), "content-type": "application/json" }, body: await answer.arrayBuffer() });
+      expect(back.status).toBe(204);
+      return { item, status: answer.status };
+    };
+    const [verified, challenge] = await Promise.all([verifyNudge(poller, log), answerOne()]);
+    expect(challenge.status).toBe(200);
+    expect(verified.verified).toBe(true);
+    // The API's challenge: signed, naming this agent and version, carrying nothing else.
+    const sent = JSON.parse(challenge.item.body);
+    expect(sent).toMatchObject({ jsonrpc: "2.0", method: "podster.dev/verifyEndpoint", params: { agent_id: agent, version: 1 } });
+    expect(Object.keys(sent.params).sort()).toEqual(["agent_id", "challenge", "version"]);
+    expect(new Headers(challenge.item.headers).get("x-podster-signature")).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
+
+    // Starting again keeps the registration: the same version and secret, still verified, so no new challenge.
+    const again = await registerNudge(poller, storage, url, log);
+    expect(again).toMatchObject({ control: "verified", registration: { version: 1, secret } });
+
+    // The agent can't switch its own nudge on: Runner holds no capability for it. Only the person who administers it can,
+    // and only for the verified version.
+    expect((await dash(person, "PUT", `/agents/${agent}/a2a-endpoint/nudge`, { on: true, version: 2 })).status).toBe(409);
+    const on = await dash(person, "PUT", `/agents/${agent}/a2a-endpoint/nudge`, { on: true, version: 1 });
+    expect(on.status, on.text).toBe(200);
+    expect((await dash(person, "GET", `/agents/${agent}/a2a-endpoint/nudge`)).body).toMatchObject({ endpoint: { nudge_on: true } });
+
+    // Logs carry IDs and codes only.
+    expect(lines.join("\n")).not.toContain(secret);
+    expect(lines.join("\n")).not.toContain("runner-nudge.example.com");
   });
 });

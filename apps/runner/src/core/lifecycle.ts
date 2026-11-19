@@ -59,7 +59,8 @@ import { pullRequestUrl, RepoPathError } from "./repository.js";
 import { readTaskDetail, sha256Hex, type TaskDetail } from "./prompt.js";
 import { cleanResult, composeNote, type NotePullRequest, type NoteWords, type ResultView } from "./results.js";
 import { parseRunResult, type RunResult } from "./tool-policy.js";
-import { AuthorityEnded, type Poller } from "./poller.js";
+import type { NudgeBell } from "./nudge.js";
+import { AuthorityEnded, waitForNext, type Poller } from "./poller.js";
 import { MAX_PROMPT_BYTES } from "./run-interface.js";
 import type { Offer } from "./state.js";
 import type { Clock, Logger } from "./runtime.js";
@@ -1253,7 +1254,7 @@ export type LoopPoller = Pick<Poller, "pollOnce" | "nextWaitMs">;
  * Runner's loop with the lifecycle: a poll, then a lifecycle pass, then the wait. A local stop (`signal`) ends it at once,
  * a run included, and nothing is called after it; a revoked agent ends it too.
  */
-export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle, clock: Clock, signal: AbortSignal): Promise<"stopped" | "revoked"> {
+export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle, clock: Clock, signal: AbortSignal, bell?: NudgeBell): Promise<"stopped" | "revoked"> {
   while (!signal.aborted) {
     const polled = await poller.pollOnce();
     if (polled === "revoked") return "revoked";
@@ -1262,7 +1263,8 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
       const outcome = await lifecycle.tick(signal);
       if (outcome !== "idle") return outcome;
     }
-    await clock.idle(poller.nextWaitMs(polled), signal);
+    // A nudge (M7 step 14) only ends this wait early: the next poll and tick are the ordinary ones.
+    await waitForNext(clock, poller.nextWaitMs(polled), polled, signal, bell);
   }
   return "stopped";
 }

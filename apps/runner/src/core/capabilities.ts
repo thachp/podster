@@ -9,6 +9,11 @@
  * the default one, a fixed set of GitHub calls with no merge, and the token kept in Runner's broker on the host. Only
  * `src/node/repo-path.ts` calls it; a test holds that.
  *
+ * `set_a2a_endpoint` and `verify_a2a_endpoint` (M7 step 14) are called only when the owner starts `run` with the inbound
+ * nudge switched on, and only with `delivery: "nudge"`: they register the owner's HTTPS address and prove Runner holds
+ * its signing secret. Neither grants anything in a room, and the nudge sends nothing until a person who administers the
+ * agent's organization switches it on in Podster. Only `src/core/nudge.ts` names them; a test holds that.
+ *
  * Step 6 calls only the reads and the inbox. The lifecycle calls are named now so the registered agent is the one later
  * steps use: Runner registers once per pairing and never again by itself.
  */
@@ -31,6 +36,8 @@ export const RUNNER_CAPABILITIES = [
   "get_asset_link",
   "list_assets",
   "get_repo_access",
+  "set_a2a_endpoint",
+  "verify_a2a_endpoint",
 ] as const;
 
 /**

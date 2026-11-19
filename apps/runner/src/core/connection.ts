@@ -12,7 +12,7 @@
 import { discoverProvider, signAgentJWT, type AgentConnection, type ProviderConfig } from "@auth/agent";
 import type { RunnerCapability } from "./capabilities.js";
 import { RUNNER_CAPABILITIES } from "./capabilities.js";
-import { errorFrom, GatewayError } from "./errors.js";
+import { errorFrom, GatewayError, readBounded } from "./errors.js";
 import { gatewayFetch, onGateway } from "./gateway.js";
 import type { RunnerStorage } from "./storage.js";
 
@@ -87,8 +87,9 @@ export class Connection {
       throw new GatewayError(0, "network");
     }
     if (!response.ok) throw await errorFrom(response);
-    const text = await response.text().catch(() => null);
-    if (text === null || text.length > MAX_ANSWER_BYTES) throw new GatewayError(0, "bad_answer");
+    // Read only up to the bound: an answer past it, or one that never ends, is cut there, never held whole.
+    const text = await readBounded(response, MAX_ANSWER_BYTES);
+    if (text === null) throw new GatewayError(0, "bad_answer");
     let body: unknown;
     try {
       body = JSON.parse(text);

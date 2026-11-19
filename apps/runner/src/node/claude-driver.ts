@@ -49,7 +49,7 @@ import type { AgentDriver, DriverOutcome, DriverRun, DriverSession } from "../co
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
 import { startBrokerListener, type BrokerListener, type ListenerDeps } from "./broker-listener.js";
-import { homeLabel, IMAGE_ID, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, type DockerCli } from "./docker-sandbox.js";
+import { dockerFailure, homeLabel, IMAGE_ID, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, REMOVAL_CHECK_MS, REMOVAL_CHECKS, removeContainers, type DockerCli } from "./docker-sandbox.js";
 import { ensureFolder, freshFolder, removeOwnFolder } from "./safe-fs.js";
 
 /** The SDK's functions the driver uses: the real ones, or a test's stand-in. */
@@ -316,6 +316,8 @@ export type ClaudeDriverDeps = {
   /** Bare mode, off in `claudeEngine`: it turns off the SDK's PreToolUse callback. */
   bare?: boolean;
   initWaitMs?: number;
+  /** Waits between checks that a removal is done. */
+  wait?: (ms: number) => Promise<void>;
 };
 
 export class ClaudeDriver implements AgentDriver {
@@ -328,6 +330,7 @@ export class ClaudeDriver implements AgentDriver {
   private readonly runs: string;
   private readonly homeLabel: string;
   private readonly live = new Map<string, Live>();
+  private readonly wait: (ms: number) => Promise<void>;
 
   constructor(deps: ClaudeDriverDeps) {
     const refused = versionRefusal(deps.installed);
@@ -339,6 +342,7 @@ export class ClaudeDriver implements AgentDriver {
     this.processes = deps.processes ?? nodeProcesses;
     this.runs = join(deps.home, "runs");
     this.homeLabel = homeLabel(deps.home);
+    this.wait = deps.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
   /** What this driver runs as. */
@@ -359,37 +363,55 @@ export class ClaudeDriver implements AgentDriver {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     const names = claudeNames(ref);
     const base = { ref, image: this.deps.claudeImage, uid: this.deps.uid, gid: this.deps.gid, home_label: this.homeLabel, max_seconds };
-    const steps = [
-      ["network", "create", "--internal", "--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${this.homeLabel}`, "--label", `${LABEL_ROLE}=network`, names.network],
-      relayRunArgs({ ...base, port }),
-      ["network", "connect", "bridge", names.relay],
-      claudeRunArgs(base),
+    const steps: [string, string[]][] = [
+      ["network_create", ["network", "create", "--internal", "--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${this.homeLabel}`, "--label", `${LABEL_ROLE}=network`, names.network]],
+      ["run_relay", relayRunArgs({ ...base, port })],
+      ["network_connect", ["network", "connect", "bridge", names.relay]],
+      ["run_claude", claudeRunArgs(base)],
     ];
-    for (const args of steps) {
+    for (const [step, args] of steps) {
       const r = await this.docker(args);
       if (r.code !== 0) {
         await this.teardown(ref).catch(() => undefined);
-        throw new Error("claude_container_failed");
+        throw dockerFailure(step, r.code);
       }
     }
   }
 
-  /** Removes the run's Claude Code container, relay and network, by label and by name. */
+  /**
+   * Removes the run's Claude Code container and relay, then its network, in that order (the ninth real run of #460, on
+   * Docker 28.5.1: naming one container twice in one `rm` answers "already in progress", and `network rm` while a
+   * container is still attached answers "has active endpoints", which had left networks behind on every run):
+   * containers by ID, each named once, confirmed gone; then each network, any container still attached disconnected
+   * first, removed, and confirmed gone. A Docker failure is a fixed code with its exit code.
+   */
   async teardown(ref: string): Promise<void> {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
-    const names = claudeNames(ref);
-    const ids = await this.own([`label=${LABEL_RUN}=${ref}`]);
-    const rm = await this.docker(["rm", "--force", ...ids, names.container, names.relay]);
-    // A removal that fails is never taken as done: `rm` may answer 1 only because a name it was given is already gone.
-    if (rm.code !== 0) {
-      const errors = rm.stderr.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-      if (rm.code !== 1 || errors.length === 0 || !errors.every((l) => /No such container/i.test(l))) throw new Error("docker_failed");
+    const run = [`label=${LABEL_RUN}=${ref}`];
+    await removeContainers(this.deps.docker, await this.own(run), () => this.own(run), this.wait);
+    await this.removeNetworks(run);
+  }
+
+  /** Each network matching `filters`: attached containers disconnected, removed, then confirmed gone. */
+  private async removeNetworks(filters: string[]) {
+    for (const network of await this.list("network", filters)) {
+      let r = await this.docker(["network", "rm", "--force", network]);
+      if (r.code !== 0) {
+        const attached = await this.docker(["network", "inspect", "--format", "{{range .Containers}}{{.Name}} {{end}}", network]);
+        if (attached.code !== 0) throw dockerFailure("network_inspect", attached.code);
+        for (const name of attached.stdout.split(/\s+/).filter((n) => /^[A-Za-z0-9_.-]{1,128}$/.test(n))) {
+          const d = await this.docker(["network", "disconnect", "--force", network, name]);
+          if (d.code !== 0) throw dockerFailure("network_disconnect", d.code);
+        }
+        r = await this.docker(["network", "rm", "--force", network]);
+        if (r.code !== 0) throw dockerFailure("network_rm", r.code);
+      }
     }
-    const networks = await this.list("network", [`label=${LABEL_RUN}=${ref}`]);
-    if (networks.length > 0) {
-      const r = await this.docker(["network", "rm", ...networks]);
-      if (r.code !== 0) throw new Error("docker_failed");
+    for (let check = 0; check < REMOVAL_CHECKS; check++) {
+      if ((await this.list("network", filters)).length === 0) return;
+      await this.wait(REMOVAL_CHECK_MS);
     }
+    throw new Error("docker_network_lingers");
   }
 
   /**
@@ -403,9 +425,11 @@ export class ClaudeDriver implements AgentDriver {
   private async list(kind: "ps" | "network", filters: string[]): Promise<string[]> {
     const args = kind === "ps" ? ["ps", "--all", "--quiet", "--no-trunc"] : ["network", "ls", "--quiet", "--no-trunc"];
     const r = await this.docker([...args, ...filters.flatMap((f) => ["--filter", f])]);
-    if (r.code !== 0 || r.cut) throw new Error("docker_failed");
+    const step = kind === "ps" ? "ps" : "network_ls";
+    if (r.code !== 0) throw dockerFailure(step, r.code);
+    if (r.cut) throw new Error(`docker_${step}_cut`);
     const ids = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-    if (!ids.every((id) => /^[A-Za-z0-9_.-]{1,128}$/.test(id))) throw new Error("docker_failed");
+    if (!ids.every((id) => /^[A-Za-z0-9_.-]{1,128}$/.test(id))) throw new Error(`docker_${step}_output`);
     return ids;
   }
 
@@ -623,10 +647,9 @@ export class ClaudeDriver implements AgentDriver {
 
   /** At startup: every Claude Code container, relay and network of this home. */
   async reapAll(): Promise<void> {
-    const ids = await this.own([`label=${LABEL_HOME}=${this.homeLabel}`]);
-    if (ids.length > 0 && (await this.docker(["rm", "--force", ...ids])).code !== 0) throw new Error("docker_failed");
-    const networks = await this.list("network", [`label=${LABEL_HOME}=${this.homeLabel}`]);
-    if (networks.length > 0 && (await this.docker(["network", "rm", ...networks])).code !== 0) throw new Error("docker_failed");
+    const home = [`label=${LABEL_HOME}=${this.homeLabel}`];
+    await removeContainers(this.deps.docker, await this.own(home), () => this.own(home), this.wait);
+    await this.removeNetworks(home);
   }
 }
 

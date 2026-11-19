@@ -236,6 +236,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     // A task container beside it, which Claude Code's container must not reach.
     const taskSandbox = new DockerSandbox({ docker, image: taskImage, uid, gid, home });
     const taskRef = `real-taskprobe-${Date.now()}`;
+    const cleanupErrors: unknown[] = [];
     const task_container = `podster-run-${taskRef.toLowerCase()}`;
     try {
       await taskSandbox.open(containerSpec(taskRef, { task_folder: join(base, "workspaces", "ws_real", "tsk_isolation_probe"), network: [], caps: { spend_micro_usd: 1, run_time_ms: 120_000, turns: 1, output_tokens: 1, max_tokens: 1 } }), new AbortController().signal);
@@ -274,9 +275,11 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       probeInfo = { reaches, gateway, relay_networks: networks, no_security_information: (await exec(names.container, ["ls", "/usr/bin/security"])).code !== 0, unexpected_mounts: unexpectedMounts((await exec(names.container, ["cat", "/proc/mounts"])).stdout) };
       expect(probe).toEqual({ reaches_nothing_else: true, relay_answers_401: true, only_token: true, mounts_exact: true, relay_networks: true });
     } finally {
-      await driver.teardown(ref);
-      await taskSandbox.kill(taskRef);
+      // Each part cleaned up on its own, so one failure never leaves another running (the ninth real run left the
+      // task container running when the driver's teardown threw first).
+      await Promise.allSettled([driver.teardown(ref), taskSandbox.kill(taskRef)]).then((cleaned) => { for (const c of cleaned) if (c.status === "rejected") cleanupErrors.push(c.reason); });
       halt.abort();
+      if (cleanupErrors.length > 0) throw cleanupErrors[0];
     }
   }, 240_000);
 

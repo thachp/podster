@@ -222,21 +222,22 @@ describe("the Docker task container", () => {
     expect(execs.some((c) => c.args.join(" ").endsWith("mkdir -p -- ./src"))).toBe(true);
   });
 
-  it("kills by the run's label and name, confirms by both, and reaps every container of its home at startup (M4)", async () => {
-    let listed = ["f".repeat(64)];
-    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: listed.join("\n") } : {}));
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/home/owner/.podster-runner" });
-    await sandbox.kill("run-1");
-    // Only the task's own container: the driver removes Claude Code's and the relay, so the two never race.
-    expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_RUN}=run-1`, "--filter", `label=${LABEL_ROLE}=task`]);
-    expect(calls[1].args).toEqual(["rm", "--force", "f".repeat(64), "podster-run-run-1"]);
+  it("kills by the run's task label and name, confirms it gone, and reaps every container of its home at startup (M4)", async () => {
+    const d = docker28();
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/home/owner/.podster-runner", every: () => () => undefined, wait: async () => undefined });
+    await sandbox.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
     expect(await sandbox.gone("run-1")).toBe(false);
-    listed = [];
+    const before = d.calls.length;
+    await sandbox.kill("run-1");
+    // Only the task's own container, by its labels and its name: the driver removes Claude Code's and the relay.
+    expect(d.calls[before]).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_RUN}=run-1`, "--filter", `label=${LABEL_ROLE}=task`]);
+    expect(d.calls[before + 1]).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", "name=^/podster-run-run-1$"]);
+    expect(d.calls[before + 2]).toEqual(["rm", "--force", d.containers[0].id]);
     expect(await sandbox.gone("run-1")).toBe(true);
-    listed = ["e".repeat(64), "d".repeat(64)];
+    for (const ref of ["run-2", "run-3"]) await sandbox.open(containerSpec(ref, facts(join(await temp(), "w"))), new AbortController().signal);
     expect(await sandbox.reapAll()).toBe(2);
-    expect(calls.at(-2)?.args).toContain(`label=${LABEL_HOME}=${homeLabel("/home/owner/.podster-runner")}`);
-    expect(calls.at(-1)?.args).toEqual(["rm", "--force", "e".repeat(64), "d".repeat(64)]);
+    expect(d.live()).toEqual([]);
+    expect(d.calls.some((c) => c.includes(`label=${LABEL_HOME}=${homeLabel("/home/owner/.podster-runner")}`))).toBe(true);
     expect(homeLabel("/a")).toMatch(/^[0-9a-f]{32}$/);
   });
 
@@ -487,7 +488,7 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
 
 function fakeProcesses() {
   const killed: string[] = [];
-  const children: { exitCode: number | null; signalCode: string | null }[] = [];
+  const children: { exitCode: number | null; signalCode: string | null; exit: (code: number | null, signal: string | null) => void }[] = [];
   const spawned: { command: string; args: string[]; cwd: string; env: Record<string, string> }[] = [];
   const processes: ProcessControl = {
     spawn(command, args, opts) {
@@ -821,7 +822,9 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
   async function wired(steps: Step[], caps = CAPS) {
     const t = await driverFor(steps);
     const root = join(await temp(), "w");
-    const docker = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : args.includes("cat") && !args.join(" ").includes("/proc/1/") ? { stdout: "file text" } : {}));
+    // The task container is listed until it is removed, as Docker lists it.
+    let taskRemoved = false;
+    const docker = fakeDocker((args) => (args[0] === "ps" ? { stdout: taskRemoved || !args.join(" ").includes("role=task") ? "" : "a".repeat(64) } : args[0] === "rm" ? ((taskRemoved = true), {}) : args.includes("cat") && !args.join(" ").includes("/proc/1/") ? { stdout: "file text" } : {}));
     const sandbox = new DockerSandbox({ docker: docker.docker, image: IMAGE, uid: 501, gid: 20, home: t.home });
     const sent: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[] = [];
     const fetch = (async (url: string, init: RequestInit) => {
@@ -961,27 +964,27 @@ describe("review item 2 (M2): the disk bound", () => {
 
   it("checks the folder on a timer for the whole run, so a background writer is caught between tool calls", async () => {
     const root = join(await temp(), "w");
-    const { calls, docker } = fakeDocker((args) => (args.includes("children") || args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "7\n" } : args[0] === "ps" ? { stdout: "" } : {}));
+    const d = docker28();
     const t = timers();
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: t.every, limits: { folder_bytes: 1_000 } });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: t.every, limits: { folder_bytes: 1_000 }, wait: async () => undefined });
     const spec = containerSpec("run-1", facts(root));
     await sandbox.open(spec, new AbortController().signal);
     expect(t.ticks).toHaveLength(1);
     await t.ticks[0]();
-    expect(calls.some((c) => c.args[0] === "rm")).toBe(false);
+    expect(d.live()).toHaveLength(1);
     // A process left running in the container writes, with no tool call in flight.
     await writeFile(join(spec.task_folder, "big"), "x".repeat(2_000));
     await t.ticks[0]();
-    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+    expect(d.live()).toHaveLength(0);
     expect(t.stopped).toEqual([0]);
   });
 
   it("refuses to open when it can't tell the sleep's process apart", async () => {
     const root = join(await temp(), "w");
-    const { calls, docker } = fakeDocker((args) => (args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "" } : {}));
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every });
+    const d = docker28({ exec: (args) => (args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "" } : null) });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, wait: async () => undefined });
     await expect(sandbox.open(containerSpec("run-1", facts(root)), new AbortController().signal)).rejects.toThrow(/container_failed/);
-    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+    expect(d.live()).toEqual([]);
   });
 
   it("counts a folder with too many entries as over the bound", async () => {
@@ -994,13 +997,13 @@ describe("review item 2 (M2): the disk bound", () => {
   it("kills the container from a tool call when the folder is over the bound (the disk-kill branch)", async () => {
     const root = join(await temp(), "w");
     const spec = containerSpec("run-1", facts(root));
-    const { calls, docker } = fakeDocker((args) => (args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "7\n" } : {}));
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, limits: { folder_bytes: 10 } });
+    const d = docker28();
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, limits: { folder_bytes: 10 }, wait: async () => undefined });
     await sandbox.open(spec, new AbortController().signal);
     await writeFile(join(spec.task_folder, "big"), "x".repeat(100));
     const out = await sandbox.exec("run-1", { call_id: "c", tool: "write", path: "a", content: "x" }, new AbortController().signal);
     expect(out).toEqual({ ok: false, text: "Runner stopped the task's container: its folder passed its size bound." });
-    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+    expect(d.live()).toEqual([]);
   });
 });
 
@@ -1233,8 +1236,17 @@ describe("the reviewer's untested paths", () => {
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
-    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : args[0] === "network" ? { stdout: "podster-net-old" } : {}));
-    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin" });
+    // A container and a network a previous process left, listed until removed.
+    let containerLeft = true;
+    let networkLeft = true;
+    const { calls, docker } = fakeDocker((args) => {
+      if (args[0] === "ps") return { stdout: containerLeft && !args.join(" ").includes("role=") ? "c".repeat(64) : "" };
+      if (args[0] === "rm") containerLeft = false;
+      if (args[0] === "network" && args[1] === "ls") return { stdout: networkLeft ? "podster-net-old" : "" };
+      if (args[0] === "network" && args[1] === "rm") networkLeft = false;
+      return {};
+    });
+    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin", wait: async () => undefined });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
     await engine.reap();
@@ -1324,12 +1336,12 @@ describe("re-review item 5 (M2 lows)", () => {
   it("ends the container when strays keep coming (fork and exit) past the round limit", async () => {
     const root = join(await temp(), "w");
     let n = 0;
-    const { calls, docker } = fakeDocker((args) => (args.join(" ").endsWith("ls -l -- /proc") ? { stdout: `dr-xr-xr-x 9 501 20 0 Nov 18 10:00 ${1000 + n++}\nlrwxrwxrwx 1 0 0 0 Nov 18 10:00 self -> 5\n` } : args[0] === "ps" ? { stdout: "" } : {}));
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined });
+    const d = docker28({ exec: (args) => (args.join(" ").endsWith("ls -l -- /proc") ? { stdout: `dr-xr-xr-x 9 501 20 0 Nov 18 10:00 ${1000 + n++}\nlrwxrwxrwx 1 0 0 0 Nov 18 10:00 self -> 5\n` } : null) });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: async () => undefined });
     await sandbox.open(containerSpec("run-1", facts(root, { tools: ["read", "write", "shell"], shell: true })), new AbortController().signal);
     const out = await sandbox.exec("run-1", { call_id: "c", tool: "shell", command: "true" }, new AbortController().signal);
     expect(out.ok).toBe(false);
-    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+    expect(d.live()).toEqual([]);
   });
 });
 
@@ -2066,12 +2078,12 @@ describe("confirmStopped and the task container's removal", () => {
   });
 
   it("a removal that fails, for any reason but the container being gone already, is never taken as done", async () => {
-    const failing = laggingDocker(0, { code: 1, stderr: "Error response from daemon: removal of container podster-run-run-1 is already in progress" });
-    const sandbox = new DockerSandbox({ docker: failing.docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
+    const failing = laggingDocker(0, { code: 1, stderr: "Error response from daemon: cannot remove container: device or resource busy" });
+    const sandbox = new DockerSandbox({ docker: failing.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", wait: async () => undefined });
     await sandbox.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
-    await expect(sandbox.kill("run-1")).rejects.toThrow(/docker_failed/);
+    await expect(sandbox.kill("run-1")).rejects.toThrow(/^docker_rm_1$/);
     const gone = laggingDocker(0, { code: 1, stderr: "Error response from daemon: No such container: podster-run-run-1" });
-    await new DockerSandbox({ docker: gone.docker, image: IMAGE, uid: 501, gid: 20, home: "/h" }).kill("run-1");
+    await new DockerSandbox({ docker: gone.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", wait: async () => undefined }).kill("run-1");
   });
 
   it("matches the task container by name with Docker's leading slash, and never touches Claude Code's or the relay", async () => {
@@ -2088,5 +2100,185 @@ describe("the real run's turns scenario", () => {
     expect(real).toMatch(/run\("turns", "[^"]*one tool call per step[^"]*", \{ turns: 2 \}\)/);
     expect(real).toMatch(/expect\(r\.requests\)\.toBeLessThanOrEqual\(3\)/);
     expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(148_000\)/);
+  });
+});
+
+// ---- After the ninth real run of #460 at daf6c30: Docker's real cleanup behaviour, observed on Docker 28.5.1 ----
+
+/**
+ * A fake Docker that behaves as Docker 28.5.1 did when probed by hand (2026-11-18, labelled debug containers only):
+ * - `rm --force` naming one container twice (its ID and its name) removes it once and answers exit 1, "removal of
+ *   container … is already in progress", for the second;
+ * - `rm --force` of a container that is gone answers exit 0, with "No such container" on standard error;
+ * - `network rm` while a container is still attached answers exit 1, "has active endpoints";
+ * - `network rm --force` of a network that is gone answers exit 0;
+ * - `ps` and `network ls` filter by labels (ANDed) and by `name=^/…$` or `name=^…$`.
+ */
+function docker28(opts: { lag?: number; exec?: (args: string[]) => Partial<{ code: number; stdout: string; stderr: string }> | null } = {}) {
+  type C = { id: string; name: string; labels: string[]; networks: Set<string>; removeAfter: number | null };
+  const containers: C[] = [];
+  const networks = new Map<string, { id: string; labels: string[] }>();
+  const calls: string[][] = [];
+  let seq = 0;
+  const hex = () => (++seq).toString(16).padStart(64, "0");
+  const live = () => containers.filter((c) => c.removeAfter === null || c.removeAfter > 0);
+  const find = (ref: string) => live().find((c) => c.id === ref || c.name === ref);
+  const labelsOf = (args: string[]) => args.filter((_, i) => args[i - 1] === "--label");
+  const matches = (labels: string[], name: string, filters: string[]) =>
+    filters.every((f) => (f.startsWith("label=") ? labels.includes(f.slice(6)) : new RegExp(f.slice(5).replace("^/", "^/?")).test(`/${name}`) || new RegExp(f.slice(5)).test(name)));
+  const ok = (stdout = "", stderr = "", code = 0) => ({ code, stdout, stderr, cut: false });
+  const netName = (ref: string) => [...networks].find(([n, v]) => n === ref || v.id === ref)?.[0] ?? ref;
+  const docker: DockerCli = async (args) => {
+    calls.push(args);
+    const filters = args.filter((_, i) => args[i - 1] === "--filter");
+    if (args[0] === "run") {
+      const name = args[args.indexOf("--name") + 1];
+      const net = args.includes("--network") ? args[args.indexOf("--network") + 1] : "none";
+      containers.push({ id: hex(), name, labels: labelsOf(args), networks: new Set(net === "none" ? [] : [net]), removeAfter: null });
+      return ok();
+    }
+    if (args[0] === "exec") {
+      const custom = opts.exec?.(args);
+      if (custom) return { ...ok(), ...custom };
+      return args.join(" ").includes("/proc/1/task/1/children") ? ok("7\n") : ok();
+    }
+    if (args[0] === "ps") {
+      for (const c of containers) if (c.removeAfter !== null) c.removeAfter--;
+      return ok(live().filter((c) => matches(c.labels, c.name, filters)).map((c) => c.id).join("\n"));
+    }
+    if (args[0] === "rm") {
+      const seen = new Set<C>();
+      const errors: string[] = [];
+      let code = 0;
+      for (const ref of args.slice(2)) {
+        const c = find(ref);
+        if (!c) {
+          errors.push(`Error response from daemon: No such container: ${ref}`);
+          continue;
+        }
+        if (seen.has(c)) {
+          errors.push(`Error response from daemon: removal of container ${c.id} is already in progress`);
+          code = 1;
+          continue;
+        }
+        seen.add(c);
+        c.removeAfter = opts.lag ?? 0;
+      }
+      return ok("", errors.join("\n"), code);
+    }
+    if (args[0] === "network" && args[1] === "create") {
+      networks.set(args.at(-1) as string, { id: hex(), labels: labelsOf(args) });
+      return ok();
+    }
+    if (args[0] === "network" && args[1] === "connect") {
+      find(args.at(-1) as string)?.networks.add(args.at(-2) as string);
+      return ok();
+    }
+    if (args[0] === "network" && args[1] === "disconnect") {
+      const [net, ref] = args.slice(-2);
+      find(ref)?.networks.delete(netName(net));
+      return ok();
+    }
+    if (args[0] === "network" && args[1] === "inspect") return ok(live().filter((c) => c.networks.has(netName(args.at(-1) as string))).map((c) => c.name).join(" "));
+    if (args[0] === "network" && args[1] === "ls") return ok([...networks].filter(([n, v]) => matches(v.labels, n, filters)).map(([, v]) => v.id).join("\n"));
+    if (args[0] === "network" && args[1] === "rm") {
+      const force = args.includes("--force");
+      for (const ref of args.slice(force ? 3 : 2)) {
+        const entry = [...networks].find(([n, v]) => n === ref || v.id === ref);
+        if (!entry) {
+          if (!force) return ok("", `Error response from daemon: network ${ref} not found`, 1);
+          continue;
+        }
+        const attached = live().filter((c) => c.networks.has(entry[0]));
+        if (attached.length > 0) return ok("", `Error response from daemon: error while removing network: network ${entry[0]} has active endpoints (name:"${attached[0].name}")`, 1);
+        networks.delete(entry[0]);
+      }
+      return ok();
+    }
+    return ok();
+  };
+  return { docker, calls, containers, networks, live };
+}
+
+describe("cleanup as Docker 28.5.1 really behaves", () => {
+  const noWait = async () => undefined;
+
+  it("the task sandbox never names one container twice in one rm, so it never meets 'already in progress'", async () => {
+    const d = docker28();
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: noWait });
+    await sandbox.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
+    await sandbox.kill("run-1");
+    const rm = d.calls.filter((c) => c[0] === "rm");
+    expect(rm).toHaveLength(1);
+    expect(new Set(rm[0].slice(2)).size).toBe(rm[0].length - 2);
+    expect(rm[0].slice(2)).toEqual([d.containers[0].id]);
+    expect(await sandbox.gone("run-1")).toBe(true);
+  });
+
+  it("takes rm's exit 0 with 'No such container' as done, and waits for a removal still in progress before it says done", async () => {
+    const d = docker28({ lag: 2 });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: noWait });
+    await sandbox.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
+    await sandbox.kill("run-1");
+    expect(d.live()).toHaveLength(0);
+    await sandbox.kill("run-1");
+  });
+
+  it("names every Docker failure by a fixed code with its exit code, never its text", async () => {
+    const failing: DockerCli = async (args) => (args[0] === "ps" ? { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon at unix:///x", cut: false } : { code: 0, stdout: "", stderr: "", cut: false });
+    await expect(new DockerSandbox({ docker: failing, image: IMAGE, uid: 501, gid: 20, home: "/h" }).gone("run-1")).rejects.toThrow(/^docker_ps_1$/);
+    const rmFails: DockerCli = async (args) => (args[0] === "ps" ? { code: 0, stdout: "f".repeat(64), stderr: "", cut: false } : { code: 125, stdout: "", stderr: "some daemon text", cut: false });
+    await expect(new DockerSandbox({ docker: rmFails, image: IMAGE, uid: 501, gid: 20, home: "/h", wait: noWait }).kill("run-1")).rejects.toThrow(/^docker_rm_125$/);
+    const lingers = docker28({ lag: 1000 });
+    const s = new DockerSandbox({ docker: lingers.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: noWait });
+    await s.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
+    await expect(s.kill("run-1")).rejects.toThrow(/^docker_rm_lingers$/);
+  });
+
+  it("the driver removes its containers, confirms them gone, and only then removes the network, which it confirms gone", async () => {
+    const d = docker28({ lag: 1 });
+    const t = await driverFor([], {}, { docker: d.docker, wait: noWait });
+    await (await t.driver.begin(session().s)).done;
+    expect(d.live()).toHaveLength(2);
+    expect(d.networks.size).toBe(1);
+    await t.driver.teardown("run-1");
+    expect(d.live()).toHaveLength(0);
+    expect(d.networks.size).toBe(0);
+    // No `network rm` was sent while a container of the run was still listed: none answered 'active endpoints'.
+    const rmIndex = d.calls.findIndex((c) => c[0] === "network" && c[1] === "rm");
+    const lastPs = d.calls.slice(0, rmIndex).filter((c) => c[0] === "ps").at(-1);
+    expect(lastPs).toBeTruthy();
+    expect(new Set(d.calls.filter((c) => c[0] === "rm").flatMap((c) => c.slice(2))).size).toBe(d.calls.filter((c) => c[0] === "rm").flatMap((c) => c.slice(2)).length);
+    // The exec client exits once its container is gone, as `docker exec` does.
+    t.procs.children[0].exit(0, null);
+    expect(await t.driver.confirmGone("run-1")).toBe(true);
+  });
+
+  it("disconnects a container still attached to the network before removing it again", async () => {
+    const d = docker28();
+    const t = await driverFor([], {}, { docker: d.docker, wait: noWait });
+    await (await t.driver.begin(session().s)).done;
+    // A container outside the run's labels still attached, as a leftover would be.
+    d.containers.push({ id: "e".repeat(64), name: "stray", labels: [], networks: new Set([claudeNames("run-1").network]), removeAfter: null });
+    await t.driver.teardown("run-1");
+    expect(d.calls.some((c) => c[0] === "network" && c[1] === "disconnect" && c.includes("--force"))).toBe(true);
+    expect(d.networks.size).toBe(0);
+  });
+
+  it("confirmGone reads false while the run's network is still there, and reapAll clears containers then networks", async () => {
+    const d = docker28();
+    const t = await driverFor([], {}, { docker: d.docker, wait: noWait });
+    await (await t.driver.begin(session().s)).done;
+    for (const c of d.containers) c.removeAfter = 0;
+    t.procs.children[0].exit(0, null);
+    expect(await t.driver.confirmGone("run-1")).toBe(false);
+    await t.driver.reapAll();
+    expect(d.networks.size).toBe(0);
+    expect(await t.driver.confirmGone("run-1")).toBe(true);
+  });
+
+  it("the real test's probes clean up each part on its own, so one failure never leaves the others running", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/await Promise\.allSettled\(\[driver\.teardown\(ref\), taskSandbox\.kill\(taskRef\)\]\)/);
   });
 });

@@ -79,7 +79,7 @@ export async function claudeImage(home: string): Promise<string> {
 
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
-export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; dockerProgram?: string; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform }): Promise<ClaudeEngine> {
+export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; dockerProgram?: string; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform; wait?: (ms: number) => Promise<void> }): Promise<ClaudeEngine> {
   // Only macOS is verified (L3 of the review at 1335df4a); Linux waits on S-47's run, and every other system is refused.
   if ((opts.platform ?? process.platform) !== "darwin") throw new Error("platform_unverified: Runner runs tasks only on macOS until its checks have run on this system (Linux: S-47).");
   const key = await readKeyFile(opts.key_file);
@@ -96,8 +96,8 @@ export async function claudeEngine(opts: { home: string; key_file: string; log: 
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
   // Never bare: under bare mode the SDK's PreToolUse callback, Runner's decision point, never fires (the fifth real run
   // of #460), and the container now does what bare mode was for.
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid });
-  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home });
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid, wait: opts.wait });
+  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait });
   return {
     drivers: { claude_agent_sdk: driver },
     sandbox,

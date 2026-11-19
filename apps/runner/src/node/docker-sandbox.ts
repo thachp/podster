@@ -72,6 +72,41 @@ export const LIMITS = Object.freeze({
   folder_entries: 200_000,
 });
 type Limits = { folder_bytes: number; folder_entries: number };
+/**
+ * A Docker failure as a fixed code with its step and exit code (`docker_rm_1`, `docker_ps_125`), never Docker's text
+ * (the ninth real run of #460).
+ */
+export const dockerFailure = (step: string, code: number) => new Error(`docker_${step}_${Number.isSafeInteger(code) && code >= 0 ? code : "x"}`);
+
+/** How many times, and how long apart, a removal is checked before it counts as lingering. **Proposed** figures. */
+export const REMOVAL_CHECKS = 20;
+export const REMOVAL_CHECK_MS = 250;
+const realWait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Removes containers by ID, each named once, and confirms them gone. As Docker 28.5.1 behaves (probed 2026-11-18): a
+ * container named twice in one `rm` (by its ID and its name) answers exit 1, "removal … is already in progress", for
+ * the second, so nothing is ever named twice; `rm --force` of a container already gone answers exit 0 with "No such
+ * container"; and an exit 1 whose every error is one of those two is followed by the check, never taken as done by
+ * itself. Done means `listLeft` finds nothing, checked up to `REMOVAL_CHECKS` times.
+ */
+export async function removeContainers(docker: DockerCli, ids: readonly string[], listLeft: () => Promise<string[]>, wait: (ms: number) => Promise<void> = realWait): Promise<void> {
+  const unique = [...new Set(ids)];
+  if (unique.length > 0) {
+    const r = await docker(["rm", "--force", ...unique], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
+    if (r.code !== 0) {
+      const errors = r.stderr.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+      const benign = (l: string) => /No such container/i.test(l) || /removal of container \S+ is already in progress/i.test(l);
+      if (r.code !== 1 || errors.length === 0 || !errors.every(benign)) throw dockerFailure("rm", r.code);
+    }
+  }
+  for (let check = 0; check < REMOVAL_CHECKS; check++) {
+    if ((await listLeft()).length === 0) return;
+    await wait(REMOVAL_CHECK_MS);
+  }
+  throw new Error("docker_rm_lingers");
+}
+
 /** Runs `fn` every `ms` until the returned stop is called. */
 export type Every = (ms: number, fn: () => Promise<void> | void) => () => void;
 const realEvery: Every = (ms, fn) => {
@@ -190,7 +225,9 @@ export class DockerSandbox implements TaskSandbox {
   private readonly every: Every;
   private readonly limits: Limits;
 
-  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits> }) {
+  private readonly wait: (ms: number) => Promise<void>;
+
+  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits>; wait?: (ms: number) => Promise<void> }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
     if (!Number.isSafeInteger(opts.uid) || !Number.isSafeInteger(opts.gid) || opts.uid <= 0 || opts.gid < 0) throw new Error("Runner won't run a task container as root");
     this.docker = opts.docker;
@@ -200,6 +237,7 @@ export class DockerSandbox implements TaskSandbox {
     this.homeLabel = homeLabel(opts.home);
     this.workspaceRoot = opts.workspaceRoot ?? ((spec) => dirname(dirname(spec.task_folder)));
     this.every = opts.every ?? realEvery;
+    this.wait = opts.wait ?? realWait;
     this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
   }
 
@@ -250,7 +288,8 @@ export class DockerSandbox implements TaskSandbox {
     let empty = 0;
     for (let listing = 0; listing < STRAY_LISTINGS; listing++) {
       const r = await this.docker(["exec", opened.name, "ls", "-l", "--", "/proc"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 512 * 1024 });
-      if (r.code !== 0 || r.cut) throw new Error("docker_failed");
+      if (r.code !== 0) throw dockerFailure("exec_ls", r.code);
+      if (r.cut) throw new Error("docker_exec_ls_cut");
       const strays = procListing(r.stdout).filter((p) => !keep.has(p));
       if (strays.length === 0) {
         if (++empty === 2) return;
@@ -332,12 +371,9 @@ export class DockerSandbox implements TaskSandbox {
   async kill(run_ref: string): Promise<void> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
     this.opened.get(run_ref)?.unwatch();
-    const ids = await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`]);
-    const r = await this.docker(["rm", "--force", ...ids, containerName(run_ref)], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
-    if (r.code !== 0) {
-      const errors = r.stderr.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-      if (r.code !== 1 || errors.length === 0 || !errors.every((l) => /No such container/i.test(l))) throw new Error("docker_failed");
-    }
+    // By labels and by name, resolved to IDs and each named once, then confirmed gone.
+    const left = async () => [...new Set([...(await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`])), ...(await this.list([`name=^/${containerName(run_ref)}$`]))])];
+    await removeContainers(this.docker, await left(), left, this.wait);
   }
 
   /** Nothing of the run's task container is listed, by its labels or by its name (Docker names carry a leading slash). */
@@ -355,16 +391,16 @@ export class DockerSandbox implements TaskSandbox {
   async reapAll(): Promise<number> {
     const ids = await this.list([`label=${LABEL_HOME}=${this.homeLabel}`]);
     if (ids.length === 0) return 0;
-    const r = await this.docker(["rm", "--force", ...ids], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
-    if (r.code !== 0) throw new Error("docker_failed");
+    await removeContainers(this.docker, ids, () => this.list([`label=${LABEL_HOME}=${this.homeLabel}`]), this.wait);
     return ids.length;
   }
 
   private async list(filters: string[]): Promise<string[]> {
     const r = await this.docker(["ps", "--all", "--quiet", "--no-trunc", ...filters.flatMap((f) => ["--filter", f])], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
-    if (r.code !== 0 || r.cut) throw new Error("docker_failed");
+    if (r.code !== 0) throw dockerFailure("ps", r.code);
+    if (r.cut) throw new Error("docker_ps_cut");
     const ids = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-    if (!ids.every((id) => /^[0-9a-f]{64}$/.test(id))) throw new Error("docker_failed");
+    if (!ids.every((id) => /^[0-9a-f]{64}$/.test(id))) throw new Error("docker_ps_output");
     return ids;
   }
 }

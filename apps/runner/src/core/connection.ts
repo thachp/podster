@@ -13,7 +13,7 @@ import { discoverProvider, signAgentJWT, type AgentConnection, type ProviderConf
 import type { RunnerCapability } from "./capabilities.js";
 import { RUNNER_CAPABILITIES } from "./capabilities.js";
 import { errorFrom, GatewayError, readBounded } from "./errors.js";
-import { gatewayFetch, onGateway } from "./gateway.js";
+import { boundedBodies, gatewayFetch, onGateway } from "./gateway.js";
 import type { RunnerStorage } from "./storage.js";
 
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -21,11 +21,14 @@ const isObject = (value: unknown): value is Record<string, unknown> => !!value &
 const MAX_ANSWER_BYTES = 4 * 1024 * 1024;
 const CALL_TIMEOUT_MS = 30_000;
 
+/** The most of a discovery document Runner reads. */
+export const MAX_DISCOVERY_BYTES = 64 * 1024;
+
 /** The gateway's discovery document, checked to name the gateway itself as its issuer. */
 export async function discover(origin: string, fetchImpl: typeof fetch): Promise<ProviderConfig> {
   let config: ProviderConfig;
   try {
-    config = await discoverProvider(origin, gatewayFetch(origin, fetchImpl));
+    config = await discoverProvider(origin, boundedBodies(gatewayFetch(origin, fetchImpl), MAX_DISCOVERY_BYTES));
   } catch (error) {
     if (error instanceof GatewayError) throw error;
     throw new GatewayError(0, "discovery_failed");

@@ -22,8 +22,8 @@
 import { AgentAuthClient, generateKeypair, signHostJWT, type Keypair } from "@auth/agent";
 import { RUNNER_CAPABILITIES } from "./capabilities.js";
 import { Connection } from "./connection.js";
-import { errorFrom, GatewayError, meaningOf } from "./errors.js";
-import { gatewayFetch } from "./gateway.js";
+import { errorFrom, GatewayError, meaningOf, readBounded } from "./errors.js";
+import { boundedBodies, gatewayFetch } from "./gateway.js";
 import type { Clock, Logger } from "./runtime.js";
 import { emptyState, isId, type RunnerState, type StateStore } from "./state.js";
 import { RunnerStorage, type SecretStore } from "./storage.js";
@@ -196,6 +196,10 @@ export async function retire(deps: Pick<PairingDeps, "state" | "log">, storage: 
   return next;
 }
 
+/** The most of a redeem answer Runner reads, and of any answer the SDK reads while registering. */
+const MAX_REDEEM_BYTES = 16_384;
+const MAX_SDK_ANSWER_BYTES = 64 * 1024;
+
 type Redeemed = { kind: "redeemed"; hostId: string } | { kind: "ended" } | { kind: "unreachable" };
 
 async function redeem(deps: PairingDeps, keypair: Keypair, agentId: string, code: string, thumbprint: string): Promise<Redeemed> {
@@ -213,7 +217,14 @@ async function redeem(deps: PairingDeps, keypair: Keypair, agentId: string, code
         signal: AbortSignal.timeout(30_000),
       });
       if (response.ok) {
-        const answer = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+        // Read only up to the bound: an answer past it, or one that never ends, is cut there and read as no answer.
+        const text = await readBounded(response, MAX_REDEEM_BYTES);
+        let answer: Record<string, unknown> | null = null;
+        try {
+          answer = text === null ? null : (JSON.parse(text) as Record<string, unknown> | null);
+        } catch {
+          answer = null;
+        }
         if (answer?.agent_id === agentId && answer.key_thumbprint === thumbprint && isId(answer.plugin_host_id)) {
           deps.log("pairing.redeem", "redeemed", { agent: agentId });
           return { kind: "redeemed", hostId: answer.plugin_host_id };
@@ -245,7 +256,8 @@ async function register(deps: PairingDeps, storage: RunnerStorage): Promise<Regi
   const client = new AgentAuthClient({
     storage,
     urls: [deps.origin],
-    fetch: gatewayFetch(deps.origin, deps.fetch),
+    // Every answer the SDK reads is bounded first: it reads them whole (review L3 on #461).
+    fetch: boundedBodies(gatewayFetch(deps.origin, deps.fetch), MAX_SDK_ANSWER_BYTES),
     hostName: RUNNER_NAME,
     approvalTimeoutMs: 1,
     // An approval is never Runner's to wait for: the paired host's defaults are all it asks for.

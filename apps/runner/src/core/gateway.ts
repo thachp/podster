@@ -3,7 +3,7 @@
  * host a response or a discovery document points at. Every request Runner or the SDK makes goes through `gatewayFetch`,
  * which refuses any other origin and never follows a redirect.
  */
-import { GatewayError } from "./errors.js";
+import { GatewayError, readBounded } from "./errors.js";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -55,5 +55,25 @@ export function gatewayFetch(origin: string, fetchImpl: typeof fetch): typeof fe
       throw new GatewayError(response.status, "redirect_refused");
     }
     return response;
+  }) as typeof fetch;
+}
+
+/**
+ * A fetch for the pinned SDK, which reads every answer whole with `json()`: each answer's body is read here first, only
+ * up to `max` bytes, the rest cancelled, and the SDK gets that text. A successful answer past the bound, or one that
+ * never ends, is refused as `bad_answer`; a refusal's body past it reaches the SDK empty, with its status (review L3 on
+ * #461).
+ */
+export function boundedBodies(reach: typeof fetch, max: number): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await reach(input, init);
+    const text = await readBounded(response, max);
+    if (text === null && response.ok) throw new GatewayError(0, "bad_answer");
+    const headers = new Headers();
+    const type = response.headers.get("content-type");
+    if (type !== null) headers.set("content-type", type);
+    const retry = response.headers.get("retry-after");
+    if (retry !== null) headers.set("retry-after", retry);
+    return new Response(response.status === 204 || text === "" ? null : text, { status: response.status, headers });
   }) as typeof fetch;
 }

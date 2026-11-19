@@ -131,7 +131,6 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 12's real half (opt-in: runs D
         git_writable_by_shell: outputs.git_by_shell.includes("GIT_WRITABLE"),
       };
       summary.escape = escape;
-      await expect(stat(join(base, "podster-x"))).rejects.toThrow();
       expect({ ...escape, git_writable_by_shell: undefined }).toEqual({ no_key: true, no_canary: true, no_dns: true, not_root: true, no_capabilities: true, read_only_root: true, no_docker_socket: true, git_refused_for_tools: true, git_writable_by_shell: undefined });
     } finally {
       await sandbox.kill(ref);

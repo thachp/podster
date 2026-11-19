@@ -219,13 +219,47 @@ function toolOk(v: unknown): boolean {
 const nameCode = (v: unknown) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(v) ? v : "other");
 
 /** The first part of a content block outside the allowlist, as a code; null when the block is allowed. */
+/** Each block type's keys, as `blockOk` takes them. */
+const BLOCK_KEYS: Record<string, readonly string[]> = {
+  text: ["type", "text", "cache_control"],
+  image: ["type", "source", "cache_control"],
+  document: ["type", "source", "cache_control", "title", "context"],
+  tool_use: ["type", "id", "name", "input", "cache_control"],
+  tool_result: ["type", "tool_use_id", "content", "is_error", "cache_control"],
+  thinking: ["type", "thinking", "signature"],
+  redacted_thinking: ["type", "data"],
+};
+/** Only these may sit inside a tool result's content. */
+const RESULT_BLOCKS = ["text", "image", "document"];
+/** A media type as a code: itself when it is a plain `kind/subtype`, else `other`. */
+const mediaCode = (v: unknown) => (typeof v === "string" && /^[a-z]+\/[a-z0-9.+-]{1,40}$/.test(v) ? v : "other");
+
+/**
+ * The first part of a content block outside the allowlist, as a precise code (the sixth real run of #460); null when
+ * the block is allowed. It refuses exactly what `blockOk` refuses: the code only says where.
+ */
 function blockRefusal(v: unknown, inResult = false): string | null {
   if (blockOk(v, inResult)) return null;
-  if (!isObj(v)) return "block:other";
-  const known = ["text", "image", "document", "tool_use", "tool_result", "thinking", "redacted_thinking"];
-  if (typeof v.type !== "string" || !known.includes(v.type)) return `block:${nameCode(v.type)}`;
-  if (!cacheOk(v.cache_control)) return "cache_control";
-  return `block_shape:${v.type}`;
+  if (!isObj(v) || typeof v.type !== "string" || !Object.hasOwn(BLOCK_KEYS, v.type)) return `${inResult ? "tool_result_content_type" : "content_type"}:${nameCode(isObj(v) ? v.type : undefined)}`;
+  const type = v.type;
+  if (inResult && !RESULT_BLOCKS.includes(type)) return `tool_result_content_type:${type}`;
+  const extra = Object.keys(v).find((k) => !BLOCK_KEYS[type].includes(k));
+  if (extra !== undefined) return `block_key:${type}.${nameCode(extra)}`;
+  if (v.cache_control !== undefined && !cacheOk(v.cache_control)) return isObj(v.cache_control) && Object.hasOwn(v.cache_control, "ttl") ? "cache_control_ttl" : "cache_control";
+  if (type === "image" || type === "document") {
+    const source = v.source;
+    if (!isObj(source)) return `block_shape:${type}`;
+    const kinds = type === "image" ? ["base64"] : ["base64", "text"];
+    if (!kinds.includes(source.type as string)) return `source_type:${nameCode(source.type)}`;
+    if (type === "document" && source.media_type !== "text/plain") return `media_type:${mediaCode(source.media_type)}`;
+  }
+  if (type === "tool_result" && Array.isArray(v.content)) {
+    for (const inner of v.content) {
+      const refused = blockRefusal(inner, true);
+      if (refused !== null) return refused;
+    }
+  }
+  return `block_shape:${type}`;
 }
 
 /** `thinking.display` for adaptive thinking, exactly the enum SDK 0.3.327 declares (its `ThinkingConfigAdaptive`). */
@@ -266,9 +300,12 @@ function bodyRefusal(b: Obj): string | null {
   }
   if (!Array.isArray(b.messages)) return "messages";
   for (const m of b.messages) {
-    if (!isObj(m) || !only(m, ["role", "content"]) || (m.role !== "user" && m.role !== "assistant")) return "message_shape";
+    if (!isObj(m)) return "message_shape";
+    const key = Object.keys(m).find((k) => k !== "role" && k !== "content");
+    if (key !== undefined) return `message_key:${nameCode(key)}`;
+    if (m.role !== "user" && m.role !== "assistant") return `message_role:${nameCode(m.role)}`;
     if (isText(m.content)) continue;
-    if (!Array.isArray(m.content)) return "message_shape";
+    if (!Array.isArray(m.content)) return "message_content";
     for (const block of m.content) {
       const refused = blockRefusal(block);
       if (refused) return refused;

@@ -45,12 +45,13 @@ import { CLAUDE_PROFILE } from "../src/core/claude-profile.js";
 import type { RunFacts, Tool } from "../src/core/policy.js";
 import { containerSpec, SupervisedAdapter, type ProgressEvent, type TaskSandbox } from "../src/core/run-interface.js";
 import { systemClock } from "../src/core/runtime.js";
-import { startBrokerListener } from "../src/node/broker-listener.js";
+import { startBrokerListener, type ListenerDeps } from "../src/node/broker-listener.js";
 import { claudeEnv, ClaudeDriver, claudeNames, PLUGIN_ALLOWLIST, RELAY_ALIAS, RELAY_PORT, type DriverObservation } from "../src/node/claude-driver.js";
 import { installedClaudeVersions, readKeyFile } from "../src/node/claude-engine.js";
 import { DockerSandbox, dockerCli, dockerHost, findDocker, type DockerCli } from "../src/node/docker-sandbox.js";
 import { ProviderKeyTransport } from "../src/node/provider-transport.js";
 import { ensureFolder } from "../src/node/safe-fs.js";
+import { bodyShape } from "./body-shape.js";
 import { answeredUnauthorized, connected, unexpectedMounts } from "./probe-checks.js";
 
 const OPTED_IN = process.env.RUNNER_REAL_RUN === "1" && !!process.env.RUNNER_REAL_KEY_FILE;
@@ -64,7 +65,7 @@ const CAPS = { enforcement: 30_000, isolation: 30_000, expansion: 20_000, spend:
 /** The six scenarios, once each, in default mode: 0.148 USD. */
 export const REAL_SPEND_CEILING_MICRO_USD = Object.values(CAPS).reduce((a, b) => a + b, 0);
 
-type RunRecord = { scenario: string; status: string; stop_reason: string | null; stop_detail: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; refusals: string[]; statuses: string[] };
+type RunRecord = { refused_body_shape: unknown; scenario: string; status: string; stop_reason: string | null; stop_detail: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; refusals: string[]; statuses: string[] };
 /** A name Claude Code reports, kept only if it's a plain identifier. */
 const plain = (v: string) => (/^[A-Za-z0-9_:.-]{1,80}$/.test(v) ? v : "other");
 type S44 = { plugins_allowed: boolean; no_hook_events: boolean; callback_ran: boolean; isolated: boolean; answered: boolean };
@@ -123,6 +124,8 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       // Under zero means the broker stopped before the cap, which is the guarantee's price; never above.
       overshoot_micro_usd: (r.spent_micro_usd ?? 0) - r.cap_micro_usd,
       provider_requests: r.requests,
+      // Every plugin init reported, flat, beside the full init below.
+      plugins: [...new Set(r.observations.filter((o) => o.kind === "init").flatMap((o) => (o as { plugins: string[] }).plugins.map(plain)))],
       init: r.observations.filter((o) => o.kind === "init").map((o) => {
         const i = o as { claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[]; api_key_source: string; cwd_ok: boolean };
         return { version: plain(i.claude_code_version), permission_mode: plain(i.permission_mode), tools: i.tools.map(plain), mcp_servers: i.mcp_servers.map(plain), plugins: i.plugins.map(plain), api_key_source: i.api_key_source, cwd_ok: i.cwd_ok };
@@ -134,14 +137,37 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       model_refusals: r.refusals,
       // The upstream's HTTP status for each answer, the number only (`status:200`, `status:400`).
       model_statuses: r.statuses,
+      // The first refused body's structure only: key names, lengths, value types and fixed enums, no words.
+      refused_body_shape: r.refused_body_shape,
       hooks: r.observations.filter((o) => o.kind === "hook").map((o) => `${(o as { hook_event: string }).hook_event}/${(o as { hook_name: string }).hook_name}${(o as { origin: boolean }).origin ? "/origin" : ""}`),
       runner_callbacks: r.observations.filter((o) => o.kind === "callback").length,
     }));
     console.log(JSON.stringify({ s44: s44Results, isolation_probe: probe, isolation_probe_detail: probeInfo, spike_b: summary }, null, 2));
   });
 
-  function newDriver(observe?: (o: DriverObservation) => void) {
-    return installedClaudeVersions().then((installed) => new ClaudeDriver({ home, installed, docker, dockerProgram: DOCKER as string, dockerEnv, claudeImage, uid, gid, bare: false, observe }));
+  /**
+   * A driver for one run. `onRefusedBody` gets the SHAPE of each body the broker refuses (`body-shape.ts`: structure,
+   * lengths, types and fixed enums, no words), captured at the listener in this opt-in test only.
+   */
+  function newDriver(observe?: (o: DriverObservation) => void, onRefusedBody?: (shape: unknown) => void) {
+    const listen = onRefusedBody
+      ? (deps: ListenerDeps) =>
+          startBrokerListener({
+            ...deps,
+            model: async (request) => {
+              const answer = await deps.model(request);
+              if (!answer.ok && answer.refused === "body_not_allowed") {
+                try {
+                  onRefusedBody(bodyShape(JSON.parse(new TextDecoder().decode(request.body))));
+                } catch {
+                  onRefusedBody("unparsable");
+                }
+              }
+              return answer;
+            },
+          })
+      : undefined;
+    return installedClaudeVersions().then((installed) => new ClaudeDriver({ home, installed, docker, dockerProgram: DOCKER as string, dockerEnv, claudeImage, uid, gid, bare: false, observe, listen }));
   }
 
   async function run(name: keyof typeof CAPS, prompt: string, over: { tools?: Tool[]; turns?: number; run_time_ms?: number; setup?: (folder: string) => Promise<void> } = {}) {
@@ -169,7 +195,8 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       await over.setup(facts.task_folder);
     }
     const observations: DriverObservation[] = [];
-    const driver = await newDriver((o) => void observations.push(o));
+    let refusedShape: unknown = null;
+    const driver = await newDriver((o) => void observations.push(o), (shape) => void (refusedShape ??= shape));
     const inner = new DockerSandbox({ docker, image: taskImage, uid, gid, home });
     const sandbox: TaskSandbox = {
       open: (spec, signal, events) => inner.open(spec, signal, events),
@@ -192,7 +219,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     const stopped = await handle.stop();
     const refusals = progress.filter((e) => e.kind === "model_refused").map((e) => `${e.code}${e.detail ? `/${e.detail}` : ""}`);
     const statuses = progress.filter((e) => e.kind === "model_request").map((e) => e.detail ?? "status:unknown");
-    records.push({ scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, stop_detail: report.stop_detail ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations, refusals, statuses });
+    records.push({ refused_body_shape: refusedShape, scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, stop_detail: report.stop_detail ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations, refusals, statuses });
     expect(await adapter.confirmStopped(ref)).toBe(true);
     expect(await inner.gone(ref)).toBe(true);
     expect(await driver.confirmGone(ref)).toBe(true);

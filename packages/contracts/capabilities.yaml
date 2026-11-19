@@ -50,6 +50,9 @@ capabilities:
   claim_public_opening: { kind: command, operation: claimPublicOpening, idempotent_by_design: true }
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
+  # M7 step 13 (Proposed): a nudge endpoint proves control by answering one signed challenge. Safe to retry: a verified
+  # endpoint answers as verified and sends nothing, and each challenge counts against a cap for its signing secret.
+  verify_a2a_endpoint: { kind: command, operation: verifyA2aEndpoint, idempotent_by_design: true }
   # Managed repositories (M5 step 6). Safe to retry: one live token per agent and task, and a repeat gets the held one.
   # It keeps no idempotency record, because a stored answer would be a second copy of the token. The gateway lists it only
   # while its MANAGED_REPOSITORIES is on, and the API answers not_found while its own is off.
@@ -138,6 +141,11 @@ person_only:
   - getAgentA2aEndpoint
   - setAgentA2aEndpoint
   - deleteAgentA2aEndpoint
+  # M7 step 13 (Proposed): the admin's challenge of the agent's nudge endpoint, also open to the agent itself, and the
+  # owner's opt-in and its audit, which only a person who administers the agent's organization reads or sets.
+  - verifyAgentA2aEndpoint
+  - getAgentA2aNudge
+  - setAgentA2aNudge
   - removeFile
   - listWorkspaceCards
   - getWorkspaceCard

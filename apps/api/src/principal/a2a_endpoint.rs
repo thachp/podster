@@ -8,10 +8,20 @@
 //! Each set records who set it: the person who linked the agent's credential, or the admin. A send stops, and the endpoint
 //! is deleted, once that person has left the agent's organization since (ADR 0007, step 12). Their own Principal records
 //! the departure, so a claim asks it, and refuses to send if it can't tell.
+//!
+//! M7 step 13 adds a delivery mode, `nudge`, which sends IDs only (`podster_egress::nudge`, **Proposed**). A nudge endpoint
+//! sends nothing until it has proved control, by answering a signed challenge with an HMAC under its own signing secret, and
+//! a person who administers the agent's organization has switched it on for that exact registration version. Any new
+//! signing secret clears both. That person leaving the organization switches it off again, as a claim finds.
 use super::*;
 use podster_egress::endpoint::{
-    check_endpoint_url, decide_report, decide_set, open, parse_key, seal, valid_bearer_token,
-    ReportOutcome, TokenChange, NONCE_BYTES,
+    check_endpoint_url, decide_report, open, parse_key, seal, valid_bearer_token, ReportOutcome,
+    TokenChange, NONCE_BYTES,
+};
+use podster_egress::nudge::{
+    decide_nudge, decide_opt_in, decide_set_for, decide_verify, decide_verify_result,
+    proof_matches, valid_challenge, Delivery, NudgeState, Refusal as NudgeRefusal, Registration,
+    VerifyResult, VerifyStart,
 };
 
 /// One endpoint per agent. A delete blanks the row rather than removing it, so `version` only ever goes up and an attempt
@@ -19,8 +29,16 @@ use podster_egress::endpoint::{
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS a2a_endpoint (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 0,
   signing_secret TEXT NOT NULL DEFAULT '', token_sealed TEXT, enabled INTEGER NOT NULL DEFAULT 0, consecutive_failures INTEGER NOT NULL DEFAULT 0,
-  set_at INTEGER, last_report_at INTEGER, set_by TEXT, set_by_org TEXT, set_by_since INTEGER);
+  set_at INTEGER, last_report_at INTEGER, set_by TEXT, set_by_org TEXT, set_by_since INTEGER, delivery TEXT NOT NULL DEFAULT 'offers',
+  verified_at INTEGER, challenge TEXT, verify_attempts INTEGER NOT NULL DEFAULT 0, nudge_version INTEGER, nudge_by TEXT,
+  nudge_by_org TEXT, nudge_by_since INTEGER, nudge_set_at INTEGER);
 ";
+
+/// The nudge's own audit, IDs and reason codes only (M7 step 13): each challenge's outcome and each switch.
+const AUDIT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS a2a_nudge_audit (seq INTEGER PRIMARY KEY, type TEXT NOT NULL, actor_id TEXT NOT NULL,
+  version INTEGER NOT NULL, reason TEXT, created_at INTEGER NOT NULL);";
+/// Audit rows kept, so a flood of challenges can't grow the object without end.
+const AUDIT_KEPT: i64 = 200;
 
 /// Who set the endpoint: a person, the organization it's for, and since when that person's link or membership counts, in
 /// milliseconds. A departure from that organization at or after `since` ends the endpoint.
@@ -30,9 +48,27 @@ pub(super) struct Setter<'a> {
     pub since: i64,
 }
 
-/// Creates the table, and adds step 12's columns to one made before them. Forward-only.
+/// Creates the table, and adds step 12's and M7 step 13's columns to one made before them. Forward-only.
 fn ensure_schema(sql: &SqlStorage) -> R<()> {
     exec(sql, SCHEMA, vec![])?;
+    exec(sql, AUDIT_SCHEMA, vec![])?;
+    let has_delivery = !rows(
+        sql,
+        "SELECT name FROM pragma_table_info('a2a_endpoint') WHERE name = 'delivery'",
+        vec![],
+    )?
+    .is_empty();
+    if !has_delivery {
+        exec(
+            sql,
+            "ALTER TABLE a2a_endpoint ADD COLUMN delivery TEXT NOT NULL DEFAULT 'offers'; ALTER TABLE a2a_endpoint ADD COLUMN verified_at INTEGER;
+             ALTER TABLE a2a_endpoint ADD COLUMN challenge TEXT; ALTER TABLE a2a_endpoint ADD COLUMN verify_attempts INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE a2a_endpoint ADD COLUMN nudge_version INTEGER; ALTER TABLE a2a_endpoint ADD COLUMN nudge_by TEXT;
+             ALTER TABLE a2a_endpoint ADD COLUMN nudge_by_org TEXT; ALTER TABLE a2a_endpoint ADD COLUMN nudge_by_since INTEGER;
+             ALTER TABLE a2a_endpoint ADD COLUMN nudge_set_at INTEGER;",
+            vec![],
+        )?;
+    }
     let has_setter = !rows(
         sql,
         "SELECT name FROM pragma_table_info('a2a_endpoint') WHERE name = 'set_by'",
@@ -102,14 +138,98 @@ pub(super) fn status_json(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
     Ok(match current(sql)? {
         Some(row) => {
             let token_state = token_state(&row, key, &agent);
-            json!({
+            let delivery = delivery_of(&row);
+            let mut out = json!({
                 "url": row["url"], "version": row["version"], "enabled": int(&row["enabled"]) == 1,
                 "consecutive_failures": row["consecutive_failures"], "has_token": token_state != "none",
-                "token_state": token_state, "set_at": row["set_at"],
-            })
+                "token_state": token_state, "set_at": row["set_at"], "delivery": delivery.name(),
+            });
+            // A nudge endpoint also says whether it proved control, and whether the owner switched it on for this version.
+            if delivery == Delivery::Nudge {
+                let state = nudge_state(&row);
+                out["control"] = json!(if state.verified {
+                    "verified"
+                } else {
+                    "unverified"
+                });
+                out["nudge_on"] = json!(decide_nudge(state).is_ok());
+                out["nudge_set_at"] = row["nudge_set_at"].clone();
+            }
+            out
         }
         None => Value::Null,
     })
+}
+
+/// The row's delivery mode. A row made before M7 step 13, or one that says anything else, is `offers`.
+fn delivery_of(row: &Value) -> Delivery {
+    row["delivery"]
+        .as_str()
+        .and_then(Delivery::from_name)
+        .unwrap_or(Delivery::Offers)
+}
+
+fn nudge_state(row: &Value) -> NudgeState {
+    NudgeState {
+        version: int(&row["version"]).max(0) as u64,
+        verified: row["verified_at"].as_i64().is_some(),
+        opted_in_version: row["nudge_version"].as_i64().map(|v| v.max(0) as u64),
+    }
+}
+
+fn registration(row: &Value) -> Registration {
+    Registration {
+        version: int(&row["version"]).max(0) as u64,
+        delivery: delivery_of(row),
+        enabled: int(&row["enabled"]) == 1,
+        verified: row["verified_at"].as_i64().is_some(),
+        verify_attempts: int(&row["verify_attempts"]),
+    }
+}
+
+fn refused(refusal: NudgeRefusal) -> ApiError {
+    let (status, code) = refusal.code();
+    // error-codes: no_endpoint, not_a_nudge_endpoint, endpoint_switched_off, verify_attempts_exhausted, endpoint_unverified, endpoint_changed
+    ApiError::api(status, code)
+}
+
+fn audit(
+    sql: &SqlStorage,
+    kind: &str,
+    actor: &str,
+    version: i64,
+    reason: Option<&str>,
+    now: i64,
+) -> R<()> {
+    exec(sql, AUDIT_SCHEMA, vec![])?;
+    exec(
+        sql,
+        "INSERT INTO a2a_nudge_audit (type, actor_id, version, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+        vec![
+            kind.into(),
+            actor.into(),
+            version.into(),
+            reason.map_or(SqlStorageValue::Null, SqlStorageValue::from),
+            now.into(),
+        ],
+    )?;
+    exec(
+        sql,
+        "DELETE FROM a2a_nudge_audit WHERE seq <= (SELECT max(seq) FROM a2a_nudge_audit) - ?",
+        vec![AUDIT_KEPT.into()],
+    )
+}
+
+/// The nudge's audit, newest first, for the agent's organization's admins: IDs, versions and reason codes only.
+pub(super) fn audit_json(sql: &SqlStorage) -> R<Value> {
+    if !has_table(sql, "a2a_nudge_audit")? {
+        return Ok(json!([]));
+    }
+    Ok(json!(rows(
+        sql,
+        "SELECT type, actor_id, version, reason, created_at FROM a2a_nudge_audit ORDER BY seq DESC LIMIT 50",
+        vec![],
+    )?))
 }
 
 /// A fresh 96-bit nonce from the Worker's own `crypto.getRandomValues`. If that isn't there, nothing is sealed.
@@ -151,13 +271,21 @@ pub(super) fn set(
     let object = body.as_object().ok_or_else(ApiError::invalid_argument)?;
     if object
         .keys()
-        .any(|k| !matches!(k.as_str(), "url" | "token" | "rotate_secret"))
+        .any(|k| !matches!(k.as_str(), "url" | "token" | "rotate_secret" | "delivery"))
     {
         return Err(ApiError::invalid_argument());
     }
     let rotate_secret = match body.get("rotate_secret") {
         None | Some(Value::Null) => false,
         Some(Value::Bool(rotate)) => *rotate,
+        Some(_) => return Err(ApiError::invalid_argument()),
+    };
+    // Left out, it's `offers`, as every endpoint was before M7 step 13.
+    let delivery = match body.get("delivery") {
+        None | Some(Value::Null) => Delivery::Offers,
+        Some(Value::String(name)) => {
+            Delivery::from_name(name).ok_or_else(ApiError::invalid_argument)?
+        }
         Some(_) => return Err(ApiError::invalid_argument()),
     };
     let url = body["url"]
@@ -182,7 +310,16 @@ pub(super) fn set(
         .and_then(|r| r["url"].as_str())
         .filter(|u| !u.is_empty());
     let highest = row.as_ref().map_or(0, |r| int(&r["version"]).max(0) as u64);
-    let outcome = decide_set(current_url, highest, &url, change, rotate_secret);
+    let current_delivery = row.as_ref().map_or(Delivery::Offers, delivery_of);
+    let outcome = decide_set_for(
+        current_url,
+        current_delivery,
+        highest,
+        &url,
+        delivery,
+        change,
+        rotate_secret,
+    );
     let secret = if outcome.new_secret {
         new_secret()
     } else {
@@ -216,6 +353,15 @@ pub(super) fn set(
             setter.since.into(),
         ],
     )?;
+    exec(
+        sql,
+        "UPDATE a2a_endpoint SET delivery = ?",
+        vec![delivery.name().into()],
+    )?;
+    // A new signing secret is a new proof to make, and a new opt-in to give: neither carries over (M7 step 13).
+    if outcome.new_secret {
+        clear_nudge(sql)?;
+    }
     let mut out = status_json(sql, key)?;
     if outcome.new_secret {
         out["signing_secret"] = json!(secret);
@@ -233,6 +379,7 @@ pub(super) fn delete(sql: &SqlStorage) -> R<Value> {
             "UPDATE a2a_endpoint SET url = '', signing_secret = '', token_sealed = NULL, enabled = 0, consecutive_failures = 0, set_by = NULL",
             vec![],
         )?;
+        clear_nudge(sql)?;
     }
     Ok(json!({ "deleted": true }))
 }
@@ -277,6 +424,13 @@ pub(super) fn claim(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
         return Ok(skip("setter_unknown"));
     };
     let version = int(&row["version"]).max(0) as u64;
+    // A nudge endpoint sends only once it has proved control and the owner switched it on for this version (M7 step 13).
+    let delivery = delivery_of(&row);
+    if delivery == Delivery::Nudge {
+        if let Err(hold) = decide_nudge(nudge_state(&row)) {
+            return Ok(skip(hold.code()));
+        }
+    }
     let token = match row["token_sealed"].as_str() {
         None => Value::Null,
         Some(sealed) => {
@@ -287,11 +441,206 @@ pub(super) fn claim(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
             }
         }
     };
-    Ok(json!({
+    let mut out = json!({
         "send": true, "agent_id": conn["id"], "org_id": conn["org_id"], "generation": conn["generation"], "url": url, "version": version,
         "signing_secret": row["signing_secret"], "token": token,
         "setter": { "person": set_by, "org": set_by_org, "since": set_by_since },
+    });
+    if delivery == Delivery::Nudge {
+        // Who switched it on, so the route can check they're still in the agent's organization, as for the setter.
+        out["delivery"] = json!(delivery.name());
+        out["nudge_by"] = json!({ "person": row["nudge_by"], "org": row["nudge_by_org"], "since": row["nudge_by_since"] });
+    }
+    Ok(out)
+}
+
+/// Clears the proof of control and the owner's opt-in, and any challenge out. Called for every new signing secret, on
+/// delete and on disconnect.
+fn clear_nudge(sql: &SqlStorage) -> R<()> {
+    exec(
+        sql,
+        "UPDATE a2a_endpoint SET verified_at = NULL, challenge = NULL, verify_attempts = 0, nudge_version = NULL, nudge_by = NULL,
+           nudge_by_org = NULL, nudge_by_since = NULL, nudge_set_at = NULL",
+        vec![],
+    )
+}
+
+/// Switches the nudge off if it's still on for `version`, because whoever switched it on has left the agent's
+/// organization. The endpoint stays, unverified for nothing: its owner can switch it on again.
+pub(super) fn owner_departed(sql: &SqlStorage, version: i64, now: i64) -> R<()> {
+    let Some(row) = current(sql)? else {
+        return Ok(());
+    };
+    if int(&row["version"]) != version || row["nudge_version"].as_i64() != Some(version) {
+        return Ok(());
+    }
+    let by = text(&row["nudge_by"]).unwrap_or_default();
+    exec(
+        sql,
+        "UPDATE a2a_endpoint SET nudge_version = NULL, nudge_by = NULL, nudge_by_org = NULL, nudge_by_since = NULL, nudge_set_at = ?",
+        vec![now.into()],
+    )?;
+    audit(sql, "nudge_off", &by, version, Some("owner_departed"), now)
+}
+
+/// The first half of `POST .../a2a-endpoint/verify`: whether to send a challenge, and if so the one to send, made and
+/// counted here. A verified endpoint answers its status and sends nothing.
+pub(super) fn verify_begin(
+    sql: &SqlStorage,
+    key: Option<&[u8]>,
+    actor: &str,
+    now: i64,
+) -> R<Value> {
+    connection(sql)?
+        .filter(|c| c["status"].as_str() == Some(ACTIVE))
+        .ok_or_else(ApiError::agent_disconnected)?;
+    let row = current(sql)?;
+    match decide_verify(row.as_ref().map(registration)).map_err(refused)? {
+        VerifyStart::AlreadyVerified => {
+            let mut out = status_json(sql, key)?;
+            out["verified"] = json!(true);
+            return Ok(json!({ "send": false, "answer": out }));
+        }
+        VerifyStart::Challenge => {}
+    }
+    let row = row.ok_or_else(|| refused(NudgeRefusal::NoEndpoint))?;
+    let url = text(&row["url"]).unwrap_or_default();
+    if check_endpoint_url(&url).is_err() {
+        exec(sql, "UPDATE a2a_endpoint SET enabled = 0", vec![])?;
+        return Err(refused(NudgeRefusal::SwitchedOff));
+    }
+    ensure_schema(sql)?;
+    let challenge = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    exec(
+        sql,
+        "UPDATE a2a_endpoint SET challenge = ?, verify_attempts = verify_attempts + 1",
+        vec![challenge.as_str().into()],
+    )?;
+    let version = int(&row["version"]);
+    audit(sql, "challenge_sent", actor, version, None, now)?;
+    let agent = connection(sql)?
+        .and_then(|c| text(&c["id"]))
+        .unwrap_or_default();
+    Ok(json!({
+        "send": true, "url": url, "version": version, "challenge": challenge, "agent_id": agent,
+        "signing_secret": row["signing_secret"],
     }))
+}
+
+/// The second half: records how the challenge was answered, if the registration and its challenge are still the ones it
+/// was sent for. `proof` is what the endpoint answered, if it answered usably.
+pub(super) fn verify_end(
+    sql: &SqlStorage,
+    key: Option<&[u8]>,
+    actor: &str,
+    sent: &Value,
+    proof: Option<&str>,
+    now: i64,
+) -> R<Value> {
+    let version = sent["version"].as_i64().unwrap_or(-1);
+    let challenge = sent["challenge"].as_str().unwrap_or_default();
+    let row = current(sql)?;
+    let proof_ok = row.as_ref().is_some_and(|row| {
+        let secret = row["signing_secret"].as_str().unwrap_or_default();
+        let agent = sent["agent_id"].as_str().unwrap_or_default();
+        valid_challenge(challenge)
+            && proof
+                .is_some_and(|p| proof_matches(secret, agent, version.max(0) as u64, challenge, p))
+    });
+    let result = decide_verify_result(
+        version.max(0) as u64,
+        challenge,
+        row.as_ref().map(|r| int(&r["version"]).max(0) as u64),
+        row.as_ref().and_then(|r| r["challenge"].as_str()),
+        proof_ok,
+    );
+    let reason = match (result, proof) {
+        (VerifyResult::Verified, _) => None,
+        (VerifyResult::Stale, _) => Some("endpoint_changed"),
+        (VerifyResult::Failed, None) => Some("no_answer"),
+        (VerifyResult::Failed, Some(_)) => Some("wrong_proof"),
+    };
+    match result {
+        VerifyResult::Verified => exec(
+            sql,
+            "UPDATE a2a_endpoint SET verified_at = ?, challenge = NULL",
+            vec![now.into()],
+        )?,
+        VerifyResult::Failed => exec(sql, "UPDATE a2a_endpoint SET challenge = NULL", vec![])?,
+        VerifyResult::Stale => {}
+    }
+    let kind = if result == VerifyResult::Verified {
+        "verified"
+    } else {
+        "verify_failed"
+    };
+    audit(sql, kind, actor, version, reason, now)?;
+    let mut out = status_json(sql, key)?;
+    if out.is_null() {
+        out = json!({});
+    }
+    out["verified"] = json!(result == VerifyResult::Verified);
+    if let Some(reason) = reason {
+        out["reason"] = json!(reason);
+    }
+    Ok(out)
+}
+
+/// `PUT /v1/agents/{agent}/a2a-endpoint/nudge` with `{ "on": bool, "version"?: n }`: the owner's opt-in, by a person who
+/// administers the agent's organization, which the route has checked. On names the verified version the owner was shown.
+pub(super) fn switch_nudge(
+    sql: &SqlStorage,
+    key: Option<&[u8]>,
+    by: &Setter<'_>,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    let object = body.as_object().ok_or_else(ApiError::invalid_argument)?;
+    if object
+        .keys()
+        .any(|k| !matches!(k.as_str(), "on" | "version"))
+    {
+        return Err(ApiError::invalid_argument());
+    }
+    let on = body["on"]
+        .as_bool()
+        .ok_or_else(ApiError::invalid_argument)?;
+    let version = match body.get("version") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or_else(ApiError::invalid_argument)?),
+    };
+    let row = current(sql)?;
+    decide_opt_in(row.as_ref().map(registration), on, version).map_err(refused)?;
+    if let Some(row) = row {
+        ensure_schema(sql)?;
+        let current_version = int(&row["version"]);
+        if on {
+            exec(
+                sql,
+                "UPDATE a2a_endpoint SET nudge_version = ?, nudge_by = ?, nudge_by_org = ?, nudge_by_since = ?, nudge_set_at = ?",
+                vec![current_version.into(), by.person.into(), by.org.into(), by.since.into(), now.into()],
+            )?;
+        } else {
+            exec(
+                sql,
+                "UPDATE a2a_endpoint SET nudge_version = NULL, nudge_by = NULL, nudge_by_org = NULL, nudge_by_since = NULL, nudge_set_at = ?",
+                vec![now.into()],
+            )?;
+        }
+        audit(
+            sql,
+            if on { "nudge_on" } else { "nudge_off" },
+            by.person,
+            current_version,
+            None,
+            now,
+        )?;
+    }
+    status_json(sql, key)
 }
 
 /// `/internal/a2a-endpoint-pin`: the endpoint's URL and version, and whether it's usable now, with no secret or token, so a

@@ -39,6 +39,8 @@ const RETRY_DELAY_SECS: u32 = if cfg!(feature = "failpoints") { 1 } else { 60 };
 /// Where the A2A task ID and attempt go in the message's metadata. Both are IDs.
 const TASK_KEY: &str = "podster.dev/task";
 const ATTEMPT_KEY: &str = "podster.dev/attempt";
+/// Says a request is a nudge, IDs only (M7 step 13).
+const DELIVERY_KEY: &str = "podster.dev/delivery";
 
 /// What to do with the job.
 #[derive(Debug, PartialEq, Eq)]
@@ -104,15 +106,15 @@ enum Sent {
     Failed,
 }
 
-/// Reads at most `MAX_ANSWER_BYTES`, stopping there.
-async fn bounded(response: &mut Response) -> Option<Vec<u8>> {
+/// Reads at most `max` bytes, stopping there.
+async fn bounded(response: &mut Response, max: usize) -> Option<Vec<u8>> {
     if response
         .headers()
         .get("content-length")
         .ok()
         .flatten()
         .and_then(|n| n.parse::<usize>().ok())
-        .is_some_and(|n| n > MAX_ANSWER_BYTES)
+        .is_some_and(|n| n > max)
     {
         return None;
     }
@@ -120,7 +122,7 @@ async fn bounded(response: &mut Response) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
         bytes.extend_from_slice(&chunk.ok()?);
-        if bytes.len() > MAX_ANSWER_BYTES {
+        if bytes.len() > max {
             return None;
         }
     }
@@ -154,6 +156,17 @@ fn answered(body: &Value) -> Sent {
 /// One signed JSON-RPC request to the endpoint, with the token if there is one, a timeout and no redirects. Answers the parsed
 /// body of a 2xx response read to at most `MAX_ANSWER_BYTES`, or `None` for anything else.
 async fn rpc(url: &str, secret: &str, token: Option<&str>, body: &str) -> Option<Value> {
+    rpc_bounded(url, secret, token, body, MAX_ANSWER_BYTES).await
+}
+
+/// `rpc`, reading at most `max` bytes of the answer.
+async fn rpc_bounded(
+    url: &str,
+    secret: &str,
+    token: Option<&str>,
+    body: &str,
+    max: usize,
+) -> Option<Value> {
     let signature = podster_egress::sign(secret, (Date::now().as_millis() / 1000) as i64, body);
     let controller = AbortController::default();
     let signal = controller.signal();
@@ -177,7 +190,7 @@ async fn rpc(url: &str, secret: &str, token: Option<&str>, body: &str) -> Option
         if !(200..300).contains(&response.status_code()) {
             return Ok::<_, Error>(None);
         }
-        Ok(bounded(&mut response)
+        Ok(bounded(&mut response, max)
             .await
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()))
     };
@@ -303,6 +316,97 @@ fn link(env: &Env, ws: &str) -> Option<String> {
         .then(|| format!("{base}/w/{ws}/tasks"))
 }
 
+/// M7 step 13's nudge: the exact JSON-RPC body, IDs only. One data part names the room, the task and the attempt, and the
+/// metadata says it's a nudge, so the agent fetches the task over its own connection. The `messageId` is the attempt's, so a
+/// retry is the same message.
+fn nudge_body(ws: &str, attempt: &str, task_id: &str) -> String {
+    json!({
+        "jsonrpc": "2.0", "id": attempt, "method": "SendMessage",
+        "params": {
+            "message": {
+                "messageId": attempt, "role": "ROLE_USER",
+                "parts": [{
+                    "data": { "kind": "podster.dev/nudge", "workspace_id": ws, "task_id": task_id, "attempt_id": attempt },
+                    "mediaType": "application/json",
+                }],
+                "metadata": { TASK_KEY: format!("{ws}:{task_id}"), ATTEMPT_KEY: attempt, DELIVERY_KEY: "nudge" },
+            },
+            "configuration": { "returnImmediately": true },
+        },
+    })
+    .to_string()
+}
+
+/// Whether a nudge was taken: a 2xx JSON-RPC answer with a result and no error. What the result says isn't kept, since a
+/// nudge starts nothing here: no remote task is recorded or read back.
+fn nudge_taken(answer: Option<&Value>) -> bool {
+    answer.is_some_and(|body| {
+        body.get("error").is_none_or(Value::is_null) && body["result"].is_object()
+    })
+}
+
+/// The challenge that proves a nudge endpoint's control (M7 step 13), from what the endpoint's Principal made: a signed
+/// JSON-RPC request naming the agent, the registration version and the challenge, under the egress rules, with a timeout
+/// and no redirects. Answers the `result.proof` it got, if any. The Principal checks it.
+pub async fn challenge(begun: &Value) -> Option<String> {
+    let url = begun["url"].as_str()?;
+    // Checked again here, where it's sent, as before every send.
+    podster_egress::endpoint::check_endpoint_url(url).ok()?;
+    let body = json!({
+        "jsonrpc": "2.0", "id": begun["challenge"], "method": podster_egress::nudge::CHALLENGE_METHOD,
+        "params": { "agent_id": begun["agent_id"], "version": begun["version"], "challenge": begun["challenge"] },
+    })
+    .to_string();
+    let answer = rpc_bounded(
+        url,
+        begun["signing_secret"].as_str().unwrap_or_default(),
+        None,
+        &body,
+        podster_egress::nudge::MAX_PROOF_ANSWER_BYTES,
+    )
+    .await?;
+    if answer.get("error").is_some_and(|e| !e.is_null()) {
+        return None;
+    }
+    answer["result"]["proof"].as_str().map(str::to_string)
+}
+
+/// One nudge's send, once the room has begun it: IDs only, signed, the result counted toward switching the endpoint off. A
+/// failure is retried with backoff by the try count (`podster_egress::nudge::retry_delay_secs`); the offer stays in the
+/// inbox either way, so polling finds it.
+async fn send_nudge(
+    env: &Env,
+    (ws, attempt, agent): (&str, &str, &str),
+    claim: &Value,
+    begun: &Value,
+) -> R<Outcome> {
+    let url = claim["url"].as_str().unwrap_or_default();
+    let version = claim["version"].as_u64().unwrap_or(0);
+    let body = nudge_body(ws, attempt, begun["task_id"].as_str().unwrap_or_default());
+    let answer = rpc(
+        url,
+        claim["signing_secret"].as_str().unwrap_or_default(),
+        claim["token"].as_str(),
+        &body,
+    )
+    .await;
+    let mut finish = json!({ "attempt": attempt, "url": url, "version": version });
+    if nudge_taken(answer.as_ref()) {
+        finish["outcome"] = json!("sent");
+        room(env, ws, crate::INTERNAL_A2A_FINISH, agent, claim, &finish).await?;
+        report_a2a_for(env, agent, version, true).await?;
+        log("a2a.nudge", ws, attempt, agent, "sent");
+        return Ok(Outcome::Ack);
+    }
+    report_a2a_for(env, agent, version, false).await?;
+    finish["outcome"] = json!("retry");
+    room(env, ws, crate::INTERNAL_A2A_FINISH, agent, claim, &finish).await?;
+    log("a2a.nudge", ws, attempt, agent, "failed");
+    Ok(Outcome::Retry(podster_egress::nudge::retry_delay_secs(
+        begun["tries"].as_i64().unwrap_or(1),
+    )))
+}
+
 /// One job's work.
 pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
     let (ws, attempt, agent) = (
@@ -343,13 +447,14 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
         log("a2a.send", ws, attempt, agent, reason);
         return Ok(Outcome::Ack);
     }
+    let nudge = claim["delivery"].as_str() == Some("nudge");
     let begun = room(
         env,
         ws,
         crate::INTERNAL_A2A_BEGIN,
         agent,
         &claim,
-        &json!({ "attempt": attempt }),
+        &json!({ "attempt": attempt, "nudge": nudge }),
     )
     .await?;
     if begun["sent"] == Value::Bool(true) {
@@ -368,6 +473,9 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
         } else {
             Outcome::Ack
         });
+    }
+    if nudge {
+        return send_nudge(env, (ws, attempt, agent), &claim, &begun).await;
     }
     let url = claim["url"].as_str().unwrap_or_default();
     let version = claim["version"].as_u64().unwrap_or(0);
@@ -832,11 +940,19 @@ async fn process_cancel(env: &Env, ws: &str, attempt: &str, agent: &str) -> R<Ou
 async fn handle(env: &Env, message: Message<Value>) {
     match process(env, message.body()).await {
         Ok(Outcome::Ack) => message.ack(),
-        Ok(Outcome::Retry(delay)) => message.retry_with_options(
-            &QueueRetryOptionsBuilder::new()
-                .with_delay_seconds(delay)
-                .build(),
-        ),
+        Ok(Outcome::Retry(delay)) => {
+            // Short in test builds, so retries can be watched; `process` still answers the real delay.
+            let delay = if cfg!(feature = "failpoints") {
+                delay.min(RETRY_DELAY_SECS)
+            } else {
+                delay
+            };
+            message.retry_with_options(
+                &QueueRetryOptionsBuilder::new()
+                    .with_delay_seconds(delay)
+                    .build(),
+            )
+        }
         Err(error) => {
             console_error!(
                 "{}",

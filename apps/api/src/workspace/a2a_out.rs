@@ -145,7 +145,8 @@ fn no_send(reason: &str) -> Value {
 /// `/internal/a2a-begin`, as the agent the consumer says, with the generation its Principal gave. Rechecks everything from
 /// the room's current state, in one transaction, and only then reads the text: the agent is still a participant here and
 /// sees the task, the room isn't archived, and the task is still offered to it on this attempt's offer. Anything that
-/// moved on ends the attempt. On success the attempt is leased, so another delivery of the same job sends nothing.
+/// moved on ends the attempt. On success the attempt is leased, so another delivery of the same job sends nothing. With
+/// `"nudge": true` it answers IDs and the try count only, and reads no text (M7 step 13).
 pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i64) -> R<Value> {
     let id = body["attempt"].as_str().unwrap_or_default();
     let Some(attempt) = attempt_row(sql, id)? else {
@@ -219,6 +220,12 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
         "UPDATE a2a_attempt SET lease_until = ?, tries = tries + 1, updated_at = ? WHERE id = ?",
         vec![(now + SEND_LEASE_MS).into(), now.into(), id.into()],
     )?;
+    // A nudge (M7 step 13) carries IDs only, so no text is read: the agent fetches the task over its own connection.
+    if body["nudge"] == Value::Bool(true) {
+        return Ok(json!({
+            "send": true, "kind": kind.name(), "task_id": task.id, "tries": int(&attempt["tries"]) + 1,
+        }));
+    }
     if kind == AttemptKind::ChangeRequest {
         // The reviewer's reason, read now from the change request's own event, and the remote task it refers to.
         let reason = rows(

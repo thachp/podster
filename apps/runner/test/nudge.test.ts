@@ -9,6 +9,7 @@ import type { Server } from "node:http";
 import type { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
+  asksForServedVersion,
   checkNudgeUrl,
   MAX_NUDGE_BODY_BYTES,
   MAX_NUDGE_URL_BYTES,
@@ -75,13 +76,48 @@ function harness(registration: NudgeRegistration | null = REG) {
   const endpoint = new NudgeEndpoint({ registration: () => registration, path: PATH, clock, log: (at, outcome, fields) => void lines.push(JSON.stringify({ at, outcome, ...fields })), bell });
   const now = () => Math.floor(clock.now() / 1000);
   const post = (body: string | ReadableStream<Uint8Array>, opts: { signature?: string | null; headers?: Record<string, string>; path?: string; method?: string } = {}) => {
-    const headers: Record<string, string> = { "content-type": "application/json", ...(opts.headers ?? {}) };
+    // Podster sends A2A-Version 1.0 on every request to the endpoint (`a2a_out::rpc`).
+    const headers: Record<string, string> = { "content-type": "application/json", "a2a-version": "1.0", ...(opts.headers ?? {}) };
     const signature = opts.signature === undefined ? (typeof body === "string" ? sign(SECRET, now(), body) : null) : opts.signature;
     if (signature !== null) headers["x-podster-signature"] = signature;
     return endpoint.handle(new Request(`http://127.0.0.1:9999${opts.path ?? PATH}`, { method: opts.method ?? "POST", headers, body, ...(typeof body === "string" ? {} : { duplex: "half" }) } as RequestInit));
   };
   return { clock, bell, endpoint, lines, rings: () => rings, post, now };
 }
+
+describe("the A2A version a request asks for (step 15)", () => {
+  it("serves 1.0 and any patch of it, and nothing else that isn't exactly a version", () => {
+    for (const header of ["1.0", "1.0.0", "1.0.1"]) expect([header, asksForServedVersion(header)]).toEqual([header, true]);
+    for (const header of [null, "1.00", "01.0", "1.0.", "1.0.0.0", " 1.0", "1.0 ", "1.0, 0.3", "0.3", "1.1", "2.0", "1", ""]) {
+      expect([header, asksForServedVersion(header)]).toEqual([header, false]);
+    }
+  });
+
+  it("is read only after the signature: an unsigned or forged request asking for another version gets 401, never -32009", async () => {
+    const h = harness();
+    for (const signature of [null, sign("a2asec_forger", h.now(), nudgeBody("att_v"))]) {
+      const res = await h.post(nudgeBody("att_v"), { signature, headers: { "a2a-version": "0.3" } });
+      expect(res.status).toBe(401);
+      expect(await res.text()).toBe("");
+    }
+    expect(h.rings()).toBe(0);
+  });
+
+  it("refuses a verify challenge for another version with -32009 and no proof, so the endpoint stays unproved", async () => {
+    const h = harness();
+    for (const version of ["0.3", "1.1"]) {
+      const res = await h.post(verifyBody(), { headers: { "a2a-version": version } });
+      const body = (await res.json()) as { result?: unknown; error?: { code: number } };
+      expect([version, body.result, body.error?.code]).toEqual([version, undefined, -32009]);
+    }
+    const empty = await h.post(verifyBody(), { headers: { "a2a-version": "" } });
+    expect(((await empty.json()) as { error?: { code: number } }).error?.code).toBe(-32009);
+    // The refused challenge wasn't taken as answered: the same one at 1.0 still gets its proof.
+    const answered = (await (await h.post(verifyBody())).json()) as { result?: { proof: string } };
+    expect(answered.result?.proof).toBe(expectedProof(SECRET, AGENT, 3, CHALLENGE));
+    expect(h.rings()).toBe(0);
+  });
+});
 
 describe("the nudge endpoint", () => {
   it("answers the verify challenge with the proof, bound to the agent, the version and the challenge", async () => {
@@ -404,7 +440,7 @@ describe("a nudge in the poll loop", () => {
         // While Runner waits after its first poll, a nudge naming a task the inbox doesn't hold yet.
         gateway.offer(ROOM, "tsk_one");
         const body = nudgeBody("att_x", { task_id: "tsk_not_offered" });
-        await new NudgeEndpoint({ registration: () => REG, path: PATH, clock, log: () => undefined, bell }).handle(new Request(`http://127.0.0.1${PATH}`, { method: "POST", headers: { "x-podster-signature": sign(SECRET, Math.floor(clock.now() / 1000), body) }, body }));
+        await new NudgeEndpoint({ registration: () => REG, path: PATH, clock, log: () => undefined, bell }).handle(new Request(`http://127.0.0.1${PATH}`, { method: "POST", headers: { "a2a-version": "1.0", "x-podster-signature": sign(SECRET, Math.floor(clock.now() / 1000), body) }, body }));
       }
       if (polls >= 2) stop.abort();
     };
@@ -539,7 +575,7 @@ describe("the listener", () => {
     expect(listener.port).toBeGreaterThan(0);
     const at = `http://127.0.0.1:${listener.port}${PATH}`;
     const body = nudgeBody();
-    const ok = await fetch(at, { method: "POST", headers: { "content-type": "application/json", "x-podster-signature": sign(SECRET, h.now(), body) }, body });
+    const ok = await fetch(at, { method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0", "x-podster-signature": sign(SECRET, h.now(), body) }, body });
     expect(ok.status).toBe(200);
     expect(h.rings()).toBe(1);
     const big = await fetch(at, { method: "POST", headers: { "x-podster-signature": sign(SECRET, h.now(), "x") }, body: "x".repeat(MAX_NUDGE_BODY_BYTES * 4) }).catch(() => null);
@@ -590,8 +626,9 @@ describe("registration and verify, against the stand-in gateway", () => {
     // A good nudge now rings.
     const body = nudgeBody();
     const t = Math.floor(s.clock.now() / 1000);
-    const answered = await s.gateway.deliver!(new Request(URL_, { method: "POST", headers: { "x-podster-signature": sign(secret, t, body) }, body }));
+    const answered = await s.gateway.deliver!(new Request(URL_, { method: "POST", headers: { "a2a-version": "1.0", "x-podster-signature": sign(secret, t, body) }, body }));
     expect(answered.status).toBe(200);
+    expect(((await answered.json()) as { result?: unknown }).result).toBeDefined();
     await nudge!.close();
   });
 

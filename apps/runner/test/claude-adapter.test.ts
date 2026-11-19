@@ -427,7 +427,7 @@ function viaRelay(env: Record<string, string>, path: string, body: string): Prom
 
 /** A stand-in for the SDK: it spawns through the driver's seam, sends init, then plays its steps as Claude Code would. */
 function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts: { modelFirst?: boolean } = {}) {
-  const seen: { options: Record<string, unknown>; prompt: string; denied: string[]; outputs: string[]; spawned: { command: string; env: Record<string, string> } | null; model: { status: number }[] } = { options: {}, prompt: "", denied: [], outputs: [], spawned: null, model: [] };
+  const seen: { options: Record<string, unknown>; prompt: string; denied: string[]; reasons: string[]; outputs: string[]; spawned: { command: string; env: Record<string, string> } | null; model: { status: number }[] } = { options: {}, prompt: "", denied: [], reasons: [], outputs: [], spawned: null, model: [] };
   const sdk: ClaudeSdk = {
     tool: ((name: string, _d: string, _s: unknown, handler: ToolDef["handler"]) => ({ name, handler })) as never,
     createSdkMcpServer: ((o: { tools: ToolDef[] }) => ({ type: "sdk", tools: o.tools })) as never,
@@ -469,8 +469,10 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
             const tool = servers.runner.tools.find((t) => t.name === step.name.replace("mcp__runner__", ""));
             if (step.kind === "tool") {
               const out = await hooks[0]({ hook_event_name: "PreToolUse", tool_name: step.name, tool_input: step.input, tool_use_id: step.id }, step.id, { signal: abort });
-              if ((out.hookSpecificOutput as { permissionDecision?: string } | undefined)?.permissionDecision === "deny") {
+              const specific = out.hookSpecificOutput as { permissionDecision?: string; permissionDecisionReason?: string } | undefined;
+              if (specific?.permissionDecision === "deny") {
                 seen.denied.push(step.id);
+                seen.reasons.push(specific.permissionDecisionReason ?? "");
                 continue;
               }
               if (step.name === "StructuredOutput") continue;
@@ -688,6 +690,33 @@ describe("the Claude Agent SDK driver", () => {
     ]);
     expect(t.seen.denied).toEqual(["toolu_2", "toolu_3"]);
     expect(tools.map((c) => [c.call_id, c.tool])).toEqual([["toolu_1", "read"], ["toolu_4", "read"]]);
+  });
+
+  // The real run of 2026-11-19: its first call named a file in Claude Code's working folder, was refused as outside the
+  // task's folder, and the run gave up with nothing to tell it how to name one.
+  it("allows a call naming a file in Claude Code's working folder, /work, and tells the model how to name one when it refuses", async () => {
+    const t = await driverFor([
+      { kind: "tool", id: "toolu_1", name: "mcp__runner__write", input: { path: "/work/proof.txt", content: "working" } },
+      { kind: "tool", id: "toolu_2", name: "mcp__runner__read", input: { path: "/work/proof.txt" }, meta: true },
+      { kind: "tool", id: "toolu_3", name: "mcp__runner__write", input: { path: "/workspace/proof.txt", content: "x" } },
+      { kind: "tool", id: "toolu_4", name: "mcp__runner__write", input: { path: "/work/../proof.txt", content: "x" } },
+      { kind: "tool", id: "toolu_5", name: "mcp__runner__write", input: { path: "/work/.git/config", content: "x" } },
+      { kind: "tool", id: "toolu_6", name: "Bash", input: { command: "ls" } },
+      { kind: "tool", id: "toolu_7", name: "StructuredOutput", input: RESULT },
+    ]);
+    const { s, tools } = session();
+    const run = await t.driver.begin(s);
+    expect(await run.done).toEqual({ result: RESULT });
+    expect(tools.map((c) => [c.call_id, c.tool])).toEqual([["toolu_1", "write"], ["toolu_2", "read"]]);
+    expect(t.seen.denied).toEqual(["toolu_3", "toolu_4", "toolu_5", "toolu_6"]);
+    const [outside, escape, git, other] = t.seen.reasons;
+    expect(outside).toBe(escape);
+    expect(outside).toMatch(/relative to the task's folder/);
+    expect(outside).toContain("/work");
+    expect(git).toMatch(/Git's own folder/);
+    expect(other).toBe("Runner refused this call.");
+    // Fixed text only: nothing of the call's input comes back.
+    for (const r of t.seen.reasons) expect(r).not.toMatch(/proof|workspace|\.\.\//);
   });
 
   it("ends the run when a handler runs a call the hook never saw", async () => {

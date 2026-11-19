@@ -1509,8 +1509,17 @@ describe("production: the two-container placement everywhere, bare mode, no sand
   });
 
   it("on Linux, refuses unless its own checks pass: a Docker that doesn't answer is never taken as one that does (S-47)", async () => {
-    // This fake answers every command with exit 0 and nothing printed, so `docker version` names no server.
-    await expect(engineFor("linux")).rejects.toThrow(/^linux_check_failed: /);
+    // This fake answers every command with exit 0 and nothing printed, so `docker version` names no server. The home is
+    // short (under /tmp on a Mac), so the socket's length rule isn't what refuses it.
+    const { claudeEngine } = await import("../src/node/claude-engine.js");
+    const home = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), "rl-"));
+    temps.push(home);
+    await chmod(home, 0o700);
+    await writeFile(join(home, "fake.key"), KEY, { mode: 0o600 });
+    await writeFile(join(home, "task-image"), IMAGE);
+    await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    const { docker } = fakeDocker();
+    await expect(claudeEngine({ home, key_file: join(home, "fake.key"), log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "linux", mounts: "", procVersion: null })).rejects.toThrow(/^linux_check_failed: Docker isn't reachable/);
   });
 
   it("refuses without a pinned Claude Code image", async () => {

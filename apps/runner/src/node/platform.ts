@@ -13,6 +13,8 @@
  * Windows file system (`/mnt/<drive>`, or any 9p or drvfs mount), where Linux file modes aren't enforced.
  */
 import { readFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { onWindowsDrive } from "../core/policy.js";
 import type { DockerCli } from "./docker-sandbox.js";
 
@@ -69,16 +71,47 @@ export function filesystemOf(path: string, mounts: string): string | null {
 /** The Windows file system as WSL mounts it: 9p (WSL2's drvfs) or drvfs. */
 const WINDOWS_FS = /^(9p|v9fs|drvfs)$/;
 
+/** Whether `path` is on a mount of the Windows file system, by its mount's type. */
+export function onWindowsFilesystem(path: string, mounts: string | null): boolean {
+  const type = mounts === null ? null : filesystemOf(path, mounts);
+  return type !== null && WINDOWS_FS.test(type);
+}
+
 /**
- * Why Runner's home can't be at `home`, or null: on a Windows drive, by its path or by its mount's file system. Fixed
- * words, never the path.
+ * `path` with every link resolved (L1 on #471's review): its own real path, or, while it doesn't exist yet, its
+ * nearest existing parent's real path with the rest joined on.
  */
-export function homeRefusal(home: string, mounts: string | null): string | null {
-  const type = mounts === null ? null : filesystemOf(home, mounts);
-  if (onWindowsDrive(home) || (type !== null && WINDOWS_FS.test(type))) {
+export async function resolvedPath(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    const parent = dirname(path);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === path) throw error;
+    return join(await resolvedPath(parent), basename(path));
+  }
+}
+
+/**
+ * Why Runner's home can't be at `home`, or null: on a Windows drive, by its path or by its mount's file system. Give
+ * it the resolved path too (`resolvedPath`), so a link can't hide where it is. Fixed words, never the path.
+ */
+export function homeRefusal(home: string, mounts: string | null, real: string = home): string | null {
+  if (onWindowsDrive(home) || onWindowsDrive(real) || onWindowsFilesystem(home, mounts) || onWindowsFilesystem(real, mounts)) {
     return "Runner's home is on the Windows file system (/mnt/<drive>), where Linux file modes aren't enforced and access is slow. Use a folder in your WSL2 distro's own file system, such as ~/.podster-runner, the default.";
   }
   return null;
+}
+
+/**
+ * The longest Runner home the Linux relay takes: a run's socket is `<home>/runs/<run ref>/r.sock`, the run ref a UUID
+ * (36 characters), and the whole path at most `MAX_SOCKET_PATH_BYTES` (100).
+ */
+export const MAX_LINUX_HOME_BYTES = 100 - "/runs/".length - 36 - "/r.sock".length;
+
+/** A home too long for the relay's socket: a fixed message naming `--home` and the limit, never the path. */
+export function homeLengthRefusal(home: string): string | null {
+  if (Buffer.byteLength(home) <= MAX_LINUX_HOME_BYTES) return null;
+  return `linux_home_too_long: Runner's home path is too long for the relay's Unix socket on Linux. Pass a shorter --home, such as ~/.podster-runner, the default: it may be at most ${MAX_LINUX_HOME_BYTES} bytes.`;
 }
 
 /** Docker answers: `docker version` names its server's version. */

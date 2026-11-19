@@ -55,6 +55,7 @@ import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
 import { startBrokerListener, type BrokerListener, type ListenerDeps } from "./broker-listener.js";
 import { dockerFailure, homeLabel, IMAGE_ID, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, REMOVAL_CHECK_MS, REMOVAL_CHECKS, removeContainers, type DockerCli } from "./docker-sandbox.js";
+import { MAX_SOCKET_PATH_BYTES } from "./broker-listener.js";
 import type { RelayMode } from "./platform.js";
 import { ensureFolder, freshFolder, removeOwnFolder } from "./safe-fs.js";
 
@@ -507,6 +508,10 @@ export class ClaudeDriver implements AgentDriver {
   async begin(session: DriverSession): Promise<DriverRun> {
     const ref = session.run_ref;
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
+    // A socket path past the limit is the home's length, said as that, never as the relay failing (nit on #471's review).
+    if (this.deps.relay === "unix" && Buffer.byteLength(join(this.runs, ref, SOCKET_NAME)) > MAX_SOCKET_PATH_BYTES) {
+      throw new Error(`relay_socket_path_too_long: Runner's home is too long for this run's Unix socket. Pass a shorter --home, such as ~/.podster-runner, the default: the socket's path may be at most ${MAX_SOCKET_PATH_BYTES} bytes.`);
+    }
     await ensureFolder(this.deps.home, this.runs);
     const root = await freshFolder(join(this.runs, ref));
     const live: Live = { child: null, exited: null, listener: null, abort: new AbortController(), dir: root };

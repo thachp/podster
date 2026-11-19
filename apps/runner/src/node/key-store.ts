@@ -11,9 +11,10 @@
  * On Linux the choice is made once and remembered in `key-store` in Runner's home, so a Secret Service that is locked
  * or unreachable later is an error, never a quiet switch to an empty file store that would read as "not paired".
  *
- * The file store: one file per item under `keys/`, the folder 0700 and each file 0600, both owned by this user, each
- * named by a hash of the item's name and replaced whole (`writeFileAtomic`). A folder or file with any other mode or
- * owner, or a link, is refused, never repaired. The file store is weaker than a keyring: anyone who can read the owner's
+ * The file store: one file per item under `keys/`, Runner's home and that folder 0700 and each file 0600, all owned by
+ * this user, each named by a hash of the item's name and replaced whole (`writeFileAtomic`). A home, folder or file with
+ * any other mode or owner, a link, a FIFO or anything but a regular file, or an item past `MAX_ITEM_BYTES`, is refused,
+ * never repaired; an item is opened with `O_NOFOLLOW` and `O_NONBLOCK`, so nothing planted there can redirect or hang it. The file store is weaker than a keyring: anyone who can read the owner's
  * files as the owner can read it, as with the provider key file.
  */
 import { createHash } from "node:crypto";
@@ -23,7 +24,7 @@ import { join } from "node:path";
 import type { SecretStore } from "../core/storage.js";
 import { accountFor, MacKeychain, run, SecretServiceKeychain, SERVICE, type Runner } from "./keychain.js";
 import { childEnv } from "./child-env.js";
-import { homeRefusal, readMounts } from "./platform.js";
+import { homeRefusal, readMounts, resolvedPath } from "./platform.js";
 import { ensureFolder, readNoFollow, writeFileAtomic, writeNew } from "./safe-fs.js";
 
 export type KeyStoreKind = "macos_keychain" | "secret_service" | "file";
@@ -51,9 +52,11 @@ export class FileSecretStore implements SecretStore {
     this.folder = join(home, "keys");
   }
 
-  /** The keys folder: made 0700 if missing, and refused unless it is a real folder, this user's, mode 0700. */
+  /** Runner's home and the keys folder: each refused unless it is a real folder, this user's, mode 0700. */
   private async ready(): Promise<string> {
     await ensureFolder(this.home, this.folder, { makeRoot: true });
+    const home = await lstat(this.home);
+    if (!home.isDirectory() || home.uid !== ownUid() || (home.mode & 0o777) !== 0o700) throw new Error("Runner's home must be yours alone (mode 700) to keep its keys in files there. Nothing was read or written.");
     const info = await lstat(this.folder);
     if (!info.isDirectory() || info.uid !== ownUid() || (info.mode & 0o777) !== 0o700) throw new Error("Runner's keys folder must be yours alone (mode 700). Nothing was read or written.");
     return this.folder;
@@ -69,7 +72,8 @@ export class FileSecretStore implements SecretStore {
     const path = this.path(await this.ready(), name);
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      // Never through a link, and never waiting on a FIFO: whatever isn't a regular file is refused after the open.
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new Error("Runner's key file must be a regular file you own, mode 600. Nothing was read.");
@@ -134,7 +138,7 @@ export async function chooseKeyStore(home: string, opts: ChooseOptions = {}): Pr
   const env = opts.env ?? process.env;
   if (platform === "darwin") return { store: new MacKeychain(home), kind: "macos_keychain", line: KEY_STORE_LINES.macos_keychain };
   if (platform !== "linux") throw new Error("Runner keeps its keys in the OS keychain, and has no supported keychain on this system.");
-  const refused = homeRefusal(home, opts.mounts !== undefined ? opts.mounts : readMounts());
+  const refused = homeRefusal(home, opts.mounts !== undefined ? opts.mounts : readMounts(), await resolvedPath(home));
   if (refused) throw new Error(refused);
   await ensureFolder(home, home, { makeRoot: true });
   const runner = opts.runner ?? run;

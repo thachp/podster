@@ -365,13 +365,13 @@ describe("Runner's own source", () => {
       "npm run typecheck",
       "npm test",
       "npm run build",
-      // S-47's Linux Docker proof: on this runner's Docker, gated on both of its tests having run and passed.
+      // S-47's Linux Docker proof: on this runner's Docker, gated on all three of its tests having run and passed.
       "docker version --format '{{.Server.Version}}'",
       'npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"',
       "|",
     ]);
     expect(job).toContain('RUNNER_LINUX_DOCKER: "1"');
-    expect(job).toMatch(/r\.numPassedTests === 2 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
+    expect(job).toMatch(/r\.numPassedTests === 3 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|publish|secrets\./);
     // merge-gate requires every job ci.yml has, this one included.
     expect(await read("scripts/merge-gate")).toMatch(/^CI_JOBS=".* runner .*"$/m);

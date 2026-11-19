@@ -3,7 +3,9 @@
 // would), a fake `secret-tool`, and temporary folders. No Docker runs, no D-Bus or keyring is touched, nothing reaches a
 // provider. The real Linux Docker proof is test/linux-docker.test.ts, which only CI's Linux job runs.
 import { connect } from "node:net";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,7 +16,7 @@ import { MemorySecretStore, RunnerStorage } from "../src/core/storage.js";
 import { startBrokerListener } from "../src/node/broker-listener.js";
 import { ClaudeDriver, claudeNames, RELAY_SOCKET_IN_CONTAINER, relayRunArgs } from "../src/node/claude-driver.js";
 import { DockerSandbox, type DockerCli } from "../src/node/docker-sandbox.js";
-import { chooseKeyStore, FileSecretStore, KEY_STORE_LINES } from "../src/node/key-store.js";
+import { chooseKeyStore, FileSecretStore, KEY_STORE_LINES, MAX_ITEM_BYTES } from "../src/node/key-store.js";
 import type { Runner } from "../src/node/keychain.js";
 import { filesystemOf, isWsl, relayModeFor, WINDOWS_REFUSAL } from "../src/node/platform.js";
 import { writeFileAtomic } from "../src/node/safe-fs.js";
@@ -27,8 +29,8 @@ const DOCKER_PROGRAM = "/usr/bin/docker";
 
 const temps: string[] = [];
 async function temp(prefix = "rl-") {
-  // Short, so a Unix socket's path fits.
-  const dir = await mkdtemp(join(tmpdir(), prefix));
+  // Short, so a Unix socket's path fits: /tmp on a Mac, whose own temporary folder is long.
+  const dir = await mkdtemp(join(process.platform === "darwin" ? "/tmp" : tmpdir(), prefix));
   await chmod(dir, 0o700);
   temps.push(dir);
   return dir;
@@ -57,7 +59,7 @@ const httpRequest = (token: string | null, host = "relay:8080") =>
  * `exec … socat - TCP:relay:8080` by sending its standard input to the Unix socket the relay was started with, as the
  * relay's socat would.
  */
-function fakeLinuxDocker(opts: { version?: { code: number; stdout: string }; relayBroken?: boolean } = {}) {
+function fakeLinuxDocker(opts: { version?: { code: number; stdout: string }; relayBroken?: boolean; answerWithoutNonce?: boolean } = {}) {
   const containers = new Map<string, string[]>();
   const networks = new Map<string, string[]>();
   const calls: string[][] = [];
@@ -80,6 +82,8 @@ function fakeLinuxDocker(opts: { version?: { code: number; stdout: string }; rel
     else if (args[0] === "ps") return ok([...containers].filter(([, l]) => matches(l, filters)).map(([n]) => n).join("\n"));
     else if (args[0] === "exec" && args.includes("socat")) {
       if (opts.relayBroken || socket === null) return { code: 1, stdout: "", stderr: "socat E connect(): Connection refused", cut: false };
+      // Something answering 200 that isn't Runner's listener: never taken as the relay working.
+      if (opts.answerWithoutNonce) return ok('HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{"type":"message"}');
       return ok(await overSocket(socket, input ?? ""));
     }
     return ok();
@@ -136,6 +140,32 @@ describe("the Windows file system under WSL2 is refused", () => {
     const spec = containerSpec("run-1", { task_folder: "/mnt/c/work/ws_room/tsk_one", network: [], caps: { spend_micro_usd: 1, run_time_ms: 600_000, turns: 1, output_tokens: 1, max_tokens: 1 } });
     await expect(sandbox.open(spec, new AbortController().signal)).rejects.toThrow(/workspace_on_windows_drive/);
     expect(calls).toEqual([]);
+  });
+
+  it("refuses a task folder whose real path is on a 9p or drvfs mount, wherever the drive is mounted (L1)", async () => {
+    const root = await temp();
+    const drive = join(root, "drive");
+    await mkdir(drive, { mode: 0o700 });
+    await symlink(drive, join(root, "linked"));
+    const mounts = `/dev/sdc / ext4 rw 0 0\nC:\\134 ${await realpath(drive)} 9p rw,aname=drvfs 0 0`;
+    const { docker, calls } = fakeLinuxDocker();
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 1000, gid: 1000, home: "/home/long/.podster-runner", mounts: () => mounts });
+    const caps = { spend_micro_usd: 1, run_time_ms: 600_000, turns: 1, output_tokens: 1, max_tokens: 1 };
+    const spec = containerSpec("run-1", { task_folder: join(root, "linked", "ws", "ws_room", "tsk_one"), network: [], caps });
+    await expect(sandbox.open(spec, new AbortController().signal)).rejects.toThrow(/workspace_on_windows_drive/);
+    expect(calls).toEqual([]);
+    // The same folder on an ordinary mount opens.
+    const plain = new DockerSandbox({ docker, image: IMAGE, uid: 1000, gid: 1000, home: "/home/long/.podster-runner", mounts: () => "/dev/sdc / ext4 rw 0 0", every: () => () => undefined });
+    // (This fake answers no container's processes, so the open goes on to `docker run` and then stops.)
+    await expect(plain.open(containerSpec("run-2", { task_folder: join(root, "ws2", "ws_room", "tsk_one"), network: [], caps }), new AbortController().signal)).rejects.toThrow(/container_failed/);
+    expect(calls[0][0]).toBe("run");
+  });
+
+  it("refuses a symlinked Runner home whose real path is on a drvfs mount (L1)", async () => {
+    const root = await temp();
+    await mkdir(join(root, "win"), { mode: 0o700 });
+    await symlink(join(root, "win"), join(root, "home"));
+    await expect(chooseKeyStore(join(root, "home"), { platform: "linux", env: {}, mounts: `drvfs ${await realpath(join(root, "win"))} drvfs rw 0 0` })).rejects.toThrow(/Windows file system/);
   });
 
   it("refuses Runner's home on a Windows drive before choosing a key store", async () => {
@@ -225,6 +255,26 @@ describe("the relay on Linux: socat UNIX-CONNECT to the run's socket, internal n
     expect(await (await import("node:fs/promises")).readdir(join(home, "runs"))).toEqual([]);
   });
 
+  it("fails the check when something answers 200 without the listener's own value (L2)", async () => {
+    const home = await temp();
+    const dk = fakeLinuxDocker({ answerWithoutNonce: true });
+    await expect(driver(home, dk.docker).checkRelay()).rejects.toThrow(/relay_check_failed/);
+    expect(dk.containers.size).toBe(0);
+    expect(dk.networks.size).toBe(0);
+  });
+
+  it("refuses a run whose socket path is too long with a fixed message naming --home and the limit, before anything starts", async () => {
+    const home = await temp();
+    const deep = join(home, "a".repeat(40), "b".repeat(40));
+    await mkdir(deep, { recursive: true, mode: 0o700 });
+    const dk = fakeLinuxDocker();
+    const d = driver(deep, dk.docker);
+    const halt = new AbortController();
+    const s = { run_ref: "run-1", signal: halt.signal } as never;
+    await expect(d.begin(s)).rejects.toThrow(/^relay_socket_path_too_long: .*--home.*100 bytes/);
+    expect(dk.calls).toEqual([]);
+  });
+
   it("fails the check, and leaves nothing, when the relay can't reach the socket", async () => {
     const home = await temp();
     const dk = fakeLinuxDocker({ relayBroken: true });
@@ -264,9 +314,23 @@ describe("the engine on Linux", () => {
     await expect(build(home, keyFile, fakeLinuxDocker({ relayBroken: true }).docker)).rejects.toThrow(/^linux_check_failed: Runner's relay/);
   });
 
-  it("refuses a Runner home on the Windows file system", async () => {
+  it("refuses a Runner home on the Windows file system, by its real path (L1)", async () => {
     const { home, keyFile } = await engineHome();
-    await expect(build(home, keyFile, fakeLinuxDocker().docker, { mounts: `drvfs ${home} 9p rw 0 0` })).rejects.toThrow(/Windows file system/);
+    await expect(build(home, keyFile, fakeLinuxDocker().docker, { mounts: `drvfs ${await realpath(home)} 9p rw 0 0` })).rejects.toThrow(/Windows file system/);
+    // A link to it, from a folder that isn't on that mount, is refused the same.
+    const elsewhere = await temp();
+    await symlink(home, join(elsewhere, "home"));
+    await expect(build(join(elsewhere, "home"), keyFile, fakeLinuxDocker().docker, { mounts: `drvfs ${await realpath(home)} 9p rw 0 0` })).rejects.toThrow(/Windows file system/);
+  });
+
+  it("refuses a home too long for the relay's socket with a fixed message naming --home, not as a relay failure (nit)", async () => {
+    const { home, keyFile } = await engineHome();
+    const deep = join(home, "x".repeat(60));
+    await mkdir(deep, { mode: 0o700 });
+    for (const f of ["task-image", "claude-image"]) await writeFile(join(deep, f), await readFile(join(home, f)));
+    const dk = fakeLinuxDocker();
+    await expect(build(deep, keyFile, dk.docker)).rejects.toThrow(/^linux_home_too_long: .*--home.*\d+ bytes/);
+    expect(dk.calls).toEqual([]);
   });
 
   it("refuses Windows itself, pointing to WSL2", async () => {
@@ -365,6 +429,45 @@ describe("Runner's key store on Linux", () => {
     expect((await file.getHostIdentity())?.keypair).toEqual((await mem.getHostIdentity())?.keypair);
     await file.deleteAll();
     expect(await file.getHostIdentity()).toBeNull();
+  });
+
+  it("the file store never follows a link planted at an item, and never reads a FIFO or an item past its bound (L3)", async () => {
+    const home = await temp();
+    const store = new FileSecretStore(home);
+    await store.set("host", "real");
+    const item = (name: string) => join(home, "keys", createHash("sha256").update(name).digest("hex"));
+    // A link to a file holding something else, owned by this user and mode 600: refused, not followed.
+    const decoy = join(home, "decoy");
+    await writeFile(decoy, "planted", { mode: 0o600 });
+    await rm(item("host"));
+    await symlink(decoy, item("host"));
+    await expect(store.get("host")).rejects.toThrow(/regular file/);
+    await rm(item("host"));
+    // A FIFO: refused at once, never waited on.
+    execFileSync("mkfifo", ["-m", "600", item("host")]);
+    await expect(store.get("host")).rejects.toThrow(/regular file/);
+    await rm(item("host"));
+    // One byte past the bound.
+    await writeFile(item("host"), "x".repeat(MAX_ITEM_BYTES + 1), { mode: 0o600 });
+    await expect(store.get("host")).rejects.toThrow(/regular file/);
+    await expect(store.set("host", "x".repeat(MAX_ITEM_BYTES + 1))).rejects.toThrow(/too large/);
+  });
+
+  it("the file store needs Runner's home to be this user's, mode 700 (L3)", async () => {
+    const home = await temp();
+    await chmod(home, 0o755);
+    await expect(new FileSecretStore(home).get("host")).rejects.toThrow(/home must be yours alone \(mode 700\)/);
+    await chmod(home, 0o700);
+    expect(await new FileSecretStore(home).get("host")).toBeNull();
+  });
+
+  it("writes atomically and clears an earlier write's leftover temporary file (L3)", async () => {
+    const dir = await temp();
+    const target = join(dir, "item");
+    await writeFile(join(dir, ".item.0123456789ab.tmp"), "half", { mode: 0o600 });
+    await writeFileAtomic(target, "whole");
+    expect(await readdir(dir)).toEqual(["item"]);
+    expect(await readFile(target, "utf8")).toBe("whole");
   });
 
   it("writes atomically: a new file in the same folder, renamed over, never through a link", async () => {

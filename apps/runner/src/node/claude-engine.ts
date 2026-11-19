@@ -27,9 +27,9 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { CLAUDE_PROFILE } from "../core/claude-profile.js";
 import type { Logger } from "../core/runtime.js";
-import { ClaudeDriver } from "./claude-driver.js";
+import { ClaudeDriver, type ClaudeDriverDeps } from "./claude-driver.js";
 import { DockerSandbox, dockerCli, dockerHost, findDocker, IMAGE_ID, type DockerCli } from "./docker-sandbox.js";
-import { dockerReachable, homeRefusal, isWsl, linuxCheckFailure, readMounts, readProcVersion, relayModeFor } from "./platform.js";
+import { dockerReachable, homeLengthRefusal, homeRefusal, isWsl, linuxCheckFailure, readMounts, readProcVersion, relayModeFor, resolvedPath } from "./platform.js";
 import { ProviderKeyTransport } from "./provider-transport.js";
 import type { RunEngine } from "./run-command.js";
 import { ensureFolder, readNoFollow } from "./safe-fs.js";
@@ -96,13 +96,20 @@ export async function claudeEngine(opts: {
   /** `/proc/self/mounts` and `/proc/version`, for tests; read from the system when left out, on Linux only. */
   mounts?: string | null;
   procVersion?: string | null;
+  /**
+   * For CI's real Linux proof only (`test/linux-docker.test.ts`): a stand-in SDK and process control, so the driver's
+   * own wiring starts a process in Claude Code's container with no model call. `cli.ts` never passes it.
+   */
+  driverSeams?: Pick<ClaudeDriverDeps, "sdk" | "processes">;
 }): Promise<ClaudeEngine> {
   // macOS and Linux (with WSL2) only (L3 of the review at 1335df4a; S-47); Windows itself points to WSL2.
   const platform = opts.platform ?? process.platform;
   const relay = relayModeFor(platform);
   const env = opts.env ?? process.env;
+  const mounts = relay === "unix" ? (opts.mounts !== undefined ? opts.mounts : readMounts()) : null;
   if (relay === "unix") {
-    const refused = homeRefusal(opts.home, opts.mounts !== undefined ? opts.mounts : readMounts());
+    // By its path and its real path, so a link can't hide a home on the Windows file system (L1 on #471's review).
+    const refused = homeRefusal(opts.home, mounts, await resolvedPath(opts.home)) ?? homeLengthRefusal(opts.home);
     if (refused) throw new Error(refused);
   }
   const key = await readKeyFile(opts.key_file);
@@ -119,7 +126,7 @@ export async function claudeEngine(opts: {
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
   // Never bare: under bare mode the SDK's PreToolUse callback, Runner's decision point, never fires (the fifth real run
   // of #460), and the container now does what bare mode was for.
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid, wait: opts.wait, relay });
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid, wait: opts.wait, relay, ...opts.driverSeams });
   if (relay === "unix") {
     // Linux is turned on only by a positive check on this host (S-47): Docker answers, then the relay carries a request.
     const wsl = isWsl(env, opts.procVersion !== undefined ? opts.procVersion : readProcVersion());
@@ -131,7 +138,7 @@ export async function claudeEngine(opts: {
     }
     opts.log("adapter.platform", "linux_checked", {});
   }
-  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait });
+  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait, ...(relay === "unix" ? { mounts: () => (opts.mounts !== undefined ? opts.mounts : readMounts()) } : {}) });
   return {
     drivers: { claude_agent_sdk: driver },
     sandbox,

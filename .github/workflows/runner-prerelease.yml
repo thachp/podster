@@ -1,0 +1,109 @@
+name: Runner pre-release
+
+# Runner's npm test pre-release (the owner's decision of 2026-11-19, narrowing decision 26): the package `podster`, versioned
+# 0.0.x-test.N, on npm's `test` tag, never `latest`, pointing at staging. It is built and published only here, by hand, from
+# main, with npm provenance through npm's trusted publishing (OIDC), so there is no npm token secret. The gated release
+# after M7's step 17 replaces it. The owner's steps on npmjs.com and GitHub are in docs/runner-prerelease.md.
+#
+# `dry_run`, on by default, builds and checks the package and uploads the packed .tgz as this run's artifact without
+# publishing. That's how the first version reaches npm if npm needs the package to exist before a trusted publisher can be
+# added: the owner publishes this CI-built file once, at their own terminal.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version in apps/runner/package.json, such as 0.0.1-test.1"
+        required: true
+        type: string
+      dry_run:
+        description: "Build, check and upload the .tgz without publishing"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One at a time, and a second waits rather than replacing a publish that's under way.
+concurrency:
+  group: runner-prerelease
+  cancel-in-progress: false
+
+jobs:
+  # A run from any other ref fails here, and the publish job, which holds the environment and the OIDC token, is skipped.
+  main-only:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse any ref but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "Runner's pre-release is published only from main, not $REF."
+            exit 1
+          fi
+
+  prerelease:
+    needs: main-only
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The owner can require approval on this environment in GitHub, and limit it to main. npm's trusted publisher names it.
+    environment: npm-test-prerelease
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: apps/runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Refuse a version that isn't the package's, or isn't a test pre-release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          actual=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$actual" ]; then
+            echo "The version input ($VERSION) isn't the version in apps/runner/package.json ($actual)."
+            exit 1
+          fi
+          case "$actual" in
+            *-test.*) ;;
+            *) echo "Only a test pre-release (0.0.x-test.N) is published here, not $actual."; exit 1 ;;
+          esac
+          if ! printf '%s' "$actual" | grep -Eq '^0\.0\.[0-9]+-test\.[0-9]+$'; then
+            echo "Test pre-releases are versioned 0.0.x-test.N, not $actual."
+            exit 1
+          fi
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10. Pinned, and no install script runs.
+      - run: npm install --global --ignore-scripts npm@11.21.2
+      - run: npm --version
+      # No package's install script runs, as in CI's runner job.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+      - name: Pack the .tgz and print its SHA-256
+        if: inputs.dry_run
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --pack-destination "$RUNNER_TEMP/pack"
+          cd "$RUNNER_TEMP/pack" && sha256sum ./*.tgz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.dry_run
+        with:
+          name: podster-${{ inputs.version }}
+          path: ${{ runner.temp }}/pack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+      # The package's prepublishOnly guard checks it's this workflow on main, again.
+      - name: Publish to npm's test tag
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --provenance --tag test --access public

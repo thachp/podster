@@ -1,8 +1,11 @@
+#!/usr/bin/env node
 /**
- * Podster Runner's command line, built from source for the owner's machine (M7 step 6). No package or install command is
- * published (decision 26). Run `npm run build`, then `node build/node/cli.js <command>`.
+ * Podster Runner's command line, for the owner's machine (M7 step 6). Built from source (`npm run build`, then
+ * `node build/node/cli.js <command>`), or, as the owner decided on 2026-11-19 (narrowing decision 26), from the npm
+ * package `podster`'s marked test pre-release for staging (`npx podster@test <command>`). The gated release is unchanged.
  *
- *   pair    --gateway <https://…> --agent <agt_…>   Pair this machine. The code is read from standard input, never an argument.
+ *   pair    --agent <agt_…> [--gateway <https://…>]   Pair this machine, with staging's gateway unless another is named.
+ *                                                     The code is read from standard input, never an argument.
  *   run     [--interval <seconds>] [--grace <minutes>] [--provider-key-file <path>]
  *                                                     Poll the inbox until stopped (Ctrl-C). With a provider key
  *                                                     file, run tasks through the Claude Agent SDK; without one,
@@ -22,7 +25,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { gatewayOrigin } from "../core/gateway.js";
+import { DEFAULT_GATEWAY, pairingGateway } from "../core/gateway.js";
 import { pair, type PairingOutcome } from "../core/pairing.js";
 import { clampGrace, clampInterval, DEFAULT_GRACE_MS, DEFAULT_INTERVAL_MS, Poller } from "../core/poller.js";
 import { lineLogger, logLine, systemClock } from "../core/runtime.js";
@@ -38,8 +41,9 @@ import { processTerminal, runInbox } from "./run-command.js";
 
 const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through the Claude Agent SDK)
 
-  pair    --gateway <https://…> --agent <agt_…>   Pair this machine with the agent Podster's pairing started.
+  pair    --agent <agt_…> [--gateway <https://…>]  Pair this machine with the agent Podster's pairing started.
                                                    Paste the code when asked: it's never taken as an argument.
+                                                   Gateway default: ${DEFAULT_GATEWAY} (staging).
   run     [--interval <seconds>] [--grace <minutes>] [--provider-key-file <path>]
                                                    Poll the inbox until you stop it (Ctrl-C). With your Anthropic
                                                    API key in a file only you can read, run tasks the run policy
@@ -138,8 +142,9 @@ async function locked(command: string, args: string[], home: string, state: File
   if (command === "pair") {
     const gateway = option(args, "gateway");
     const agent = option(args, "agent");
-    if (!gateway || !agent) throw new Error("pair needs --gateway and --agent");
-    const origin = gatewayOrigin(gateway);
+    if (!agent) throw new Error("pair needs --agent");
+    // Staging's gateway unless the owner names another (the test pre-release of 2026-11-19).
+    const origin = pairingGateway(gateway);
     const secrets = systemKeychain(home);
     const record = await state.load();
     const resuming = record.agent_id === agent && record.stopped === null && (record.phase === "registered" || record.phase === "redeemed");

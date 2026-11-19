@@ -26,6 +26,18 @@ export function gatewayOrigin(input: string): string {
   return url.origin;
 }
 
+/**
+ * The gateway Runner pairs with when the owner names none: Podster's staging gateway. Runner is published only as a test
+ * pre-release for staging (the owner's decision of 2026-11-19, narrowing decision 26), and there is no production
+ * deployment. `pair --gateway <origin>` still names another, such as a gateway on this machine.
+ */
+export const DEFAULT_GATEWAY = "https://gateway-staging.podster.dev";
+
+/** The gateway `pair` uses: the one the owner named, or staging's, checked as `gatewayOrigin` checks any. */
+export function pairingGateway(named: string | undefined): string {
+  return gatewayOrigin(named ?? DEFAULT_GATEWAY);
+}
+
 /** Whether a URL is on the gateway's origin. */
 export function onGateway(origin: string, target: string): boolean {
   try {

@@ -7,6 +7,9 @@
 //   cd apps/runner && RUNNER_REAL_RUN=1 RUNNER_REAL_KEY_FILE=$HOME/.podster/anthropic-spike-b.key \
 //     npx vitest run --config vitest.real.config.ts
 //
+// Its summary JSON is always written to RUNNER_REAL_SUMMARY, or to podster-runner-real-summary.json in the OS temp
+// folder, and printed, whatever the outcome.
+//
 // What it spends: each run's spend cap is enforced by Runner's broker, which refuses any request whose worst case
 // would pass it, so the most it can spend is the sum of the six scenarios' caps, REAL_SPEND_CEILING_MICRO_USD
 // (0.148 USD), on claude-haiku-5-5. It builds Runner's two images first (apps/runner/sandbox and
@@ -36,6 +39,7 @@
 // - (d) a structured result Runner parses and bounds.
 // Not shown here: anything on a Linux host (S-47), larger models or long runs (S-49), subagents, parallel tool calls
 // and slash-command dispatch (S-46), and Claude Code's network calls beyond the relay (S-45: its network allows none).
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -55,6 +59,8 @@ import { bodyShape } from "./body-shape.js";
 import { answeredUnauthorized, connected, unexpectedMounts } from "./probe-checks.js";
 
 const OPTED_IN = process.env.RUNNER_REAL_RUN === "1" && !!process.env.RUNNER_REAL_KEY_FILE;
+/** Where the summary JSON is written, every run: IDs, codes, counts and spend only, never words or a key. */
+const SUMMARY_PATH = process.env.RUNNER_REAL_SUMMARY ?? join(tmpdir(), "podster-runner-real-summary.json");
 const KEY_FILE = process.env.RUNNER_REAL_KEY_FILE;
 // Docker is looked for only when the owner has opted in.
 const DOCKER = OPTED_IN ? findDocker() : null;
@@ -112,7 +118,6 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
   }, 1_900_000);
 
   afterAll(async () => {
-    if (base) await rm(base, { recursive: true, force: true });
     const summary = records.map((r) => ({
       scenario: r.scenario,
       status: r.status,
@@ -142,7 +147,13 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       hooks: r.observations.filter((o) => o.kind === "hook").map((o) => `${(o as { hook_event: string }).hook_event}/${(o as { hook_name: string }).hook_name}${(o as { origin: boolean }).origin ? "/origin" : ""}`),
       runner_callbacks: r.observations.filter((o) => o.kind === "callback").length,
     }));
-    console.log(JSON.stringify({ s44: s44Results, isolation_probe: probe, isolation_probe_detail: probeInfo, spike_b: summary }, null, 2));
+    // Always kept, whatever the outcome (the final real run passed 7 of 7 and its summary wasn't printed): written to a
+    // file, and written to standard output directly, not through the test runner's console capture.
+    const text = `${JSON.stringify({ s44: s44Results, isolation_probe: probe, isolation_probe_detail: probeInfo, spike_b: summary }, null, 2)}\n`;
+    writeFileSync(SUMMARY_PATH, text, { mode: 0o600 });
+    process.stdout.write(`step 9(b) real-run summary, also in ${SUMMARY_PATH}:\n${text}`);
+    // Removed after the summary is written, so a failure here can never cost the summary.
+    if (base) await rm(base, { recursive: true, force: true });
   });
 
   /**

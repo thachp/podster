@@ -2289,3 +2289,13 @@ describe("the SDK's max-turns end (the tenth real run of #460)", () => {
     await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/^max_turns$/);
   });
 });
+
+describe("the real run's summary (the final real run of #460)", () => {
+  it("is always written to a file, named by RUNNER_REAL_SUMMARY or a fixed name in the OS temp folder, and printed whatever the outcome", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/process\.env\.RUNNER_REAL_SUMMARY \?\? join\(tmpdir\(\), "podster-runner-real-summary\.json"\)/);
+    expect(real).toMatch(/writeFileSync\(SUMMARY_PATH, /);
+    expect(real).toMatch(/process\.stdout\.write\(/);
+    expect(real).not.toMatch(/console\.log\(/);
+  });
+});

@@ -1199,7 +1199,7 @@ describe("the reviewer's untested paths", () => {
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
     const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : args[0] === "network" ? { stdout: "podster-net-old" } : {}));
-    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [] });
+    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin" });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
     await engine.reap();
@@ -1207,7 +1207,7 @@ describe("the reviewer's untested paths", () => {
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
     // And every network a previous process left for this home.
     expect(calls.some((c) => c.args[0] === "network" && c.args[1] === "rm" && c.args.includes("podster-net-old"))).toBe(true);
-    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [] })).rejects.toThrow();
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [], platform: "darwin" })).rejects.toThrow();
   });
 });
 
@@ -1428,8 +1428,12 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform });
   }
 
-  it("builds the same engine on darwin and linux: bare mode, Claude Code in its container", async () => {
-    for (const platform of ["darwin", "linux"] as const) expect((await engineFor(platform)).drivers.claude_agent_sdk && ((await engineFor(platform)).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, placement: "container" });
+  it("on darwin, builds the engine: bare mode, Claude Code in its container", async () => {
+    expect(((await engineFor("darwin")).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, placement: "container" });
+  });
+
+  it("on linux, refuses with platform_unverified until S-47's Linux run (the listener stays on 127.0.0.1, which a container can't reach there)", async () => {
+    await expect(engineFor("linux")).rejects.toThrow(/platform_unverified/);
   });
 
   it("refuses without a pinned Claude Code image", async () => {
@@ -1439,16 +1443,16 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     const keyFile = join(home, "fake.key");
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
-    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker: fakeDocker().docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [] })).rejects.toThrow(/Claude Code image/);
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker: fakeDocker().docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin" })).rejects.toThrow(/Claude Code image/);
   });
 
-  it("has no sandbox-exec wrapper, preflight or host-side Claude Code left in Runner's source", async () => {
+  it("has no sandbox-exec wrapper or preflight left in Runner's source", async () => {
     const { readdir } = await import("node:fs/promises");
     const src = new URL("../src/", import.meta.url);
     for (const file of (await readdir(src, { recursive: true })).filter((f) => f.endsWith(".ts"))) {
       // Code only: the comments say what was removed and why.
       const text = (await readFile(new URL(file, src), "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-      expect([file, /sandbox-exec|sandboxPreflight|macSandbox|platform_unverified/.test(text)]).toEqual([file, false]);
+      expect([file, /sandbox-exec|sandboxPreflight|macSandbox/.test(text)]).toEqual([file, false]);
       // Only Runner's own keychain tool may name `security`.
       if (file !== "node/keychain.ts") expect([file, /\/usr\/bin\/security/.test(text)]).toEqual([file, false]);
     }

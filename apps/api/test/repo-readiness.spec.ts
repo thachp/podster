@@ -1032,6 +1032,41 @@ describe("the read-back while an agent holds a token", () => {
     expect(inTheHour).toBe(6);
   });
 
+  it("still reads while a token is held when the daily read fails in the same pass", async () => {
+    const r = await heldRoom();
+    // The daily read is due too, and fails with an error of its own, not an unread answer.
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_daily_read_fails (x INTEGER)"));
+    await ready({ rulesets: "no_update" });
+    await later(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
+    expect(await heldReads(r.id)).toBe(1);
+    expect(await scheduledReads(r.id)).toBe(0);
+    expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
+
+  it("forgets attempts older than an hour when it counts one, and still caps the hour", async () => {
+    const r = await heldRoom();
+    await later(r.id, 60 * 60_000);
+    const now = Date.now();
+    await inRoom(r.id, (sql) => {
+      // Three from long ago, and five in the hour, the newest well over an interval ago.
+      for (let n = 0; n < 3; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'held', NULL)", now - 3 * 60 * 60_000 + n * 60_000);
+      for (let n = 0; n < 5; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'held', NULL)", now - 45 * 60_000 + n * 60_000);
+    });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads.length).toBeGreaterThan(0);
+    // The old three are gone; the five and this attempt remain, which fills the hour's cap.
+    expect(await heldReads(r.id)).toBe(6);
+    const reads = (await readBack()).reads.length;
+    // Eleven minutes on, the interval since this attempt has passed, but the five are still in the hour: the cap holds.
+    await later(r.id, 11 * 60_000);
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads.length).toBe(reads);
+    expect(await heldReads(r.id)).toBe(6);
+  });
+
   it("reuses a mint's read-back from the last minute, and a mint reuses its own", async () => {
     const r = await heldRoom();
     // Due by the token's age and the link's, but the mint's read-back is still under a minute old: it stands, and

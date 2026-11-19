@@ -171,13 +171,38 @@ impl Workspace {
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
         }
-        self.daily_read().await?;
+        // A daily read that fails holds up nothing: it's logged by its code, the held-token read still runs, and the
+        // first error is what the pass returns.
+        let daily = self.daily_read().await;
+        if let Err(error) = &daily {
+            // Read without `?`, so this can't skip the held-token read either.
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])
+                .ok()
+                .and_then(|found| found.first().and_then(|row| text(&row["id"])))
+                .unwrap_or_default();
+            console_error!(
+                "{}",
+                json!({ "event": "repository.readiness_failed", "ws": room, "by": "daily", "code": error.code().unwrap_or("internal_error") })
+            );
+        }
         // After the daily read, which may have found the link right or degraded it: either way this one isn't due then.
-        self.held_token_read().await
+        let held = self.held_token_read().await;
+        daily.and(held)
     }
 
     async fn daily_read(&self) -> R<()> {
         let sql = self.state.storage().sql();
+        // Test builds only: a room holding this table fails its daily read, so a test can show the held read still runs.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_daily_read_fails'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Err(ApiError::internal("injected failure"));
+        }
         let now = now_ms();
         match daily_due(&sql, &self.env, now)? {
             Some(due) if due <= now => {}
@@ -244,6 +269,12 @@ impl Workspace {
             let Some(link) = ready_link(sql)? else {
                 return Ok(false);
             };
+            // Attempts older than the hour no longer count against anything.
+            exec(
+                sql,
+                "DELETE FROM repo_read WHERE kind = ? AND at <= ?",
+                vec![HELD_KIND.into(), (now - HOUR_MS).into()],
+            )?;
             if !held_due_for(sql, &link, now)?.is_some_and(|due| due <= now) {
                 return Ok(false);
             }

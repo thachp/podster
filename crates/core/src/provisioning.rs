@@ -62,6 +62,57 @@ pub fn readiness_due_at(
     }
 }
 
+/// **Proposed:** how often a repository's rules are read back while an agent holds an unexpired token for it. A mint
+/// reads them first, but a token lives an hour, so a rule removed after the mint would otherwise stay unseen until the
+/// next mint or the daily read. This bounds that to about one interval.
+pub const HELD_TOKEN_READ_MS: i64 = 10 * 60 * 1000;
+/// The most of those reads a room makes in an hour, whatever else happens: each is up to 12 calls on the provisioning
+/// App's installation, whose hourly budget the whole organization shares.
+pub const HELD_TOKEN_READS_PER_HOUR: usize = 6;
+const HELD_TOKEN_READ_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// When a room's repository is next due a read of its rules because an agent holds a token for it, or `None` when no
+/// unexpired token is held, so nothing is read.
+///
+/// - `latest_mint`: when the newest held token was minted. A mint reads the rules back first, or reuses a read from
+///   up to [`READ_BACK_REUSE_MS`](crate::repo_access::READ_BACK_REUSE_MS) before it, so that counts as a read made that
+///   long before the mint.
+/// - `last_found_right`: when a read last found the link exactly right.
+/// - `attempts`: when this job's reads were made, whatever came of them. Only those within the last hour count.
+///
+/// Due [`HELD_TOKEN_READ_MS`] after the latest of the three, so a read that couldn't be made is retried an interval on,
+/// as the daily read's are. Never while [`HELD_TOKEN_READS_PER_HOUR`] attempts are already in the hour: then not before
+/// the oldest that counts against it is an hour old.
+pub fn held_token_read_due_at(
+    latest_mint: Option<i64>,
+    last_found_right: i64,
+    attempts: &[i64],
+    now: i64,
+) -> Option<i64> {
+    let latest_mint = latest_mint?;
+    let window_start = now.saturating_sub(HELD_TOKEN_READ_WINDOW_MS);
+    let mut recent: Vec<i64> = attempts
+        .iter()
+        .copied()
+        .filter(|at| *at > window_start)
+        .collect();
+    recent.sort_unstable();
+    let last = recent
+        .last()
+        .copied()
+        .unwrap_or(i64::MIN)
+        .max(latest_mint.saturating_sub(crate::repo_access::READ_BACK_REUSE_MS))
+        .max(last_found_right);
+    let due = last.saturating_add(HELD_TOKEN_READ_MS);
+    // With the hour's cap used up, the oldest attempt that keeps it full must age out first.
+    let cap_frees = recent
+        .len()
+        .checked_sub(HELD_TOKEN_READS_PER_HOUR)
+        .and_then(|over| recent.get(over))
+        .map(|oldest| oldest.saturating_add(HELD_TOKEN_READ_WINDOW_MS));
+    Some(cap_frees.map_or(due, |frees| due.max(frees)))
+}
+
 /// The wait before a retry is taken: a minute after the first run, doubling, up to an hour.
 pub const RETRY_WAIT_MIN_MS: i64 = 60 * 1000;
 pub const RETRY_WAIT_MAX_MS: i64 = 60 * 60 * 1000;

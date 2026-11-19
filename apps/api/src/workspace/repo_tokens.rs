@@ -39,7 +39,7 @@
 //! **Revocation.** Each cascade that ends a token's authority marks it in its own transaction, through
 //! `store::mark_stale_repo_tokens`. The alarm revokes marked tokens with `DELETE /installation/token`, retrying with
 //! backoff until the token would have expired anyway, and removes the rows. A failed revoke never holds up the cascade.
-use super::merges::degrade;
+use super::merges::{degrade, Readiness};
 use super::*;
 use crate::github::{AgentConfig, AgentTokens, Failure, Minted, Revoked, TokenIssuer};
 use podster_core::provisioning::RecheckRead;
@@ -97,6 +97,12 @@ pub(super) async fn forget_read_back(state: &State, repo_id: i64) {
             json!({ "event": "repo_token.read_back_not_forgotten", "repo": repo_id })
         );
     }
+}
+
+/// What a read-back for agents' tokens came to: a kept one that stood, from when it was made, or a read just made.
+pub(super) enum TokenReadBack {
+    Kept { at: i64 },
+    Read(Readiness),
 }
 
 /// The deadline for the read-back. Test builds can shorten it by a table only a test can make.
@@ -920,14 +926,21 @@ impl Workspace {
         Ok(())
     }
 
-    /// Reads the repository's protections back before a new token is minted, with the one readiness check the daily
-    /// read, a merge and an operator's recheck use, within [`RECHECK_DEADLINE_MS`], and decides on it in `core`. A
-    /// read-back that passed within `READ_BACK_REUSE_MS` on the unchanged link stands instead. On a refusal the lease
-    /// goes, and on a definite difference the link is degraded in that same transaction, which marks every held token
-    /// for revocation; the alarm the request arms afterwards takes them back. After a read that passed, the lease must
-    /// still be this call's with time left.
-    async fn recheck_before_mint(&self, sql: &SqlStorage, room: &str, lease: &Lease) -> R<()> {
-        let key = read_back_key(lease.repo_id);
+    /// The repository's protections read back for its agents' tokens, with the one readiness check the daily read, a
+    /// merge and an operator's recheck use, within [`RECHECK_DEADLINE_MS`]. A read-back that passed within
+    /// `READ_BACK_REUSE_MS` on the unchanged link (`link_stamp`, its `updated_at`) stands instead, and reads nothing. A
+    /// read that passes is kept for the next one; any other ends the kept one. Before a mint, and from the alarm while a
+    /// token is held (`readiness_upkeep`).
+    pub(super) async fn token_read_back(
+        &self,
+        sql: &SqlStorage,
+        room: &str,
+        repo_id: i64,
+        public: bool,
+        default_branch: &str,
+        link_stamp: i64,
+    ) -> TokenReadBack {
+        let key = read_back_key(repo_id);
         let kept = self
             .state
             .storage()
@@ -942,40 +955,62 @@ impl Workspace {
                     link_stamp: kept["link_stamp"].as_i64()?,
                 })
             });
-        let read = if read_back_reusable(kept, lease.repo_id, lease.link_stamp, now_ms()) {
-            RecheckRead::ExactlyRight
-        } else {
-            #[cfg(feature = "failpoints")]
-            let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
-            // The kept read's minute counts from before the read starts, so a slow read never stands longer.
-            let started = now_ms();
-            let deadline = Delay::from(std::time::Duration::from_millis(
-                recheck_deadline_ms(sql).max(0) as u64,
-            ));
-            let reading = self.readiness(lease.repo_id, lease.public, &lease.default_branch, room);
-            let read = match futures_util::future::select(Box::pin(reading), deadline).await {
-                futures_util::future::Either::Left((verdict, _)) => verdict.read(),
-                // Past its deadline the read counts as unread, before the lease can run out under it.
-                futures_util::future::Either::Right(_) => {
-                    console_error!(
-                        "{}",
-                        json!({ "event": "repo_token.recheck_deadline", "ws": room })
-                    );
-                    RecheckRead::CouldNotRead
-                }
-            };
-            if read == RecheckRead::ExactlyRight {
-                let kept = json!({ "repo_id": lease.repo_id, "at": started, "link_stamp": lease.link_stamp });
-                if self.state.storage().put(&key, kept).await.is_err() {
-                    console_error!(
-                        "{}",
-                        json!({ "event": "repo_token.read_back_not_kept", "ws": room })
-                    );
-                }
-            } else {
-                forget_read_back(&self.state, lease.repo_id).await;
+        if let Some(kept) =
+            kept.filter(|kept| read_back_reusable(Some(*kept), repo_id, link_stamp, now_ms()))
+        {
+            return TokenReadBack::Kept { at: kept.at };
+        }
+        #[cfg(feature = "failpoints")]
+        let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
+        // The kept read's minute counts from before the read starts, so a slow read never stands longer.
+        let started = now_ms();
+        let deadline = Delay::from(std::time::Duration::from_millis(
+            recheck_deadline_ms(sql).max(0) as u64,
+        ));
+        let reading = self.readiness(repo_id, public, default_branch, room);
+        let verdict = match futures_util::future::select(Box::pin(reading), deadline).await {
+            futures_util::future::Either::Left((verdict, _)) => verdict,
+            // Past its deadline the read counts as unread, before a lease can run out under it.
+            futures_util::future::Either::Right(_) => {
+                console_error!(
+                    "{}",
+                    json!({ "event": "repo_token.recheck_deadline", "ws": room })
+                );
+                Readiness::CouldNotRead(0)
             }
-            read
+        };
+        if matches!(verdict, Readiness::Ready) {
+            let kept = json!({ "repo_id": repo_id, "at": started, "link_stamp": link_stamp });
+            if self.state.storage().put(&key, kept).await.is_err() {
+                console_error!(
+                    "{}",
+                    json!({ "event": "repo_token.read_back_not_kept", "ws": room })
+                );
+            }
+        } else {
+            forget_read_back(&self.state, repo_id).await;
+        }
+        TokenReadBack::Read(verdict)
+    }
+
+    /// Reads the repository's protections back before a new token is minted ([`Self::token_read_back`]), and decides
+    /// on it in `core`. On a refusal the lease goes, and on a definite difference the link is degraded in that same
+    /// transaction, which marks every held token for revocation; the alarm the request arms afterwards takes them back.
+    /// After a read that passed, the lease must still be this call's with time left.
+    async fn recheck_before_mint(&self, sql: &SqlStorage, room: &str, lease: &Lease) -> R<()> {
+        let read = match self
+            .token_read_back(
+                sql,
+                room,
+                lease.repo_id,
+                lease.public,
+                &lease.default_branch,
+                lease.link_stamp,
+            )
+            .await
+        {
+            TokenReadBack::Kept { .. } => RecheckRead::ExactlyRight,
+            TokenReadBack::Read(verdict) => verdict.read(),
         };
         let (id, repo_id) = (lease.id.clone(), lease.repo_id);
         if let Err(block) = decide_mint_recheck(read) {

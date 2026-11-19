@@ -1403,6 +1403,9 @@ impl Principal {
         let begun = self.in_transaction(move || {
             a2a_endpoint::verify_begin(&store, begin_key.as_deref(), &actor, now_ms())
         })?;
+        if begun["refused"].as_str() == Some("switched_off") {
+            return Err(ApiError::api(409, "endpoint_switched_off"));
+        }
         if begun["send"] != Value::Bool(true) {
             return Ok(begun["answer"].clone());
         }

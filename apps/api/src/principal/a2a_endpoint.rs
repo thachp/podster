@@ -20,8 +20,8 @@ use podster_egress::endpoint::{
 };
 use podster_egress::nudge::{
     decide_nudge, decide_opt_in, decide_set_for, decide_verify, decide_verify_result,
-    proof_matches, valid_challenge, Delivery, NudgeState, Refusal as NudgeRefusal, Registration,
-    VerifyResult, VerifyStart,
+    delivery_for_set, proof_matches, valid_challenge, Delivery, NudgeState,
+    Refusal as NudgeRefusal, Registration, VerifyResult, VerifyStart, VERIFY_WINDOW_MS,
 };
 
 /// One endpoint per agent. A delete blanks the row rather than removing it, so `version` only ever goes up and an attempt
@@ -48,26 +48,45 @@ pub(super) struct Setter<'a> {
     pub since: i64,
 }
 
+/// M7 step 13's columns, in the order they were added. Forward-only: never dropped or changed.
+const NUDGE_COLUMNS: [(&str, &str); 9] = [
+    ("delivery", "TEXT NOT NULL DEFAULT 'offers'"),
+    ("verified_at", "INTEGER"),
+    ("challenge", "TEXT"),
+    ("verify_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("nudge_version", "INTEGER"),
+    ("nudge_by", "TEXT"),
+    ("nudge_by_org", "TEXT"),
+    ("nudge_by_since", "INTEGER"),
+    ("nudge_set_at", "INTEGER"),
+];
+
+/// Each challenge sent for this agent, by time, for the hourly cap (M7 step 13). It belongs to the agent, not to an
+/// endpoint, so no set, rotation or delete clears it; rows past the window are dropped as challenges are counted.
+const WINDOW_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS a2a_verify_window (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL);";
+
 /// Creates the table, and adds step 12's and M7 step 13's columns to one made before them. Forward-only.
 fn ensure_schema(sql: &SqlStorage) -> R<()> {
     exec(sql, SCHEMA, vec![])?;
     exec(sql, AUDIT_SCHEMA, vec![])?;
-    let has_delivery = !rows(
+    // M7 step 13's columns, each added if it's missing, so a change that stopped partway is finished rather than skipped.
+    let present: Vec<String> = rows(
         sql,
-        "SELECT name FROM pragma_table_info('a2a_endpoint') WHERE name = 'delivery'",
+        "SELECT name FROM pragma_table_info('a2a_endpoint')",
         vec![],
     )?
-    .is_empty();
-    if !has_delivery {
-        exec(
-            sql,
-            "ALTER TABLE a2a_endpoint ADD COLUMN delivery TEXT NOT NULL DEFAULT 'offers'; ALTER TABLE a2a_endpoint ADD COLUMN verified_at INTEGER;
-             ALTER TABLE a2a_endpoint ADD COLUMN challenge TEXT; ALTER TABLE a2a_endpoint ADD COLUMN verify_attempts INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE a2a_endpoint ADD COLUMN nudge_version INTEGER; ALTER TABLE a2a_endpoint ADD COLUMN nudge_by TEXT;
-             ALTER TABLE a2a_endpoint ADD COLUMN nudge_by_org TEXT; ALTER TABLE a2a_endpoint ADD COLUMN nudge_by_since INTEGER;
-             ALTER TABLE a2a_endpoint ADD COLUMN nudge_set_at INTEGER;",
-            vec![],
-        )?;
+    .iter()
+    .filter_map(|r| text(&r["name"]))
+    .collect();
+    for (name, definition) in NUDGE_COLUMNS {
+        if !present.iter().any(|p| p == name) {
+            exec(
+                sql,
+                &format!("ALTER TABLE a2a_endpoint ADD COLUMN {name} {definition}"),
+                vec![],
+            )?;
+        }
     }
     let has_setter = !rows(
         sql,
@@ -189,7 +208,7 @@ fn registration(row: &Value) -> Registration {
 
 fn refused(refusal: NudgeRefusal) -> ApiError {
     let (status, code) = refusal.code();
-    // error-codes: no_endpoint, not_a_nudge_endpoint, endpoint_switched_off, verify_attempts_exhausted, endpoint_unverified, endpoint_changed
+    // error-codes: no_endpoint, not_a_nudge_endpoint, endpoint_switched_off, verify_attempts_exhausted, verify_rate_limited, endpoint_unverified, endpoint_changed
     ApiError::api(status, code)
 }
 
@@ -234,17 +253,25 @@ pub(super) fn audit_json(sql: &SqlStorage) -> R<Value> {
 
 /// A fresh 96-bit nonce from the Worker's own `crypto.getRandomValues`. If that isn't there, nothing is sealed.
 fn fresh_nonce() -> R<[u8; NONCE_BYTES]> {
+    random_bytes::<NONCE_BYTES>().map_err(|_| no_token_storage())
+}
+
+/// `N` bytes from the Worker's own `crypto.getRandomValues`, or an error if it isn't there.
+fn random_bytes<const N: usize>() -> R<[u8; N]> {
     use wasm_bindgen::JsCast;
-    let unavailable = |_| no_token_storage();
+    let unavailable = |_| ApiError::internal("no random source");
     let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).map_err(unavailable)?;
     let fill: js_sys::Function = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
         .map_err(unavailable)?
         .dyn_into()
         .map_err(unavailable)?;
-    let array = js_sys::Uint8Array::new_with_length(NONCE_BYTES as u32);
+    let array = js_sys::Uint8Array::new_with_length(N as u32);
     fill.call1(&crypto, &array).map_err(unavailable)?;
-    // Built from the filled array, so no buffer of fixed bytes ever stands in for the nonce.
-    array.to_vec().try_into().map_err(|_| no_token_storage())
+    // Built from the filled array, so no buffer of fixed bytes ever stands in for random ones.
+    array
+        .to_vec()
+        .try_into()
+        .map_err(|_| ApiError::internal("no random source"))
 }
 
 fn new_secret() -> String {
@@ -281,10 +308,11 @@ pub(super) fn set(
         Some(_) => return Err(ApiError::invalid_argument()),
     };
     // Left out, it's `offers`, as every endpoint was before M7 step 13.
-    let delivery = match body.get("delivery") {
-        None | Some(Value::Null) => Delivery::Offers,
+    // Left out, it keeps the mode in force, decided once the current registration is read below.
+    let asked_delivery = match body.get("delivery") {
+        None | Some(Value::Null) => None,
         Some(Value::String(name)) => {
-            Delivery::from_name(name).ok_or_else(ApiError::invalid_argument)?
+            Some(Delivery::from_name(name).ok_or_else(ApiError::invalid_argument)?)
         }
         Some(_) => return Err(ApiError::invalid_argument()),
     };
@@ -311,6 +339,7 @@ pub(super) fn set(
         .filter(|u| !u.is_empty());
     let highest = row.as_ref().map_or(0, |r| int(&r["version"]).max(0) as u64);
     let current_delivery = row.as_ref().map_or(Delivery::Offers, delivery_of);
+    let delivery = delivery_for_set(asked_delivery, current_url.map(|_| current_delivery));
     let outcome = decide_set_for(
         current_url,
         current_delivery,
@@ -495,7 +524,17 @@ pub(super) fn verify_begin(
         .filter(|c| c["status"].as_str() == Some(ACTIVE))
         .ok_or_else(ApiError::agent_disconnected)?;
     let row = current(sql)?;
-    match decide_verify(row.as_ref().map(registration)).map_err(refused)? {
+    // The agent's challenges in the last hour, whatever endpoint or secret they were for.
+    exec(sql, WINDOW_SCHEMA, vec![])?;
+    exec(
+        sql,
+        "DELETE FROM a2a_verify_window WHERE at <= ?",
+        vec![(now - VERIFY_WINDOW_MS).into()],
+    )?;
+    let recent = rows(sql, "SELECT count(*) AS n FROM a2a_verify_window", vec![])?
+        .first()
+        .map_or(0, |r| int(&r["n"]));
+    match decide_verify(row.as_ref().map(registration), recent).map_err(refused)? {
         VerifyStart::AlreadyVerified => {
             let mut out = status_json(sql, key)?;
             out["verified"] = json!(true);
@@ -505,20 +544,27 @@ pub(super) fn verify_begin(
     }
     let row = row.ok_or_else(|| refused(NudgeRefusal::NoEndpoint))?;
     let url = text(&row["url"]).unwrap_or_default();
+    // A URL the egress rules no longer allow is switched off, as a claim would. The refusal is an answer, not an error, so
+    // the transaction keeps the switch-off; the route turns it into `endpoint_switched_off` after the commit.
     if check_endpoint_url(&url).is_err() {
         exec(sql, "UPDATE a2a_endpoint SET enabled = 0", vec![])?;
-        return Err(refused(NudgeRefusal::SwitchedOff));
+        return Ok(json!({ "send": false, "refused": "switched_off" }));
     }
     ensure_schema(sql)?;
-    let challenge = format!(
-        "{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    );
+    // 256 bits from the Worker's random source, as 64 lowercase hex characters.
+    let challenge: String = random_bytes::<32>()?
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     exec(
         sql,
         "UPDATE a2a_endpoint SET challenge = ?, verify_attempts = verify_attempts + 1",
         vec![challenge.as_str().into()],
+    )?;
+    exec(
+        sql,
+        "INSERT INTO a2a_verify_window (at) VALUES (?)",
+        vec![now.into()],
     )?;
     let version = int(&row["version"]);
     audit(sql, "challenge_sent", actor, version, None, now)?;

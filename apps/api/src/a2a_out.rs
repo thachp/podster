@@ -316,17 +316,20 @@ fn link(env: &Env, ws: &str) -> Option<String> {
         .then(|| format!("{base}/w/{ws}/tasks"))
 }
 
-/// M7 step 13's nudge: the exact JSON-RPC body, IDs only. One data part names the room, the task and the attempt, and the
+/// M7 step 13's nudge: the exact JSON-RPC body, IDs only. One data part names the room, the task, the attempt and its kind, and the
 /// metadata says it's a nudge, so the agent fetches the task over its own connection. The `messageId` is the attempt's, so a
 /// retry is the same message.
-fn nudge_body(ws: &str, attempt: &str, task_id: &str) -> String {
+fn nudge_body(ws: &str, attempt: &str, task_id: &str, kind: AttemptKind) -> String {
     json!({
         "jsonrpc": "2.0", "id": attempt, "method": "SendMessage",
         "params": {
             "message": {
                 "messageId": attempt, "role": "ROLE_USER",
                 "parts": [{
-                    "data": { "kind": "podster.dev/nudge", "workspace_id": ws, "task_id": task_id, "attempt_id": attempt },
+                    "data": {
+                        "kind": "podster.dev/nudge", "workspace_id": ws, "task_id": task_id, "attempt_id": attempt,
+                        "attempt_kind": kind.name(),
+                    },
                     "mediaType": "application/json",
                 }],
                 "metadata": { TASK_KEY: format!("{ws}:{task_id}"), ATTEMPT_KEY: attempt, DELIVERY_KEY: "nudge" },
@@ -382,7 +385,17 @@ async fn send_nudge(
 ) -> R<Outcome> {
     let url = claim["url"].as_str().unwrap_or_default();
     let version = claim["version"].as_u64().unwrap_or(0);
-    let body = nudge_body(ws, attempt, begun["task_id"].as_str().unwrap_or_default());
+    // The attempt's kind, `offer` or `change_request`: an enum, so the body stays IDs and names only.
+    let kind = begun["kind"]
+        .as_str()
+        .and_then(AttemptKind::from_name)
+        .unwrap_or(AttemptKind::Offer);
+    let body = nudge_body(
+        ws,
+        attempt,
+        begun["task_id"].as_str().unwrap_or_default(),
+        kind,
+    );
     let answer = rpc(
         url,
         claim["signing_secret"].as_str().unwrap_or_default(),

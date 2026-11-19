@@ -54,6 +54,11 @@ pub const PROOF_LABEL: &str = "podster-endpoint-proof/1";
 pub const CHALLENGE_METHOD: &str = "podster.dev/verifyEndpoint";
 /// **Proposed:** challenges sent for one signing secret before verifying refuses until a new one is made.
 pub const MAX_VERIFY_ATTEMPTS: i64 = 5;
+/// **Proposed:** challenges sent for one agent within [`VERIFY_WINDOW_MS`], whatever its endpoint or secret. Neither a
+/// rotation, a new URL nor a delete starts it over, so a new secret can't buy more requests.
+pub const MAX_VERIFY_PER_WINDOW: i64 = 10;
+/// The window [`MAX_VERIFY_PER_WINDOW`] counts over: an hour.
+pub const VERIFY_WINDOW_MS: i64 = 60 * 60 * 1000;
 /// **Proposed:** the largest answer to a challenge that's read. A proof is 64 characters.
 pub const MAX_PROOF_ANSWER_BYTES: usize = 4 * 1024;
 /// **Proposed:** the first retry of a failed nudge, doubling each time to [`RETRY_MAX_SECS`].
@@ -118,6 +123,13 @@ pub fn valid_challenge(challenge: &str) -> bool {
         && challenge
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The mode a set asks for. Left out, it keeps the mode of the registration in force, so a set that only changes a token
+/// or a URL doesn't drop a nudge endpoint to offers; with none in force it's `offers`, as every endpoint was before M7
+/// step 13.
+pub fn delivery_for_set(asked: Option<Delivery>, current: Option<Delivery>) -> Delivery {
+    asked.or(current).unwrap_or(Delivery::Offers)
 }
 
 /// [`decide_set`] with the delivery mode: changing the mode is a new registration, as changing the URL is, so attempts and
@@ -190,6 +202,7 @@ pub enum Refusal {
     NotNudge,
     SwitchedOff,
     Exhausted,
+    RateLimited,
     Unverified,
     Changed,
 }
@@ -203,6 +216,7 @@ impl Refusal {
             Refusal::NotNudge => (409, "not_a_nudge_endpoint"),
             Refusal::SwitchedOff => (409, "endpoint_switched_off"),
             Refusal::Exhausted => (429, "verify_attempts_exhausted"),
+            Refusal::RateLimited => (429, "verify_rate_limited"),
             Refusal::Unverified => (409, "endpoint_unverified"),
             Refusal::Changed => (409, "endpoint_changed"),
         }
@@ -218,9 +232,10 @@ pub enum VerifyStart {
     Challenge,
 }
 
-/// Decides a request to verify the endpoint. Only a nudge endpoint that's on is challenged, and only
-/// [`MAX_VERIFY_ATTEMPTS`] times for one signing secret.
-pub fn decide_verify(current: Option<Registration>) -> Result<VerifyStart, Refusal> {
+/// Decides a request to verify the endpoint. Only a nudge endpoint that's on is challenged, only [`MAX_VERIFY_ATTEMPTS`]
+/// times for one signing secret, and only [`MAX_VERIFY_PER_WINDOW`] times for the agent in the last hour, of which
+/// `recent` have been sent.
+pub fn decide_verify(current: Option<Registration>, recent: i64) -> Result<VerifyStart, Refusal> {
     let current = current.ok_or(Refusal::NoEndpoint)?;
     if current.delivery != Delivery::Nudge {
         return Err(Refusal::NotNudge);
@@ -233,6 +248,9 @@ pub fn decide_verify(current: Option<Registration>) -> Result<VerifyStart, Refus
     }
     if current.verify_attempts >= MAX_VERIFY_ATTEMPTS {
         return Err(Refusal::Exhausted);
+    }
+    if recent >= MAX_VERIFY_PER_WINDOW {
+        return Err(Refusal::RateLimited);
     }
     Ok(VerifyStart::Challenge)
 }
@@ -360,6 +378,16 @@ mod tests {
     }
 
     #[test]
+    fn a_left_out_mode_keeps_the_one_in_force_and_is_offers_for_a_new_registration() {
+        use Delivery::{Nudge, Offers};
+        assert_eq!(delivery_for_set(None, Some(Nudge)), Nudge);
+        assert_eq!(delivery_for_set(None, Some(Offers)), Offers);
+        assert_eq!(delivery_for_set(None, None), Offers);
+        assert_eq!(delivery_for_set(Some(Offers), Some(Nudge)), Offers);
+        assert_eq!(delivery_for_set(Some(Nudge), None), Nudge);
+    }
+
+    #[test]
     fn a_new_delivery_mode_is_a_new_registration() {
         let url = "https://a.acme.dev/x";
         let moved = decide_set_for(
@@ -429,36 +457,63 @@ mod tests {
 
     #[test]
     fn verifying_challenges_only_an_unverified_nudge_endpoint_thats_on_and_not_exhausted() {
-        assert_eq!(decide_verify(None), Err(Refusal::NoEndpoint));
+        assert_eq!(decide_verify(None, 0), Err(Refusal::NoEndpoint));
         assert_eq!(
-            decide_verify(Some(registration())),
+            decide_verify(Some(registration()), 0),
             Ok(VerifyStart::Challenge)
         );
         let offers = Registration {
             delivery: Delivery::Offers,
             ..registration()
         };
-        assert_eq!(decide_verify(Some(offers)), Err(Refusal::NotNudge));
+        assert_eq!(decide_verify(Some(offers), 0), Err(Refusal::NotNudge));
         let done = Registration {
             verified: true,
             ..registration()
         };
-        assert_eq!(decide_verify(Some(done)), Ok(VerifyStart::AlreadyVerified));
+        assert_eq!(
+            decide_verify(Some(done), 0),
+            Ok(VerifyStart::AlreadyVerified)
+        );
         let off = Registration {
             enabled: false,
             ..registration()
         };
-        assert_eq!(decide_verify(Some(off)), Err(Refusal::SwitchedOff));
+        assert_eq!(decide_verify(Some(off), 0), Err(Refusal::SwitchedOff));
         let last = Registration {
             verify_attempts: MAX_VERIFY_ATTEMPTS - 1,
             ..registration()
         };
-        assert_eq!(decide_verify(Some(last)), Ok(VerifyStart::Challenge));
+        assert_eq!(decide_verify(Some(last), 0), Ok(VerifyStart::Challenge));
         let spent = Registration {
             verify_attempts: MAX_VERIFY_ATTEMPTS,
             ..registration()
         };
-        assert_eq!(decide_verify(Some(spent)), Err(Refusal::Exhausted));
+        assert_eq!(decide_verify(Some(spent), 0), Err(Refusal::Exhausted));
+    }
+
+    #[test]
+    fn the_agent_gets_ten_challenges_an_hour_whatever_its_secret() {
+        assert_eq!(
+            decide_verify(Some(registration()), MAX_VERIFY_PER_WINDOW - 1),
+            Ok(VerifyStart::Challenge)
+        );
+        assert_eq!(
+            decide_verify(Some(registration()), MAX_VERIFY_PER_WINDOW),
+            Err(Refusal::RateLimited)
+        );
+        // A verified endpoint sends nothing, so it isn't limited.
+        let done = Registration {
+            verified: true,
+            ..registration()
+        };
+        assert_eq!(
+            decide_verify(Some(done), MAX_VERIFY_PER_WINDOW),
+            Ok(VerifyStart::AlreadyVerified)
+        );
+        assert_eq!(MAX_VERIFY_PER_WINDOW, 10);
+        assert_eq!(VERIFY_WINDOW_MS, 3_600_000);
+        assert_eq!(Refusal::RateLimited.code(), (429, "verify_rate_limited"));
     }
 
     #[test]

@@ -84,6 +84,14 @@ const verify = (who: Who, agent: Who) =>
   who.id === agent.id ? api(agent, "POST", "/v1/inbox/a2a-endpoint/verify", {}) : api(who, "POST", `/v1/agents/${agent.id}/a2a-endpoint/verify`, {});
 const switchNudge = (who: Who, agent: Who, body: unknown) => api(who, "PUT", `/v1/agents/${agent.id}/a2a-endpoint/nudge`, body);
 const status = async (agent: Who) => must(agent, "GET", "/v1/inbox/a2a-endpoint");
+const principalSql = (agent: Who, query: string, ...args: unknown[]) =>
+  runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id)), (_: any, state: any) => state.storage.sql.exec(query, ...args).toArray());
+/** A new signing secret for the same URL, held by the fake endpoint as Runner would hold it. */
+async function rotate(target: { agent: Who; url: string; path: string }) {
+  const rotated = await must(target.agent, "PUT", "/v1/inbox/a2a-endpoint", { url: target.url, delivery: "nudge", rotate_secret: true });
+  await holdSecret(target.path, rotated.signing_secret);
+  return rotated;
+}
 /** Verified and switched on by the owner: a nudge endpoint that sends. */
 async function activeTarget(room: string, path?: string, extra: Partial<Who> = {}, owner: Who = OWNER) {
   const target = await nudgeTarget(room, path, extra);
@@ -190,6 +198,87 @@ describe("a nudge endpoint", () => {
     expect(await challenges(url)).toHaveLength(6);
   });
 
+  it("counts challenges per agent, 10 an hour, and no rotation, new URL or delete resets that", async () => {
+    const path = `/nudge/echo-${++counter}`;
+    const target = await nudgeTarget(null, path);
+    const { agent, url } = target;
+    for (let n = 0; n < 5; n++) expect((await verify(agent, agent)).body.verified).toBe(false);
+    await rotate(target);
+    for (let n = 0; n < 5; n++) expect((await verify(agent, agent)).body.verified).toBe(false);
+    await rotate(target);
+    const limited = await verify(agent, agent);
+    expect([limited.status, limited.code]).toEqual([429, "verify_rate_limited"]);
+    // Neither a new URL nor a delete and set again starts the count over, and the admin's challenges count too.
+    const elsewhere = `https://${HOST}/nudge/echo-${++counter}`;
+    await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url: elsewhere, delivery: "nudge" });
+    expect((await verify(OWNER, agent)).code).toBe("verify_rate_limited");
+    await must(agent, "DELETE", "/v1/inbox/a2a-endpoint");
+    await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url, delivery: "nudge" });
+    expect((await verify(agent, agent)).code).toBe("verify_rate_limited");
+    expect(await challenges(url)).toHaveLength(10);
+    expect(await challenges(elsewhere)).toEqual([]);
+    // An hour on, the oldest have left the window.
+    await principalSql(agent, "UPDATE a2a_verify_window SET at = at - 3600001");
+    expect((await verify(agent, agent)).status).toBe(200);
+    expect(await challenges(url)).toHaveLength(11);
+  });
+
+  it("draws each challenge from 256 random bits, not from UUIDs", async () => {
+    const seen: string[] = [];
+    for (let n = 0; n < 2; n++) {
+      const target = await nudgeTarget(null, `/nudge/echo-${++counter}`);
+      for (let m = 0; m < 5; m++) await verify(target.agent, target.agent);
+      seen.push(...(await challenges(target.url)).map((r) => JSON.parse(r.body).params.challenge));
+    }
+    expect(seen).toHaveLength(10);
+    for (const c of seen) expect(c).toMatch(/^[0-9a-f]{64}$/);
+    expect(new Set(seen).size).toBe(10);
+    // Two v4 UUIDs would put a 4 at 12 and 44 every time.
+    expect(seen.every((c) => c[12] === "4" && c[44] === "4")).toBe(false);
+  });
+
+  it("refuses a challenge to a URL that no longer passes the egress rules, and the switch-off it makes stays", async () => {
+    const { agent, url } = await nudgeTarget(null);
+    await principalSql(agent, "UPDATE a2a_endpoint SET url = 'https://localhost/nudge'");
+    const refused = await verify(agent, agent);
+    expect([refused.status, refused.code]).toEqual([409, "endpoint_switched_off"]);
+    expect((await status(agent)).enabled).toBe(false);
+    expect(await challenges(url)).toEqual([]);
+  });
+
+  it("finishes adding its columns to a table an earlier, partial change left behind", async () => {
+    const { agent, url, path } = await nudgeTarget(null);
+    // A table with step 12's columns and only the first of step 13's, as an ALTER that stopped partway would leave.
+    await principalSql(agent, "DROP TABLE a2a_endpoint");
+    await principalSql(agent, `CREATE TABLE a2a_endpoint (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 0,
+      signing_secret TEXT NOT NULL DEFAULT '', token_sealed TEXT, enabled INTEGER NOT NULL DEFAULT 0, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      set_at INTEGER, last_report_at INTEGER, set_by TEXT, set_by_org TEXT, set_by_since INTEGER, delivery TEXT NOT NULL DEFAULT 'offers')`);
+    const set = await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url, delivery: "nudge" });
+    await holdSecret(path, set.signing_secret);
+    expect(set).toMatchObject({ delivery: "nudge", control: "unverified" });
+    expect((await verify(agent, agent)).body.verified).toBe(true);
+    const columns = (await principalSql(agent, "SELECT name FROM pragma_table_info('a2a_endpoint')")).map((r: any) => r.name);
+    expect(columns).toEqual(expect.arrayContaining(["verified_at", "challenge", "verify_attempts", "nudge_version", "nudge_by", "nudge_set_at"]));
+  });
+
+  it("keeps the current mode when a set leaves delivery out, and offers only for a new registration", async () => {
+    const target = await nudgeTarget(null);
+    const { agent, url, version } = target;
+    await verify(agent, agent);
+    expect((await switchNudge(OWNER, agent, { on: true, version })).body.nudge_on).toBe(true);
+    // The same URL with only a token: still the same nudge registration, secret, proof and opt-in.
+    const same = await api(agent, "PUT", "/v1/inbox/a2a-endpoint", { url, token: null });
+    expect(same.body).toMatchObject({ delivery: "nudge", version, control: "verified", nudge_on: true });
+    expect(same.body.signing_secret).toBeUndefined();
+    // A new URL with a token and no delivery: still a nudge endpoint, with a new secret, so proof and opt-in again.
+    const moved = await api(agent, "PUT", "/v1/inbox/a2a-endpoint", { url: `https://${HOST}/nudge/ok-moved-${++counter}`, token: null });
+    expect(moved.body).toMatchObject({ delivery: "nudge", version: version + 1, control: "unverified", nudge_on: false });
+    expect(moved.body.signing_secret).toMatch(/^a2asec_/);
+    // After a delete, a set with no delivery is a new registration: offers.
+    await must(agent, "DELETE", "/v1/inbox/a2a-endpoint");
+    expect((await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url })).delivery).toBe("offers");
+  });
+
   it("must prove control again after any new secret, and keeps it for the same registration", async () => {
     const { agent, url, path } = await nudgeTarget(null);
     await verify(agent, agent);
@@ -199,7 +288,7 @@ describe("a nudge endpoint", () => {
     await holdSecret(path, rotated.signing_secret);
     expect((await verify(agent, agent)).body.verified).toBe(true);
     // Another mode is another registration, with its own version and secret.
-    const offers = await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url });
+    const offers = await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url, delivery: "offers" });
     expect(offers).toMatchObject({ version: 2, delivery: "offers" });
     expect(offers.signing_secret).toBeTruthy();
     const back = await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url, delivery: "nudge" });
@@ -255,6 +344,22 @@ describe("the owner's opt-in", () => {
     expect((await attempts(room, task.id))[0]).toMatchObject({ state: "stopped", ended_reason: "endpoint_unverified" });
   });
 
+  it("ends with a rotated secret, even once the new secret is proved", async () => {
+    const room = await newRoom();
+    const target = await activeTarget(room);
+    const rotated = await rotate(target);
+    expect(rotated).toMatchObject({ version: target.version, nudge_on: false });
+    expect((await verify(target.agent, target.agent)).body.verified).toBe(true);
+    const [row] = await principalSql(target.agent, "SELECT nudge_version, nudge_by, nudge_by_org, nudge_by_since FROM a2a_endpoint");
+    expect(row).toEqual({ nudge_version: null, nudge_by: null, nudge_by_org: null, nudge_by_since: null });
+    expect((await status(target.agent)).nudge_on).toBe(false);
+    const task = await offer(room, target.agent.id);
+    const [attempt] = await attempts(room, task.id);
+    expect((await consume(room, attempt)).body.outcome).toBe("ack");
+    expect((await attempts(room, task.id))[0]).toMatchObject({ state: "stopped", ended_reason: "nudge_off" });
+    expect(await nudges(target.url)).toEqual([]);
+  });
+
   it("is needed after proof: a verified endpoint the owner didn't switch on sends nothing", async () => {
     const room = await newRoom();
     const { agent, url } = await nudgeTarget(room);
@@ -282,7 +387,7 @@ describe("a nudge", () => {
     expect(body).toMatchObject({ jsonrpc: "2.0", id: attempt.id, method: "SendMessage" });
     const message = body.params.message;
     expect(message).toMatchObject({ messageId: attempt.id, role: "ROLE_USER" });
-    expect(message.parts).toEqual([{ data: { kind: "podster.dev/nudge", workspace_id: room, task_id: task.id, attempt_id: attempt.id }, mediaType: "application/json" }]);
+    expect(message.parts).toEqual([{ data: { kind: "podster.dev/nudge", workspace_id: room, task_id: task.id, attempt_id: attempt.id, attempt_kind: "offer" }, mediaType: "application/json" }]);
     expect(message.metadata).toEqual({ "podster.dev/task": `${room}:${task.id}`, "podster.dev/attempt": attempt.id, "podster.dev/delivery": "nudge" });
     expect((await attempts(room, task.id))[0]).toMatchObject({ state: "sent", remote_task_id: null, endpoint_url: url, reading_ended: 1, next_read_at: null });
     // Redelivered: nothing more goes out.

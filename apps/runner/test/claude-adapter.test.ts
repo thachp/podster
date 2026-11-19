@@ -13,9 +13,9 @@ import type { RunFacts } from "../src/core/policy.js";
 import { containerSpec, PLACEHOLDER_KEY, RESULT_SCHEMA, UNTRUSTED_FRAME, type DriverSession, type ModelAnswer } from "../src/core/run-interface.js";
 import { decideToolCall } from "../src/core/tool-policy.js";
 import { startBrokerListener, tokenMatches } from "../src/node/broker-listener.js";
-import { claudeEnv, ClaudeDriver, claudeExecArgs, claudeNames, claudeOptions, claudeRunArgs, CLAUDE_IN_CONTAINER, CONTAINER_CONFIG, CONTAINER_HOME, fixedOptionsRefusal, LABEL_ROLE, PLUGIN_ALLOWLIST, QUIET, relayRunArgs, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
+import { claudeEnv, ClaudeDriver, claudeExecArgs, claudeNames, claudeOptions, claudeRunArgs, CLAUDE_IN_CONTAINER, CONTAINER_CONFIG, CONTAINER_HOME, fixedOptionsRefusal, PLUGIN_ALLOWLIST, QUIET, relayRunArgs, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
 import { installedClaudeVersions, readKeyFile, taskImage } from "../src/node/claude-engine.js";
-import { dockerHost, DockerSandbox, findDocker, homeLabel, LABEL_HOME, LABEL_RUN, RG_FLAGS, runArgs, toolArgv, type DockerCli } from "../src/node/docker-sandbox.js";
+import { dockerHost, DockerSandbox, findDocker, homeLabel, LABEL_HOME, LABEL_ROLE, LABEL_RUN, RG_FLAGS, runArgs, toolArgv, type DockerCli } from "../src/node/docker-sandbox.js";
 import { answerUsage, envProxyRequested, ProviderKeyTransport, streamUsage } from "../src/node/provider-transport.js";
 import { ensureFolder, folderBytes, readNoFollow, UnsafePath } from "../src/node/safe-fs.js";
 
@@ -162,7 +162,7 @@ describe("the Docker task container", () => {
     expect(flag("--ulimit")).toContain(`fsize=${1024 ** 3}`);
     expect(flag("--network")).toEqual(["none"]);
     expect(flag("--pull")).toEqual(["never"]);
-    expect(flag("--label")).toEqual([`${LABEL_RUN}=run-1`, `${LABEL_HOME}=h`]);
+    expect(flag("--label")).toEqual([`${LABEL_RUN}=run-1`, `${LABEL_HOME}=h`, `${LABEL_ROLE}=task`]);
     expect(flag("--mount")).toEqual([`type=bind,source=${spec.task_folder},target=/work`]);
     expect(flag("--env").sort()).toEqual(["HOME=/work", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"]);
     // No socket, device, privilege, host namespace or other mount.
@@ -227,7 +227,8 @@ describe("the Docker task container", () => {
     const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: listed.join("\n") } : {}));
     const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/home/owner/.podster-runner" });
     await sandbox.kill("run-1");
-    expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_RUN}=run-1`]);
+    // Only the task's own container: the driver removes Claude Code's and the relay, so the two never race.
+    expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_RUN}=run-1`, "--filter", `label=${LABEL_ROLE}=task`]);
     expect(calls[1].args).toEqual(["rm", "--force", "f".repeat(64), "podster-run-run-1"]);
     expect(await sandbox.gone("run-1")).toBe(false);
     listed = [];
@@ -2005,5 +2006,87 @@ describe("a system-role message, in its reviewed shape only (the architect's rul
     const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
     expect(long.forward.worst_micro_usd).toBe(worstCaseOf(price, long.forward.body.byteLength, long.forward.max_tokens));
     expect(long.forward.worst_micro_usd).toBeGreaterThan(short.forward.worst_micro_usd);
+  });
+});
+
+// ---- After the eighth real run of #460 at 95a3d17: confirmStopped and the task container's removal ----
+
+describe("confirmStopped and the task container's removal", () => {
+  /** A fake docker whose `rm` answers at once while the container stays listed for `lag` more listings. */
+  function laggingDocker(lag: number, rmAnswer: { code: number; stderr: string } = { code: 0, stderr: "" }) {
+    const alive = new Map<string, { id: string; labels: string[]; listingsLeft: number | null }>();
+    let next = 0;
+    const calls: string[][] = [];
+    const labelsOf = (args: string[]) => args.filter((_, i) => args[i - 1] === "--label");
+    const docker: DockerCli = async (args) => {
+      calls.push(args);
+      if (args[0] === "run") alive.set(args[args.indexOf("--name") + 1], { id: (++next).toString(16).padStart(64, "0"), labels: labelsOf(args), listingsLeft: null });
+      if (args[0] === "rm") for (const name of args.slice(2)) for (const [n, c] of alive) if (n === name || c.id === name) c.listingsLeft ??= lag;
+      if (args[0] === "exec" && args.join(" ").includes("/proc/1/task/1/children")) return { code: 0, stdout: "7\n", stderr: "", cut: false };
+      if (args[0] === "ps") {
+        const filters = args.filter((_, i) => args[i - 1] === "--filter").map((f) => f.slice("label=".length));
+        const listed: string[] = [];
+        for (const [name, c] of [...alive]) {
+          if (!filters.every((f) => c.labels.includes(f))) continue;
+          if (c.listingsLeft !== null && c.listingsLeft-- <= 0) {
+            alive.delete(name);
+            continue;
+          }
+          listed.push(alive.get(name)?.id ?? name);
+        }
+        return { code: 0, stdout: listed.join("\n"), stderr: "", cut: false };
+      }
+      if (args[0] === "rm") return { code: rmAnswer.code, stdout: "", stderr: rmAnswer.stderr, cut: false };
+      return { code: 0, stdout: "", stderr: "", cut: false };
+    };
+    return { docker, calls, alive };
+  }
+
+  it("never reads true while the task container is still listed, however its removal lags", async () => {
+    const { SupervisedAdapter } = await import("../src/core/run-interface.js");
+    const { systemClock } = await import("../src/core/runtime.js");
+    const t = await driverFor([]);
+    const root = join(await temp(), "w");
+    const lagging = laggingDocker(3);
+    const sandbox = new DockerSandbox({ docker: lagging.docker, image: IMAGE, uid: 501, gid: 20, home: t.home });
+    const adapter = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox, transports: { anthropic: new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: (async () => new Response("{}")) as never, env: {}, execArgv: [] }) }, clock: systemClock, log: () => undefined });
+    const handle = await adapter.start({ run_ref: "run-1", workspace_id: "ws_room", task_id: "tsk_one", prompt: enc.encode("x"), facts: facts(root) });
+    await handle.done;
+    await handle.stop();
+    // Every true answer is followed by the same check, with the same answer.
+    for (let i = 0; i < 6; i++) {
+      const confirmed = await adapter.confirmStopped("run-1");
+      if (confirmed) {
+        expect(await sandbox.gone("run-1")).toBe(true);
+        expect(lagging.alive.size).toBe(0);
+        return;
+      }
+    }
+    throw new Error("never confirmed");
+  });
+
+  it("a removal that fails, for any reason but the container being gone already, is never taken as done", async () => {
+    const failing = laggingDocker(0, { code: 1, stderr: "Error response from daemon: removal of container podster-run-run-1 is already in progress" });
+    const sandbox = new DockerSandbox({ docker: failing.docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
+    await sandbox.open(containerSpec("run-1", facts(join(await temp(), "w"))), new AbortController().signal);
+    await expect(sandbox.kill("run-1")).rejects.toThrow(/docker_failed/);
+    const gone = laggingDocker(0, { code: 1, stderr: "Error response from daemon: No such container: podster-run-run-1" });
+    await new DockerSandbox({ docker: gone.docker, image: IMAGE, uid: 501, gid: 20, home: "/h" }).kill("run-1");
+  });
+
+  it("matches the task container by name with Docker's leading slash, and never touches Claude Code's or the relay", async () => {
+    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
+    expect(await sandbox.gone("run-1")).toBe(true);
+    expect(calls.map((c) => c.args.filter((_, i) => c.args[i - 1] === "--filter"))).toEqual([[`label=${LABEL_RUN}=run-1`, `label=${LABEL_ROLE}=task`], ["name=^/podster-run-run-1$"]]);
+  });
+});
+
+describe("the real run's turns scenario", () => {
+  it("caps turns at 2 and forces one tool call per step, so parallel calls can't fit the work in fewer requests", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/run\("turns", "[^"]*one tool call per step[^"]*", \{ turns: 2 \}\)/);
+    expect(real).toMatch(/expect\(r\.requests\)\.toBeLessThanOrEqual\(3\)/);
+    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(148_000\)/);
   });
 });

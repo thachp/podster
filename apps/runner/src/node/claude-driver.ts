@@ -49,7 +49,7 @@ import type { AgentDriver, DriverOutcome, DriverRun, DriverSession } from "../co
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
 import { startBrokerListener, type BrokerListener, type ListenerDeps } from "./broker-listener.js";
-import { homeLabel, IMAGE_ID, LABEL_HOME, LABEL_RUN, LIMITS, type DockerCli } from "./docker-sandbox.js";
+import { homeLabel, IMAGE_ID, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, type DockerCli } from "./docker-sandbox.js";
 import { ensureFolder, freshFolder, removeOwnFolder } from "./safe-fs.js";
 
 /** The SDK's functions the driver uses: the real ones, or a test's stand-in. */
@@ -86,8 +86,7 @@ export const CONTAINER_CONFIG = "/claude/config";
 export const CONTAINER_WORK = "/work";
 export const RELAY_ALIAS = "relay";
 export const RELAY_PORT = 8080;
-/** Which container of a run a container is. */
-export const LABEL_ROLE = "dev.podster.runner.role";
+export { LABEL_ROLE };
 /** How long Claude Code's containers may outlive a run's time cap, as the task container may. */
 const CONTAINER_MARGIN_S = 60;
 
@@ -379,14 +378,26 @@ export class ClaudeDriver implements AgentDriver {
   async teardown(ref: string): Promise<void> {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     const names = claudeNames(ref);
-    const ids = await this.list("ps", [`label=${LABEL_RUN}=${ref}`, `label=${LABEL_ROLE}`]);
+    const ids = await this.own([`label=${LABEL_RUN}=${ref}`]);
     const rm = await this.docker(["rm", "--force", ...ids, names.container, names.relay]);
-    if (rm.code !== 0 && rm.code !== 1) throw new Error("docker_failed");
+    // A removal that fails is never taken as done: `rm` may answer 1 only because a name it was given is already gone.
+    if (rm.code !== 0) {
+      const errors = rm.stderr.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+      if (rm.code !== 1 || errors.length === 0 || !errors.every((l) => /No such container/i.test(l))) throw new Error("docker_failed");
+    }
     const networks = await this.list("network", [`label=${LABEL_RUN}=${ref}`]);
     if (networks.length > 0) {
       const r = await this.docker(["network", "rm", ...networks]);
       if (r.code !== 0) throw new Error("docker_failed");
     }
+  }
+
+  /**
+   * The driver's own containers, Claude Code's and the relay, by role: never the task container, which the task
+   * sandbox removes, so the two never remove one container at once (the eighth real run of #460).
+   */
+  private async own(filters: string[]): Promise<string[]> {
+    return [...(await this.list("ps", [...filters, `label=${LABEL_ROLE}=claude`])), ...(await this.list("ps", [...filters, `label=${LABEL_ROLE}=relay`]))];
   }
 
   private async list(kind: "ps" | "network", filters: string[]): Promise<string[]> {
@@ -593,7 +604,7 @@ export class ClaudeDriver implements AgentDriver {
     const child = this.live.get(run_ref)?.child;
     if (child && !exitedOf(child)) return false;
     try {
-      if ((await this.list("ps", [`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}`])).length > 0) return false;
+      if ((await this.own([`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;
       if ((await this.list("network", [`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;
     } catch {
       return false;
@@ -612,7 +623,7 @@ export class ClaudeDriver implements AgentDriver {
 
   /** At startup: every Claude Code container, relay and network of this home. */
   async reapAll(): Promise<void> {
-    const ids = await this.list("ps", [`label=${LABEL_HOME}=${this.homeLabel}`, `label=${LABEL_ROLE}`]);
+    const ids = await this.own([`label=${LABEL_HOME}=${this.homeLabel}`]);
     if (ids.length > 0 && (await this.docker(["rm", "--force", ...ids])).code !== 0) throw new Error("docker_failed");
     const networks = await this.list("network", [`label=${LABEL_HOME}=${this.homeLabel}`]);
     if (networks.length > 0 && (await this.docker(["network", "rm", ...networks])).code !== 0) throw new Error("docker_failed");

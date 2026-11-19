@@ -47,6 +47,12 @@ export type DockerCli = (args: string[], opts: { input?: string; signal?: AbortS
 
 export const LABEL_RUN = "dev.podster.runner.run";
 export const LABEL_HOME = "dev.podster.runner.home";
+/**
+ * Which container of a run a container is: `task` here, `claude`, `relay` and `network` in the driver's. The task
+ * sandbox kills and confirms only its own (the eighth real run of #460: both it and the driver removed Claude Code's
+ * containers by the run's label at once, and a removal racing another can fail and leave the container listed).
+ */
+export const LABEL_ROLE = "dev.podster.runner.role";
 /** An image pinned by content: Docker's image ID, the digest of its configuration. */
 export const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const REF = /^[A-Za-z0-9_-]{1,128}$/;
@@ -103,6 +109,8 @@ export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number;
     `${LABEL_RUN}=${spec.run_ref}`,
     "--label",
     `${LABEL_HOME}=${opts.home_label}`,
+    "--label",
+    `${LABEL_ROLE}=task`,
     "--user",
     `${opts.uid}:${opts.gid}`,
     "--cap-drop",
@@ -317,19 +325,25 @@ export class DockerSandbox implements TaskSandbox {
     return r.code === 0 ? { ok: true, text: "Written." } : { ok: false, text: "The file couldn't be written." };
   }
 
-  /** Removes every container carrying the run's label, and its name, whatever this process remembers. */
+  /**
+   * Removes the run's task container, by its run and role labels and by its name, whatever this process remembers. A
+   * removal that fails is never taken as done: `rm` may answer 1 only because a name it was given is already gone.
+   */
   async kill(run_ref: string): Promise<void> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
     this.opened.get(run_ref)?.unwatch();
-    const ids = await this.list([`label=${LABEL_RUN}=${run_ref}`]);
+    const ids = await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`]);
     const r = await this.docker(["rm", "--force", ...ids, containerName(run_ref)], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
-    // `rm` answers 1 when a name it was given is already gone; whether anything is left is `gone`'s to say.
-    if (r.code !== 0 && r.code !== 1) throw new Error("docker_failed");
+    if (r.code !== 0) {
+      const errors = r.stderr.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+      if (r.code !== 1 || errors.length === 0 || !errors.every((l) => /No such container/i.test(l))) throw new Error("docker_failed");
+    }
   }
 
+  /** Nothing of the run's task container is listed, by its labels or by its name (Docker names carry a leading slash). */
   async gone(run_ref: string): Promise<boolean> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
-    const left = (await this.list([`label=${LABEL_RUN}=${run_ref}`])).length === 0 && (await this.list([`name=^${containerName(run_ref)}$`])).length === 0;
+    const left = (await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`])).length === 0 && (await this.list([`name=^/${containerName(run_ref)}$`])).length === 0;
     if (left) {
       this.opened.get(run_ref)?.unwatch();
       this.opened.delete(run_ref);

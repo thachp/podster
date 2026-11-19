@@ -343,7 +343,10 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
   }, 240_000);
 
   it("(b) stops turns at the cap", async () => {
-    const r = await run("turns", "Write the files a1.txt to a20.txt, one call each, then finish.", { turns: 3 });
+    // Sequential steps, one tool call per step, each needing the last one's answer: the eighth real run showed parallel
+    // calls fitting 21 tool calls in 3 requests, so a cap of 5 was never reached. With a cap of 2 the third request is
+    // refused and the run stops.
+    const r = await run("turns", "Work in strict sequence, making exactly one tool call per step and waiting for its answer before the next: write a1.txt containing 1, then read a1.txt back, then write a2.txt containing what you read plus 1, then read a2.txt back, and go on the same way up to a10.txt. Then finish.", { turns: 2 });
     expect(r.report.status).toBe("budget_stopped");
     expect(r.requests).toBeLessThanOrEqual(3);
   }, 240_000);

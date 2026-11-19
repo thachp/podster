@@ -98,10 +98,15 @@ export type ContainerSpec = {
   read_only_root: true;
   drop_capabilities: "all";
   user: "unprivileged";
+  /** How long the container may live at most: the run-time cap plus a margin, never forever (L2 on #460). */
+  max_seconds: number;
 };
 
+/** What a container may outlive its run's time cap by, so Runner's own stop always comes first. */
+export const CONTAINER_MARGIN_S = 60;
+
 /** The container for a run, from its facts alone. */
-export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network">): ContainerSpec {
+export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network" | "caps">): ContainerSpec {
   return {
     run_ref,
     task_folder: facts.task_folder,
@@ -111,6 +116,7 @@ export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folde
     read_only_root: true,
     drop_capabilities: "all",
     user: "unprivileged",
+    max_seconds: Math.ceil(facts.caps.run_time_ms / 1000) + CONTAINER_MARGIN_S,
   };
 }
 
@@ -123,14 +129,17 @@ export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mo
   if (names.length !== Object.keys(CONTAINER_ENV).length || names.some((n) => !Object.hasOwn(CONTAINER_ENV, n) || spec.env[n] !== CONTAINER_ENV[n])) return "env_not_allowed";
   if (spec.mounts.length !== 1 || spec.mounts[0].source !== spec.task_folder || spec.mounts[0].target !== CONTAINER_WORKDIR) return "mount_not_allowed";
   if (spec.read_only_root !== true || spec.drop_capabilities !== "all" || spec.user !== "unprivileged") return "spec_invalid";
+  if (!Number.isSafeInteger(spec.max_seconds) || spec.max_seconds <= CONTAINER_MARGIN_S) return "spec_invalid";
   return null;
 }
 
 export type ToolOutput = { ok: boolean; text: string };
 
 /** The task's container (step 9(b): Docker, no network, only the task's folder). Runner's own tools run in it. */
+/** What the container tells the run while it lives: a bound it passed on its own, such as the disk bound's timer. */
+export type SandboxEvents = { breach(code: "disk_bound"): void };
 export interface TaskSandbox {
-  open(spec: ContainerSpec, signal: AbortSignal): Promise<void>;
+  open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void>;
   exec(run_ref: string, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput>;
   /** Kills the whole container, so every process in it ends. */
   kill(run_ref: string): Promise<void>;
@@ -158,7 +167,7 @@ export interface DriverSession {
   readonly allowed_tools: readonly string[];
   readonly result_schema: typeof RESULT_SCHEMA;
   /** For the SDK's own limits, also a second lock: the broker stops the run whatever the SDK does. */
-  readonly limits: { turns: number; max_tokens: number; output_tokens: number };
+  readonly limits: { turns: number; max_tokens: number; output_tokens: number; run_time_ms: number };
   readonly provider: { api_key: typeof PLACEHOLDER_KEY };
   /** Aborts when Runner stops the run. */
   readonly signal: AbortSignal;
@@ -187,6 +196,8 @@ export interface AgentDriver {
   begin(session: DriverSession): Promise<DriverRun>;
   /** Whether nothing of the run's process tree is left, after a restart too. */
   confirmGone(run_ref: string): Promise<boolean>;
+  /** After a restart: ends whatever a previous process left of the run's process tree (M4 on #459). */
+  reap(run_ref: string): Promise<void>;
 }
 
 // ---- Progress ----
@@ -199,13 +210,15 @@ export type ProgressEvent = {
   task_id: string;
   kind: ProgressKind;
   code: string | null;
+  /** A model refusal's part of the body, as a fixed code (`top_key:output_config`); null otherwise. */
+  detail?: string | null;
   turns: number;
   spent_micro_usd: number;
   output_tokens: number;
   elapsed_ms: number;
 };
 
-export type StopReason = HardStop | "run_time" | "refusal_ignored" | "tool_refused_unchecked" | "stopped" | "start_failed";
+export type StopReason = HardStop | "run_time" | "refusal_ignored" | "tool_refused_unchecked" | "stopped" | "start_failed" | "disk_bound";
 const STATUS_OF: Record<StopReason, RunStatus> = {
   spend_cap: "budget_stopped",
   turns_exhausted: "budget_stopped",
@@ -215,6 +228,7 @@ const STATUS_OF: Record<StopReason, RunStatus> = {
   tool_refused_unchecked: "failed",
   stopped: "failed",
   start_failed: "failed",
+  disk_bound: "failed",
 };
 
 export type SupervisedDeps = {
@@ -278,11 +292,24 @@ export class SupervisedAdapter implements RunAdapter {
     return live.handle;
   }
 
-  /** Nothing of the run is left: not a run still going here, the driver's process tree, or its container. */
+  /**
+   * Nothing of the run is left: not a run still going here, the driver's process tree, or its container. A run this
+   * process never started, as after a restart, is reaped first (M4 on #459): its container, by the run's label, and each
+   * driver's process tree are killed before anything is confirmed, so a previous process's run never reads as stopped
+   * while it still goes.
+   */
   async confirmStopped(run_ref: string): Promise<boolean> {
     const live = this.live.get(run_ref);
     if (live?.active) return false;
     try {
+      if (!live) {
+        const drivers = Object.values(this.deps.drivers).filter((d): d is AgentDriver => d !== undefined);
+        // Bounded like a stop's steps: a reap that hangs reads as not stopped, never as a wait without end.
+        const settled = new AbortController();
+        const reaped = Promise.all([this.deps.sandbox.kill(run_ref), ...drivers.map((d) => d.reap(run_ref))]).then(() => true, () => false).finally(() => settled.abort());
+        const late = this.deps.clock.idle(STOP_STEP_MS, settled.signal).then(() => (settled.signal.aborted ? new Promise<boolean>(() => undefined) : false));
+        if (!(await Promise.race([reaped, late]))) return false;
+      }
       for (const driver of Object.values(this.deps.drivers)) if (driver && !(await driver.confirmGone(run_ref))) return false;
       if (!(await this.deps.sandbox.gone(run_ref))) return false;
     } catch {
@@ -296,6 +323,7 @@ export class SupervisedAdapter implements RunAdapter {
 /** One run under supervision. */
 class LiveRun {
   private reason: StopReason | null = null;
+  private detail: string | null = null;
   private ended = false;
   private stopping: Promise<StopResult> | null = null;
   private confirmed = false;
@@ -337,7 +365,8 @@ class LiveRun {
   }
 
   async begin() {
-    await this.deps.sandbox.open(this.spec, this.abort.signal);
+    // A bound the container passes on its own, between tool calls, halts the run at once (re-review item 5 on #460).
+    await this.deps.sandbox.open(this.spec, this.abort.signal, { breach: (code) => void this.halt(code) });
     if (!this.active) {
       // Halted while the container was opening, which then made it after all: kill it now, whatever an earlier stop
       // confirmed (P8 on #459).
@@ -353,7 +382,7 @@ class LiveRun {
       frame: UNTRUSTED_FRAME,
       allowed_tools: [...facts.tools.filter((t) => t !== "shell" || facts.shell), facts.result_tool],
       result_schema: RESULT_SCHEMA,
-      limits: { turns: facts.caps.turns, max_tokens: facts.caps.max_tokens, output_tokens: facts.caps.output_tokens },
+      limits: { turns: facts.caps.turns, max_tokens: facts.caps.max_tokens, output_tokens: facts.caps.output_tokens, run_time_ms: facts.caps.run_time_ms },
       provider: { api_key: PLACEHOLDER_KEY },
       signal: this.abort.signal,
       check: (call) => this.check(call),
@@ -366,7 +395,7 @@ class LiveRun {
     // Always handled, whatever happened meanwhile, so a rejection is never left unhandled (M3 on #459).
     driverRun.done.then(
       (outcome) => this.finish(outcome, false),
-      () => this.finish(null, true),
+      (error: unknown) => this.finish(null, true, error),
     );
     if (!this.active) {
       // Halted while the driver was beginning, before its run could be cancelled: cancel it and kill the container
@@ -436,8 +465,15 @@ class LiveRun {
   }
 
   /** The driver ended by itself. Ignored once Runner has stopped the run: Runner's reason is the outcome. */
-  private finish(outcome: DriverOutcome | null, threw: boolean) {
+  private finish(outcome: DriverOutcome | null, threw: boolean, error?: unknown) {
     if (!this.active) return;
+    // The driver's own code, when it is one: a fixed lower-case identifier; anything else is the SDK's, never kept as text.
+    const message = error instanceof Error ? error.message : "";
+    this.detail = threw ? (/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "sdk_error") : null;
+    // The SDK's own end, its turn limit or any error of its, once Runner's broker has let the run's whole turn cap go: the
+    // cap reached is the cause (the tenth real run of #460). Only then: below the cap, or for a failure Runner names
+    // itself (`hook_bypassed`, `plugins_unexpected` and the rest), the driver's failure stands.
+    if (threw && (this.detail === "max_turns" || this.detail === "sdk_error") && this.broker.totals.turns >= this.run.facts.caps.turns) this.reason = "turns_exhausted";
     this.end(outcome, threw);
   }
 
@@ -465,7 +501,7 @@ class LiveRun {
       result = parsed.ok ? parsed.value : null;
     }
     this.emit("ended", code ?? status);
-    this.resolveDone({ status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code });
+    this.resolveDone({ status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code, stop_detail: this.detail });
   }
 
   private check(call: ToolCall): ToolDecision {
@@ -523,7 +559,7 @@ class LiveRun {
     const admitted = this.broker.admit(request);
     if (!admitted.ok) {
       this.log("adapter.broker", "refused", admitted.reason);
-      this.emit("model_refused", admitted.reason);
+      this.emit("model_refused", admitted.reason, admitted.detail ?? null);
       if (admitted.hard_stop) void this.halt(admitted.reason as HardStop);
       return { ok: false, refused: admitted.reason };
     }
@@ -531,18 +567,21 @@ class LiveRun {
     let answer: ProviderAnswer;
     try {
       answer = await this.transport.send(admitted.forward, this.abort.signal);
-    } catch {
+    } catch (error) {
       this.broker.fail(id);
-      this.emit("model_refused", "upstream_failed");
+      // The transport's own fixed code, when it is one; never an error's text.
+      const message = error instanceof Error ? error.message : "";
+      this.emit("model_refused", "upstream_failed", `transport:${/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "other"}`);
       return { ok: false, refused: "upstream_failed" };
     }
     const { cap_reached } = this.broker.settle(id, answer.usage);
-    this.emit("model_request");
+    // The upstream's HTTP status, the number only: a 4xx names a request the provider refused, never with its body.
+    this.emit("model_request", null, Number.isSafeInteger(answer.status) ? `status:${answer.status}` : null);
     if (cap_reached) void this.halt(cap_reached);
     return { ok: true, status: answer.status, body: answer.body };
   }
 
-  private emit(kind: ProgressKind, code: string | null = null) {
+  private emit(kind: ProgressKind, code: string | null = null, detail: string | null = null) {
     const totals = this.broker.totals;
     this.deps.progress?.({
       run_ref: this.run.run_ref,
@@ -550,6 +589,7 @@ class LiveRun {
       task_id: this.run.task_id,
       kind,
       code,
+      detail,
       turns: totals.turns,
       spent_micro_usd: totals.spent_micro_usd,
       output_tokens: totals.output_tokens,

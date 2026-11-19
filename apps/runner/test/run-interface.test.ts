@@ -106,7 +106,9 @@ class FakeSandbox implements TaskSandbox {
   /** When set, open waits for this, then makes the container: a slow `docker run` that finishes after all. */
   openGate: Promise<void> | null = null;
   output = "ran";
-  async open(spec: ContainerSpec, signal: AbortSignal) {
+  breach: ((code: string) => void) | null = null;
+  async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
+    this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
     if (this.openGate) await this.openGate;
     this.alive.add(spec.run_ref);
@@ -169,6 +171,11 @@ class FakeDriver implements AgentDriver {
   }
   async confirmGone(ref: string) {
     return !this.alive.has(ref);
+  }
+  reaped: string[] = [];
+  async reap(ref: string) {
+    this.reaped.push(ref);
+    this.alive.delete(ref);
   }
 }
 
@@ -316,7 +323,7 @@ describe("a run that keeps to its policy", () => {
     });
     const handle = await t.start();
     const report = await handle.done;
-    expect(report).toEqual({ status: "succeeded", spent_micro_usd: expect.any(Number), result: RESULT, stop_reason: null });
+    expect(report).toEqual({ status: "succeeded", spent_micro_usd: expect.any(Number), result: RESULT, stop_reason: null, stop_detail: null });
     expect(report.spent_micro_usd).toBeGreaterThan(0);
     expect(t.sandbox.execs).toEqual([{ call_id: "c1", tool: "read", path: "src/build.ts" }]);
     expect(t.transport.sent).toHaveLength(1);
@@ -334,7 +341,7 @@ describe("a run that keeps to its policy", () => {
     expect(session.prompt).toEqual({ trust: "untrusted", origin: "podster_task", text: WORDS });
     expect(session.frame).toBe(UNTRUSTED_FRAME);
     expect(session.allowed_tools).toEqual(["read", "search", "write", "edit", "StructuredOutput"]);
-    expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens });
+    expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens, run_time_ms: CAPS.run_time_ms });
     expect(session.provider).toEqual({ api_key: PLACEHOLDER_KEY });
     expect(exposed(t)).not.toContain(KEY);
   });
@@ -347,7 +354,7 @@ describe("a run that keeps to its policy", () => {
     });
     await (await t.start()).done;
     expect(t.progress.map((p) => p.kind)).toEqual(["started", "tool_refused", "model_request", "ended"]);
-    for (const event of t.progress) expect(Object.keys(event).sort()).toEqual(["code", "elapsed_ms", "kind", "output_tokens", "run_ref", "spent_micro_usd", "task_id", "turns", "workspace_id"]);
+    for (const event of t.progress) expect(Object.keys(event).sort()).toEqual(["code", "detail", "elapsed_ms", "kind", "output_tokens", "run_ref", "spent_micro_usd", "task_id", "turns", "workspace_id"]);
     expect(t.progress.at(-1)).toMatchObject({ kind: "ended", code: "succeeded", turns: 1 });
     const text = exposed(t);
     for (const secret of [WORDS, "id_rsa", KEY]) expect(text.includes(secret) ? secret : null).toBeNull();
@@ -625,16 +632,37 @@ describe("stopping", () => {
     expect(t.sandbox.execs).toEqual([]);
   });
 
-  it("a run still going never reads as stopped, and after a restart only the driver and container decide", async () => {
+  it("a run still going never reads as stopped, and after a restart it is reaped before anything is confirmed (M4 on #459)", async () => {
     const t = setup(() => never());
     await t.start();
     expect(await t.adapter.confirmStopped("run_1")).toBe(false);
-    // A fresh interface, as after a restart, with the same machine.
+    expect(t.driver.reaped).toEqual([]);
+    // A fresh interface, as after a restart, with the same machine: the container goes by its label, the driver's tree
+    // is reaped, and only then do the two confirm.
     const again = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: t.sandbox, transports: { testprov: t.transport }, clock: t.clock, log: () => undefined });
+    expect(await again.confirmStopped("run_1")).toBe(true);
+    expect(t.sandbox.killed).toEqual(["run_1"]);
+    expect(t.driver.reaped).toEqual(["run_1"]);
+  });
+
+  it("after a restart, a reap that fails or hangs never reads as stopped", async () => {
+    const t = setup(() => never());
+    await t.start();
+    const again = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: t.sandbox, transports: { testprov: t.transport }, clock: t.clock, log: () => undefined });
+    // A reap that leaves the driver's tree alive, as one that can't reach it would.
+    t.driver.reap = async () => undefined;
+    t.sandbox.killThrows = true;
+    expect(await again.confirmStopped("run_1")).toBe(false);
+    t.sandbox.killThrows = false;
+    t.driver.reap = () => never();
+    const pending = again.confirmStopped("run_1");
+    await settled();
+    await t.clock.advance(STOP_STEP_MS);
+    expect(await pending).toBe(false);
+    // And a driver whose tree outlives the reap still holds it.
+    t.driver.reap = async () => undefined;
     expect(await again.confirmStopped("run_1")).toBe(false);
     t.driver.alive.clear();
-    expect(await again.confirmStopped("run_1")).toBe(false);
-    t.sandbox.alive.clear();
     expect(await again.confirmStopped("run_1")).toBe(true);
   });
 
@@ -660,6 +688,18 @@ describe("stopping", () => {
   });
 });
 
+describe("a breach the container reports (re-review item 5)", () => {
+  it("halts the run at once, killing the container and the driver, with its own stop reason", async () => {
+    const t = setup(() => never());
+    const handle = await t.start();
+    expect(t.sandbox.breach).not.toBeNull();
+    t.sandbox.breach?.("disk_bound");
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "disk_bound" });
+    expect(t.sandbox.killed).toContain("run_1");
+    expect(t.driver.cancels).toBeGreaterThan(0);
+  });
+});
+
 describe("Runner's run interface source", () => {
   const files = ["src/core/run-interface.ts", "src/core/broker.ts", "src/core/tool-policy.ts", "src/node/run-command.ts"];
   const root = new URL("../", import.meta.url);
@@ -672,14 +712,52 @@ describe("Runner's run interface source", () => {
     }
   });
 
-  it("adds no provider SDK and makes no network call of its own", async () => {
+  it("pins the Claude Agent SDK and its peers exactly, and only the Claude driver and its engine name it", async () => {
     const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8")) as { dependencies: Record<string, string> };
-    expect(Object.keys(pkg.dependencies)).toEqual(["@auth/agent"]);
+    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/sdk": "1.32.2", zod: "4.6.7" });
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version: string }> };
+    for (const [name, version] of Object.entries(pkg.dependencies)) expect([name, lock.packages[`node_modules/${name}`]?.version]).toEqual([name, version]);
     const src = new URL("src/", root);
     for (const file of (await readdir(src, { recursive: true })).filter((f) => f.endsWith(".ts"))) {
       const text = await readFile(new URL(file, src), "utf8");
-      expect([file, /@anthropic-ai|openai|claude-agent-sdk/.test(text)]).toEqual([file, false]);
+      const allowed = file === "node/claude-driver.ts" || file === "node/claude-engine.ts";
+      expect([file, /@anthropic-ai|claude-agent-sdk/.test(text) && !allowed]).toEqual([file, false]);
+      expect([file, /openai/i.test(text)]).toEqual([file, false]);
     }
     for (const file of files.slice(0, 3)) expect([file, /\bfetch\s*\(/.test(await readFile(new URL(file, root), "utf8"))]).toEqual([file, false]);
+  });
+});
+
+describe("a run that ends on its turn cap (the tenth real run of #460)", () => {
+  const atCap = (error: string, calls = CAPS.turns) =>
+    setup(async (s) => {
+      for (let i = 0; i < calls; i++) await s.model(modelRequest());
+      throw new Error(error);
+    });
+
+  it("reads the SDK's max-turns end, at Runner's turn cap, as a turns stop", async () => {
+    const t = atCap("max_turns");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "budget_stopped", stop_reason: "turns_exhausted", stop_detail: "max_turns" });
+  });
+
+  it("reads any SDK error after Runner's turn cap was reached as a turns stop: the cap reached is the cause", async () => {
+    const t = atCap("sdk_error");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "budget_stopped", stop_reason: "turns_exhausted", stop_detail: "sdk_error" });
+  });
+
+  it("never hides a real driver failure below the cap, max_turns included", async () => {
+    for (const error of ["max_turns", "sdk_error", "hook_bypassed"]) {
+      const t = atCap(error, CAPS.turns - 1);
+      const handle = await t.start();
+      expect([error, await handle.done]).toMatchObject([error, { status: "failed", stop_reason: "driver_failed", stop_detail: error }]);
+    }
+  });
+
+  it("never reads a driver failure Runner can name, such as hook_bypassed, as a turns stop even at the cap", async () => {
+    const t = atCap("hook_bypassed");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "driver_failed", stop_detail: "hook_bypassed" });
   });
 });

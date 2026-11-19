@@ -5,6 +5,7 @@ import { AgentAuthClient, generateKeypair, MemoryStorage, signAgentJWT, signHost
 import { env, SELF } from "cloudflare:test";
 import { SignJWT, importJWK } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { capabilitiesFor } from "../src/capabilities";
 import type { Env } from "../src/index";
 import { confirmEnrollment, pluginFacts, settleSession, START_PER_MINUTE, strictLimit, REDEEM_PER_MINUTE, RUNNER_CAPABILITIES, sweepPairings } from "../src/pairing";
 
@@ -81,12 +82,17 @@ describe("starting a pairing, on the person's session", () => {
     expect(stored).toMatchObject({ userId: person.id.slice("per_".length), status: "pending_enrollment", publicKey: "" });
     // Only the plugin's hash of the code is kept, and the session's read never answers it.
     expect(stored.enrollmentTokenHash).not.toBe(res.body.code);
-    expect(JSON.parse(stored.defaultCapabilities).sort()).toEqual([...RUNNER_CAPABILITIES].sort());
-    // Decision 230, ruled 2026-11-18 (L1): no merge, release or repository token until step 10's own rules.
-    for (const withheld of ["merge_task", "deploy_release", "get_repo_access"]) {
+    // Managed repositories are off here, so `get_repo_access` isn't listed and isn't a default (M7 step 10).
+    expect(JSON.parse(stored.defaultCapabilities).sort()).toEqual(RUNNER_CAPABILITIES.filter((c) => c !== "get_repo_access").sort());
+    // Decision 230: never a merge or a release.
+    for (const withheld of ["merge_task", "deploy_release"]) {
       expect(RUNNER_CAPABILITIES as readonly string[]).not.toContain(withheld);
       expect(JSON.parse(stored.defaultCapabilities)).not.toContain(withheld);
     }
+    // Step 10 brings `get_repo_access` back under the repository path's own rules, only where the deployment lists it.
+    expect(RUNNER_CAPABILITIES as readonly string[]).toContain("get_repo_access");
+    expect(capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).map((c) => c.name)).toContain("get_repo_access");
+    expect(capabilitiesFor({}).map((c) => c.name)).not.toContain("get_repo_access");
     const again = await read(person, res.body.agent_id);
     expect(again.status).toBe(200);
     expect(again.text).not.toContain(res.body.code);

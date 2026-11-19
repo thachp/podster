@@ -27,19 +27,28 @@
  * 8. **Release only after the old process tree is confirmed stopped.** When it isn't, the entry is held: nothing is
  *    released, no new run starts, and the owner is told, until the adapter confirms it.
  *
- * Step 9 builds the adapter; step 11 submits results; step 10 binds a repository and base (null until then).
+ * Step 9 builds the adapter; step 11 submits results.
+ *
+ * **The repository path (M7 step 10).** In a room whose owner named a repository, the decision is issued with that
+ * repository and no base, since `get_repo_access` answers only for an accepted task. Before the consume, under the same
+ * gate as the fresh evaluation, `RepositoryPath.prepare` makes a fresh, verified checkout at the commit the run starts
+ * from; that commit is pinned into the stored decision (`pinRunBase`) and the consume binds it. A run that succeeds is
+ * published only after its container is confirmed stopped: committed, pushed to the task's one branch and opened as a
+ * pull request, through Runner's broker. A refusal on the repository path releases the task with its code; a passing
+ * failure leaves it to be evaluated afresh.
  *
  * Agent content is data: a task's words are read only to build and hash the prompt and to show the owner on an ask. Logs
  * carry IDs and codes only.
  */
 import type { RunAdapter, RunHandle, RunReport, StopResult } from "./adapter.js";
 import { GatewayError, meaningOf } from "./errors.js";
-import { consumeRunDecision, evaluate, factsKey, issueRunDecision, parsePolicyConfig, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
+import { consumeRunDecision, evaluate, factsKey, issueRunDecision, parsePolicyConfig, pinRunBase, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
+import { RepoPathError } from "./repository.js";
 import { readTaskDetail, type TaskDetail } from "./prompt.js";
 import { AuthorityEnded, type Poller } from "./poller.js";
 import type { Offer } from "./state.js";
 import type { Clock, Logger } from "./runtime.js";
-import { budgetOf, clockWentBack, dayOf, newEntry, reserve, settle, type After, type GiveUp, type RunEntry, type RunsState, type RunStore } from "./runs.js";
+import { budgetOf, clockWentBack, dayOf, newEntry, reserve, settle, type After, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore } from "./runs.js";
 
 /** The check-in's fixed maximum interval during a run (S-33, S-43). **Proposed** figure. */
 export const CHECK_IN_MS = 60_000;
@@ -61,7 +70,20 @@ const LOCAL = new Set(["authority_stale", "config_invalid", "budget_invalid", "c
  * decline doesn't disclose the owner's caps or allowlists; the reason itself stays in Runner's record and log (Info on
  * #458's review).
  */
-const PRIVATE = new Set(["day_budget_exhausted", "room_not_configured", "requester_out_of_scope", "author_out_of_scope"]);
+const PRIVATE = new Set([
+  "day_budget_exhausted",
+  "room_not_configured",
+  "requester_out_of_scope",
+  "author_out_of_scope",
+  // The owner's repository scope and Runner's own setup (M7 step 10): Podster hears only that Runner can't do it.
+  "repository_unavailable",
+  "repo_repository_out_of_scope",
+  "repo_clone_url_unexpected",
+  "repo_repository_id_mismatch",
+  "repo_repository_renamed",
+  "repo_path_unsafe",
+  "repo_helper_unavailable",
+]);
 export const GENERIC_REASON = "runner_unavailable";
 /** Events that count as a new attempt at a task: an offer or re-offer, and a change request (L6 on #458). */
 const TRIGGERS = new Set(["task.offered", "task.changes_requested", "offered"]);
@@ -81,6 +103,8 @@ export type AskView = {
   tools: RunFacts["tools"];
   network: string[];
   caps: RunFacts["caps"];
+  /** The owner's repository for the room, which the run is checked out from and published to (step 10). */
+  repository: RunFacts["repository"];
   /** The task's words, untrusted, for the owner to read. Never stored or logged. */
   inputs: { input: string; text: string }[];
 };
@@ -90,7 +114,28 @@ export interface OwnerPrompter {
   ask(view: AskView, signal?: AbortSignal): Promise<OwnerAnswer>;
 }
 
-export type PolicyCalls = { evaluate: typeof evaluate; issueRunDecision: typeof issueRunDecision; consumeRunDecision: typeof consumeRunDecision };
+export type PolicyCalls = { evaluate: typeof evaluate; issueRunDecision: typeof issueRunDecision; consumeRunDecision: typeof consumeRunDecision; pinRunBase?: typeof pinRunBase };
+
+/** A task's repository work, as the lifecycle hands it over: the repository and branch are the decision's own facts. */
+export type RepoTask = { workspace_id: string; task_id: string; task_folder: string; repository: NonNullable<RunFacts["repository"]> };
+export type Publication = { kind: "published"; branch: string; commit: string; pr_number: number } | { kind: "no_changes" };
+
+/**
+ * The repository path (M7 step 10; `src/node/repo-path.ts`). It holds the task's token in memory, outside every
+ * container, and throws `RepoPathError` with a fixed code for anything it refuses or can't do.
+ */
+export interface RepositoryPath {
+  /**
+   * A fresh checkout in the task's folder, its Git folder outside it, at the commit the run starts from: the default
+   * branch's head, or `continue_from` (what Runner last pushed) while the task branch on GitHub still points at it.
+   * Answers that commit, verified as the checkout's head with nothing changed.
+   */
+  prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }>;
+  /** After the run's container is confirmed stopped: commit on top of `base_commit`, push the task branch, open its pull request. */
+  publish(task: RepoTask & { base_commit: string }, signal: AbortSignal): Promise<Publication>;
+  /** Drops what it holds for the task, its token included. */
+  forget(workspace_id: string, task_id: string): void;
+}
 
 export type LifecyclePoller = Pick<Poller, "agentId" | "authorityFresh" | "request" | "endAuthority" | "record" | "graceMs">;
 
@@ -104,6 +149,8 @@ export type LifecycleDeps = {
    */
   config: unknown | (() => unknown | Promise<unknown>);
   adapter: RunAdapter;
+  /** The repository path; without it, a room with a repository refuses its tasks (`repository_unavailable`). */
+  repository?: RepositoryPath;
   prompter: OwnerPrompter;
   clock: Clock;
   log: Logger;
@@ -176,7 +223,7 @@ export class Lifecycle {
   private constructor(deps: LifecycleDeps, state: RunsState) {
     this.deps = deps;
     this.state = state;
-    this.policy = deps.policy ?? { evaluate, issueRunDecision, consumeRunDecision };
+    this.policy = { evaluate, issueRunDecision, consumeRunDecision, pinRunBase, ...deps.policy };
     this.newId = deps.newId ?? (() => crypto.randomUUID());
     this.checkInMs = Math.min(Math.max(Math.round(deps.checkInMs ?? CHECK_IN_MS), MIN_CHECK_IN_MS), CHECK_IN_MS);
   }
@@ -262,6 +309,7 @@ export class Lifecycle {
     // One pass at a time: a second call while one runs does nothing.
     if (this.busy) return "idle";
     this.busy = true;
+    this.tickSignal = signal;
     try {
       return await this.work(signal);
     } catch (error) {
@@ -279,6 +327,8 @@ export class Lifecycle {
     }
   }
   private busy = false;
+  /** The local stop of the pass under way, so a publication after a confirmed stop never runs past it. */
+  private tickSignal: AbortSignal | undefined;
 
   private entries(phase: RunEntry["phase"]) {
     return Object.values(this.state.entries).filter((e) => e.phase === phase);
@@ -461,7 +511,9 @@ export class Lifecycle {
       this.approvals.delete(key);
       if (!approved) return { view: askView(entry, decision, detail), decision };
     }
-    const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: task.version, input_hash: detail.prompt.hash, repository_id: null, base_commit: null };
+    // The owner's repository for the room, if any; its base is pinned after the accept, against a fresh checkout.
+    const repository = decision.facts.repository;
+    const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: task.version, input_hash: detail.prompt.hash, repository_id: repository === null ? null : String(repository.provider_repo_id), base_commit: null };
     const issued = this.policy.issueRunDecision(decision, binding, this.now(), approved ? { approved_by_owner: true } : {});
     if (!issued.ok) {
       await this.put({ ...entry, phase: "waiting", outcome: `issue_${issued.reason}`, retry_at: this.now() + WAIT_MS });
@@ -595,9 +647,18 @@ export class Lifecycle {
       if (signal.aborted) return "aborted" as const;
       // The accept moved the version by exactly itself; any other change since shows as a different version and refuses.
       const version = task.version === entry.expected_version ? decision.task_version : task.version;
-      const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: version, input_hash: prompt?.hash ?? "", repository_id: null, base_commit: null };
-      const consumed = prompt ? this.policy.consumeRunDecision(decision, fresh, binding, this.now()) : ({ ok: false, reason: "binding_changed" } as const);
+      // A room with a repository: a fresh checkout, verified, and its commit pinned into the stored decision (step 10).
+      let pinned = decision;
+      if (decision.repository_id !== null && prompt && fresh.outcome !== "refuse") {
+        const checkout = await this.checkout(entry, decision, fresh.facts, signal);
+        if (checkout === "aborted") return "aborted" as const;
+        if (checkout === null) return null;
+        pinned = checkout;
+      }
+      const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: version, input_hash: prompt?.hash ?? "", repository_id: pinned.repository_id, base_commit: pinned.base_commit };
+      const consumed = prompt ? this.policy.consumeRunDecision(pinned, fresh, binding, this.now()) : ({ ok: false, reason: "binding_changed" } as const);
       if (!consumed.ok) {
+        if (entry.decision?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
         const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
         const cleared: RunEntry = { ...entry, decision: null, reservation: null, expected_version: null };
         this.state = { ...this.state, ledger };
@@ -646,6 +707,100 @@ export class Lifecycle {
       // Whatever went wrong, a run that may still be going is never left looking like nothing is (M2 on #458).
       await this.holdOrphan(running, "run_interrupted");
       throw error;
+    }
+  }
+
+  /**
+   * Step 10's checkout, inside the gate between the fresh evaluation and the consume: a fresh, verified checkout of the
+   * decision's own repository, and its commit pinned into the stored decision. Answers the pinned decision, or null when
+   * the task was given up, left to be evaluated afresh, or held.
+   */
+  private async checkout(entry: RunEntry, decision: NonNullable<RunEntry["decision"]>, facts: RunFacts, signal: AbortSignal): Promise<NonNullable<RunEntry["decision"]> | null | "aborted"> {
+    const repository = facts.repository;
+    const path = this.deps.repository;
+    const release = async (reason: string) => {
+      path?.forget(entry.workspace_id, entry.task_id);
+      const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
+      this.state = { ...this.state, ledger };
+      await this.giveUp({ ...entry, decision: null, reservation: null, expected_version: null }, "accepted", reason);
+    };
+    // The fresh facts name the decision's repository, or the consume refuses them anyway; no path is never a quiet run.
+    if (repository === null || String(repository.provider_repo_id) !== decision.repository_id) return decision;
+    if (!path) {
+      this.log("lifecycle.repository", "refused", entry, { code: "repository_unavailable" });
+      await release("repository_unavailable");
+      return null;
+    }
+    const published = entry.published && entry.published.repository_id === decision.repository_id ? entry.published : null;
+    let base: string;
+    try {
+      const checkout = await path.prepare({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository, continue_from: published?.commit ?? null }, signal);
+      if (signal.aborted) return "aborted";
+      if (checkout.repository_id !== decision.repository_id) throw new RepoPathError("repository_id_mismatch");
+      base = checkout.base_commit;
+    } catch (error) {
+      if (signal.aborted) return "aborted";
+      if (!(error instanceof RepoPathError)) throw error;
+      this.log("lifecycle.repository", error.transient ? "unavailable" : "refused", entry, { code: error.code });
+      if (error.transient) {
+        // Passing: the decision is dropped and the task evaluated afresh at its next turn, with a new checkout.
+        path.forget(entry.workspace_id, entry.task_id);
+        const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
+        this.state = { ...this.state, ledger };
+        await this.put({ ...entry, phase: "waiting", outcome: `repo_${error.code}`, decision: null, reservation: null, expected_version: null, retry_at: this.now() + WAIT_MS });
+      } else await release(`repo_${error.code}`);
+      return null;
+    }
+    const pin = (this.policy.pinRunBase ?? pinRunBase)(decision, base, this.now());
+    if (!pin.ok) {
+      this.log("lifecycle.repository", "pin_refused", entry, { code: pin.reason });
+      path.forget(entry.workspace_id, entry.task_id);
+      const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
+      this.state = { ...this.state, ledger };
+      await this.put({ ...entry, phase: "done", marker: "", outcome: `pin_${pin.reason}`, decision: null, reservation: null, expected_version: null });
+      return null;
+    }
+    // Stored as returned, before the consume reads it.
+    await this.put({ ...entry, decision: pin.record });
+    this.log("lifecycle.repository", "checked_out", entry);
+    return pin.record;
+  }
+
+  /**
+   * Step 10's publication, after the run's container is confirmed stopped: committed, pushed and opened as a pull request
+   * through the broker. Answers what to store, or null when the task was given up instead. After a local stop nothing
+   * reaches Podster or GitHub: the finish waits, held, for a restart.
+   */
+  private async publish(entry: RunEntry, signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait"> {
+    const consumed = entry.consumed;
+    const facts = consumed && consumed.repository_id !== null ? repositoryOf(consumed) : null;
+    if (!consumed || consumed.repository_id === null) return { published: entry.published ?? null, outcome: entry.outcome ?? "succeeded" };
+    if (!facts || consumed.base_commit === null) {
+      await this.giveUp(entry, "accepted", "repo_record_invalid");
+      return null;
+    }
+    if (signal?.aborted) return "wait";
+    const path = this.deps.repository;
+    if (!path) {
+      await this.giveUp(entry, "accepted", "repository_unavailable");
+      return null;
+    }
+    try {
+      const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit }, signal ?? new AbortController().signal);
+      if (publication.kind === "no_changes") {
+        this.log("lifecycle.publish", "no_changes", entry);
+        return { published: entry.published ?? null, outcome: "no_changes" };
+      }
+      this.log("lifecycle.publish", "published", entry, { count: publication.pr_number });
+      return { published: { repository_id: consumed.repository_id as string, branch: publication.branch, commit: publication.commit, pr_number: publication.pr_number }, outcome: "published" };
+    } catch (error) {
+      if (signal?.aborted) return "wait";
+      if (!(error instanceof RepoPathError)) throw error;
+      this.log("lifecycle.publish", "refused", entry, { code: error.code });
+      await this.giveUp(entry, "accepted", `repo_${error.code}`);
+      return null;
+    } finally {
+      path.forget(entry.workspace_id, entry.task_id);
     }
   }
 
@@ -789,8 +944,20 @@ export class Lifecycle {
 
   private async afterStop(entry: RunEntry, after: After) {
     const base: RunEntry = { ...entry, after_stop: null, run_ref: entry.run_ref };
-    if (after.kind === "finish") await this.put({ ...base, phase: "finished", ran_hash: entry.consumed?.input_hash ?? null });
-    else if (after.kind === "release") await this.giveUp(base, "accepted", after.reason);
+    if (after.kind === "finish") {
+      // Step 10: a run in a room with a repository is published before it counts as finished.
+      const published = await this.publish(base, this.tickSignal);
+      if (published === "wait") {
+        await this.put({ ...entry, phase: "held", after_stop: after });
+        return;
+      }
+      if (published === null) return;
+      await this.put({ ...base, phase: "finished", ran_hash: entry.consumed?.input_hash ?? null, published: published.published, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome });
+    }
+    else if (after.kind === "release") {
+      if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+      await this.giveUp(base, "accepted", after.reason);
+    }
     else if (after.kind === "reconsider") await this.put({ ...base, phase: "done", marker: "" });
     else await this.put({ ...base, phase: "done" });
   }
@@ -808,6 +975,7 @@ function askView(entry: RunEntry, decision: Decision & { outcome: "ask" }, detai
     tools: facts.tools,
     network: facts.network,
     caps: facts.caps,
+    repository: facts.repository,
     inputs: detail.prompt?.inputs.map(({ input, text }) => ({ input, text })) ?? [],
   };
 }

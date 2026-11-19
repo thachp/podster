@@ -4,7 +4,8 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, runWithLifecycle, type AskView, type OwnerAnswer, type PolicyCalls } from "../src/core/lifecycle.js";
+import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, runWithLifecycle, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, type RunDecisionRecord } from "../src/core/policy.js";
 import { Poller, type PollerDeps } from "../src/core/poller.js";
@@ -105,7 +106,7 @@ class FakePrompter {
   }
 }
 
-async function setup(config: unknown | (() => unknown) = policyConfig()) {
+async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath } = {}) {
   const clock = new TestClock();
   const gateway = new FakeGateway(clock);
   const secrets = new MemorySecretStore();
@@ -143,7 +144,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig()) {
     },
   };
   let ids = 0;
-  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS };
+  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
   const lifecycle = await Lifecycle.open(lifecycleDeps);
   const stop = new AbortController();
   /** Offers a task: its record in the gateway and its inbox event. */
@@ -896,5 +897,120 @@ describe("the rulings on #458's review", () => {
     expect(u.policyCalls.filter((c) => c.fn === "evaluate")).toHaveLength(2);
     expect(u.entry("tsk_one")).toMatchObject({ phase: "finished", consumed: finished.consumed, ran_hash: finished.ran_hash });
     expect(u.adapter.starts).toHaveLength(1);
+  });
+});
+
+describe("step 10: the repository path in the lifecycle", () => {
+  const SCOPE = { full_name: "podsterdev/todo-app", provider_repo_id: 9001 };
+  const BASE = "b".repeat(40);
+  const repoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE }] });
+
+  class FakeRepository implements RepositoryPath {
+    prepared: (RepoTask & { continue_from: string | null })[] = [];
+    published: (RepoTask & { base_commit: string })[] = [];
+    forgotten = 0;
+    prepareError: RepoPathError | null = null;
+    publishError: RepoPathError | null = null;
+    commit = "c".repeat(40);
+    timeline: string[] = [];
+    async prepare(task: RepoTask & { continue_from: string | null }) {
+      this.timeline.push("repo:prepare");
+      this.prepared.push(task);
+      if (this.prepareError) throw this.prepareError;
+      return { repository_id: "9001", base_commit: task.continue_from ?? BASE };
+    }
+    async publish(task: RepoTask & { base_commit: string }): Promise<Publication> {
+      this.timeline.push("repo:publish");
+      this.published.push(task);
+      if (this.publishError) throw this.publishError;
+      return { kind: "published", branch: task.repository.branch, commit: this.commit, pr_number: 12 };
+    }
+    forget() {
+      this.forgotten++;
+    }
+  }
+
+  async function repoSetup() {
+    const repo = new FakeRepository();
+    const t = await setup(repoConfig(), { repository: repo });
+    repo.timeline = t.timeline;
+    return { ...t, repo };
+  }
+
+  it("issues with the repository and no base, checks out after the accept, pins the base before the consume, and publishes only after a confirmed stop", async () => {
+    const t = await repoSetup();
+    t.offer(detail("tsk_repo"));
+    expect(await t.pass()).toBe("idle");
+    const order = t.timeline.filter((x) => /^(call:(accept_task|get_task)|repo:|adapter:)/.test(x));
+    expect(order).toEqual(["call:get_task", "call:accept_task", "call:get_task", "repo:prepare", "adapter:start", "adapter:stop", "repo:publish"]);
+    const issued = (t.policyCalls.find((c) => c.fn === "issue")?.returned as { record: RunDecisionRecord }).record;
+    expect([issued.repository_id, issued.base_commit]).toEqual(["9001", null]);
+    const consumed = (t.policyCalls.find((c) => c.fn === "consume")?.returned as { record: RunDecisionRecord }).record;
+    expect([consumed.repository_id, consumed.base_commit]).toEqual(["9001", BASE]);
+    expect(t.repo.prepared[0]).toMatchObject({ workspace_id: ROOM, task_id: "tsk_repo", task_folder: `/work/podster/${ROOM}/tsk_repo`, repository: { ...SCOPE, branch: "podster/tsk_repo" }, continue_from: null });
+    expect(t.repo.published[0]).toMatchObject({ base_commit: BASE, repository: { ...SCOPE, branch: "podster/tsk_repo" } });
+    expect(t.adapter.starts[0].facts.repository).toEqual({ ...SCOPE, branch: "podster/tsk_repo" });
+    expect(t.entry("tsk_repo")).toMatchObject({ phase: "finished", outcome: "published", published: { repository_id: "9001", branch: "podster/tsk_repo", commit: t.repo.commit, pr_number: 12 } });
+    expect(t.repo.forgotten).toBeGreaterThan(0);
+  });
+
+  it("starts a rerun from what Runner pushed", async () => {
+    const t = await repoSetup();
+    t.offer(detail("tsk_repo"));
+    await t.pass();
+    const d = detail("tsk_repo", { changeRequest: { event_id: "evt_cr", text: "Tighten it" } });
+    d.task.status = "accepted";
+    d.task.version = 3;
+    t.offer(d, "task.changes_requested");
+    await t.pass();
+    expect(t.repo.prepared[1]?.continue_from).toBe(t.repo.commit);
+  });
+
+  it("releases with the code a refusal names, and leaves a passing failure to be evaluated afresh", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("repository_unprotected");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(0);
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_a", reason: "repo_repository_unprotected" });
+    t.repo.prepareError = new RepoPathError("base_moved", true);
+    t.offer(detail("tsk_b"));
+    await t.pass();
+    expect(t.entry("tsk_b")).toMatchObject({ phase: "waiting", outcome: "repo_base_moved", decision: null, reservation: null });
+    expect(t.commands("release_task").filter((c) => c.arguments.task_id === "tsk_b")).toHaveLength(0);
+    expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
+  });
+
+  it("tells Podster only `runner_unavailable` when the owner's scope or Runner's setup is the reason", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("repository_out_of_scope");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments.reason).toBe("runner_unavailable");
+    expect(t.entry("tsk_a").outcome).toBe("repo_repository_out_of_scope");
+  });
+
+  it("releases a run whose publication is refused, and never runs a room with a repository without the path", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("push_rejected");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_a", reason: "repo_push_rejected" });
+    const bare = await setup(repoConfig());
+    bare.offer(detail("tsk_b"));
+    await bare.pass();
+    await bare.pass();
+    expect(bare.adapter.starts).toHaveLength(0);
+    expect(bare.commands("release_task")[0]?.arguments.reason).toBe("runner_unavailable");
+    expect(bare.entry("tsk_b").outcome).toBe("repository_unavailable");
   });
 });

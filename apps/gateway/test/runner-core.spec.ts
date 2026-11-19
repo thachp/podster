@@ -121,6 +121,7 @@ describe("Runner's core against the gateway", () => {
     const agents = await e.DB.prepare(`SELECT count(*) AS n FROM agent WHERE hostId = ?`).bind(record.plugin_host_id).first<{ n: number }>();
     expect(agents!.n).toBe(1);
     const grants = await e.DB.prepare(`SELECT capability FROM agentCapabilityGrant WHERE agentId = ? AND status = 'active'`).bind(record.plugin_agent_id).all<{ capability: string }>();
+    // Managed repositories are off here, so Runner registered again without `get_repo_access` (M7 step 10's fallback).
     for (const never of ["merge_task", "deploy_release", "get_repo_access", "create_task"]) expect(grants.results.map((g) => g.capability)).not.toContain(never);
 
     // A room with the agent in it, and a task offered to it.

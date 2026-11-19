@@ -36,6 +36,14 @@ function setup(consent = true) {
 }
 
 describe("pairing from the machine", () => {
+  it("registers without `get_repo_access` only where the deployment doesn't list it, and drops nothing else (M7 step 10)", async () => {
+    const { gateway, deps } = setup();
+    gateway.listed = (c) => c !== "get_repo_access";
+    expect((await pair(deps, { agentId: AGENT, code: CODE })).outcome).toBe("connected");
+    expect(gateway.refusedRegistrations).toEqual([[...RUNNER_CAPABILITIES]]);
+    expect(gateway.registrations).toEqual([{ capabilities: RUNNER_CAPABILITIES.filter((c) => c !== "get_repo_access"), name: "Podster Runner" }]);
+  });
+
   it("asks consent, shows the whole thumbprint, redeems with a fresh proof, registers one agent within the allowlist, and waits for confirmation", async () => {
     const { gateway, deps, notices, asked, state, secrets, logged } = setup();
     const result = await pair(deps, { agentId: AGENT, code: CODE });

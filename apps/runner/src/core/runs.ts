@@ -37,6 +37,11 @@ export type RunPhase = "accepting" | "ready" | "running" | "giving_up" | "held" 
 export type GiveUp = { capability: "decline_task" | "release_task"; reason: string; version: number | null; key: string };
 /** What follows once a run's stop is confirmed. */
 export type After = { kind: "release"; reason: string } | { kind: "reconsider" } | { kind: "finish" } | { kind: "none" };
+/**
+ * What Runner last pushed for a task, in a room with a repository (M7 step 10): the task branch's commit and its pull
+ * request. A rerun starts from that commit, and only while the branch on GitHub still points at it. Step 11 submits it.
+ */
+export type Published = { repository_id: string; branch: string; commit: string; pr_number: number };
 
 export type RunEntry = {
   workspace_id: string;
@@ -63,6 +68,8 @@ export type RunEntry = {
   after_stop: After | null;
   /** The input hash of the last run that finished successfully: a rerun needs other inputs. */
   ran_hash: string | null;
+  /** What Runner last pushed for this task, or null; absent in a record from before step 10. */
+  published?: Published | null;
   retry_at: number | null;
   attempts: { day: number; count: number };
   updated_at: number;
@@ -120,6 +127,7 @@ export const newEntry = (workspace_id: string, task_id: string, now: number): Ru
   give_up: null,
   after_stop: null,
   ran_hash: null,
+  published: null,
   retry_at: null,
   attempts: { day: dayOf(now), count: 0 },
   updated_at: now,
@@ -191,6 +199,8 @@ export function checkRuns(v: unknown): string | null {
     if (!orNull(e.reservation, (x) => isText(x, 64)) || !orNull(e.accept_key, (x) => isText(x, 128)) || !orNull(e.run_ref, (x) => isText(x, 128))) return `${at}.keys`;
     if (!orNull(e.expected_version, isCount) || !orNull(e.retry_at, isCount) || !isCount(e.updated_at)) return `${at}.numbers`;
     if (!orNull(e.ran_hash, (x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x))) return `${at}.ran_hash`;
+    const pub = e.published;
+    if (pub !== undefined && pub !== null && (!isObj(pub) || typeof pub.repository_id !== "string" || !/^[1-9][0-9]{0,15}$/.test(pub.repository_id) || !isText(pub.branch, 200) || typeof pub.commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pub.commit) || !isCount(pub.pr_number) || pub.pr_number < 1)) return `${at}.published`;
     const give = e.give_up;
     if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
     const after = e.after_stop;

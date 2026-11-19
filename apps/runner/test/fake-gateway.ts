@@ -56,6 +56,10 @@ export class FakeGateway {
   proofs: Jwt[] = [];
   agentJwts: Jwt[] = [];
   registrations: { capabilities: string[]; name: string }[] = [];
+  /** Registrations the plugin refused as naming a capability this deployment doesn't list. */
+  refusedRegistrations: string[][] = [];
+  /** Whether this deployment lists a capability: all, unless a test switches managed repositories off. */
+  listed: (capability: string) => boolean = () => true;
   calls: { capability: string; arguments: Record<string, unknown> }[] = [];
   /** Every URL asked, in order. */
   asked: string[] = [];
@@ -148,6 +152,11 @@ export class FakeGateway {
       const jwt = this.hostKey ? await verified(bearer, this.hostKey) : null;
       if (!jwt || (unverified.host_public_key as { x?: string })?.x !== this.hostKey?.x) return Response.json({ error: "invalid_jwt", message: "bad host" }, { status: 401 });
       this.agentKey = jwt.payload.agent_public_key as { x?: string };
+      const unlisted = (body.capabilities as string[]).filter((c) => !this.listed(c));
+      if (unlisted.length > 0) {
+        this.refusedRegistrations.push(body.capabilities as string[]);
+        return Response.json({ error: "invalid_capabilities", message: "One or more requested capability names don't exist or are blocked" }, { status: 400 });
+      }
       this.registrations.push({ capabilities: body.capabilities as string[], name: body.name as string });
       const pending = this.registerStatus === "pending";
       return Response.json({ agent_id: this.pluginAgent, host_id: this.hostId, name: body.name, mode: "delegated", status: this.registerStatus, agent_capability_grants: (body.capabilities as string[]).map((capability) => ({ capability, status: pending ? "pending" : "active" })), ...(pending ? { approval: { method: "device_authorization", user_code: "ABCD", verification_uri: `${ORIGIN}/claim`, expires_in: 600, interval: 5 } } : {}) });

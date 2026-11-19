@@ -5,7 +5,8 @@ import { StartPairing } from "./start-pairing";
 
 const CODE = "c0dE_c0dE_c0dE_c0dE_c0dE_c0dE_c0dE_c0dE_c0d";
 const GATEWAY = "https://gateway.example.test";
-const COMMAND = `node build/node/cli.js pair --gateway ${GATEWAY} --agent agt_1`;
+const COMMAND = `npx --ignore-scripts podster@test pair --gateway ${GATEWAY} --agent agt_1`;
+const STAGING = "https://gateway-staging.podster.dev";
 const started = (agentId = "agt_1") => vi.fn(async () => new Response(JSON.stringify({ agent_id: agentId, org_id: "org_a", name: "Mac", status: "pending", key_thumbprint: null, expires_at: 1, code: CODE }), { status: 200 }));
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -49,6 +50,22 @@ describe("StartPairing", () => {
     expect(screen.getByLabelText("Code for Runner")).toHaveTextContent(CODE);
     // The code is copied by hand only: no button puts it anywhere.
     expect(screen.queryByRole("button", { name: /Copy code/i })).toBeNull();
+  });
+
+  it("leaves out --gateway for staging's gateway, which pair uses by default", async () => {
+    vi.stubGlobal("fetch", started());
+    render(<StartPairing gateway={STAGING} />);
+    await start();
+    expect(screen.getByLabelText("Command for Runner")).toHaveTextContent(/^npx --ignore-scripts podster@test pair --agent agt_1$/);
+  });
+
+  it("says what Runner needs and how the code behaves", async () => {
+    vi.stubGlobal("fetch", started());
+    render(<StartPairing gateway={GATEWAY} />);
+    await start();
+    expect(screen.getByText(/Node 22 or later/)).toHaveTextContent(/Docker Desktop.*WSL2/);
+    expect(screen.getByText(/expires in 10 minutes/)).toHaveTextContent(/isn.t part of the command.*start a new pairing/);
+    expect(screen.queryByText(/npm run build/)).toBeNull();
   });
 
   it("copies the agent ID and the command exactly, never the code", async () => {

@@ -10,7 +10,7 @@
 // The subprocess escape suite (R-08, R-30) and the same injections against the real provider are opt-in only, in
 // hostile-real.test.ts under vitest.real.config.ts, since they need Docker and the owner's key.
 import { readFile } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { RunAdapter, RunStart } from "../src/core/adapter.js";
 import type { BrokerRequest, Forward, ProviderProfile } from "../src/core/broker.js";
 import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, type AskView, type LifecyclePoller, type OwnerAnswer, type PolicyCalls } from "../src/core/lifecycle.js";
@@ -130,37 +130,87 @@ class SimClock implements Clock {
     return this.waits.length;
   }
   /** Fires the earliest wait, and any due with it. */
-  async next() {
+  next() {
     if (this.waits.length === 0) return;
     this.at = Math.min(...this.waits.map((w) => w.due));
     const due = this.waits.filter((w) => w.due <= this.at);
     this.waits = this.waits.filter((w) => w.due > this.at);
     for (const w of due) w.resolve();
-    await turns();
   }
 }
 
-/** Lets pending work run: promise chains, and the WebCrypto signing each gateway call does. No timer. */
-async function turns(n = 20) {
-  for (let i = 0; i < n; i++) await new Promise<void>((resolve) => setImmediate(resolve));
-}
-/** Waits, by event-loop turns only, until `cond` holds. */
-async function until(cond: () => boolean, what: string) {
-  for (let i = 0; i < 5_000; i++) {
-    if (cond()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+/**
+ * Work that settles off the event loop's promise chains, counted while it's in flight: every WebCrypto call (the JWT
+ * signing and checking, and the SHA-256 of each prompt) and every request through the harness's fetch. With none in
+ * flight and the microtask queue drained, nothing more happens until the test fires the clock.
+ */
+class Busy {
+  private n = 0;
+  private waiters: (() => void)[] = [];
+  get count() {
+    return this.n;
   }
-  throw new Error(`never happened: ${what}`);
+  track<T>(work: () => Promise<T>): Promise<T> {
+    this.n++;
+    return (async () => work())().finally(() => {
+      if (--this.n === 0) for (const wake of this.waiters.splice(0)) wake();
+    });
+  }
+  idle(): Promise<void> {
+    return this.n === 0 ? Promise.resolve() : new Promise((resolve) => this.waiters.push(resolve));
+  }
+  reset() {
+    this.n = 0;
+    for (const wake of this.waiters.splice(0)) wake();
+  }
+}
+const busy = new Busy();
+type Subtle = Record<string, (...args: unknown[]) => Promise<unknown>>;
+const subtle = globalThis.crypto.subtle as unknown as Subtle;
+const SUBTLE = ["digest", "sign", "verify", "importKey", "exportKey", "generateKey", "deriveBits", "deriveKey"].filter((n) => typeof subtle[n] === "function");
+const ownSubtle = new Map<string, PropertyDescriptor | undefined>();
+beforeAll(() => {
+  for (const name of SUBTLE) {
+    ownSubtle.set(name, Object.getOwnPropertyDescriptor(subtle, name));
+    const original = subtle[name].bind(subtle);
+    Object.defineProperty(subtle, name, { configurable: true, writable: true, value: (...args: unknown[]) => busy.track(() => original(...args)) });
+  }
+});
+afterAll(() => {
+  for (const [name, own] of ownSubtle) {
+    if (own) Object.defineProperty(subtle, name, own);
+    else delete subtle[name];
+  }
+});
+beforeEach(() => busy.reset());
+
+/** Returns once nothing tracked is in flight and every promise chain queued meanwhile has run. Never moves the clock. */
+async function quiesce() {
+  for (;;) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (busy.count === 0) return;
+    await busy.idle();
+  }
+}
+/** `cond` must hold once everything that can happen without the clock has happened. */
+async function until(cond: () => boolean, what: string) {
+  await quiesce();
+  if (!cond()) throw new Error(`never happened: ${what}`);
 }
 /**
  * A body that sends `chunk` up to 64 MB, then stays open for ever, and records how much was pulled and whether the
- * reader cancelled it.
+ * reader cancelled it. `whole` resolves once it was pulled to its 64 MB end, which only reading it whole can do.
  */
-function endless(chunk: Uint8Array) {
-  const seen = { pulled: 0, cancelled: false };
+function endless(chunk: Uint8Array, onWhole?: () => void) {
+  let reachedEnd: () => void = () => undefined;
+  const seen = { pulled: 0, cancelled: false, whole: new Promise<string>((resolve) => (reachedEnd = () => resolve("read_whole"))) };
   const body = new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (seen.pulled > 64 * 1024 * 1024) return new Promise<void>(() => undefined);
+      if (seen.pulled > 64 * 1024 * 1024) {
+        reachedEnd();
+        onWhole?.();
+        return new Promise<void>(() => undefined);
+      }
       seen.pulled += chunk.byteLength;
       controller.enqueue(chunk);
     },
@@ -170,28 +220,20 @@ function endless(chunk: Uint8Array) {
   });
   return { body, seen };
 }
-/** Resolves `read_whole` once a hostile stream was pulled to its 64 MB end; never rejects, and gives up quietly. */
-async function wholeStream(pulled: () => number): Promise<string> {
-  for (let i = 0; i < 20_000; i++) {
-    if (pulled() > 64 * 1024 * 1024) return "read_whole";
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  return new Promise<string>(() => undefined);
-}
 /**
- * Settles `work`, firing the clock's waits one at a time while it's pending, and only while no call to Podster is in
- * flight (`quiet`), so a check-in's answer is always read before the next wait fires.
+ * Settles `work`. Whenever everything that can happen without the clock has happened, it fires the clock's earliest
+ * wait; with none pending and the work unsettled, nothing could ever move it, so it fails at once.
  */
-async function drive<T>(clock: SimClock, work: Promise<T>, quiet: () => boolean, steps = 100): Promise<T> {
+async function drive<T>(clock: SimClock, work: Promise<T>): Promise<T> {
   let done = false;
   const watched = work.finally(() => void (done = true));
-  for (let i = 0; i < steps && !done; i++) {
-    for (let j = 0; j < 5_000 && !done && !quiet(); j++) await new Promise<void>((resolve) => setImmediate(resolve));
-    await turns();
-    if (!done) await clock.next();
+  watched.catch(() => undefined);
+  for (;;) {
+    await quiesce();
+    if (done) return watched;
+    if (clock.pending === 0) throw new Error("stuck: the work waits on nothing the clock or a call in flight can move");
+    clock.next();
   }
-  if (!done) throw new Error("work never settled");
-  return watched;
 }
 
 // ---- The run's side: a model that obeys injected text, a container and the provider ----
@@ -423,7 +465,8 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
   // Every request that leaves Runner, and the hostile layer in front of the stand-in gateway.
   const network: string[] = [];
   let hostile: Hostile | null = null;
-  const fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetch = ((input: RequestInfo | URL, init?: RequestInit) => busy.track(() => hostileFetch(input, init))) as typeof globalThis.fetch;
+  const hostileFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(String(input), init);
     network.push(request.url);
     if (hostile) {
@@ -434,7 +477,7 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
       if (answer) return answer;
     }
     return gateway.fetch(request);
-  }) as typeof globalThis.fetch;
+  };
 
   const pollerDeps: PollerDeps = { origin: ORIGIN, fetch, secrets, state, clock, log, intervalMs: 10_000, graceMs: 300_000 };
   const poller = await Poller.open(pollerDeps);
@@ -470,9 +513,7 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
       return r;
     },
   };
-  // The poller as the lifecycle sees it, counting the calls in flight, so the clock fires only when none is.
-  let inflight = 0;
-  const quiet = () => inflight === 0;
+  // The poller as the lifecycle sees it, each call counted while it's in flight, so the clock fires only when none is.
   const lifecyclePoller: LifecyclePoller = {
     get agentId() {
       return poller.agentId;
@@ -483,14 +524,7 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
     graceMs: poller.graceMs,
     authorityFresh: () => poller.authorityFresh(),
     endAuthority: () => poller.endAuthority(),
-    request: async (capability, args) => {
-      inflight++;
-      try {
-        return await poller.request(capability, args);
-      } finally {
-        inflight--;
-      }
-    },
+    request: (capability, args) => busy.track(() => poller.request(capability, args)),
   };
   let ids = 0;
   const lifecycleDeps = { poller: lifecyclePoller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS };
@@ -506,10 +540,10 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
     clock.auto = true;
     expect(await poller.pollOnce()).toBe("ok");
     clock.auto = false;
-    return drive(clock, lifecycle.tick(signal), quiet);
+    return drive(clock, lifecycle.tick(signal));
   };
   /** Drives a pass the test started itself. */
-  const settle = <T,>(work: Promise<T>) => drive(clock, work, quiet);
+  const settle = <T,>(work: Promise<T>) => drive(clock, work);
   const entry = (id: string, room = ROOM) => lifecycle.record.entries[`${room}/${id}`];
   const commands = (name: string) => gateway.calls.filter((c) => c.capability === name);
   const refusals = () => driver.attempts.filter((a) => !a.decision.allow).map((a) => [a.call_id, (a.decision as { reason: string }).reason]);
@@ -908,7 +942,7 @@ describe("R-21: malicious gateway answers", () => {
     const { body, seen } = endless(enc.encode(`{"data":{"events":[${'{"seq":1},'.repeat(6_000)}`));
     t.hostile = (request) => (request.capability === "read_inbox" ? new Response(body, { status: 200, headers: { "content-type": "application/json" } }) : undefined);
     t.clock.auto = true;
-    const polled = await Promise.race([t.poller.pollOnce(), wholeStream(() => seen.pulled)]);
+    const polled = await Promise.race([t.poller.pollOnce(), seen.whole]);
     expect(polled).toBe("unreachable");
     expect(seen.pulled).toBeLessThan(5 * 1024 * 1024);
     await until(() => seen.cancelled, "the stream was cancelled");
@@ -920,7 +954,7 @@ describe("R-21: malicious gateway answers", () => {
     const { body, seen } = endless(enc.encode(`{"error":{"code":"${"a".repeat(60_000)}`));
     t.hostile = (request) => (request.capability === "read_inbox" ? new Response(body, { status: 400 }) : undefined);
     t.clock.auto = true;
-    const polled = await Promise.race([t.poller.pollOnce(), wholeStream(() => seen.pulled)]);
+    const polled = await Promise.race([t.poller.pollOnce(), seen.whole]);
     expect(polled).toBe("unreachable");
     expect(seen.pulled).toBeLessThan(1024 * 1024);
     await until(() => seen.cancelled, "the stream was cancelled");
@@ -930,16 +964,18 @@ describe("R-21: malicious gateway answers", () => {
   it("a discovery document that never ends is cut at its bound and cancelled: discovery_failed, and no capability call goes", async () => {
     const t = await harness();
     const streams: ReturnType<typeof endless>[] = [];
+    let readWhole: () => void = () => undefined;
+    const whole = new Promise<string>((resolve) => (readWhole = () => resolve("read_whole")));
     t.hostile = (request) => {
       if (request.capability !== null || !/agent-configuration$/.test(request.path)) return undefined;
-      const stream = endless(enc.encode(`{"version":"1.0-draft","issuer":"${"i".repeat(60_000)}`));
+      const stream = endless(enc.encode(`{"version":"1.0-draft","issuer":"${"i".repeat(60_000)}`), readWhole);
       streams.push(stream);
       return new Response(stream.body, { status: 200, headers: { "content-type": "application/json" } });
     };
     t.clock.auto = true;
     const fresh = await Poller.open(t.pollerDeps);
     const calls = t.gateway.calls.length;
-    const polled = await Promise.race([fresh.pollOnce(), wholeStream(() => Math.max(0, ...streams.map((s) => s.seen.pulled)))]);
+    const polled = await Promise.race([fresh.pollOnce(), whole]);
     expect(polled).toBe("unreachable");
     expect(streams.length).toBeGreaterThan(0);
     for (const s of streams) expect(s.seen.pulled).toBeLessThan(1024 * 1024);
@@ -962,7 +998,7 @@ describe("R-21: malicious gateway answers", () => {
       return gateway.fetch(request);
     }) as typeof globalThis.fetch;
     const paired = pair({ origin: ORIGIN, fetch, secrets: new MemorySecretStore(), state: new MemoryStateStore(), clock, log: lineLogger((l) => void lines.push(l)), consent: async () => true, notify: () => undefined }, { agentId: AGENT, code: CODE });
-    const outcome = await Promise.race([paired.then((r) => r.outcome), wholeStream(() => seen.pulled)]);
+    const outcome = await Promise.race([paired.then((r) => r.outcome), seen.whole]);
     expect(outcome).not.toBe("connected");
     expect(outcome).not.toBe("read_whole");
     expect(seen.pulled).toBeLessThan(1024 * 1024);
@@ -1098,7 +1134,6 @@ describe("R-21: a revoked agent mid-run", () => {
     t.gateway.session = "revoked";
     expect(await t.settle(ticking)).toBe("revoked");
     await until(() => t.driver.attempts.length === 1, "the model tried again");
-    await turns();
     expect(t.driver.cancels).toBe(1);
     expect(t.sandbox.killed).toEqual([t.starts[0].run_ref]);
     expect(t.progress.filter((e) => e.kind === "halted").map((e) => e.code)).toEqual(["stopped"]);

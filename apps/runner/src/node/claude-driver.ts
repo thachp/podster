@@ -123,6 +123,9 @@ export const KEYCHAIN_MACH_SERVICES: readonly string[] = Object.freeze([
   "com.apple.security.agent",
   "com.apple.security.authhost",
   "com.apple.security.keychainsyncingoverIDSproxy",
+  "com.apple.security.cloudkeychainproxy3",
+  // CryptoTokenKit's daemon, through which smart-card and token keychains are reached.
+  "com.apple.ctkd",
 ]);
 
 /**
@@ -130,34 +133,59 @@ export const KEYCHAIN_MACH_SERVICES: readonly string[] = Object.freeze([
  * started but Claude Code's own binary, the login keychain files can't be read or written, and the keychain's Mach
  * services can't be looked up. Later rules win.
  */
-export function sandboxProfile(command: string, ownerHome: string): string {
+export function sandboxProfile(command: string, ownerHome: string, opts: { allowSecurity?: boolean } = {}): string {
   return [
     "(version 1)",
     "(allow default)",
     "(deny process-exec)",
     `(allow process-exec (literal ${sbplString(command)}))`,
+    // The preflight's variant only (re-review 2 item 1): lets `security` start, so its keychain reads test the Mach deny.
+    ...(opts.allowSecurity === true ? ['(allow process-exec (literal "/usr/bin/security"))'] : []),
     `(deny file-read* file-write* (subpath ${sbplString(join(ownerHome, "Library", "Keychains"))}))`,
     `(deny mach-lookup ${KEYCHAIN_MACH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`,
   ].join("\n");
 }
 
-/** Runs a fixed program; its exit code only. */
-export type PreflightRun = (program: string, args: string[]) => Promise<{ code: number }>;
-export type Preflight = { ok: boolean; shell_denied: boolean; security_denied: boolean; claude_ran: boolean };
+/** Runs a fixed program; its exit code and, for telling errors apart, its standard error. */
+export type PreflightRun = (program: string, args: string[]) => Promise<{ code: number; stderr?: string }>;
+export type Preflight = { ok: boolean; shell_denied: boolean; security_denied: boolean; claude_ran: boolean; keychain_closed: boolean; keychain_open: boolean };
+
+/** The service name the preflight looks for: one that doesn't exist, so a reachable keychain answers "not found". */
+export const PREFLIGHT_MISSING_ITEM = "podster-preflight-nonexistent";
+
+/** sandbox-exec's own refusal to start a program: exit 71 (EX_OSERR), or its execvp message. */
+const execDenied = (r: { code: number; stderr?: string }) => r.code === 71 || /sandbox-exec: execvp\(\)/.test(r.stderr ?? "");
 
 /**
  * The sandbox's own preflight (re-review item 3c), under exactly the profile the run uses: a shell must fail to start,
- * the `security` tool must fail to list keychains, and Claude Code's `--version` must work. Otherwise the sandbox's
- * result is invalid.
+ * the `security` tool must fail to start, and Claude Code's `--version` must work.
+ *
+ * Then the Mach deny, isolated (re-review 2 item 1): under a variant that differs only by letting `/usr/bin/security`
+ * start, `security list-keychains` and `security find-generic-password -s podster-preflight-nonexistent` must both
+ * fail with an error that isn't the exec deny. Either succeeding, or the lookup answering "not found" (exit 44), means
+ * the keychain was reached, so the Mach deny isn't working (`keychain_open`). Only read commands run, against a name
+ * that doesn't exist; nothing is ever written. Which errors a denied lookup gives is confirmed only by the real run.
  */
 export async function sandboxPreflight(command: string, ownerHome: string, run: PreflightRun): Promise<Preflight> {
   const profile = sandboxProfile(command, ownerHome);
-  const under = (target: string, ...args: string[]) => run(SANDBOX_EXEC, ["-p", profile, target, ...args]).then((r) => r.code, () => -1);
-  const shell = await under("/bin/sh", "-c", "true");
-  const security = await under("/usr/bin/security", "list-keychains");
-  const claude = await under(command, "--version");
-  const result = { shell_denied: shell !== 0, security_denied: security !== 0, claude_ran: claude === 0 };
-  return { ok: result.shell_denied && result.security_denied && result.claude_ran, ...result };
+  const variant = sandboxProfile(command, ownerHome, { allowSecurity: true });
+  const under = (p: string, target: string, ...args: string[]) => run(SANDBOX_EXEC, ["-p", p, target, ...args]).catch(() => ({ code: -1, stderr: "" }));
+  const shell = await under(profile, "/bin/sh", "-c", "true");
+  const security = await under(profile, "/usr/bin/security", "list-keychains");
+  const claude = await under(profile, command, "--version");
+  const list = await under(variant, "/usr/bin/security", "list-keychains");
+  const find = await under(variant, "/usr/bin/security", "find-generic-password", "-s", PREFLIGHT_MISSING_ITEM);
+  const listOpen = list.code === 0;
+  const findOpen = find.code === 0 || find.code === 44 || /could not be found/i.test(find.stderr ?? "");
+  const closed = (r: { code: number; stderr?: string }, open: boolean) => !open && r.code !== 0 && !execDenied(r);
+  const result = {
+    shell_denied: shell.code !== 0,
+    security_denied: security.code !== 0,
+    claude_ran: claude.code === 0,
+    keychain_closed: closed(list, listOpen) && closed(find, findOpen),
+    keychain_open: listOpen || findOpen,
+  };
+  return { ok: result.shell_denied && result.security_denied && result.claude_ran && result.keychain_closed, ...result };
 }
 
 /** The pinned SDK's bundled Claude Code for this machine. */
@@ -346,6 +374,11 @@ export class ClaudeDriver implements AgentDriver {
   private readonly live = new Map<string, Live>();
   private preflight: Promise<Preflight> | null = null;
 
+  /** What this driver runs as, for the engine's caller and tests. */
+  get settings(): { bare: boolean; mac_sandbox: boolean } {
+    return { bare: this.deps.bare === true, mac_sandbox: this.deps.macSandbox === true };
+  }
+
   private ownerHome() {
     return this.deps.ownerHome ?? userInfo().homedir;
   }
@@ -500,6 +533,7 @@ export class ClaudeDriver implements AgentDriver {
         this.preflight ??= sandboxPreflight(this.sandboxBinary(), this.ownerHome(), this.deps.preflightRun ?? runForCode);
         const pf = await this.preflight;
         this.deps.observe?.({ kind: "preflight", run_ref: ref, ...pf });
+        if (pf.keychain_open) throw new Error("sandbox_keychain_open");
         if (!pf.ok) throw new Error("sandbox_preflight_failed");
       }
       try {
@@ -703,12 +737,16 @@ const psRows = (args: string[]) => run("/bin/ps", args);
 /** The sandbox preflight's runner: a fixed program from an argument array, its exit code, bounded to 30 seconds. */
 const runForCode: PreflightRun = (program, args) =>
   new Promise((resolve) => {
-    const child = nodeSpawn(program, args, { env: childEnv({ LC_ALL: "C" }), stdio: ["ignore", "ignore", "ignore"], shell: false });
+    const child = nodeSpawn(program, args, { env: childEnv({ LC_ALL: "C" }), stdio: ["ignore", "ignore", "pipe"], shell: false });
+    let stderr = "";
+    child.stderr.on("data", (d: Buffer) => {
+      if (stderr.length < 4096) stderr += d.toString("utf8");
+    });
     const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
-    child.on("error", () => resolve({ code: -1 }));
+    child.on("error", () => resolve({ code: -1, stderr: "" }));
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1 });
+      resolve({ code: code ?? -1, stderr });
     });
   });
 

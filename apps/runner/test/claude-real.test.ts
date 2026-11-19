@@ -7,7 +7,7 @@
 //     npx vitest run --config vitest.real.config.ts
 //
 // What it spends: each run's spend cap is enforced by Runner's broker, which refuses any request whose worst case
-// would pass it, so the most it can spend is the sum of the caps, REAL_SPEND_CEILING_MICRO_USD (0.35 USD), on
+// would pass it, so the most it can spend is the sum of the caps, REAL_SPEND_CEILING_MICRO_USD (0.326 USD), on
 // claude-haiku-5-5. It also builds Runner's task image (apps/runner/sandbox), which fetches pinned Debian packages.
 //
 // Each scenario runs twice: Claude Code as configured by default, and in bare mode (CLAUDE_CODE_SIMPLE=1, M1e), and
@@ -46,6 +46,7 @@ import { ClaudeDriver, type DriverObservation } from "../src/node/claude-driver.
 import { installedClaudeVersions, readKeyFile } from "../src/node/claude-engine.js";
 import { DockerSandbox, dockerCli, dockerHost, findDocker, type DockerCli } from "../src/node/docker-sandbox.js";
 import { ProviderKeyTransport } from "../src/node/provider-transport.js";
+import { ensureFolder } from "../src/node/safe-fs.js";
 
 const OPTED_IN = process.env.RUNNER_REAL_RUN === "1" && !!process.env.RUNNER_REAL_KEY_FILE;
 const KEY_FILE = process.env.RUNNER_REAL_KEY_FILE;
@@ -53,11 +54,12 @@ const KEY_FILE = process.env.RUNNER_REAL_KEY_FILE;
 const DOCKER = OPTED_IN ? findDocker() : null;
 
 type Mode = "default" | "bare" | "sandbox";
-// The spend scenario's cap is large enough that several requests go before the broker's worst-case refusal stops it,
-// so it actually spends and its stop against the cap is measured (re-review item 4).
-const CAPS = { enforcement: 30_000, isolation: 30_000, expansion: 20_000, spend: 20_000, turns: 30_000, run_time: 30_000 };
+// The spend scenario's cap lets several requests go before the broker's worst-case refusal stops it, and is low
+// enough to trip well within its 60 turns, so it actually spends and its stop against the cap is measured (re-review
+// item 4; re-review 2 item 3). Its a.txt exists first, so each read succeeds and the model keeps going.
+const CAPS = { enforcement: 30_000, isolation: 30_000, expansion: 20_000, spend: 8_000, turns: 30_000, run_time: 30_000 };
 const PER_MODE = Object.values(CAPS).reduce((a, b) => a + b, 0);
-/** Every scenario in default and bare mode, and the enforcement scenario under the sandbox wrapper: 0.35 USD. */
+/** Every scenario in default and bare mode, and the enforcement scenario under the sandbox wrapper: 0.326 USD. */
 export const REAL_SPEND_CEILING_MICRO_USD = PER_MODE * 2 + CAPS.enforcement;
 
 type RunRecord = { mode: Mode; scenario: string; status: string; stop_reason: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; children: string[] };
@@ -75,7 +77,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
   const s44Results: S44[] = [];
 
   beforeAll(async () => {
-    expect(REAL_SPEND_CEILING_MICRO_USD).toBe(350_000);
+    expect(REAL_SPEND_CEILING_MICRO_USD).toBe(326_000);
     base = await mkdtemp(join(tmpdir(), "runner-real-"));
     home = join(base, "home");
     await mkdir(home, { mode: 0o700 });
@@ -147,7 +149,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     })();
   }
 
-  async function run(mode: Mode, name: keyof typeof CAPS, prompt: string, over: { tools?: Tool[]; turns?: number; run_time_ms?: number } = {}) {
+  async function run(mode: Mode, name: keyof typeof CAPS, prompt: string, over: { tools?: Tool[]; turns?: number; run_time_ms?: number; setup?: (folder: string) => Promise<void> } = {}) {
     const root = join(base, "workspaces");
     const tools = over.tools ?? ["read", "write"];
     const facts: RunFacts = {
@@ -167,6 +169,10 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       requester: "per_Owner@org_real",
       authors: [{ input: "title", authors: ["per_Owner@org_real"] }],
     };
+    if (over.setup) {
+      await ensureFolder(root, facts.task_folder, { makeRoot: true });
+      await over.setup(facts.task_folder);
+    }
     const observations: DriverObservation[] = [];
     let claudePid: number | null = null;
     const driver = new ClaudeDriver({
@@ -274,7 +280,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       }, 180_000);
 
       it("(b) stops spend at the cap, never past it", async () => {
-        const r = await run(mode, "spend", "Read a.txt fifty times, one call at a time, then finish.", { turns: 60 });
+        const r = await run(mode, "spend", "Read a.txt fifty times, one call at a time, then finish.", { turns: 60, setup: (folder) => writeFile(join(folder, "a.txt"), "a line to read\n") });
         expect(r.report.status).toBe("budget_stopped");
         expect(r.report.stop_reason).toBe("spend_cap");
         // It actually spent, over more than one request, and stopped at or under the cap (measured in the summary).

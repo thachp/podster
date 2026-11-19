@@ -8,6 +8,9 @@
  * - Runner's task image is pinned: `task-image` in Runner's home names an image ID (`sha256:…`);
  * - `docker` is installed in a fixed place;
  * - no proxy would be taken from the environment.
+ * It runs exactly what was verified (re-review 2 item 2): Claude Code always in bare mode, and on macOS always under
+ * the `sandbox-exec` wrapper with its preflight. Any other system is refused (`platform_unverified`) until S-47's
+ * Linux run exists.
  * Then it reaps (M4 on #459): every container of this home, and every Claude Code group a previous process left, go
  * before the lifecycle opens and confirms any stop.
  *
@@ -67,8 +70,10 @@ export async function taskImage(home: string): Promise<string> {
 
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
-export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; env?: NodeJS.ProcessEnv; execArgv?: readonly string[] }): Promise<ClaudeEngine> {
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log });
+export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform }): Promise<ClaudeEngine> {
+  const platform = opts.platform ?? process.platform;
+  if (platform !== "darwin") throw new Error("platform_unverified: Runner runs tasks only on macOS, under its sandbox, until its checks have run on this system.");
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: true, macSandbox: true, platform });
   const key = await readKeyFile(opts.key_file);
   const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key, { env: opts.env, execArgv: opts.execArgv });
   const image = await taskImage(opts.home);

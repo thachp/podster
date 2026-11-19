@@ -763,8 +763,9 @@ describe("the step 9(b) sources", () => {
 
   it("never reach the keychain, D-Bus or the security tool from the driver, the container, the listener or the transport", async () => {
     for (const file of ["src/node/claude-driver.ts", "src/node/docker-sandbox.ts", "src/node/broker-listener.ts", "src/node/provider-transport.ts", "src/node/claude-engine.ts", "src/node/safe-fs.ts"]) {
-      // The sandbox preflight names `security` once, as a program that must FAIL to run under the profile (re-review 3c).
-      const text = (await code(file)).replace('under("/usr/bin/security", "list-keychains")', "");
+      // The sandbox preflight names `security` only as a program run under the profile, which must fail to start, or
+      // start under the variant and fail to reach the keychain (re-review 3c; re-review 2 item 1).
+      const text = (await code(file)).replace(/under\((profile|variant), "\/usr\/bin\/security"/g, "").replace(`'(allow process-exec (literal "/usr/bin/security"))'`, "");
       expect([file, /keychain\.js|\/usr\/bin\/security|secret-tool|RunnerStorage|DBUS_SESSION_BUS_ADDRESS\s*[:=]/i.test(text)]).toEqual([file, false]);
     }
   });
@@ -1290,13 +1291,13 @@ describe("the reviewer's untested paths", () => {
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : {}));
-    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [] });
+    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [], platform: "darwin" });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
     await engine.reap();
     expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
-    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [] })).rejects.toThrow();
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [], platform: "darwin" })).rejects.toThrow();
   });
 });
 
@@ -1358,23 +1359,22 @@ describe("re-review item 3: the macOS sandbox", () => {
   it("(c) runs a preflight under the same profile: sh and security must fail, Claude Code's --version must work", async () => {
     const { sandboxPreflight, sandboxProfile, SANDBOX_EXEC } = await import("../src/node/claude-driver.js");
     const calls: { program: string; args: string[] }[] = [];
-    const run = (codes: { sh: number; security: number; claude: number }) => async (program: string, args: string[]) => {
-      calls.push({ program, args });
-      const target = args[2];
-      return { code: target === "/bin/sh" ? codes.sh : target === "/usr/bin/security" ? codes.security : codes.claude };
-    };
-    expect(await sandboxPreflight("/sdk/claude", "/Users/owner", run({ sh: 1, security: 1, claude: 0 }))).toEqual({ ok: true, shell_denied: true, security_denied: true, claude_ran: true });
+    const run = good(calls);
+    expect(await sandboxPreflight("/sdk/claude", "/Users/owner", run)).toMatchObject({ ok: true, shell_denied: true, security_denied: true, claude_ran: true, keychain_closed: true, keychain_open: false });
     const profile = sandboxProfile("/sdk/claude", "/Users/owner");
+    const variant = sandboxProfile("/sdk/claude", "/Users/owner", { allowSecurity: true });
     expect(calls.map((c) => [c.program, ...c.args])).toEqual([
       [SANDBOX_EXEC, "-p", profile, "/bin/sh", "-c", "true"],
       [SANDBOX_EXEC, "-p", profile, "/usr/bin/security", "list-keychains"],
       [SANDBOX_EXEC, "-p", profile, "/sdk/claude", "--version"],
+      [SANDBOX_EXEC, "-p", variant, "/usr/bin/security", "list-keychains"],
+      [SANDBOX_EXEC, "-p", variant, "/usr/bin/security", "find-generic-password", "-s", "podster-preflight-nonexistent"],
     ]);
-    for (const codes of [{ sh: 0, security: 1, claude: 0 }, { sh: 1, security: 0, claude: 0 }, { sh: 1, security: 1, claude: 1 }]) expect((await sandboxPreflight("/sdk/claude", "/Users/owner", run(codes))).ok).toBe(false);
+    for (const over of [{ sh: { code: 0 } }, { security: { code: 0 } }, { claude: { code: 1 } }]) expect((await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over))).ok).toBe(false);
   });
 
   it("(c) the driver refuses to start Claude Code under a sandbox whose preflight fails", async () => {
-    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async () => ({ code: 0 }) });
+    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: good([], { sh: { code: 0 } }) });
     const run = await t.driver.begin(session().s);
     await expect(run.done).rejects.toThrow(/sandbox_preflight_failed/);
     expect(t.procs.spawned).toEqual([]);
@@ -1443,15 +1443,116 @@ describe("re-review item 5 (M2 lows)", () => {
 });
 
 describe("re-review items 2, 4 and 6: the real run as redesigned", () => {
-  it("settles S-44 on four conditions, spends in its spend scenario, and has a ceiling of 0.35 USD", async () => {
+  it("settles S-44 on four conditions and spends in its spend scenario", async () => {
     const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
-    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(350_000\)/);
-    expect(real).toMatch(/spend: 20_000/);
     expect(real).toMatch(/plugins_empty/);
     expect(real).toMatch(/no_hook_events/);
     expect(real).toMatch(/callback_ran/);
     expect(real).toMatch(/no_child_process/);
     expect(real).toMatch(/exec_denied/);
     expect(real).toMatch(/spent_micro_usd \?\? 0\)\.toBeGreaterThan\(0\)/);
+  });
+});
+
+// ---- The re-review of #460 at 45eebb9f: before the real run ----
+
+const EXEC_DENIED = { code: 71, stderr: "sandbox-exec: execvp() of '/usr/bin/security' failed: Operation not permitted" };
+type Outcome = { code: number; stderr?: string };
+/** A preflight's programs as a sandbox that holds would answer them; `over` changes one answer. */
+function good(calls: { program: string; args: string[] }[], over: Partial<Record<"sh" | "security" | "claude" | "list" | "find", Outcome>> = {}) {
+  return async (program: string, args: string[]) => {
+    calls.push({ program, args });
+    const variant = args[1].includes('(allow process-exec (literal "/usr/bin/security"))');
+    const target = args[2];
+    if (target === "/bin/sh") return over.sh ?? { code: 71, stderr: "sandbox-exec: execvp() of '/bin/sh' failed: Operation not permitted" };
+    if (target === "/usr/bin/security" && !variant) return over.security ?? EXEC_DENIED;
+    if (target === "/usr/bin/security" && args[3] === "list-keychains") return over.list ?? { code: 1, stderr: "security: SecKeychainCopySearchList: Connection invalid" };
+    if (target === "/usr/bin/security") return over.find ?? { code: 1, stderr: "security: SecKeychainSearchCopyNext: Connection invalid" };
+    return over.claude ?? { code: 0, stderr: "" };
+  };
+}
+
+describe("re-review 2 item 1: the Mach deny, isolated", () => {
+  it("denies ctkd and the cloud keychain proxy too", async () => {
+    const { KEYCHAIN_MACH_SERVICES } = await import("../src/node/claude-driver.js");
+    expect(KEYCHAIN_MACH_SERVICES).toContain("com.apple.ctkd");
+    expect(KEYCHAIN_MACH_SERVICES).toContain("com.apple.security.cloudkeychainproxy3");
+  });
+
+  it("has a variant profile identical but for one rule allowing /usr/bin/security to start", async () => {
+    const { sandboxProfile } = await import("../src/node/claude-driver.js");
+    const base = sandboxProfile("/sdk/claude", "/Users/owner");
+    const variant = sandboxProfile("/sdk/claude", "/Users/owner", { allowSecurity: true });
+    const extra = variant.split("\n").filter((line) => !base.split("\n").includes(line));
+    expect(extra).toEqual(['(allow process-exec (literal "/usr/bin/security"))']);
+    expect(base.split("\n").every((line) => variant.split("\n").includes(line))).toBe(true);
+    expect(base).not.toContain('(allow process-exec (literal "/usr/bin/security"))');
+  });
+
+  it("reads the keychain as open when security succeeds, or reaches it and finds no item, under the variant", async () => {
+    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
+    for (const over of [{ list: { code: 0, stderr: "" } }, { find: { code: 44, stderr: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." } }, { find: { code: 0 } }]) {
+      const r = await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over));
+      expect([over, r.ok, r.keychain_open]).toEqual([over, false, true]);
+    }
+  });
+
+  it("treats an exec deny under the variant as an invalid preflight, not a closed keychain", async () => {
+    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
+    for (const over of [{ list: EXEC_DENIED }, { find: EXEC_DENIED }]) {
+      const r = await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over));
+      expect([r.ok, r.keychain_closed, r.keychain_open]).toEqual([false, false, false]);
+    }
+  });
+
+  it("runs only security's read commands, against a name that doesn't exist", async () => {
+    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
+    const calls: { program: string; args: string[] }[] = [];
+    await sandboxPreflight("/sdk/claude", "/Users/owner", good(calls));
+    const security = calls.filter((c) => c.args[2] === "/usr/bin/security").map((c) => c.args.slice(3));
+    for (const args of security) expect(["list-keychains", "find-generic-password"]).toContain(args[0]);
+    expect(security.filter((a) => a[0] === "find-generic-password")).toEqual([["find-generic-password", "-s", "podster-preflight-nonexistent"]]);
+    expect(JSON.stringify(security)).not.toMatch(/add-|delete-|set-|create-|import|unlock|-w\b|-g\b/);
+  });
+
+  it("the driver fails the run with sandbox_keychain_open when the keychain answers under the variant", async () => {
+    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: good([], { list: { code: 0 } }) });
+    await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/sandbox_keychain_open/);
+    expect(t.procs.spawned).toEqual([]);
+  });
+});
+
+describe("re-review 2 item 2: production runs what is verified", () => {
+  async function engineFor(platform: NodeJS.Platform) {
+    const { claudeEngine } = await import("../src/node/claude-engine.js");
+    const home = await temp();
+    await chmod(home, 0o700);
+    const keyFile = join(home, "fake.key");
+    await writeFile(keyFile, KEY, { mode: 0o600 });
+    await writeFile(join(home, "task-image"), IMAGE);
+    const { docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
+    return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [], platform });
+  }
+
+  it("on darwin, always bare mode and always the sandbox", async () => {
+    const engine = await engineFor("darwin");
+    expect((engine.drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, mac_sandbox: true });
+  });
+
+  it("anywhere else, refuses to start with platform_unverified until S-47's Linux run exists", async () => {
+    await expect(engineFor("linux")).rejects.toThrow(/platform_unverified/);
+    await expect(engineFor("freebsd")).rejects.toThrow(/platform_unverified/);
+  });
+});
+
+describe("re-review 2 item 3: the spend scenario reaches its cap", () => {
+  it("makes a.txt first, caps spend near 8,000 µUSD, keeps its asserts, and the ceiling is 0.326 USD", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/spend: 8_000/);
+    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(326_000\)/);
+    expect(real).toMatch(/writeFile\(join\(folder, "a\.txt"\)/);
+    expect(real).toMatch(/spent_micro_usd \?\? 0\)\.toBeGreaterThan\(0\)/);
+    expect(real).toMatch(/requests \?\? 0\)\.toBeGreaterThan\(1\)/);
+    expect(real).toMatch(/overshoot_micro_usd/);
   });
 });

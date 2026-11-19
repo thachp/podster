@@ -3,7 +3,7 @@ name: Runner pre-release
 # Runner's npm test pre-release (the owner's decision of 2026-11-19, narrowing decision 26): the package `podster`, versioned
 # 0.0.x-test.N, published only under npm's `test` tag (npm may also point `latest` at the first version), pointing at
 # staging. It is built and published only here, by hand, from main, with npm provenance through npm's trusted publishing
-# (OIDC), so there is no npm token secret. The gated release
+# (OIDC), so there is no npm token secret. Each version is staged, and the owner approves it on npmjs.com. The gated release
 # after M7's step 17 replaces it. The owner's steps on npmjs.com and GitHub are in docs/runner-prerelease.md.
 #
 # Two jobs (security review L1 on #470). `build` holds no OIDC token and no environment: it installs with scripts off, checks,
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "The version in apps/runner/package.json, such as 0.0.1-test.1"
+        description: "The version in apps/runner/package.json, such as 0.0.1-test.2"
         required: true
         type: string
       dry_run:
@@ -137,7 +137,10 @@ jobs:
           name: podster-${{ inputs.version }}
           path: ${{ runner.temp }}/pack
       # The same file build packed, by its SHA-256. Publishing a .tgz runs none of its scripts.
-      - name: Publish the checked .tgz to npm's test tag
+      # Staged, not published (2026-11-19): the trusted publisher was added with npm's "Allow npm publish" off, so it may
+      # only `npm stage publish` (npm 11.15.0 or later). The version goes live, under the tag given here, only when the owner
+      # approves it on npmjs.com with 2FA. See docs/runner-prerelease.md.
+      - name: Stage the checked .tgz under npm's test tag
         working-directory: ${{ runner.temp }}/pack
         env:
           FILE: ${{ needs.build.outputs.file }}
@@ -146,4 +149,4 @@ jobs:
           printf '%s' "$FILE" | grep -Eq '^podster-0\.0\.[0-9]+-test\.[0-9]+\.tgz$'
           printf '%s' "$SHA256" | grep -Eq '^[0-9a-f]{64}$'
           echo "$SHA256  $FILE" | sha256sum --check --strict
-          npm publish "./$FILE" --provenance --tag test --access public
+          npm stage publish "./$FILE" --provenance --tag test --access public

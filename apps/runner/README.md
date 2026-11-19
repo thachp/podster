@@ -94,4 +94,4 @@ A WSL2 distro usually has no Secret Service, so Runner uses its file store there
 
 ## Where it comes from
 
-Each version is built and published by the `runner-prerelease` workflow on `main` of `github.com/thachp/podster`, with npm provenance. The one possible exception is the first, `0.0.1-test.1`, which the owner may publish once from that workflow's own build, without provenance (see `docs/runner-prerelease.md` in the repository). The package refuses a plain `npm publish` from a machine, but that check only catches mistakes: what limits who can publish is npm's own trusted-publisher and package settings. MIT licensed.
+Each version is built and published by the `runner-prerelease` workflow on `main` of `github.com/thachp/podster`, with npm provenance. The one exception is the first, `0.0.1-test.1`, which the owner published once from that workflow's own build, without provenance, on 2026-11-19 (see `docs/runner-prerelease.md` in the repository). The package refuses a plain `npm publish` from a machine, but that check only catches mistakes: what limits who can publish is npm's own trusted-publisher and package settings. MIT licensed.

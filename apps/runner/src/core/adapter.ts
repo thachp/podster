@@ -1,7 +1,7 @@
 /**
- * What the lifecycle (M7 step 8) needs from a run's adapter. Step 9 builds the interface's real implementations (the
- * provider-neutral interface and the Claude Agent SDK adapter); until then only tests implement it, and Runner's command
- * line starts no run.
+ * What the lifecycle (M7 step 8) needs from a run's adapter. Step 9(a) implements it once, provider-neutral, as
+ * `SupervisedAdapter` (`run-interface.ts`), over a driver for each agent SDK; step 9(b) adds the Claude Agent SDK driver.
+ * Until a driver exists, Runner's command line opens no lifecycle and starts no run (`src/node/run-command.ts`).
  *
  * - `start` is handed the prompt's bytes (untrusted task text, for the adapter to mark so), the policy's facts, which it
  *   enforces, and a run ID Runner chose and stored first, so a restart can ask about the run by it.
@@ -13,9 +13,14 @@
  * and a spend it doesn't report counts as the whole reservation.
  */
 import type { RunFacts } from "./policy.js";
+import type { RunResult } from "./tool-policy.js";
 
 export type RunStatus = "succeeded" | "failed" | "budget_stopped" | "timed_out";
-export type RunReport = { status: RunStatus; spent_micro_usd: number | null };
+/**
+ * `result` is the run's structured result, bounded, present only on a success; step 11 submits it. It is the agent's
+ * content: data, never logged. `stop_reason` is Runner's own code for why the run ended, when Runner ended it.
+ */
+export type RunReport = { status: RunStatus; spent_micro_usd: number | null; result?: RunResult | null; stop_reason?: string | null };
 export type StopResult = "stopped" | "unknown";
 
 export interface RunHandle {

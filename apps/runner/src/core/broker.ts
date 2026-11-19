@@ -1,0 +1,228 @@
+/**
+ * Runner's provider broker, its pure part (M7 step 9(a); the architect's rulings 3 and 5 on spike B). The hard stop for
+ * spend, turns and output tokens lives here, not in any SDK (S-37, S-42):
+ *
+ * - **A fixed upstream.** A request goes only to the URL built from the provider profile's fixed parts, in the adapter's
+ *   own code. Nothing is copied from the request: not its host, path, query or headers. It must name the profile's one
+ *   path, with no query, by POST.
+ * - **`max_tokens` is rewritten on every request** to the run's bound, and never above what's left of the run's output
+ *   tokens. The body is parsed and written again, so a duplicate key can't carry another value past the rewrite.
+ * - **The worst case is reserved before a request goes.** Each body byte counts as an input token at the dearest input
+ *   price, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
+ *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
+ * - **A model with no price is refused,** never counted as free. A run's model list is checked against the price table
+ *   when the broker is made.
+ * - **Turns** are model requests: exactly the cap's number go, and the next is refused.
+ * - A refusal for spend, turns or output tokens is a hard stop: the run is cancelled (`run-interface.ts`).
+ *
+ * What it counts is Runner's own running total. Usage the provider reports is priced here; a request whose usage never
+ * arrives, or can't be read, counts its whole worst case. An SDK's own spend figure is never read.
+ *
+ * Pure: no clock, no network, no randomness. Step 9(b) feeds it from a loopback listener and forwards through a transport
+ * that adds the owner's key, outside the task's container. Logs and refusals carry codes only.
+ */
+
+/** Micro-USD per million tokens, as integers. */
+export type Price = { input: number; output: number; cache_write: number; cache_read: number };
+
+/** A provider, as an adapter's code fixes it. Never read from configuration, the task or Podster. */
+export type ProviderProfile = {
+  provider: string;
+  /** The upstream's host name, without scheme, port, user or path. */
+  host: string;
+  /** The one path requests may name, and the one they're sent to. */
+  path: string;
+  /** Headers every forwarded request carries; the transport adds the key. */
+  headers: Record<string, string>;
+  prices: Record<string, Price>;
+};
+
+export type BrokerCaps = { spend_micro_usd: number; turns: number; output_tokens: number; max_tokens: number };
+
+/** What the listener hands in: no headers at all, since none is ever forwarded. */
+export type BrokerRequest = { method: string; path: string; query: string; body: Uint8Array };
+
+export type Forward = { request_id: string; url: string; headers: Record<string, string>; body: Uint8Array; max_tokens: number; worst_micro_usd: number };
+
+export type BrokerRefusal =
+  | "method_not_allowed"
+  | "path_not_allowed"
+  | "query_not_allowed"
+  | "body_too_large"
+  | "body_invalid"
+  | "model_not_allowed"
+  | "model_unpriced"
+  | "turns_exhausted"
+  | "output_tokens_exhausted"
+  | "spend_cap"
+  | "run_stopped";
+
+/** Refusals that end the run. */
+export type HardStop = "turns_exhausted" | "output_tokens_exhausted" | "spend_cap";
+const HARD: ReadonlySet<BrokerRefusal> = new Set<BrokerRefusal>(["turns_exhausted", "output_tokens_exhausted", "spend_cap"]);
+
+export type Admission = { ok: true; forward: Forward } | { ok: false; reason: BrokerRefusal; hard_stop: boolean };
+
+export type Usage = { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
+
+/** The largest request body taken: far above a run's needs, and bounded so a body can't exhaust Runner. */
+export const MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/;
+const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const isCap = (v: unknown): v is number => isCount(v) && v > 0;
+
+function checkProfile(profile: ProviderProfile) {
+  const labels = profile.host.split(".");
+  if (profile.host.length > 253 || labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l))) throw new Error("the provider profile's host isn't a plain host name");
+  if (!PATH.test(profile.path) || profile.path.split("/").some((s) => s === "." || s === "..")) throw new Error("the provider profile's path isn't a plain path");
+  for (const [model, price] of Object.entries(profile.prices)) {
+    if (!MODEL.test(model)) throw new Error("the provider profile names a model Runner can't take");
+    if (![price.input, price.output, price.cache_write, price.cache_read].every(isCount)) throw new Error("the provider profile has a price that isn't a whole number of micro-USD");
+  }
+}
+
+/** The one URL a request is forwarded to, from the profile's fixed parts. */
+export function upstreamUrl(profile: ProviderProfile): string {
+  checkProfile(profile);
+  return `https://${profile.host}${profile.path}`;
+}
+
+const priced = (tokens: number, perMillion: number) => Math.ceil((tokens * perMillion) / 1_000_000);
+
+/** What usage costs, rounded up. */
+export function costOf(price: Price, usage: Usage): number {
+  return priced(usage.input_tokens, price.input) + priced(usage.output_tokens, price.output) + priced(usage.cache_creation_input_tokens, price.cache_write) + priced(usage.cache_read_input_tokens, price.cache_read);
+}
+
+/** The most a request can cost: each body byte as an input token at the dearest input price, and all of `max_tokens`. */
+export function worstCaseOf(price: Price, bodyBytes: number, maxTokens: number): number {
+  return priced(bodyBytes, Math.max(price.input, price.cache_write, price.cache_read)) + priced(maxTokens, price.output);
+}
+
+function usageOf(v: unknown): Usage | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const u = v as Record<string, unknown>;
+  const input = u.input_tokens;
+  const output = u.output_tokens;
+  const write = u.cache_creation_input_tokens ?? 0;
+  const read = u.cache_read_input_tokens ?? 0;
+  if (!isCount(input) || !isCount(output) || !isCount(write) || !isCount(read)) return null;
+  return { input_tokens: input, output_tokens: output, cache_creation_input_tokens: write, cache_read_input_tokens: read };
+}
+
+type InFlight = { worst: number; max_tokens: number; price: Price };
+
+/** One run's broker: its caps, its allowed models, and its running total. */
+export class RunBroker {
+  private readonly profile: ProviderProfile;
+  private readonly caps: BrokerCaps;
+  private readonly models: ReadonlySet<string>;
+  private readonly url: string;
+  private spent = 0;
+  private outputUsed = 0;
+  private turns = 0;
+  private next = 0;
+  private closed = false;
+  private readonly inFlight = new Map<string, InFlight>();
+
+  constructor(profile: ProviderProfile, caps: BrokerCaps, models: readonly string[]) {
+    this.url = upstreamUrl(profile);
+    if (!isCap(caps.spend_micro_usd) || !isCap(caps.turns) || !isCap(caps.output_tokens) || !isCap(caps.max_tokens)) throw new Error("a run's caps must each be set, as a positive whole number");
+    for (const model of models) if (!Object.hasOwn(profile.prices, model)) throw new Error("a run's model has no price in the provider profile, so Runner won't allow it");
+    this.profile = profile;
+    this.caps = { ...caps };
+    this.models = new Set(models);
+  }
+
+  /** Spend counted so far, with every request in flight at its worst case; turns; output tokens; requests in flight. */
+  get totals(): { spent_micro_usd: number; turns: number; output_tokens: number; in_flight: number } {
+    let held = 0;
+    for (const f of this.inFlight.values()) held += f.worst;
+    return { spent_micro_usd: this.spent + held, turns: this.turns, output_tokens: this.outputUsed, in_flight: this.inFlight.size };
+  }
+
+  /** Refuses every later request. Requests in flight still settle, or count their worst case. */
+  close() {
+    this.closed = true;
+  }
+
+  admit(request: BrokerRequest): Admission {
+    const refuse = (reason: BrokerRefusal): Admission => ({ ok: false, reason, hard_stop: HARD.has(reason) });
+    if (this.closed) return refuse("run_stopped");
+    if (request.method !== "POST") return refuse("method_not_allowed");
+    if (request.path !== this.profile.path) return refuse("path_not_allowed");
+    if (request.query !== "") return refuse("query_not_allowed");
+    if (request.body.byteLength > MAX_BODY_BYTES) return refuse("body_too_large");
+    let body: unknown;
+    try {
+      body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(request.body));
+    } catch {
+      return refuse("body_invalid");
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return refuse("body_invalid");
+    const fields = body as Record<string, unknown>;
+    const model = fields.model;
+    if (typeof model !== "string") return refuse("body_invalid");
+    if (!Object.hasOwn(this.profile.prices, model)) return refuse("model_unpriced");
+    if (!this.models.has(model)) return refuse("model_not_allowed");
+
+    if (this.turns >= this.caps.turns) return refuse("turns_exhausted");
+    let heldOutput = 0;
+    let heldSpend = 0;
+    for (const f of this.inFlight.values()) {
+      heldOutput += f.max_tokens;
+      heldSpend += f.worst;
+    }
+    const outputLeft = this.caps.output_tokens - this.outputUsed - heldOutput;
+    const asked = fields.max_tokens;
+    const bound = Math.min(this.caps.max_tokens, outputLeft, isCap(asked) ? asked : Number.POSITIVE_INFINITY);
+    if (bound <= 0) return refuse("output_tokens_exhausted");
+
+    const rewritten = new TextEncoder().encode(JSON.stringify({ ...fields, max_tokens: bound }));
+    const worst = worstCaseOf(this.profile.prices[model], rewritten.byteLength, bound);
+    if (this.spent + heldSpend + worst > this.caps.spend_micro_usd) return refuse("spend_cap");
+
+    const request_id = `req_${++this.next}`;
+    this.turns++;
+    this.inFlight.set(request_id, { worst, max_tokens: bound, price: this.profile.prices[model] });
+    return { ok: true, forward: { request_id, url: this.url, headers: { ...this.profile.headers }, body: rewritten, max_tokens: bound, worst_micro_usd: worst } };
+  }
+
+  /**
+   * Counts what a forwarded request cost, from the provider's usage, and says whether a cap is now reached. Usage that
+   * can't be read counts the request's worst case. A request the broker didn't admit, or already counted, changes nothing.
+   */
+  settle(request_id: string, usage: unknown): { cap_reached: HardStop | null } {
+    const held = this.inFlight.get(request_id);
+    if (!held) return { cap_reached: this.reached() };
+    this.inFlight.delete(request_id);
+    const read = usageOf(usage);
+    if (read) {
+      this.spent += costOf(held.price, read);
+      this.outputUsed += read.output_tokens;
+    } else {
+      this.spent += held.worst;
+      this.outputUsed += held.max_tokens;
+    }
+    return { cap_reached: this.reached() };
+  }
+
+  /** A request whose usage never arrived (cut, failed or lost): its whole worst case counts. */
+  fail(request_id: string) {
+    const held = this.inFlight.get(request_id);
+    if (!held) return;
+    this.inFlight.delete(request_id);
+    this.spent += held.worst;
+    this.outputUsed += held.max_tokens;
+  }
+
+  private reached(): HardStop | null {
+    if (this.spent >= this.caps.spend_micro_usd) return "spend_cap";
+    if (this.outputUsed >= this.caps.output_tokens) return "output_tokens_exhausted";
+    return null;
+  }
+}

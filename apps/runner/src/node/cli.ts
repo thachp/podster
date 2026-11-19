@@ -12,8 +12,9 @@
  * standard output in fixed words; log lines, IDs only, go to standard error.
  *
  * `pair`, `run` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
- * runs. `run` still starts no task: the lifecycle (M7 step 8, `src/core/lifecycle.ts`) needs step 9's adapter, and until
- * it exists Runner accepts nothing it couldn't run.
+ * runs. `run` still starts no task: it is wired to the lifecycle and the run interface (`run-command.ts`), but this build
+ * has no run engine (`NO_ENGINE`) until step 9(b) adds the Claude Agent SDK's driver, so it opens no lifecycle and
+ * accepts nothing it couldn't run.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -29,6 +30,7 @@ import { readHidden } from "./hidden-input.js";
 import { systemKeychain } from "./keychain.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
+import { NO_ENGINE, processTerminal, runInbox } from "./run-command.js";
 
 const USAGE = `Podster Runner (M7 step 6: pairing and the inbox loop; it runs no task yet)
 
@@ -189,9 +191,12 @@ async function locked(command: string, args: string[], home: string, state: File
     // earlier Runner can't stop this one (L2 on #458).
     const unwatch = watchStop(home, nonce, () => stop.abort());
     say(`Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C or \`stop\`.`);
+    // No run engine in this build: `run` records offers and runs nothing (step 9(b) adds the Claude Agent SDK's driver).
+    const engine = NO_ENGINE;
+    if (engine === null) say("This Runner has no run adapter yet, so it records offers and accepts none.");
     let outcome;
     try {
-      outcome = await poller.run(stop.signal);
+      outcome = await runInbox({ home, poller, clock: systemClock, log, signal: stop.signal, terminal: processTerminal(), engine });
     } finally {
       unwatch();
       await clearStop(home);

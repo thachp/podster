@@ -7,7 +7,8 @@
  *   silence is never approval. Both standard input and standard output must be terminals, so `yes | runner run` approves
  *   nothing (L8 on #458).
  * - **What the owner sees is what the model gets** (L3 on #458). The words are shown exactly, except that every character
- *   that wouldn't show is written as a visible mark such as `⟨U+200B⟩`: control and format characters, Unicode tag
+ *   that wouldn't show is written as a visible mark such as `⟨U+200B⟩`, by Runner's one marking set (`markHidden`, the
+ *   same the submission's note uses): control and format characters, Unicode tag
  *   characters (U+E0000 to U+E007F), zero-width characters, every space but the plain one, line and paragraph separators,
  *   and unassigned, private-use and surrogate code points. Only a plain line feed breaks a line. Each line is fenced with
  *   `|` and wrapped to the terminal's width in columns (wide characters and emoji count two), with the fence on every
@@ -24,7 +25,7 @@
  * The words are written to this terminal only, never to a log.
  */
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
-import type { ResultView } from "../core/results.js";
+import { markHidden, type ResultView } from "../core/results.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -32,9 +33,6 @@ export const SHOWN_CHARS = 16_000;
 export const MAX_LINES = 400;
 const FENCE = "  | ";
 const MIN_WIDTH = 24;
-
-/** Characters shown as a mark: they wouldn't show, or (combining marks) would change the character before them. */
-const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Z}\p{Mn}\p{Me}]/u;
 
 /**
  * Code points a terminal shows two columns wide: East Asian Wide and Fullwidth characters and emoji, as a small built-in
@@ -71,19 +69,11 @@ export function columnsOf(cp: number): number {
 
 /** Columns a string takes on a terminal. */
 export const displayWidth = (text: string) => [...text].reduce((n, ch) => n + columnsOf(ch.codePointAt(0) as number), 0);
-const mark = (cp: number) => `⟨U+${cp.toString(16).toUpperCase().padStart(4, "0")}⟩`;
-
-/** The words with every character that wouldn't show written as a visible mark. Line feeds and plain spaces stay. */
-export function visible(text: string): string {
-  let out = "";
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) as number;
-    if (ch === "\n" || ch === " ") out += ch;
-    else if (INVISIBLE.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f)) out += mark(cp);
-    else out += ch;
-  }
-  return out;
-}
+/**
+ * The words with every character that wouldn't show written as a visible mark: Runner's one marking set, the same the
+ * submission's note uses (`markHidden`, review 4 on #465). Line feeds and plain spaces stay.
+ */
+export const visible = markHidden;
 
 /** Splits a line into pieces of at most `size` columns, never inside a mark. */
 function wrap(line: string, size: number): string[] {

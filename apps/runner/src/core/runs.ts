@@ -50,7 +50,8 @@ export type Published = { repository_id: string; branch: string; commit: string;
  *
  * - `sharing`: what may go to Podster of the agent's words, decided once, after the run: `pending` until then; `share`
  *   when the run's facts and the room's policy as it stands both allow it; `review` while it waits for the owner on this
- *   machine; then `approved` or `withheld`.
+ *   machine, since `held_since`; then `approved` or `withheld`. It is stored once decided, so every send, a replay
+ *   included, carries the same note.
  * - `key`: the submission's idempotency key, stored before it's first sent, with the SHA-256 of the note it was sent
  *   with: the same note is always sent with the same key, and a different one (the words lost at a restart) with a new
  *   one, so a replay never carries another body.
@@ -63,8 +64,10 @@ export type Submission = {
   note_hash: string | null;
   told_key: string | null;
   told: boolean;
+  /** When the words were first held for the owner's review; null until then. */
+  held_since: number | null;
 };
-export const owedSubmission = (): Submission => ({ state: "owed", sharing: "pending", key: null, note_hash: null, told_key: null, told: false });
+export const owedSubmission = (): Submission => ({ state: "owed", sharing: "pending", key: null, note_hash: null, told_key: null, told: false, held_since: null });
 
 export type RunEntry = {
   workspace_id: string;
@@ -239,7 +242,8 @@ export function checkRuns(v: unknown): string | null {
         !orNull(sub.key, (x) => isText(x, 128)) ||
         !orNull(sub.note_hash, (x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x)) ||
         !orNull(sub.told_key, (x) => isText(x, 128)) ||
-        typeof sub.told !== "boolean")
+        typeof sub.told !== "boolean" ||
+        !orNull(sub.held_since, isCount))
     )
       return `${at}.submission`;
     const give = e.give_up;

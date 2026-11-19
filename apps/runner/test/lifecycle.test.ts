@@ -4,7 +4,7 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
@@ -1193,7 +1193,7 @@ describe("step 11: results", () => {
     const note = String(sent[0].arguments.note);
     expect(note).toContain("Repository: none in this room");
     expect(note).toContain("Tests: not run by Runner");
-    expect(note).toContain(`--- the agent's words ---\n${RESULT.summary}\n--- files the agent named ---\n- src/build.ts\n--- end of the agent's words ---`);
+    expect(note).toContain(`--- the agent's words ---\n| ${RESULT.summary}\n--- files the agent named ---\n| - src/build.ts\n--- end of the agent's words ---`);
     expect(JSON.parse(onDisk).entries[`${ROOM}/tsk_one`].submission.key).toBe(sent[0].arguments.idempotency_key);
     expect(t.entry("tsk_one")).toMatchObject({ phase: "finished", outcome: "submitted", submission: { state: "submitted", sharing: "share" } });
     // No progress message for a result that may be shared, and no owner's review.
@@ -1339,6 +1339,72 @@ describe("step 11: results", () => {
     await t.pass();
     await t.pass();
     expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_one", reason: "submit_commit_changed" });
+  });
+
+  it("shows the owner exactly the cut words the note carries (review 4 on #465)", async () => {
+    const t = await setup();
+    // Within the result's 2,000 characters, but past the note's share once each no-break space is a mark.
+    const summary = `Line one\u202e\n${"\u00a0".repeat(1_980)}`;
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: { status: "completed", summary, files: ["src/build.ts"] } };
+    t.prompter.reviewAnswers = ["approve"];
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    const view = t.prompter.reviewed[0];
+    expect(view.summary).toContain("⟨cut by Runner⟩");
+    const note = String(t.commands("submit_task")[0]?.arguments.note);
+    const section = note.slice(note.indexOf("--- the agent's words ---\n") + 26, note.lastIndexOf("\n--- end of the agent's words ---")).split("\n");
+    const fenced = section.filter((l) => l !== "--- files the agent named ---").map((l) => l.replace(/^\| /, ""));
+    expect(fenced).toEqual([...view.summary.split("\n"), ...view.files.map((f) => `- ${f}`)]);
+  });
+
+  it("submits nothing once the task is another agent's, at the same version and inputs (review 5 on #465)", async () => {
+    const t = await setup(shareConfig());
+    const d = detail("tsk_one");
+    t.offer(d);
+    await t.pass();
+    d.task.assignee = "agt_another";
+    await t.pass();
+    expect(t.commands("submit_task")).toHaveLength(0);
+    expect(t.logged.map((l) => JSON.parse(l)).find((l) => l.at === "lifecycle.submit")).toMatchObject({ outcome: "not_submitted", code: "submit_task_accepted" });
+  });
+
+  it("an unknown outcome is sent again at the next pass under the same key, never a new one (review 5 on #465)", async () => {
+    const t = await setup(shareConfig());
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "submit_task" && failing-- > 0) t.gateway.executeScript.push(503);
+    };
+    await t.pass();
+    expect(t.entry("tsk_one").submission).toMatchObject({ state: "owed" });
+    await t.pass();
+    const keys = t.commands("submit_task").map((c) => c.arguments.idempotency_key);
+    expect(keys).toHaveLength(5);
+    expect(new Set(keys).size).toBe(1);
+    expect(t.entry("tsk_one")).toMatchObject({ outcome: "submitted", submission: { state: "submitted" } });
+  });
+
+  it("the ruling on a held review: after REVIEW_HOLD_MS with no answer, submitted with Runner's fixed words only (review 6 on #465)", async () => {
+    const t = await setup();
+    t.prompter.review = undefined;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    const since = t.clock.now();
+    expect(t.entry("tsk_one").submission).toMatchObject({ sharing: "review", held_since: since });
+    t.clock.at = since + REVIEW_HOLD_MS - 1;
+    await t.pass();
+    expect(t.commands("submit_task")).toHaveLength(0);
+    // Its next try, once the re-ask wait is over, is past the hold.
+    t.clock.at = since + REVIEW_HOLD_MS - 1 + ASK_AGAIN_MS;
+    await t.pass();
+    const note = String(t.commands("submit_task")[0]?.arguments.note);
+    expect(note).toContain("aren't shared: this room's output policy holds them");
+    expect(note).not.toContain("Fixed the build");
+    expect(t.entry("tsk_one")).toMatchObject({ outcome: "submitted", submission: { state: "submitted", sharing: "withheld" } });
+    expect(t.logged.map((l) => JSON.parse(l)).find((l) => l.at === "lifecycle.review" && l.outcome === "withheld")).toEqual({ at: "lifecycle.review", outcome: "withheld", agent: AGENT, workspace: ROOM, task: "tsk_one", code: "review_hold_expired" });
   });
 });
 

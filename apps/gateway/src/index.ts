@@ -1285,8 +1285,10 @@ const appHandler = {
     if (url.pathname === "/api/agents" && request.method === "GET") return listAgents(env, (await memberships(env, person)).orgs);
     // An agent's A2A endpoint, for its organization's admins (decision 119). The API checks who may, and never returns the
     // token or, outside a set, the signing secret.
-    const endpoint = url.pathname.match(/^\/api\/agents\/([\w-]+)\/a2a-endpoint$/);
-    if (endpoint && ["GET", "PUT", "DELETE"].includes(request.method)) {
+    // M7 step 13: the endpoint's challenge, and the owner's nudge switch with its audit. The API decides who may.
+    const endpoint = url.pathname.match(/^\/api\/agents\/([\w-]+)\/a2a-endpoint(\/verify|\/nudge)?$/);
+    const endpointMethods = endpoint?.[2] === "/verify" ? ["POST"] : endpoint?.[2] === "/nudge" ? ["GET", "PUT"] : ["GET", "PUT", "DELETE"];
+    if (endpoint && endpointMethods.includes(request.method)) {
       let body: string | undefined;
       if (request.method === "PUT") {
         // Counted in bytes as they arrive, so an oversized body is refused before it's all read.
@@ -1294,7 +1296,7 @@ const appHandler = {
         if (!bytes) return denied("invalid_argument", 400);
         body = new TextDecoder().decode(bytes);
       }
-      const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint`, body });
+      const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint${endpoint[2] ?? ""}`, body });
       return json(await response.json(), response.status);
     }
     // An agent's participation policy, for its organization's admins (decision 159). The API decides who may set it.

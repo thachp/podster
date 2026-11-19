@@ -27,6 +27,50 @@ export function schemaShapeProblems(doc) {
   return problems;
 }
 
+/** The OpenAPI 3.1 and JSON Schema keywords a schema object may hold. Anything else, `x-` extensions aside, is a field that
+ * slipped into the wrong map, such as a property written inside its neighbour's schema (#468's `delivery`). */
+export const SCHEMA_KEYWORDS = new Set([
+  "$ref", "$id", "$schema", "$comment", "$defs", "title", "description", "type", "enum", "const", "format", "pattern",
+  "default", "example", "examples", "nullable", "readOnly", "writeOnly", "deprecated", "properties", "additionalProperties",
+  "patternProperties", "propertyNames", "required", "minProperties", "maxProperties", "dependentRequired", "items", "prefixItems",
+  "minItems", "maxItems", "uniqueItems", "contains", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+  "minLength", "maxLength", "contentMediaType", "contentEncoding", "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
+  "discriminator", "xml", "externalDocs",
+]);
+
+/**
+ * Every schema object in `doc` holding a key that isn't a schema keyword, by path. Schemas are found where OpenAPI puts
+ * them (any `schema:` value, `components.schemas`, and `root` itself when `rootIsSchema`), then followed into every
+ * subschema: `properties`, `items`, `additionalProperties`, `allOf`/`anyOf`/`oneOf`, `not` and the rest.
+ */
+export function unknownKeywordProblems(doc, rootIsSchema = false) {
+  const problems = [];
+  const schema = (node, at) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    for (const key of Object.keys(node)) {
+      if (!SCHEMA_KEYWORDS.has(key) && !key.startsWith("x-")) problems.push(`${at}/${key}: not a schema keyword, so a field sits in the wrong map`);
+    }
+    for (const map of ["properties", "patternProperties", "$defs"]) {
+      if (node[map] && typeof node[map] === "object") for (const [name, child] of Object.entries(node[map])) schema(child, `${at}/${map}/${name}`);
+    }
+    for (const one of ["items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames"]) schema(node[one], `${at}/${one}`);
+    for (const many of ["allOf", "anyOf", "oneOf", "prefixItems"]) if (Array.isArray(node[many])) node[many].forEach((child, i) => schema(child, `${at}/${many}/${i}`));
+  };
+  const find = (node, at) => {
+    if (Array.isArray(node)) { node.forEach((child, i) => find(child, `${at}/${i}`)); return; }
+    if (!node || typeof node !== "object") return;
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "schema") schema(child, `${at}/schema`);
+      else if (key === "schemas" && at === "#/components" && child && typeof child === "object") {
+        for (const [name, one] of Object.entries(child)) schema(one, `${at}/schemas/${name}`);
+      } else find(child, `${at}/${key}`);
+    }
+  };
+  if (rootIsSchema) schema(doc, "#");
+  else find(doc, "#");
+  return problems;
+}
+
 const typeOf = (value) => {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";

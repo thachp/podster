@@ -208,7 +208,8 @@ export function hardening(helper: string | null): string[] {
     // An empty value clears every helper named before it, so only Runner's own (or none) is left.
     "credential.helper=",
   ];
-  if (helper !== null) settings.push(`credential.helper=${helper}`);
+  // Through `/bin/sh` by its path, so the helper needs no execute bit (the ruling on #470). The path is plain (`isPlainPath`).
+  if (helper !== null) settings.push(`credential.helper=!/bin/sh ${helper}`);
   return settings.flatMap((s) => ["-c", s]);
 }
 

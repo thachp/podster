@@ -50,6 +50,8 @@ cd apps/api && npm ci && npm test
 cd apps/gateway && npm ci && npm run typecheck && npm test
 ```
 
+A change to `apps/runner` also runs the gateway suite, because `apps/gateway/test/runner-core.spec.ts` drives Runner against the real API.
+
 ```bash
 cd apps/runner && npm ci && npm run typecheck && npm test && npm run build
 ```

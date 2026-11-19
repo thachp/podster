@@ -1393,6 +1393,93 @@ impl Principal {
         }
     }
 
+    /// `POST .../a2a-endpoint/verify` (M7 step 13): sends the nudge endpoint one signed challenge and records whether it
+    /// answered with the proof. The challenge is made and counted in one transaction and the answer recorded in another, with
+    /// the request between them outside both, so a set or a delete that lands meanwhile makes the answer count for nothing.
+    async fn verify_endpoint(&self, caller: &Caller) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let key = a2a_endpoint::key(&self.env);
+        let (store, actor, begin_key) = (sql.clone(), caller.id.clone(), key.clone());
+        let begun = self.in_transaction(move || {
+            a2a_endpoint::verify_begin(&store, begin_key.as_deref(), &actor, now_ms())
+        })?;
+        if begun["refused"].as_str() == Some("switched_off") {
+            return Err(ApiError::api(409, "endpoint_switched_off"));
+        }
+        if begun["send"] != Value::Bool(true) {
+            return Ok(begun["answer"].clone());
+        }
+        let proof = crate::a2a_out::challenge(&begun).await;
+        let (store, actor) = (sql.clone(), caller.id.clone());
+        self.in_transaction(move || {
+            a2a_endpoint::verify_end(
+                &store,
+                key.as_deref(),
+                &actor,
+                &begun,
+                proof.as_deref(),
+                now_ms(),
+            )
+        })
+    }
+
+    /// `GET` and `PUT /v1/agents/{agent}/a2a-endpoint/nudge` (M7 step 13): the owner's opt-in. Only a person who administers
+    /// the agent's organization switches it, from their current membership, and the connection is checked again in the
+    /// transaction that writes, against the generation seen before the body arrived, as for the participation policy.
+    async fn nudge_command(
+        &self,
+        method: Method,
+        req: &mut Request,
+        caller: &Caller,
+        conn: &Value,
+    ) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let org = text(&conn["org_id"]).unwrap_or_default();
+        let administers = caller.admin_orgs.contains(&org);
+        let kind = if caller.kind == "person" {
+            podster_policy::PrincipalKind::Person
+        } else {
+            podster_policy::PrincipalKind::Agent
+        };
+        if !podster_policy::nudge::may_switch_nudge(kind, administers) {
+            return Err(ApiError::not_allowed());
+        }
+        let key = a2a_endpoint::key(&self.env);
+        match method {
+            Method::Get => Ok(json!({
+                "endpoint": a2a_endpoint::status_json(&sql, key.as_deref())?,
+                "history": a2a_endpoint::audit_json(&sql)?,
+            })),
+            Method::Put => {
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
+                let since = caller
+                    .org_since
+                    .get(&org)
+                    .copied()
+                    .ok_or_else(ApiError::not_allowed)?;
+                let seen_generation = int(&conn["generation"]);
+                let (store, person, now) = (sql.clone(), caller.id.clone(), now_ms());
+                self.in_transaction(move || {
+                    let still = connection(&store)?.is_some_and(|c| {
+                        c["status"].as_str() == Some(ACTIVE)
+                            && int(&c["generation"]) == seen_generation
+                    });
+                    if !still {
+                        return Err(ApiError::agent_disconnected());
+                    }
+                    let by = a2a_endpoint::Setter {
+                        person: &person,
+                        org: &org,
+                        since,
+                    };
+                    a2a_endpoint::switch_nudge(&store, key.as_deref(), &by, &body, now)
+                })
+            }
+            _ => Err(ApiError::not_found()),
+        }
+    }
+
     async fn queue_wake(&self, now: i64) -> R<()> {
         let sql = self.state.storage().sql();
         let Some(delay) = wake_to_queue(&sql, now)? else {
@@ -2289,6 +2376,32 @@ impl Principal {
                     );
                     return Ok(json!({ "send": false, "reason": "setter_departed" }));
                 }
+                // A nudge endpoint: whoever switched it on must still be in the agent's organization too (M7 step 13). If
+                // they've left, it's switched off; if that can't be told, this fails and nothing is sent.
+                if claim["delivery"].as_str() == Some("nudge") {
+                    let by = &claim["nudge_by"];
+                    let (person, org) = (
+                        by["person"].as_str().unwrap_or_default(),
+                        by["org"].as_str().unwrap_or_default(),
+                    );
+                    if !crate::valid_id(person) || !crate::valid_id(org) {
+                        return Ok(json!({ "send": false, "reason": "nudge_off" }));
+                    }
+                    let since = by["since"].as_i64().unwrap_or(0);
+                    if departed_since(&self.env, person, org, since).await? {
+                        let (store, now) = (sql.clone(), now_ms());
+                        let version = claim["version"].as_i64().unwrap_or(-1);
+                        self.in_transaction(move || {
+                            a2a_endpoint::owner_departed(&store, version, now)?;
+                            Ok(Value::Null)
+                        })?;
+                        console_log!(
+                            "{}",
+                            json!({ "event": "a2a.nudge_owner_left", "agent": claim["agent_id"], "version": version })
+                        );
+                        return Ok(json!({ "send": false, "reason": "owner_departed" }));
+                    }
+                }
                 return Ok(claim);
             }
             "/internal/a2a-endpoint-pin" => {
@@ -2422,12 +2535,19 @@ impl Principal {
             (["v1", "inbox", "a2a-endpoint"], method) if caller.kind == "agent" => {
                 return self.endpoint_command(method, &mut req, &caller).await;
             }
+            (["v1", "inbox", "a2a-endpoint", "verify"], Method::Post) if caller.kind == "agent" => {
+                return self.verify_endpoint(&caller).await;
+            }
             (["v1", "inbox", ..], _) => return Err(ApiError::not_found()),
             _ => {}
         }
         let (agent_id, verb) = match segments.as_slice() {
             ["v1", "agents", id] => ((*id).to_string(), None),
             ["v1", "agents", id, verb] => ((*id).to_string(), Some((*verb).to_string())),
+            // M7 step 13: the endpoint's challenge and the owner's opt-in.
+            ["v1", "agents", id, "a2a-endpoint", sub @ ("verify" | "nudge")] => {
+                ((*id).to_string(), Some(format!("a2a-endpoint/{sub}")))
+            }
             _ => return Err(ApiError::not_found()),
         };
         let method = req.method();
@@ -2540,6 +2660,10 @@ impl Principal {
             }
             (method, Some("a2a-endpoint")) => {
                 self.endpoint_command(method, &mut req, &caller).await
+            }
+            (Method::Post, Some("a2a-endpoint/verify")) => self.verify_endpoint(&caller).await,
+            (method, Some("a2a-endpoint/nudge")) => {
+                self.nudge_command(method, &mut req, &caller, &conn).await
             }
             // Oversight: the agent or an authorized person can look, and looking never moves the cursor.
             // Rooms this agent is in or has left, from the listing read model. This shows them and decides nothing.

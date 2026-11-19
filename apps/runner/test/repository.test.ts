@@ -26,7 +26,7 @@ import {
   type GitHubRequest,
 } from "../src/core/repository.js";
 import { lineLogger } from "../src/core/runtime.js";
-import { checkedHelper, findGit, gitCli, gitEnv, HELPER_PATH, type GitExec } from "../src/node/git.js";
+import { checkedHelper, findGit, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
 import { checkWorkTree, GitRepositoryPath, RepoBroker } from "../src/node/repo-path.js";
 
@@ -236,7 +236,9 @@ describe("decision 230's own rules", () => {
     const settings = args.filter((_, i) => args[i - 1] === "-c");
     for (const s of ["core.hooksPath=/dev/null", "core.fsmonitor=false", "protocol.allow=never", "protocol.https.allow=always", "http.followRedirects=false", "submodule.recurse=false", "safe.directory=/work/r/t"]) expect(settings).toContain(s);
     // The empty helper clears any named before it, so Runner's own is the only one.
-    expect(settings.indexOf("credential.helper=")).toBeLessThan(settings.indexOf("credential.helper=/opt/runner/git/credential-helper"));
+    // Run through /bin/sh by its path (the ruling on #470), so the helper needs no execute bit.
+    expect(settings.indexOf("credential.helper=")).toBeLessThan(settings.indexOf("credential.helper=!/bin/sh /opt/runner/git/credential-helper"));
+    expect(settings.filter((s) => s.startsWith("credential.helper="))).toEqual(["credential.helper=", "credential.helper=!/bin/sh /opt/runner/git/credential-helper"]);
     expect(hardening(null).filter((a) => a.startsWith("credential.helper="))).toEqual(["credential.helper="]);
     expect(args.slice(-2)).toEqual(["--git-dir=/home/o/.runner/git/r/t", "--work-tree=/work/r/t"]);
     expect(() => locate("/home/o dir/git", "/work")).toThrow(/path_unsafe/);
@@ -268,6 +270,49 @@ describe("the credential helper", () => {
 
   it("is a plain path to a file only its owner can change", async () => {
     expect(await checkedHelper()).toBe(HELPER_PATH);
+  });
+
+  it("needs no execute bit: mode 0644 inside the package's folder is enough, and any write by others, a link or a path outside is refused", async () => {
+    const root = await temp();
+    await mkdir(join(root, "git"));
+    const helper = join(root, "git", "credential-helper");
+    await writeFile(helper, await readFile(HELPER_PATH, "utf8"), { mode: 0o644 });
+    await chmod(helper, 0o644);
+    expect(await checkedHelper(helper, root)).toBe(helper);
+    for (const mode of [0o664, 0o646, 0o666]) {
+      await chmod(helper, mode);
+      await expect(checkedHelper(helper, root)).rejects.toThrow(/helper_unavailable/);
+    }
+    await chmod(helper, 0o644);
+    // Outside the package's own folder.
+    const elsewhere = await temp();
+    expect(await checkedHelper(helper, root)).toBe(helper);
+    await expect(checkedHelper(helper, elsewhere)).rejects.toThrow(/helper_unavailable/);
+    await expect(checkedHelper(helper, `${root}-other`)).rejects.toThrow(/helper_unavailable/);
+    // A link, even inside the folder.
+    await symlink(helper, join(root, "git", "link"));
+    await expect(checkedHelper(join(root, "git", "link"), root)).rejects.toThrow(/helper_unavailable/);
+    // The packaged helper is checked against the package's own folder.
+    expect(HELPER_PATH.startsWith(`${PACKAGE_ROOT}/`)).toBe(true);
+  });
+
+  it.skipIf(findGit() === null)("is run by real Git through /bin/sh at mode 0644, answering with the token from descriptor 3", async () => {
+    const root = await temp();
+    const helper = join(root, "credential-helper");
+    await writeFile(helper, await readFile(HELPER_PATH, "utf8"), { mode: 0o644 });
+    await chmod(helper, 0o644);
+    const { spawn } = await import("node:child_process");
+    const out = await new Promise<string>((resolve) => {
+      const child = spawn(findGit() as string, [...hardening(helper), "credential", "fill"], { stdio: ["pipe", "pipe", "ignore", "pipe"], env: gitEnv(join(root, "git-home"), { PATH: "/usr/bin:/bin" }) });
+      let text = "";
+      child.stdout?.on("data", (c) => (text += c));
+      const fd3 = child.stdio[3] as NodeJS.WritableStream & { on(event: "error", fn: () => void): void };
+      fd3.on("error", () => undefined);
+      fd3.end(`${TOKEN}\n`);
+      child.stdin?.end("protocol=https\nhost=github.com\n\n");
+      child.on("close", () => resolve(text));
+    });
+    expect(out).toContain(`password=${TOKEN}`);
   });
 
   it("answers `get` for https://github.com only, with the token from descriptor 3 and nothing else", async () => {

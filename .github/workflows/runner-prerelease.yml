@@ -1,0 +1,149 @@
+name: Runner pre-release
+
+# Runner's npm test pre-release (the owner's decision of 2026-11-19, narrowing decision 26): the package `podster`, versioned
+# 0.0.x-test.N, published only under npm's `test` tag (npm may also point `latest` at the first version), pointing at
+# staging. It is built and published only here, by hand, from main, with npm provenance through npm's trusted publishing
+# (OIDC), so there is no npm token secret. The gated release
+# after M7's step 17 replaces it. The owner's steps on npmjs.com and GitHub are in docs/runner-prerelease.md.
+#
+# Two jobs (security review L1 on #470). `build` holds no OIDC token and no environment: it installs with scripts off, checks,
+# packs, and uploads the .tgz with its SHA-256. `publish` holds the `npm-test-prerelease` environment and `id-token: write`,
+# runs no dependency code, and publishes that same .tgz after checking its SHA-256.
+#
+# `workflow_dispatch` runs this file as it is on the dispatched branch, so the checks here can be edited by whoever can push
+# a branch. The server-side check is the environment's own rule: deployment branches limited to main, with the owner as
+# required reviewer (docs/runner-prerelease.md, a required step before the trusted publisher is added).
+#
+# `dry_run`, on by default, builds and checks the package and uploads the packed .tgz as this run's artifact without
+# publishing. That's how the first version reaches npm if npm needs the package to exist before a trusted publisher can be
+# added: the owner publishes this CI-built file once, at their own terminal.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version in apps/runner/package.json, such as 0.0.1-test.1"
+        required: true
+        type: string
+      dry_run:
+        description: "Build, check and upload the .tgz without publishing"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One at a time, and a second waits rather than replacing a publish that's under way.
+concurrency:
+  group: runner-prerelease
+  cancel-in-progress: false
+
+jobs:
+  # A run from any other ref fails here, and the jobs after it are skipped.
+  main-only:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse any ref but main
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "Runner's pre-release is published only from main, not $REF."
+            exit 1
+          fi
+
+  build:
+    needs: main-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      file: ${{ steps.pack.outputs.file }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    defaults:
+      run:
+        working-directory: apps/runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Refuse a version that isn't the package's, or isn't a test pre-release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          actual=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$actual" ]; then
+            echo "The version input ($VERSION) isn't the version in apps/runner/package.json ($actual)."
+            exit 1
+          fi
+          case "$actual" in
+            *-test.*) ;;
+            *) echo "Only a test pre-release (0.0.x-test.N) is published here, not $actual."; exit 1 ;;
+          esac
+          if ! printf '%s' "$actual" | grep -Eq '^0\.0\.[0-9]+-test\.[0-9]+$'; then
+            echo "Test pre-releases are versioned 0.0.x-test.N, not $actual."
+            exit 1
+          fi
+      # No package's install script runs, as in CI's runner job. The shipped npm-shrinkwrap.json is what it installs.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+      - name: Pack the .tgz and print its SHA-256
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pack"
+          cd "$RUNNER_TEMP/pack"
+          file=$(ls ./*.tgz)
+          test "$(ls ./*.tgz | wc -l)" -eq 1
+          file=${file#./}
+          sha=$(sha256sum "$file" | cut -d' ' -f1)
+          echo "$sha  $file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: podster-${{ inputs.version }}
+          path: ${{ runner.temp }}/pack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The owner requires approval on this environment and limits it to main; npm's trusted publisher names it.
+    environment: npm-test-prerelease
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10. Pinned, and no install script runs.
+      - run: npm install --global --ignore-scripts npm@11.21.2
+      - run: npm --version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: podster-${{ inputs.version }}
+          path: ${{ runner.temp }}/pack
+      # The same file build packed, by its SHA-256. Publishing a .tgz runs none of its scripts.
+      - name: Publish the checked .tgz to npm's test tag
+        working-directory: ${{ runner.temp }}/pack
+        env:
+          FILE: ${{ needs.build.outputs.file }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          printf '%s' "$FILE" | grep -Eq '^podster-0\.0\.[0-9]+-test\.[0-9]+\.tgz$'
+          printf '%s' "$SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          echo "$SHA256  $FILE" | sha256sum --check --strict
+          npm publish "./$FILE" --provenance --tag test --access public

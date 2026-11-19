@@ -417,6 +417,26 @@ describe("gateway refusals that don't rely on the API", () => {
     expect((await agent.tool("delete_a2a_endpoint")).data).toEqual({ deleted: true });
   });
 
+  it("passes a nudge endpoint's challenge and the owner's switch through, and the API decides who may", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const agent = await mcpAgent(a);
+    // An offers endpoint isn't challenged, so nothing is sent anywhere.
+    expect((await agent.tool("set_a2a_endpoint", { url: "https://agent.acme.dev/a2a" })).data).toMatchObject({ delivery: "offers" });
+    expect((await agent.tool("verify_a2a_endpoint")).code).toBe("not_a_nudge_endpoint");
+    const base = `/agents/${agent.id}/a2a-endpoint`;
+    expect((await dash(a, "POST", `${base}/verify`)).body.error.code).toBe("not_a_nudge_endpoint");
+    const set = await agent.tool("set_a2a_endpoint", { url: "https://agent.acme.dev/a2a", delivery: "nudge" });
+    expect(set.data).toMatchObject({ delivery: "nudge", version: 2, control: "unverified", nudge_on: false });
+    // Unverified, so the owner can't switch it on yet, and nobody else can try.
+    const early = await dash(a, "PUT", `${base}/nudge`, { on: true, version: 2 });
+    expect([early.status, early.body.error.code]).toEqual([409, "endpoint_unverified"]);
+    expect((await dash(b, "PUT", `${base}/nudge`, { on: true, version: 2 })).status).toBe(404);
+    expect((await dash(b, "GET", `${base}/nudge`)).status).toBe(404);
+    expect((await dash(a, "GET", `${base}/nudge`)).body).toMatchObject({ endpoint: { nudge_on: false }, history: [] });
+    expect((await dash(a, "PUT", `${base}/nudge`, { on: false })).body).toMatchObject({ nudge_on: false });
+    expect((await dash(a, "DELETE", `${base}/nudge`)).status).toBe(404);
+  });
+
   it("lets only the agent's organization's admins set its participation policy", async () => {
     const [a, b] = [await signUp(), await signUp()];
     const agent = await mcpAgent(a);

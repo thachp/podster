@@ -70,7 +70,7 @@ export function StartPairing({ gateway }: { gateway: string }) {
           <>
             <CopyValue label="Command for Runner" value={command} />
             <p className="text-sm text-muted-foreground">
-              Run it in Runner&apos;s folder on the machine you&apos;re pairing, after <code className="font-mono">npm run build</code>.
+              Needs Node 22 or later. On macOS, you also need Docker Desktop. On Windows, run it inside WSL2.
             </p>
           </>
         ) : null}
@@ -83,8 +83,8 @@ export function StartPairing({ gateway }: { gateway: string }) {
           </code>
         </div>
         <p>
-          When Runner asks for the code, paste this one. It isn&apos;t part of the command. It works once, expires in 10 minutes,
-          and won&apos;t be shown again.
+          Runner asks for this code. Paste it there; it isn&apos;t part of the command. It works once, expires in 10 minutes,
+          and won&apos;t be shown again. If it has expired, start a new pairing.
         </p>
         <Link className="underline" href={`/pairing/${started.agent_id}`} prefetch={false}>
           Continue to confirm

@@ -15,12 +15,15 @@ export type PairingView = {
   link_problem?: "already_linked";
 };
 
+/** The gateway `pair` talks to when it's given no `--gateway`. */
+const STAGING_GATEWAY = "https://gateway-staging.podster.dev";
+
 /** A pairing's agent ID as the gateway makes it. Only an ID of this shape goes into a link or a command. */
 export const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
- * The command that pairs Runner, built from source (decision 26), as its `pair` takes it: the gateway's origin and the
- * agent ID. The code is never in it: Runner asks for the code and reads it without echo. Null for anything that isn't
+ * The command that pairs Runner from npm (`podster@test`), as its `pair` takes it: the agent ID, plus the gateway's origin
+ * only when it isn't staging's, which `pair` uses by default. The code is never in it: Runner asks for the code and reads it without echo. Null for anything that isn't
  * plainly an origin and an ID, so nothing a person pastes into a shell carries more than those two.
  */
 export function runnerPairCommand(gateway: string, agentId: string): string | null {
@@ -31,7 +34,8 @@ export function runnerPairCommand(gateway: string, agentId: string): string | nu
     return null;
   }
   if (!/^https?:\/\/([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:\d+)?$/.test(origin) || !AGENT_ID.test(agentId)) return null;
-  return `node build/node/cli.js pair --gateway ${origin} --agent ${agentId}`;
+  const gatewayFlag = origin === STAGING_GATEWAY ? "" : ` --gateway ${origin}`;
+  return `npx --ignore-scripts podster@test pair${gatewayFlag} --agent ${agentId}`;
 }
 
 /** Fixed words for a refused confirmation or cancel. Nothing from the answer is shown. */

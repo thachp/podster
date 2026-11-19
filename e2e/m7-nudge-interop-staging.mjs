@@ -115,26 +115,26 @@ async function until(test, ms, every = 2_000) {
     await sleep(every);
   }
 }
-const nudgeShape = (r, room, task) => {
+const nudgeShape = (r, wantRoom, task) => {
   const part = r?.message?.parts?.[0];
   const data = part?.content?.value ?? {};
   return r?.message?.role === 1 && r.message.parts.length === 1 && part.content.$case === "data" && part.mediaType === "application/json" &&
     Object.keys(data).sort().join(",") === "attempt_id,attempt_kind,kind,task_id,workspace_id" && data.kind === "podster.dev/nudge" &&
-    data.workspace_id === room && data.task_id === task && data.attempt_kind === "offer" && r.message.messageId === data.attempt_id;
+    data.workspace_id === wantRoom && data.task_id === task && data.attempt_kind === "offer" && r.message.messageId === data.attempt_id;
 };
 
 // ---- the self-test: loopback only ----
 
 if (args.includes("--self-test")) {
-  const server = await startServer(0);
-  const base = `http://127.0.0.1:${server.port}`;
+  const selfServer = await startServer(0);
+  const selfBase = `http://127.0.0.1:${selfServer.port}`;
   const secret = `a2asec_${randomBytes(24).toString("hex")}`;
   const sign = (body, s = secret) => {
     const t = Math.floor(Date.now() / 1000);
     return `t=${t},v1=${createHmac("sha256", s).update(`${t}.${body}`).digest("hex")}`;
   };
   const post = async (path, body, headers = {}) => {
-    const res = await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0", "x-podster-signature": sign(body), ...headers }, body });
+    const res = await fetch(`${selfBase}${path}`, { method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0", "x-podster-signature": sign(body), ...headers }, body });
     return { status: res.status, body: await res.json().catch(() => null) };
   };
   const nudgeBody = (attempt) => JSON.stringify({
@@ -143,8 +143,8 @@ if (args.includes("--self-test")) {
   });
   const challenge = randomBytes(32).toString("hex");
   const verifyBody = JSON.stringify({ jsonrpc: "2.0", id: challenge, method: "podster.dev/verifyEndpoint", params: { agent_id: "agt_self", version: 1, challenge } });
-  server.hold("/ext/1", secret, "tok_self");
-  server.hold("/old/1", secret);
+  selfServer.hold("/ext/1", secret, "tok_self");
+  selfServer.hold("/old/1", secret);
   await step("self-test", async () => {
     const proof = await post("/ext/1", verifyBody);
     check(proof.body?.result?.proof === createHmac("sha256", secret).update(`podster-endpoint-proof/1.agt_self.1.${challenge}`).digest("hex"), "the owner's glue answers the challenge with the proof");
@@ -157,7 +157,7 @@ if (args.includes("--self-test")) {
     check((await post("/old/1", nudgeBody("att_self_4"))).body?.error?.code === -32009, "the 0.3-only SDK server answers VersionNotSupportedError");
     check((await post("/plain/1", verifyBody)).body?.error?.code === -32601, "the plain SDK server answers the challenge with method not found");
   });
-  server.stop();
+  selfServer.stop();
   finish();
 }
 

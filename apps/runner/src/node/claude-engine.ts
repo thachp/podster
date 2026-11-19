@@ -12,9 +12,12 @@
  * - `docker` is installed in a fixed place;
  * - no proxy or TLS trust would be taken from the environment.
  * It runs what was ruled after #460's real runs: Claude Code in default mode, never bare (bare mode turns off the SDK's
- * PreToolUse callback, Runner's decision point), in its own container (the two-container placement). The macOS `sandbox-exec` wrapper is gone. On every system but macOS it refuses
- * (`platform_unverified`); on Linux until S-47's Linux run: the relay reaches the host through `host-gateway`, which the listener, bound to 127.0.0.1
- * (scoped exception 1, not loosened), doesn't serve there. The owed Linux path is a Unix-socket listener.
+ * PreToolUse callback, Runner's decision point), in its own container (the two-container placement). The macOS `sandbox-exec` wrapper is gone.
+ * **Which systems** (`platform.ts`; S-47 and the architect's ruling of 2026-11-19): macOS relays over TCP to the
+ * loopback listener, as before. Linux, which is also Windows through WSL2, relays to a Unix-socket listener in the
+ * run's folder, and is turned on only when its own checks pass on this host: Runner's home isn't on the Windows file
+ * system, Docker answers, and a request crosses the relay with the per-run token (`ClaudeDriver.checkRelay`). Windows
+ * itself is refused with a fixed message pointing to WSL2, and every other system with `platform_unverified`.
  * Then it reaps (M4 on #459): every container and network of this home a previous process left goes before the
  * lifecycle opens and confirms any stop.
  *
@@ -27,8 +30,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLAUDE_PROFILE } from "../core/claude-profile.js";
 import type { Logger } from "../core/runtime.js";
-import { ClaudeDriver } from "./claude-driver.js";
+import { ClaudeDriver, type ClaudeDriverDeps } from "./claude-driver.js";
 import { DockerSandbox, dockerCli, dockerHost, findDocker, IMAGE_ID, type DockerCli } from "./docker-sandbox.js";
+import { dockerReachable, homeLengthRefusal, homeRefusal, isWsl, linuxCheckFailure, readMounts, readProcVersion, relayModeFor, resolvedPath } from "./platform.js";
 import { ProviderKeyTransport } from "./provider-transport.js";
 import type { RunEngine } from "./run-command.js";
 import { ensureFolder, readNoFollow, writeNew } from "./safe-fs.js";
@@ -140,17 +144,47 @@ export async function ensureImage(name: ImageName, opts: { home: string; docker:
 
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
-export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; notify?: (line: string) => void; docker?: DockerCli; dockerProgram?: string; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform; wait?: (ms: number) => Promise<void> }): Promise<ClaudeEngine> {
-  // Only macOS is verified (L3 of the review at 1335df4a); Linux waits on S-47's run, and every other system is refused.
-  if ((opts.platform ?? process.platform) !== "darwin") throw new Error("platform_unverified: Runner runs tasks only on macOS until its checks have run on this system (Linux: S-47).");
+export async function claudeEngine(opts: {
+  home: string;
+  key_file: string;
+  log: Logger;
+  notify?: (line: string) => void;
+  docker?: DockerCli;
+  dockerProgram?: string;
+  env?: NodeJS.ProcessEnv;
+  execArgv?: readonly string[];
+  platform?: NodeJS.Platform;
+  wait?: (ms: number) => Promise<void>;
+  /** `/proc/self/mounts` and `/proc/version`, for tests; read from the system when left out, on Linux only. */
+  mounts?: string | null;
+  procVersion?: string | null;
+  /**
+   * For CI's real Linux proof only (`test/linux-docker.test.ts`): a stand-in SDK and process control, so the driver's
+   * own wiring starts a process in Claude Code's container with no model call. `cli.ts` never passes it.
+   */
+  driverSeams?: Pick<ClaudeDriverDeps, "sdk" | "processes">;
+}): Promise<ClaudeEngine> {
+  // macOS and Linux (with WSL2) only (L3 of the review at 1335df4a; S-47); Windows itself points to WSL2.
+  const platform = opts.platform ?? process.platform;
+  const relay = relayModeFor(platform);
+  const env = opts.env ?? process.env;
+  const mounts = relay === "unix" ? (opts.mounts !== undefined ? opts.mounts : readMounts()) : null;
+  if (relay === "unix") {
+    // By its path and its real path, so a link can't hide a home on the Windows file system (L1 on #471's review).
+    const refused = homeRefusal(opts.home, mounts, await resolvedPath(opts.home)) ?? homeLengthRefusal(opts.home);
+    if (refused) throw new Error(refused);
+  }
   const key = await readKeyFile(opts.key_file);
   const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key, { env: opts.env, execArgv: opts.execArgv });
   const program = opts.dockerProgram ?? findDocker();
   if (!program) throw new Error("Runner needs Docker for the task's and Claude Code's containers, and found none.");
   const config = join(opts.home, "docker-config");
-  const host = dockerHost(opts.env ?? process.env, opts.platform ?? process.platform);
+  const host = dockerHost(env, platform);
   let docker = opts.docker;
   if (!docker) docker = dockerCli(program, { config_dir: await ensureFolder(opts.home, config), host });
+  // On Linux, Docker must answer before anything is inspected or built (S-47), so an unreachable Docker is said as that.
+  const wsl = relay === "unix" ? isWsl(env, opts.procVersion !== undefined ? opts.procVersion : readProcVersion()) : false;
+  if (relay === "unix" && !(await dockerReachable(docker))) throw linuxCheckFailure("docker", wsl);
   // Each image as pinned, or built from the package's own Dockerfile and pinned (the ruling on #470).
   const notify = opts.notify ?? (() => undefined);
   const image = await ensureImage("task-image", { home: opts.home, docker, notify });
@@ -159,8 +193,18 @@ export async function claudeEngine(opts: { home: string; key_file: string; log: 
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
   // Never bare: under bare mode the SDK's PreToolUse callback, Runner's decision point, never fires (the fifth real run
   // of #460), and the container now does what bare mode was for.
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid, wait: opts.wait });
-  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait });
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid, wait: opts.wait, relay, ...opts.driverSeams });
+  if (relay === "unix") {
+    // Linux is turned on only by a positive check on this host (S-47): Docker answered above; now the relay must carry a
+    // request. This needs Claude Code's image, so it comes after the images are pinned.
+    try {
+      await driver.checkRelay();
+    } catch {
+      throw linuxCheckFailure("relay", wsl);
+    }
+    opts.log("adapter.platform", "linux_checked", {});
+  }
+  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait, ...(relay === "unix" ? { mounts: () => (opts.mounts !== undefined ? opts.mounts : readMounts()) } : {}) });
   return {
     drivers: { claude_agent_sdk: driver },
     sandbox,

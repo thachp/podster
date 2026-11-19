@@ -10,9 +10,10 @@
  *
  * Errors carry fixed words only, never a path.
  */
+import { randomBytes } from "node:crypto";
 import { closeSync, constants, openSync, writeSync } from "node:fs";
-import { lstat, mkdir, open, opendir, realpath, rm } from "node:fs/promises";
-import { isAbsolute, join, normalize, relative, sep } from "node:path";
+import { lstat, mkdir, open, opendir, readdir, realpath, rename, rm, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 
 export class UnsafePath extends Error {
   constructor(what: string) {
@@ -110,6 +111,49 @@ export async function writeNew(path: string, text: string): Promise<void> {
     await handle.writeFile(text);
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Replaces a file whole, mode 0600: the text goes to a new file beside it (made with `O_EXCL` and `O_NOFOLLOW`, mode
+ * 0600, set again whatever the umask, flushed to disk), which is then renamed over the target, and the folder is flushed
+ * so the rename survives a crash. A reader sees the old file or the new one, never part of either; a link at the target
+ * is replaced, never followed. An earlier write's leftover temporary file for the same target, from a crash between its
+ * write and its rename, is removed first (L3 on #471's review).
+ */
+export async function writeFileAtomic(path: string, text: string): Promise<void> {
+  plainAbsolute(path);
+  const folder = dirname(path);
+  const escaped = basename(path).replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+  const leftover = new RegExp("^\\." + escaped + "\\.[0-9a-f]{12}\\.tmp$");
+  for (const name of await readdir(folder)) {
+    if (!leftover.test(name)) continue;
+    const info = await lstat(join(folder, name)).catch(() => null);
+    if (info?.isFile()) await unlink(join(folder, name)).catch(() => undefined);
+  }
+  const temp = join(folder, `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await handle.chmod(0o600);
+    await handle.writeFile(text);
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    await unlink(temp).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
+  try {
+    await rename(temp, path);
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
+  }
+  const dir = await open(folder, constants.O_RDONLY);
+  try {
+    await dir.sync();
+  } finally {
+    await dir.close();
   }
 }
 

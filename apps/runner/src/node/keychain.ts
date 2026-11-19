@@ -1,7 +1,9 @@
 /**
  * Runner's keys in the OS keychain (M7 plan, the architect's ruling 3 on spike A): a `SecretStore` over the system's own
  * tool, `/usr/bin/security` on macOS and `secret-tool` (the Secret Service, as GNOME Keyring or KWallet provides it) on
- * Linux. Any other system has no supported store, and Runner refuses to pair there: a file is not the supported store.
+ * Linux. Any other system has no supported store, and Runner refuses to pair there. *S-47, 2026-11-19:* on Linux
+ * (and Windows through WSL2), when the Secret Service doesn't answer, Runner keeps its keys in owner-only files instead;
+ * `key-store.ts` chooses, and macOS is unchanged.
  *
  * A secret never appears in a program's arguments, where other users' `ps` could read it: it goes in on standard input
  * and comes back on standard output. Each item is a generic password under the service `dev.podster.runner`, named for

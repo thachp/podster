@@ -9,7 +9,12 @@ Runner pairs your machine with one of your Podster agents, then polls that agent
 ## Requirements
 
 - Node 22 or later.
-- macOS, with Docker Desktop, to run tasks: Claude Code and each task run in their own containers. On other systems Runner refuses to run tasks (`platform_unverified`), and pairing and polling still work.
+- To run tasks, Docker on one of these, since Claude Code and each task run in their own containers:
+  - macOS, with Docker Desktop;
+  - Linux, with Docker Engine ([Linux](#linux));
+  - Windows, only inside a WSL2 Linux distro with Docker Desktop's WSL integration ([Windows (WSL2)](#windows-wsl2)). Runner refuses native Windows.
+
+  On any other system Runner refuses to run tasks (`platform_unverified`), and pairing and polling still work.
 - Git at `/usr/bin/git`, `/opt/homebrew/bin/git` or `/usr/local/bin/git`.
 
 ## Commands
@@ -56,6 +61,36 @@ chmod 600 <path>
 Runner refuses a key file that's a link, that someone else can read, or that holds anything but one key. It reads the key once and keeps it on your machine, in its own process: never in a task's container, a log, an argument or the environment of anything it starts. Use a key with a spending limit you set at the provider.
 
 Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, and the Claude Code image downloads Claude Code from npm's registry. If a build fails, `run` stops before running anything.
+
+## Linux
+
+**Validated so far only by CI's Linux job,** on GitHub's Ubuntu runner with Docker Engine (S-47). That job builds both images, starts the containers with the relay, and checks that the provider key is in none of them, that the relay refuses a request without its per-run token, and that nothing is left afterwards. It calls no provider. No task has run end to end with Claude Code on Linux yet.
+
+You need:
+
+- Docker Engine, which your user can reach without `sudo`: `docker version` names a server. Rootful Docker only. Rootless Docker, user-namespace remapping, and SELinux enforcing on bind mounts aren't supported yet, so Runner's check fails there.
+- `docker` at `/usr/bin/docker` or `/usr/local/bin/docker`.
+- Runner's home and the workspace root in the Linux file system, owned by you. On Linux, Runner's home path may be at most 51 bytes, so each run's Unix socket path fits; the default, `~/.podster-runner`, does. A longer `--home` is refused with a message saying so.
+
+How it differs from macOS:
+
+- **The relay.** On a Mac, Claude Code's requests reach Runner's listener over TCP through Docker Desktop's `host.docker.internal`. On Linux the listener is a Unix socket in the run's own folder, mode 600, which only the relay container mounts, read-only, and forwards to with `socat`. The relay joins no network but the run's internal one, and no TCP port opens on your machine. The per-run token is still required.
+- **A check before any task.** `run --provider-key-file` first checks that Docker answers, then sends one request from a throwaway Claude Code container through the relay to a throwaway listener. If either fails, Runner refuses to run tasks (`linux_check_failed`), says which part failed, and runs nothing. Pairing and polling still work.
+- **Where your keys go.** If the Secret Service answers (GNOME Keyring or KWallet, through `/usr/bin/secret-tool`), Runner keeps its keys there. Otherwise it keeps them in files under `keys/` in Runner's home: the folder mode 700 and each file mode 600, both yours, each replaced whole when written. Runner refuses a key folder or file with any other mode or owner. Anyone who can read your files can read these. Runner prints one line saying which store it uses. The choice is made once per home, in `key-store` there, so a locked keyring later shows as an error rather than a lost pairing.
+
+## Windows (WSL2)
+
+**Validated only by CI's Linux job and by M7's staging run (step 16) on Long's machine.** Nothing else has run Runner under WSL2.
+
+Runner on Windows runs inside a WSL2 Linux distro and follows the Linux path above. Native Windows is refused, with a message pointing here.
+
+1. Install WSL2 and a distro such as Ubuntu: `wsl --install` in PowerShell.
+2. Install Docker Desktop for Windows with its WSL2 backend.
+3. In Docker Desktop, open **Settings > Resources > WSL integration** and turn it on for your distro. Apply, then open a new terminal in the distro.
+4. In the distro, `docker version` should name a server. Install Node 22 or later in the distro, not on Windows, and run the `npx --ignore-scripts podster@test …` commands above from the distro's terminal.
+5. Keep Runner's home and your workspace root in the distro's own file system, such as `~/.podster-runner`. Runner refuses either one under `/mnt/<drive>` (the Windows file system, where Linux file modes aren't enforced and access is slow), and refuses Runner's home on any 9p or drvfs mount.
+
+A WSL2 distro usually has no Secret Service, so Runner uses its file store there and says so.
 
 ## Where it comes from
 

@@ -1,7 +1,7 @@
 /**
  * Runner's keys, behind the SDK's `Storage` interface (M7 plan, the architect's ruling 3 on spike A): the SDK has no
  * keychain store, so Runner gives it this one, over a `SecretStore` that on the owner's machine is the OS keychain
- * (`src/node/keychain.ts`). A file is not the supported store.
+ * (`src/node/keychain.ts`), or on Linux without a Secret Service, owner-only files (`src/node/key-store.ts`, S-47).
  *
  * What it holds: the host key (the one pairing binds), and the one agent connection Runner registers on that host, each
  * with its private key. Provider discovery documents aren't secret, and the SDK finds them again at each start, so they

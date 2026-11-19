@@ -37,8 +37,11 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { onWindowsDrive } from "../core/policy.js";
+import { onWindowsFilesystem } from "./platform.js";
 import type { AllowedCall } from "../core/tool-policy.js";
 import { childEnv } from "./child-env.js";
+import { realpath } from "node:fs/promises";
 import { ensureFolder, folderBytes } from "./safe-fs.js";
 
 export type DockerResult = { code: number; stdout: string; stderr: string; cut: boolean };
@@ -226,8 +229,9 @@ export class DockerSandbox implements TaskSandbox {
   private readonly limits: Limits;
 
   private readonly wait: (ms: number) => Promise<void>;
+  private readonly mounts: () => string | null;
 
-  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits>; wait?: (ms: number) => Promise<void> }) {
+  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits>; wait?: (ms: number) => Promise<void>; mounts?: () => string | null }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
     if (!Number.isSafeInteger(opts.uid) || !Number.isSafeInteger(opts.gid) || opts.uid <= 0 || opts.gid < 0) throw new Error("Runner won't run a task container as root");
     this.docker = opts.docker;
@@ -238,6 +242,8 @@ export class DockerSandbox implements TaskSandbox {
     this.workspaceRoot = opts.workspaceRoot ?? ((spec) => dirname(dirname(spec.task_folder)));
     this.every = opts.every ?? realEvery;
     this.wait = opts.wait ?? realWait;
+    // The system's mounts, read at each open; none (no check by type) where there's no /proc, as on a Mac.
+    this.mounts = opts.mounts ?? (() => null);
     this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
   }
 
@@ -248,10 +254,16 @@ export class DockerSandbox implements TaskSandbox {
   async open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void> {
     if (!REF.test(spec.run_ref)) throw new Error("run_ref_invalid");
     if (checkContainerSpec(spec) !== null) throw new Error("container_invalid");
+    // Never the Windows file system under WSL2, where modes aren't enforced (S-47); the run policy refuses it first.
+    if (onWindowsDrive(spec.task_folder)) throw new Error("workspace_on_windows_drive");
     // No allowlist without an egress proxy to hold it (step 9(b)'s ruling): refused, never widened to the internet.
     if (spec.network.kind !== "none") throw new Error(REFUSED_NETWORK);
     // Runner makes the task's folder itself, mode 0700, checking every segment for links (L3).
     await ensureFolder(this.workspaceRoot(spec), spec.task_folder, { makeRoot: true });
+    // By its real path and its mount's type too (L1 on #471's review): a link, or a drive mounted somewhere other than
+    // /mnt, can't put a task on the Windows file system.
+    const real = await realpath(spec.task_folder);
+    if (onWindowsDrive(real) || onWindowsFilesystem(real, this.mounts())) throw new Error("workspace_on_windows_drive");
     if (signal.aborted) throw new Error("halted");
     const run = await this.docker(runArgs(spec, { image: this.image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.

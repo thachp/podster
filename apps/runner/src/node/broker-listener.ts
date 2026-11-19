@@ -2,7 +2,10 @@
  * The run's loopback listener (M7 step 9(b); #459's notes for 9(b)), where Claude Code sends its model requests. It is
  * the only file in Runner's source that may open a listening socket (the scoped source test in `test/machine.test.ts`).
  *
- * - **Loopback only:** bound to the literal `"127.0.0.1"`, port 0, so the system picks a free port.
+ * - **Loopback only:** bound to the literal `"127.0.0.1"`, port 0, so the system picks a free port. **Or, on Linux
+ *   (S-47), a Unix socket only:** at a path in the run's own folder (mode 0700), readable and writable by no one else
+ *   (Node's `readableAll`/`writableAll` off, then mode 0600 set and checked, with its owner, before anything is served).
+ *   The relay container mounts that one socket, read-only, and forwards to it; no TCP port is opened at all.
  * - **A per-run token:** 32 random bytes, which Claude Code sends as its API key. It is compared byte for byte in
  *   constant time, after a length check that reveals only the token's fixed length. It is not the provider key, which never leaves the transport.
  * - **`Origin` refused:** any request carrying one is a browser's, and is refused, so no web page can reach it.
@@ -17,11 +20,16 @@
  * Logs carry codes only, never a body, a header or the token.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { chmod, lstat, unlink } from "node:fs/promises";
+import { isAbsolute, normalize } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { MAX_BODY_BYTES, type BrokerRequest } from "../core/broker.js";
 import type { ModelAnswer } from "../core/run-interface.js";
 
+/** `port` is 0 and `url` is `unix:<path>` on a Unix socket. */
 export type BrokerListener = { url: string; port: number; token: string; close(): Promise<void> };
+/** The longest socket path taken: under every system's `sun_path` (104 bytes on macOS, 108 on Linux). */
+export const MAX_SOCKET_PATH_BYTES = 100;
 export type ListenerDeps = {
   model: (request: BrokerRequest) => Promise<ModelAnswer>;
   signal: AbortSignal;
@@ -30,6 +38,11 @@ export type ListenerDeps = {
   onRefuse?: (code: string) => void;
   /** The one `Host` taken, when not `127.0.0.1:<port>`: the relay's name, fixed in the driver's code. */
   host?: string;
+  /**
+   * Listen on this Unix socket instead of loopback TCP (Linux, S-47): an absolute path in a folder only this user can
+   * reach, with no file there yet. Needs `host`, the relay's name, which is then the only `Host` taken.
+   */
+  socket?: string;
   /** For tests; the defaults bound a stalled client. */
   headersTimeoutMs?: number;
   requestTimeoutMs?: number;
@@ -75,7 +88,21 @@ function wantsStream(body: Uint8Array): boolean {
   }
 }
 
+/** Removes the socket file if it is still there and still a socket; never anything else. */
+async function removeSocket(path: string) {
+  try {
+    if ((await lstat(path)).isSocket()) await unlink(path);
+  } catch {
+    // Gone already.
+  }
+}
+
 export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerListener> {
+  if (deps.socket !== undefined) {
+    if (typeof deps.host !== "string" || deps.host === "") throw new Error("listener_socket_host");
+    const p = deps.socket;
+    if (typeof p !== "string" || !isAbsolute(p) || normalize(p) !== p || p.includes("\u0000") || Buffer.byteLength(p) > MAX_SOCKET_PATH_BYTES) throw new Error("listener_socket_path");
+  }
   const token = deps.token ?? randomBytes(32).toString("hex");
   let port = 0;
   let closed = false;
@@ -111,24 +138,49 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
     res.writeHead(answer.status, { "content-type": wantsStream(body) ? "text/event-stream" : "application/json" });
     res.end(Buffer.from(answer.body));
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-  const address = server.address();
-  if (address === null || typeof address === "string" || address.address !== "127.0.0.1") {
-    server.close();
-    throw new Error("listener_not_loopback");
+  if (deps.socket !== undefined) {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen({ path: deps.socket, readableAll: false, writableAll: false }, () => resolve());
+    });
+    // Mode 0600 and this user's, checked on the file itself, before anything is served. Its folder is the run's, 0700.
+    const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+    let safe = false;
+    try {
+      await chmod(deps.socket, 0o600);
+      const info = await lstat(deps.socket);
+      safe = info.isSocket() && info.uid === uid && (info.mode & 0o777) === 0o600 && server.address() === deps.socket;
+    } catch {
+      safe = false;
+    }
+    if (!safe) {
+      server.close();
+      await removeSocket(deps.socket);
+      throw new Error("listener_socket_unsafe");
+    }
+  } else {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string" || address.address !== "127.0.0.1") {
+      server.close();
+      throw new Error("listener_not_loopback");
+    }
+    port = address.port;
   }
-  port = address.port;
   const close = () =>
     new Promise<void>((resolve) => {
       if (closed) return resolve();
       closed = true;
-      server.close(() => resolve());
+      server.close(() => {
+        if (deps.socket === undefined) return resolve();
+        void removeSocket(deps.socket).then(resolve);
+      });
       server.closeAllConnections();
     });
   if (deps.signal.aborted) await close();
   else deps.signal.addEventListener("abort", () => void close(), { once: true });
-  return { url: `http://127.0.0.1:${port}`, port, token, close };
+  return { url: deps.socket !== undefined ? `unix:${deps.socket}` : `http://127.0.0.1:${port}`, port, token, close };
 }

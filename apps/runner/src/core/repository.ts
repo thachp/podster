@@ -88,6 +88,9 @@ export function taskBranch(task_id: string): string {
 /** The only URL Runner gives Git: GitHub's canonical HTTPS address for the scoped repository, with no credentials. */
 export const cloneUrl = (full_name: string) => `https://${GIT_HOST}/${full_name}.git`;
 
+/** The pull request's address, for a submission's link (M7 step 11): the scoped repository and Runner's own number. */
+export const pullRequestUrl = (full_name: string, number: number) => `https://${GIT_HOST}/${full_name}/pull/${number}`;
+
 /**
  * `get_repo_access`'s answer, checked against the contract's `RepoAccess` and the owner's scope. Any other field, a
  * permission other than the three the contract fixes, another repository or a clone URL other than the canonical one

@@ -88,6 +88,11 @@ export class FakeGateway {
   details: Record<string, Detail> = {};
   /** Each command's stored answer by its idempotency key, as the API keeps them. */
   readonly stored = new Map<string, unknown>();
+  /** Submissions the API took, and thread messages it posted (step 11). */
+  submissions: Record<string, unknown>[] = [];
+  messages: Record<string, unknown>[] = [];
+  /** A refusal every submission gets, as the API's checks of the pull request would give. */
+  submitRefusal: { status: number; code: string } | null = null;
   /** Capabilities whose next answer is applied, then lost on the way back, as a dropped connection would. */
   loseAnswers: string[] = [];
   /** Every call fails at the network, as Podster unreachable would. */
@@ -234,6 +239,38 @@ export class FakeGateway {
       detail.history.push({ id: `evt_h${detail.history.length + 1}`, type: capability === "accept_task" ? "task.accepted" : capability === "decline_task" ? "task.declined" : "task.released", reason: args.reason ?? null, actor_id: this.identity });
       this.stored.set(key, structuredClone(detail.task));
       return structuredClone(detail.task);
+    }
+    if (capability === "submit_task" || capability === "send_message") {
+      // Step 11. A replay with the same key answers what the first did; the same key with another body is refused, as
+      // the API's `idempotency_mismatch` does.
+      if (typeof args.idempotency_key !== "string" || args.idempotency_key.length === 0) throw new Refusal(400, "idempotency_key_required");
+      const key = `${capability}:${args.idempotency_key}`;
+      const body = JSON.stringify(args);
+      const held = this.stored.get(key) as { body: string; answer: unknown } | undefined;
+      if (held) {
+        if (held.body !== body) throw new Refusal(422, "idempotency_mismatch");
+        return structuredClone(held.answer);
+      }
+      const detail = this.details[String(args.task_id)];
+      if (!detail || detail.workspace_id !== args.workspace_id) throw new Refusal(404, "task_not_found");
+      let answer: unknown;
+      if (capability === "send_message") {
+        if (typeof args.body !== "string" || args.body.length === 0) throw new Refusal(400, "invalid_argument");
+        this.messages.push(structuredClone(args));
+        answer = { id: `msg_${this.messages.length}` };
+      } else {
+        if (detail.task.assignee !== this.identity) throw new Refusal(403, "not_allowed");
+        if (args.version !== detail.task.version) throw new Refusal(409, "version_conflict");
+        if (detail.task.status !== "accepted") throw new Refusal(409, "invalid_transition");
+        if (this.submitRefusal) throw new Refusal(this.submitRefusal.status, this.submitRefusal.code);
+        detail.task.version += 1;
+        detail.task.status = "submitted";
+        detail.history.push({ id: `evt_h${detail.history.length + 1}`, type: "task.submitted", reason: null, actor_id: this.identity });
+        this.submissions.push(structuredClone(args));
+        answer = structuredClone(detail.task);
+      }
+      this.stored.set(key, { body, answer: structuredClone(answer) });
+      return answer;
     }
     if (capability === "ack_inbox") {
       this.acked = Math.max(this.acked, Number(args.up_to));

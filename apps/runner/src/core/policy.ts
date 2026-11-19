@@ -747,3 +747,19 @@ export function repositoryOf(stored: RunDecisionRecord): { repository: NonNullab
     return null;
   }
 }
+
+/**
+ * The output policy a stored decision was made on (M7 step 11): `share` only when the record is whole and its facts say
+ * so, which they do only for a room the owner set to share, every author internal and the room private. Anything else,
+ * a record that doesn't read included, is `hold`.
+ */
+export function outputsOf(stored: RunDecisionRecord): "share" | "hold" {
+  try {
+    const record = parseRecord(stored);
+    if (!record) return "hold";
+    const facts = copy(JSON.parse(record.facts_key));
+    return isObj(facts) && facts.outputs === "share" ? "share" : "hold";
+  } catch {
+    return "hold";
+  }
+}

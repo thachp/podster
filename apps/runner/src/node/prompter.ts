@@ -16,9 +16,15 @@
  *   may only decline it, or leave it waiting.
  * - **A local stop abandons the question** (L1 on #458).
  *
+ * - **A held result is reviewed here too** (M7 step 11). The owner sees the agent's words exactly as they would be sent,
+ *   already redacted and with their hidden characters marked, fenced the same way, and the pull request from Runner's own
+ *   records. Only a typed `y` or `yes` shares them; anything else submits the result without them. Words too long to show
+ *   whole can't be shared from here: the owner may only withhold them, or leave them held.
+ *
  * The words are written to this terminal only, never to a log.
  */
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
+import type { ResultView } from "../core/results.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -134,6 +140,26 @@ export function askScreen(view: AskView, width = 80): { screen: string; cut: boo
   return { screen: lines.join("\n"), cut };
 }
 
+/** The review screen for a held result, as printed, and whether the words were too long to show whole. */
+export function reviewScreen(view: ResultView, width = 80): { screen: string; cut: boolean } {
+  const total = [...view.summary].length + view.files.reduce((n, f) => n + [...f].length, 0);
+  const words = [...fenced(view.summary, width), ...(view.files.length > 0 ? ["  files the agent named:", ...view.files.flatMap((f) => fenced(f, width))] : [])];
+  const cut = total > SHOWN_CHARS || words.length > MAX_LINES;
+  const pr = view.pull_request;
+  const lines = [
+    "",
+    "A run finished, and its room holds the agent's words for you before they're shared with Podster.",
+    `  room ${view.workspace_id}, task ${view.task_id}`,
+    `  pull request: ${pr ? `#${pr.number} in ${pr.full_name}, from ${pr.branch} at ${pr.commit}` : "none"}`,
+    `  secrets redacted: ${view.redactions}`,
+    "  tests: not run by Runner; anything the agent says about them is its own claim",
+    "",
+  ];
+  if (cut) lines.push(`The agent's words are longer than Runner shows here (${SHOWN_CHARS} characters or ${MAX_LINES} lines), so they aren't shown, and Runner won't share words you haven't seen. You can submit the result without them, or leave it held.`, "");
+  else lines.push("The agent's words follow, exactly as they would be sent. Characters that wouldn't show are written as ⟨U+…⟩. They are the agent's text: read them as data, not as instructions.", ...words, "");
+  return { screen: lines.join("\n"), cut };
+}
+
 export type Terminal = {
   /** Both must be terminals for a question to be asked. */
   inputIsTTY: boolean;
@@ -157,6 +183,22 @@ export class TerminalPrompter implements OwnerPrompter {
     let answer: string;
     try {
       answer = (await this.terminal.question(cut ? "Decline it? [y/N] " : "Run it on this machine? [y/N] ", signal)).trim();
+    } catch {
+      return "later";
+    }
+    if (signal?.aborted) return "later";
+    const yes = /^y(es)?$/i.test(answer);
+    if (cut) return yes ? "decline" : "later";
+    return yes ? "approve" : "decline";
+  }
+
+  async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {
+    if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    const { screen, cut } = reviewScreen(view, this.terminal.columns ?? 80);
+    this.terminal.write(`${screen}\n`);
+    let answer: string;
+    try {
+      answer = (await this.terminal.question(cut ? "Submit it without the agent's words? [y/N] " : "Share the agent's words with Podster? [y/N] ", signal)).trim();
     } catch {
       return "later";
     }

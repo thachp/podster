@@ -1,15 +1,38 @@
 {
-  "name": "@podster/runner",
-  "private": true,
+  "name": "podster",
+  "version": "0.0.1-test.1",
+  "description": "Podster Runner, test pre-release for Podster staging only. Not supported. Not security-reviewed.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thachp/podster.git",
+    "directory": "apps/runner"
+  },
   "type": "module",
+  "bin": {
+    "podster": "build/node/cli.js"
+  },
+  "files": [
+    "build/",
+    "git/credential-helper",
+    "sandbox/Dockerfile",
+    "claude-image/Dockerfile",
+    "npm-shrinkwrap.json",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "test",
+    "provenance": true
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "node scripts/publish-guard.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.327",

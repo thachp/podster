@@ -811,7 +811,7 @@ describe("the step 9(b) sources", () => {
   it("wire run to the Claude engine in cli.ts, reaping before the lifecycle opens, and no longer to NO_ENGINE", async () => {
     const cli = await code("src/node/cli.ts");
     expect(cli).not.toMatch(/NO_ENGINE/);
-    expect(cli).toMatch(/claudeEngine\(\{ home, key_file: resolve\(keyFile\), log \}\)/);
+    expect(cli).toMatch(/claudeEngine\(\{ home, key_file: resolve\(keyFile\), log, notify: say \}\)/);
     expect(cli.indexOf("await engine.reap()")).toBeGreaterThan(-1);
     expect(cli.indexOf("await engine.reap()")).toBeLessThan(cli.indexOf("runInbox("));
   });
@@ -1251,6 +1251,8 @@ describe("the reviewer's untested paths", () => {
     const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin", wait: async () => undefined });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
+    // Building the engine only checked that Docker has both pinned images (the ruling on #470); the reap comes after.
+    expect(calls.splice(0).map((c) => c.args.slice(0, 2))).toEqual([["image", "inspect"], ["image", "inspect"]]);
     await engine.reap();
     expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
@@ -1496,7 +1498,7 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     for (const platform of ["linux", "freebsd", "win32", "openbsd"] as const) await expect(engineFor(platform)).rejects.toThrow(/platform_unverified/);
   });
 
-  it("refuses without a pinned Claude Code image", async () => {
+  it("refuses when the Claude Code image is neither pinned nor built (the build here fails)", async () => {
     const { claudeEngine } = await import("../src/node/claude-engine.js");
     const home = await temp();
     await chmod(home, 0o700);

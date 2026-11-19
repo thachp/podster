@@ -17,6 +17,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isPlainPath, RepoPathError } from "../core/repository.js";
 import { childEnv } from "./child-env.js";
@@ -35,15 +36,25 @@ export function findGit(exists: (path: string) => boolean = existsSync): string 
   return null;
 }
 
-/** Runner's credential helper, shipped beside its source. Its path must be plain, so Git's shell reads it as one word. */
-export const HELPER_PATH = fileURLToPath(new URL("../../git/credential-helper", import.meta.url));
+/** Runner's own folder: its package when installed from npm, `apps/runner` when built from source. */
+export const PACKAGE_ROOT = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 
-/** The helper, checked: a plain path to a regular file, not a link, that only its owner can change. */
-export async function checkedHelper(path = HELPER_PATH): Promise<string> {
-  if (!isPlainPath(path)) throw new RepoPathError("helper_unavailable");
+/**
+ * Runner's credential helper, shipped beside its source. Its path must be plain, so Git's shell reads it as one word. Git
+ * runs it as `!/bin/sh <path>` (`hardening`), so it needs no execute bit, which an install may not keep (the ruling on #470).
+ */
+export const HELPER_PATH = join(PACKAGE_ROOT, "git", "credential-helper");
+
+/**
+ * The helper, checked: a plain path to a regular file, not a link, inside Runner's own folder, owned by this user, and
+ * that no one else can change. Its mode needs no execute bit.
+ */
+export async function checkedHelper(path = HELPER_PATH, root = PACKAGE_ROOT): Promise<string> {
+  if (!isPlainPath(path) || !isPlainPath(root) || !path.startsWith(`${root}/`)) throw new RepoPathError("helper_unavailable");
+  const uid = typeof process.getuid === "function" ? process.getuid() : -1;
   try {
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o022) !== 0 || (info.mode & 0o100) === 0) throw new Error("unsafe");
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== uid || (info.mode & 0o022) !== 0) throw new Error("unsafe");
   } catch {
     throw new RepoPathError("helper_unavailable");
   }

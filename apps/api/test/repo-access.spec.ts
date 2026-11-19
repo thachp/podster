@@ -488,6 +488,13 @@ describe("reading the repository back before a new token", () => {
   const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status_reason FROM repo_link").one() as any);
   const degraded = (id: string) => inRoom(id, (sql) => sql.exec("SELECT reason FROM event WHERE type = 'repository.degraded'").toArray().map((e: any) => e.reason));
   const rulesetReads = async () => (await readBack()).reads.filter((read) => read.path.includes("/rulesets")).length;
+  /** Moves the read-back a mint may reuse a minute and a moment into the past, as time passing would. */
+  const aMinuteOn = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => {
+    const key = `repo_token_read_back:${REPO_ID}`;
+    const kept = await state.storage.get(key);
+    expect(kept).toBeTruthy();
+    await state.storage.put(key, { ...kept, at: kept.at - 61_000 });
+  });
 
   it("reads the default branch's rules and bypass list back, then mints", async () => {
     const r = await room();
@@ -519,6 +526,8 @@ describe("reading the repository back before a new token", () => {
     expect(held.status, held.text).toBe(200);
     // Someone with admin rights removes the update rule. The daily read wouldn't see it for up to a day.
     await ready({ rulesets: "no_update" });
+    // Past the minute a read-back that passed may stand for.
+    await aMinuteOn(r.id);
     // The held token comes up for renewal, which is a new mint.
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 4 * 60_000));
     const res = await access(AGENT, r.id, r.task);
@@ -574,6 +583,91 @@ describe("reading the repository back before a new token", () => {
       const next = await access(AGENT, r.id, r.task);
       expect(next.status, `${name}: ${next.text}`).toBe(200);
     }
+  });
+});
+
+describe("the read-back's time and cost", () => {
+  const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_operators" };
+  const rulesetReads = async () => (await readBack()).reads.filter((read) => read.path === `/repositories/${REPO_ID}/rulesets/1`).length;
+  /** Waits until the read-back of this test's repository is held at its gate. No timer. */
+  const readHeld = () => fetch(`https://github-fake.example.com/gate-reached?repo=${REPO_ID}`);
+  const letReadGo = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
+  const unknownLeases = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_token WHERE state = 'mint_unknown'").one().n as number);
+
+  it("gives up a read that outlasts its deadline while the lease is still held: no second token, no unknown mint", async () => {
+    const r = await room();
+    // Each call of the read is well inside its own timeout, but the read as a whole is past the room's deadline for
+    // it, which the test build lets be 3 s rather than the lease's 2 minutes less 20 s.
+    await ready({ script: { gate: true } });
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_mint_recheck_deadline (ms INTEGER); INSERT INTO test_mint_recheck_deadline VALUES (3000)"));
+    const lines: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    const first = access(AGENT, r.id, r.task);
+    await readHeld();
+    // The lease is held while the read is: a second call doesn't start its own.
+    const second = await access(AGENT, r.id, r.task);
+    expect([second.status, second.code]).toEqual([409, "repo_access_busy"]);
+    const res = await first;
+    expect([res.status, res.code]).toEqual([502, "provider_unavailable"]);
+    // It was the read's deadline that ended it, with the one call still inside its own ten seconds.
+    expect(lines.filter((line) => line.includes('"event":"repo_token.recheck_deadline"'))).toHaveLength(1);
+    await letReadGo();
+    expect(await minted()).toEqual([]);
+    expect(await tokens(r.id)).toEqual([]);
+    expect(await unknownLeases(r.id)).toBe(0);
+    expect(await events(r.id, "repo_token.mint_unknown")).toEqual([]);
+    // Once GitHub answers in time, one token is minted, and only one.
+    await ready({ script: {} });
+    const next = await access(AGENT, r.id, r.task);
+    expect(next.status, next.text).toBe(200);
+    expect(await minted()).toEqual([expect.objectContaining({ token: next.body.token, live: true })]);
+  });
+
+  it("mints after a read that passed only under its own lease, with time left on it", async () => {
+    // [what happened to the lease while the read was held, the answer, mint_unknown rows left]
+    const cases: [string, string, number, string, number][] = [
+      ["too little time left", "UPDATE repo_token SET lease_until = ? WHERE state = 'minting'", Date.now() + 5_000, "provider_unavailable", 0],
+      ["taken as abandoned", "UPDATE repo_token SET state = 'mint_unknown', lease_until = NULL, expires_at = ? WHERE state = 'minting'", Date.now() + 3_600_000, "repo_access_busy", 1],
+    ];
+    for (const [name, change, at, code, unknown] of cases) {
+      await freshRepo();
+      const r = await room();
+      await ready({ script: { gate: true } });
+      const pending = access(AGENT, r.id, r.task);
+      await readHeld();
+      await inRoom(r.id, (sql) => sql.exec(change, at));
+      await letReadGo();
+      const res = await pending;
+      expect(res.code, name).toBe(code);
+      expect(await minted(), name).toEqual([]);
+      expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_token WHERE state = 'minting'").one().n), name).toBe(0);
+      expect(await unknownLeases(r.id), name).toBe(unknown);
+    }
+  });
+
+  it("reuses a read-back that passed within the minute for the next mint, and reads again after a degrade", async () => {
+    const r = await room();
+    const first = await access(AGENT, r.id, r.task);
+    expect(first.status, first.text).toBe(200);
+    expect(await rulesetReads()).toBe(1);
+    // A renewal inside the minute: a new mint, on the read just made.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 4 * 60_000));
+    const renewed = await access(AGENT, r.id, r.task);
+    expect(renewed.status, renewed.text).toBe(200);
+    expect(renewed.body.token).not.toBe(first.body.token);
+    expect(await rulesetReads()).toBe(1);
+    // An operator's recheck finds a rule removed and degrades the link; the rule is put back and the link made ready.
+    await ready({ rulesets: "no_update" });
+    const degraded = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {});
+    expect(degraded.body, degraded.text).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    await ready({ rulesets: "ready" });
+    const again = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {});
+    expect(again.body, again.text).toEqual({ status: "ready", reason: null });
+    expect(await rulesetReads()).toBe(3);
+    // Still inside the minute, the next mint reads the repository back itself.
+    const next = await access(AGENT, r.id, r.task);
+    expect(next.status, next.text).toBe(200);
+    expect(await rulesetReads()).toBe(4);
   });
 });
 

@@ -26,7 +26,12 @@
 //! added, degrades the link through `merges::degrade`, which marks every token held on it for revocation, and refuses
 //! `repo_not_ready`; a read that couldn't be made refuses `provider_unavailable` and changes nothing. Either way the
 //! lease goes and nothing is minted. A held token with time left is returned without any of this, so it reads nothing.
-//! Then the mint, outside any transaction. The second transaction decides again on current state, checks the
+//! The read has a deadline inside the lease, and past it counts as unread. After a read that passed, the mint goes on
+//! only while the lease is still this call's with `MINT_LEASE_MARGIN_MS` left (`core::lease_left_for_mint`), so a
+//! lease taken as abandoned during a slow read never leads to a second live token. A read-back that passed may stand
+//! for the same repository's next mint for `READ_BACK_REUSE_MS` (proposed), kept in the object's durable storage and
+//! stamped with the link's `updated_at`: a degrade, a link made ready again, or any read that isn't exactly right ends
+//! it. Then the mint, outside any transaction. The second transaction decides again on current state, checks the
 //! lease is still this call's, and commits the sealed token, the replaced one's revocation and the event together. If it
 //! refuses or fails, the minted token is revoked at once, and if that fails it's queued for the alarm. A Worker that dies
 //! between the mint and the commit leaves a token nobody holds, which lives out its hour: the one acknowledged gap.
@@ -37,9 +42,11 @@
 use super::merges::degrade;
 use super::*;
 use crate::github::{AgentConfig, AgentTokens, Failure, Minted, Revoked, TokenIssuer};
+use podster_core::provisioning::RecheckRead;
 use podster_core::repo_access::{
-    decide_access, decide_mint_recheck, minted_token_matches, AccessCheck, AccessRefusal, Budget,
-    Deadline, HeldToken, MintBlock, TokenPermissions, TokenPlan,
+    decide_access, decide_mint_recheck, lease_left_for_mint, mint_needs_recheck,
+    minted_token_matches, read_back_reusable, AccessCheck, AccessRefusal, Budget, Deadline,
+    HeldToken, LeaseLeft, MintBlock, ReadBack, TokenPermissions,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
@@ -50,14 +57,64 @@ use podster_policy::repositories::{authorize_repo_access, GrantStanding};
 pub(super) const KEY_SECRET: &str = "REPO_TOKEN_KEY";
 /// **Proposed:** mints an agent may cause in a room in an hour, renewals included. A token lives an hour and is renewed
 /// after 55 minutes, so an agent on one task needs about one an hour, and a handful of tasks fit well inside this.
+///
+/// These caps also bound the provisioning App's spend. Each attempt is counted when its lease is taken, before the
+/// read-back, so a read that fails or is refused counts too. A read-back is up to 12 calls on the provisioning App's
+/// installation, whose hourly budget the whole organization shares, unless one from the last `READ_BACK_REUSE_MS`
+/// stands. At most about 60 read-backs a room an hour, so a handful of busy rooms could use a real share of it.
 pub(super) const MINTS_PER_AGENT_HOUR: i64 = 10;
 /// **Proposed:** mints a room may cause in an hour. The agent-token App's installation has 5,000 requests an hour for
 /// the whole organization, and every room shares them.
 pub(super) const MINTS_PER_ROOM_HOUR: i64 = 60;
 const HOUR_MS: i64 = 3_600_000;
-/// How long a lease holds: longer than the read-back before a mint (a provisioning token, the repository's reads and
-/// that token's revocation, each call timing out in 10 seconds), then signing the App's JWT and the mint's one call.
+/// How long a lease holds. The read-back before a mint is up to 12 calls at 10 seconds each (a provisioning token, the
+/// repository's reads, a presence check and its token, and the revocations), so it's cut off at
+/// [`RECHECK_DEADLINE_MS`] and counts as unread. The mint after it needs `MINT_LEASE_MARGIN_MS` still left: signing
+/// the App's JWT and the mint's one call.
 const LEASE_MS: i64 = 2 * 60_000;
+/// How long the read-back before a mint may take in all: the lease less 20 seconds, which leaves the margin the mint
+/// needs and 5 seconds over.
+const RECHECK_DEADLINE_MS: i64 = LEASE_MS - 20_000;
+/// The key in the room's durable storage holding the read-back a mint may reuse, for one repository. No schema step.
+fn read_back_key(repo_id: i64) -> String {
+    format!("repo_token_read_back:{repo_id}")
+}
+
+/// Ends the read-back a mint may reuse for a repository. A failure is logged: the link's stamp still ends it on a
+/// degrade, and it ends by itself within the minute.
+pub(super) async fn forget_read_back(state: &State, repo_id: i64) {
+    if state
+        .storage()
+        .delete(&read_back_key(repo_id))
+        .await
+        .is_err()
+    {
+        console_error!(
+            "{}",
+            json!({ "event": "repo_token.read_back_not_forgotten", "repo": repo_id })
+        );
+    }
+}
+
+/// The deadline for the read-back. Test builds can shorten it by a table only a test can make.
+fn recheck_deadline_ms(sql: &SqlStorage) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if let Some(ms) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_mint_recheck_deadline'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| rows(sql, "SELECT ms FROM test_mint_recheck_deadline", vec![]).ok())
+    .and_then(|found| found.first().and_then(|row| row["ms"].as_i64()))
+    {
+        return ms.min(RECHECK_DEADLINE_MS);
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    RECHECK_DEADLINE_MS
+}
 const REVOKE_FIRST_WAIT_MS: i64 = 60_000;
 const REVOKE_LONGEST_WAIT_MS: i64 = 15 * 60_000;
 /// Revocations one alarm attempts, so a room with many doesn't run long.
@@ -314,9 +371,10 @@ struct Lease {
     id: String,
     grant: String,
     repo_id: i64,
-    /// The ready link's visibility and default branch, for the read-back before the mint.
+    /// The ready link's visibility, default branch and `updated_at`, for the read-back before the mint.
     public: bool,
     default_branch: String,
+    link_stamp: i64,
 }
 
 /// The caller's `push` grant row that isn't revoked.
@@ -568,8 +626,9 @@ impl Workspace {
                         return Ok(Outcome::Refused(error));
                     }
                 };
-                match access.token {
-                    TokenPlan::ReuseHeld => {
+                // Only a new token reads the repository back first; a held one with time left is returned as it is.
+                match mint_needs_recheck(access.token) {
+                    false => {
                         let (sealed, expires_at, grant) = inputs.held.ok_or_else(|| ApiError::internal("no held token"))?;
                         let label = label(&room, access.repo_id, &grant, &who.caller.id, &task);
                         Ok(match keys.open(&label, &sealed) {
@@ -583,7 +642,7 @@ impl Workspace {
                             None => Outcome::Refused(unavailable()),
                         })
                     }
-                    TokenPlan::Mint { .. } => {
+                    true => {
                         if !ready {
                             return Ok(Outcome::Refused(unavailable()));
                         }
@@ -595,7 +654,7 @@ impl Workspace {
                         }
                         let grant = inputs.grant.ok_or_else(|| ApiError::internal("no grant"))?.id;
                         // The ready link the decision allowed, as the read-back before the mint needs it.
-                        let Some(link) = rows(sql, "SELECT visibility, default_branch FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'", vec![access.repo_id.into()])?.into_iter().next() else {
+                        let Some(link) = rows(sql, "SELECT visibility, default_branch, updated_at FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'", vec![access.repo_id.into()])?.into_iter().next() else {
                             return Ok(Outcome::Refused(refused(AccessRefusal::RepoNotReady)));
                         };
                         let lease = Lease {
@@ -604,6 +663,7 @@ impl Workspace {
                             repo_id: access.repo_id,
                             public: link["visibility"].as_str() == Some("public"),
                             default_branch: text(&link["default_branch"]).unwrap_or_default(),
+                            link_stamp: int(&link["updated_at"]),
                         };
                         exec(sql, "INSERT INTO repo_token (id, agent_id, task_id, grant_id, provider_repo_id, state, lease_until, created_at) VALUES (?, ?, ?, ?, ?, 'minting', ?, ?)", vec![
                             lease.id.as_str().into(), who.caller.id.as_str().into(), task.as_str().into(), lease.grant.as_str().into(),
@@ -623,16 +683,13 @@ impl Workspace {
         let (Some(config), Some(key)) = (config, keys.current.clone()) else {
             return Err(unavailable());
         };
-        // Before a new token, the repository's protections are read back now, never trusted from the last read.
-        if let Err(block) = self.recheck_before_mint(&sql, &room, &lease).await {
+        // Before a new token, the repository's protections are read back, never trusted from the daily read.
+        if let Err(error) = self.recheck_before_mint(&sql, &room, &lease).await {
             console_error!(
                 "{}",
-                json!({ "event": "repo_token.mint_refused", "ws": room, "task": task, "agent": agent, "code": block.code() })
+                json!({ "event": "repo_token.mint_refused", "ws": room, "task": task, "agent": agent, "code": error.code().unwrap_or("internal_error") })
             );
-            return Err(match block {
-                MintBlock::Drifted(_) => refused(AccessRefusal::RepoNotReady),
-                MintBlock::Unread => ApiError::api(502, "provider_unavailable"),
-            });
+            return Err(error);
         }
         let issuer = AgentTokens::new(config);
         #[cfg(feature = "failpoints")]
@@ -861,47 +918,110 @@ impl Workspace {
     }
 
     /// Reads the repository's protections back before a new token is minted, with the one readiness check the daily
-    /// read, a merge and an operator's recheck use, and decides on it in `core`. On a refusal the lease goes, and on a
-    /// definite difference the link is degraded in that same transaction, which marks every held token for revocation.
-    /// The alarm the request arms afterwards takes them back.
-    async fn recheck_before_mint(
-        &self,
-        sql: &SqlStorage,
-        room: &str,
-        lease: &Lease,
-    ) -> std::result::Result<(), MintBlock> {
-        #[cfg(feature = "failpoints")]
-        let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
-        #[cfg(not(feature = "failpoints"))]
-        let _ = sql;
-        let read = self
-            .readiness(lease.repo_id, lease.public, &lease.default_branch, room)
+    /// read, a merge and an operator's recheck use, within [`RECHECK_DEADLINE_MS`], and decides on it in `core`. A
+    /// read-back that passed within `READ_BACK_REUSE_MS` on the unchanged link stands instead. On a refusal the lease
+    /// goes, and on a definite difference the link is degraded in that same transaction, which marks every held token
+    /// for revocation; the alarm the request arms afterwards takes them back. After a read that passed, the lease must
+    /// still be this call's with time left.
+    async fn recheck_before_mint(&self, sql: &SqlStorage, room: &str, lease: &Lease) -> R<()> {
+        let key = read_back_key(lease.repo_id);
+        let kept = self
+            .state
+            .storage()
+            .get::<Value>(&key)
             .await
-            .read();
-        let Err(block) = decide_mint_recheck(read) else {
-            return Ok(());
+            .ok()
+            .flatten()
+            .and_then(|kept| {
+                Some(ReadBack {
+                    repo_id: kept["repo_id"].as_i64()?,
+                    at: kept["at"].as_i64()?,
+                    link_stamp: kept["link_stamp"].as_i64()?,
+                })
+            });
+        let read = if read_back_reusable(kept, lease.repo_id, lease.link_stamp, now_ms()) {
+            RecheckRead::ExactlyRight
+        } else {
+            #[cfg(feature = "failpoints")]
+            let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
+            let deadline = Delay::from(std::time::Duration::from_millis(
+                recheck_deadline_ms(sql).max(0) as u64,
+            ));
+            let reading = self.readiness(lease.repo_id, lease.public, &lease.default_branch, room);
+            let read = match futures_util::future::select(Box::pin(reading), deadline).await {
+                futures_util::future::Either::Left((verdict, _)) => verdict.read(),
+                // Past its deadline the read counts as unread, before the lease can run out under it.
+                futures_util::future::Either::Right(_) => {
+                    console_error!(
+                        "{}",
+                        json!({ "event": "repo_token.recheck_deadline", "ws": room })
+                    );
+                    RecheckRead::CouldNotRead
+                }
+            };
+            if read == RecheckRead::ExactlyRight {
+                let kept = json!({ "repo_id": lease.repo_id, "at": now_ms(), "link_stamp": lease.link_stamp });
+                if self.state.storage().put(&key, kept).await.is_err() {
+                    console_error!(
+                        "{}",
+                        json!({ "event": "repo_token.read_back_not_kept", "ws": room })
+                    );
+                }
+            } else {
+                forget_read_back(&self.state, lease.repo_id).await;
+            }
+            read
         };
         let (id, repo_id) = (lease.id.clone(), lease.repo_id);
-        let ended = self.in_transaction(move |sql| {
-            exec(
-                sql,
-                "DELETE FROM repo_token WHERE id = ? AND state = 'minting'",
-                vec![id.as_str().into()],
-            )?;
-            match block.degrade_reason() {
-                Some(code) => degrade(sql, repo_id, code, now_ms()),
-                None => Ok(()),
+        if let Err(block) = decide_mint_recheck(read) {
+            let ended = self.in_transaction(move |sql| {
+                exec(
+                    sql,
+                    "DELETE FROM repo_token WHERE id = ? AND state = 'minting'",
+                    vec![id.as_str().into()],
+                )?;
+                match block.degrade_reason() {
+                    Some(code) => degrade(sql, repo_id, code, now_ms()),
+                    None => Ok(()),
+                }
+            });
+            if ended.is_err() {
+                // The lease is then left to run out, and kept as a record, as one a Worker never came back from is.
+                // Nothing was minted, and the request still refuses: the decision doesn't depend on this write.
+                console_error!(
+                    "{}",
+                    json!({ "event": "repo_token.recheck_not_kept", "ws": room })
+                );
             }
-        });
-        if ended.is_err() {
-            // The lease is then left to run out, and kept as a record, as one a Worker never came back from is. Nothing
-            // was minted, and the request still refuses: the decision doesn't depend on this write.
-            console_error!(
-                "{}",
-                json!({ "event": "repo_token.recheck_not_kept", "ws": room })
-            );
+            return Err(match block {
+                MintBlock::Drifted(_) => refused(AccessRefusal::RepoNotReady),
+                MintBlock::Unread => ApiError::api(502, "provider_unavailable"),
+            });
         }
-        Err(block)
+        // The read passed. The mint goes on only under this call's own lease, with time left for it.
+        let left = self.in_transaction(move |sql| {
+            let until = rows(
+                sql,
+                "SELECT lease_until FROM repo_token WHERE id = ? AND state = 'minting'",
+                vec![id.as_str().into()],
+            )?
+            .first()
+            .map(|row| row["lease_until"].as_i64().unwrap_or(0));
+            let left = lease_left_for_mint(until, now_ms());
+            if left == LeaseLeft::TooShort {
+                exec(
+                    sql,
+                    "DELETE FROM repo_token WHERE id = ? AND state = 'minting'",
+                    vec![id.as_str().into()],
+                )?;
+            }
+            Ok(left)
+        })?;
+        match left {
+            LeaseLeft::Enough => Ok(()),
+            LeaseLeft::TooShort => Err(ApiError::api(502, "provider_unavailable")),
+            LeaseLeft::Lost => Err(busy()),
+        }
     }
 
     fn drop_lease(&self, id: &str) {

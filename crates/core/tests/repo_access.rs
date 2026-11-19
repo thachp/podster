@@ -721,8 +721,8 @@ fn only_a_new_mint_reads_the_repository_back_first() {
 }
 
 /// The read-back before a mint: exactly right mints; a definite difference, a ruleset removed or a bypass actor added,
-/// refuses as `repo_not_ready` and degrades the link for that reason; no definite answer refuses as a transient
-/// `provider_unavailable` and changes nothing. Nothing is ever minted on a read that wasn't made.
+/// refuses as `repo_not_ready` and degrades the link for that reason; no definite answer, a read past its deadline
+/// included, refuses as `provider_unavailable` and changes nothing. Nothing is ever minted on a read that wasn't made.
 #[test]
 fn a_mint_goes_on_only_after_a_read_back_that_is_exactly_right() {
     use podster_core::provisioning::RecheckRead;
@@ -739,12 +739,63 @@ fn a_mint_goes_on_only_after_a_read_back_that_is_exactly_right() {
         assert_eq!(block.degrade_reason(), Some(reason));
         assert_eq!(block.code(), "repo_not_ready");
         assert_eq!(block.code(), AccessRefusal::RepoNotReady.code());
-        assert!(!block.transient());
     }
     let unread = decide_mint_recheck(RecheckRead::CouldNotRead);
     assert_eq!(unread, Err(MintBlock::Unread));
     let block = unread.unwrap_err();
     assert_eq!(block.degrade_reason(), None);
     assert_eq!(block.code(), "provider_unavailable");
-    assert!(block.transient());
+}
+
+/// After a read-back that passed, the mint goes on only under the call's own lease with time to spare: one that ran
+/// out was taken as abandoned, and another call may hold a new one, so minting would make a second live token.
+#[test]
+fn a_mint_needs_its_own_lease_with_time_left_after_the_read() {
+    assert_eq!(
+        lease_left_for_mint(Some(NOW + MINT_LEASE_MARGIN_MS), NOW),
+        LeaseLeft::Enough
+    );
+    assert_eq!(
+        lease_left_for_mint(Some(NOW + 2 * MINUTE), NOW),
+        LeaseLeft::Enough
+    );
+    for left in [MINT_LEASE_MARGIN_MS - 1, 1, 0, -MINUTE] {
+        assert_eq!(
+            lease_left_for_mint(Some(NOW + left), NOW),
+            LeaseLeft::TooShort,
+            "{left}"
+        );
+    }
+    assert_eq!(lease_left_for_mint(None, NOW), LeaseLeft::Lost);
+    assert_eq!(MINT_LEASE_MARGIN_MS, 15_000);
+}
+
+/// A read-back that passed may stand for the same repository's next mint for a minute, and only while the link hasn't
+/// changed since: a degrade, or a link made ready again, moves its stamp.
+#[test]
+fn a_ready_read_back_stands_for_a_minute_on_an_unchanged_link() {
+    let read = ReadBack {
+        repo_id: REPO,
+        at: NOW,
+        link_stamp: 7,
+    };
+    assert!(read_back_reusable(Some(read), REPO, 7, NOW));
+    assert!(read_back_reusable(
+        Some(read),
+        REPO,
+        7,
+        NOW + READ_BACK_REUSE_MS - 1
+    ));
+    assert!(!read_back_reusable(
+        Some(read),
+        REPO,
+        7,
+        NOW + READ_BACK_REUSE_MS
+    ));
+    assert!(!read_back_reusable(Some(read), REPO, 8, NOW));
+    assert!(!read_back_reusable(Some(read), REPO + 1, 7, NOW));
+    // A read stamped in the future isn't trusted.
+    assert!(!read_back_reusable(Some(read), REPO, 7, NOW - 1));
+    assert!(!read_back_reusable(None, REPO, 7, NOW));
+    assert_eq!(READ_BACK_REUSE_MS, 60_000);
 }

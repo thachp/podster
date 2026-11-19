@@ -1164,12 +1164,17 @@ impl Workspace {
             }
             Ok(Some(look))
         });
-        match (verdict, look) {
+        let verdict = match (verdict, look) {
             (verdict, Ok(None) | Ok(Some(GoneLook::Confirmed))) => verdict,
             (_, Ok(Some(GoneLook::FirstSeen | GoneLook::TooSoon)) | Err(_)) => {
                 Readiness::CouldNotRead(404)
             }
+        };
+        // Any read that isn't exactly right ends the read-back a mint may reuse (`repo_tokens`).
+        if !matches!(verdict, Readiness::Ready) {
+            super::repo_tokens::forget_read_back(&self.state, repo_id).await;
         }
+        verdict
     }
 
     /// An operator's recheck of a degraded link, `{ operator, key }` (reached only from `crate::moderation`, which has

@@ -4,7 +4,7 @@
 // misbehaves in one way the plan names, and the interface must catch it.
 import { readdir, readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import type { RunHandle, RunReport } from "../src/core/adapter.js";
+import type { RunHandle, RunReport, StopResult } from "../src/core/adapter.js";
 import type { BrokerRequest, Forward, ProviderProfile } from "../src/core/broker.js";
 import type { RunFacts } from "../src/core/policy.js";
 import type { Clock, LogFields } from "../src/core/runtime.js";
@@ -16,6 +16,7 @@ import {
   MAX_PROMPT_BYTES,
   MAX_TOOL_OUTPUT_BYTES,
   PLACEHOLDER_KEY,
+  STOP_STEP_MS,
   SupervisedAdapter,
   UNTRUSTED_FRAME,
   type AgentDriver,
@@ -99,10 +100,14 @@ class FakeSandbox implements TaskSandbox {
   killed: string[] = [];
   alive = new Set<string>();
   killThrows = false;
+  goneHangs = false;
+  /** Open holds until the run's signal aborts, then fails, as a stuck `docker run` would once cancelled. */
+  openHangs = false;
   output = "ran";
-  async open(spec: ContainerSpec) {
+  async open(spec: ContainerSpec, signal: AbortSignal) {
     this.specs.push(structuredClone(spec));
     this.alive.add(spec.run_ref);
+    if (this.openHangs) await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   }
   async exec(_ref: string, call: AllowedCall) {
     this.execs.push(call);
@@ -114,6 +119,7 @@ class FakeSandbox implements TaskSandbox {
     this.alive.delete(ref);
   }
   async gone(ref: string) {
+    if (this.goneHangs) return never();
     return !this.alive.has(ref);
   }
 }
@@ -139,6 +145,7 @@ class FakeDriver implements AgentDriver {
   sessions: DriverSession[] = [];
   cancels = 0;
   cancelThrows = false;
+  cancelHangs = false;
   alive = new Set<string>();
   private readonly script: Script;
   constructor(script: Script) {
@@ -151,6 +158,7 @@ class FakeDriver implements AgentDriver {
       done: this.script(session).then((result) => ({ result })),
       cancel: async () => {
         this.cancels++;
+        if (this.cancelHangs) return never();
         if (this.cancelThrows) throw new Error("the SDK's cancel threw");
         this.alive.delete(session.run_ref);
       },
@@ -167,7 +175,9 @@ const modelRequest = (over: Record<string, unknown> = {}): BrokerRequest => ({
   query: "",
   body: enc.encode(JSON.stringify({ model: "model-small", max_tokens: 128_000, messages: [{ role: "user", content: "go" }], ...over })),
 });
-const never = () => new Promise<never>(() => undefined);
+function never(): Promise<never> {
+  return new Promise<never>(() => undefined);
+}
 
 function setup(script: Script, facts: RunFacts = FACTS) {
   const clock = new ManualClock();
@@ -224,6 +234,24 @@ describe("the tool decision", () => {
   it("keeps tools out of Git's own folder, whose hooks and config Runner's Git would act on", () => {
     for (const bad of [".git", ".git/config", "sub/.GIT/hooks/pre-push", ".Git/HEAD"])
       expect([bad, decideToolCall(FACTS, call("write", { path: bad, content: "x" }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);
+  });
+
+  it("refuses a path segment that would read as an option to the program running the tool (L1 on #459)", () => {
+    for (const bad of ["--pre=/bin/sh", "-n", "a/-n", "src/--output=x"]) {
+      expect([bad, decideToolCall(FACTS, call("search", { pattern: "x", path: bad }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);
+      expect([bad, decideToolCall(FACTS, call("read", { path: bad }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);
+    }
+    expect(decideToolCall(FACTS, call("read", { path: "a-b/c-" }))).toMatchObject({ allow: true });
+  });
+
+  it("refuses every look-alike of Git's folder, and a segment ending in a space or dot (L2 on #459)", () => {
+    const lookalikes = [
+      ".git ", ".git.", ".GiT", ".gıt", ".g\u200bit", ".git\u00ad", "\u200d.git", ".gi\ufefft", "\uff0egit", ".\uff47it", ".g\u0130t", ".git\u034f", "a/.git\u2060/hooks",
+    ].map((x) => JSON.parse(`"${x}"`) as string);
+    for (const bad of lookalikes) expect([bad, decideToolCall(FACTS, call("write", { path: bad, content: "x" })).allow]).toEqual([bad, false]);
+    for (const bad of ["notes.", "notes ", "a./b", "a /b"]) expect([bad, decideToolCall(FACTS, call("read", { path: bad }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);
+    expect(decideToolCall(FACTS, call("read", { path: ".github/workflows/ci.yml" }))).toMatchObject({ allow: true });
+    expect(decideToolCall(FACTS, call("read", { path: ".gitignore" }))).toMatchObject({ allow: true });
   });
 
   it("takes each tool's input in exactly its shape", () => {
@@ -369,10 +397,10 @@ describe("fake adapters that misbehave, each caught", () => {
     const t = setup(async (s) => {
       for (let i = 0; i < 100; i++) if (!(await s.model(modelRequest())).ok) refusals++;
       return RESULT;
-    }, { ...FACTS, caps: { ...CAPS, spend_micro_usd: 12_000, turns: 1_000 } });
+    }, { ...FACTS, caps: { ...CAPS, spend_micro_usd: 20_000, turns: 1_000 } });
     const report = await (await t.start()).done;
     expect(report).toMatchObject({ status: "budget_stopped", stop_reason: "spend_cap", result: null });
-    expect(report.spent_micro_usd).toBeLessThanOrEqual(12_000);
+    expect(report.spent_micro_usd).toBeLessThanOrEqual(20_000);
     expect(t.transport.sent.length).toBe(2);
     // Every later request is refused, never sent, as the driver's loop runs on.
     await settled();
@@ -477,6 +505,80 @@ describe("fake adapters that misbehave, each caught", () => {
     });
     t.transport.usage = () => ({ input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost_usd: 0 });
     expect((await (await t.start()).done).spent_micro_usd).toBe(6);
+  });
+});
+
+describe("stopping, in parallel and bounded (M2 on #459)", () => {
+  it("a cancel that never returns still gets the container killed, and the stop returns", async () => {
+    const t = setup(() => never());
+    t.driver.cancelHangs = true;
+    const handle = await t.start();
+    let result: StopResult | null = null;
+    void handle.stop().then((r) => (result = r));
+    await settled();
+    // The kill went at once, beside the cancel, not after it.
+    expect(t.driver.cancels).toBe(1);
+    expect(t.sandbox.killed).toEqual(["run_1"]);
+    expect(result).toBeNull();
+    await t.clock.advance(STOP_STEP_MS);
+    expect(result).toBe("unknown");
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "stopped" });
+  });
+
+  it("a container that never says whether it's gone is unknown, never stopped", async () => {
+    const t = setup(() => never());
+    const handle = await t.start();
+    t.sandbox.goneHangs = true;
+    let result: StopResult | null = null;
+    void handle.stop().then((r) => (result = r));
+    await settled();
+    await t.clock.advance(STOP_STEP_MS);
+    expect(result).toBe("unknown");
+  });
+});
+
+describe("a driver that acts while beginning (M3 on #459)", () => {
+  it("a begin that calls model and tool, then hands back a run whose done rejects: handled, cancelled and killed", async () => {
+    const t = setup(() => never());
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    let cancels = 0;
+    t.driver.begin = async (session) => {
+      t.driver.sessions.push(session);
+      await session.model(modelRequest());
+      // Refused without the hook: the run halts before the driver's run exists.
+      await session.tool({ call_id: "c1", tool: "shell", input: { command: "id" } });
+      return {
+        done: Promise.reject(new Error("the SDK threw after its stop")),
+        cancel: async () => void cancels++,
+      };
+    };
+    // Its process tree reads as gone throughout, so only a forced stop cancels the late run.
+    t.driver.confirmGone = async () => true;
+    const handle = await t.start();
+    await settled();
+    process.off("unhandledRejection", onUnhandled);
+    expect(unhandled).toEqual([]);
+    expect(cancels).toBe(1);
+    expect(t.sandbox.killed.length).toBeGreaterThanOrEqual(2);
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "tool_refused_unchecked" });
+    expect(t.sandbox.execs).toEqual([]);
+  });
+});
+
+describe("the run-time timer starts with the run (L4 on #459)", () => {
+  it("a container that never opens is still stopped at the run-time cap", async () => {
+    const t = setup(async () => RESULT);
+    t.sandbox.openHangs = true;
+    const started = t.start();
+    started.catch(() => undefined);
+    await settled();
+    await t.clock.advance(CAPS.run_time_ms);
+    await expect(started).rejects.toThrow(/start_failed/);
+    expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "halted", fields: { workspace: "ws_room_one", task: "tsk_one", code: "run_time" } });
+    expect(t.sandbox.killed).toContain("run_1");
+    expect(t.driver.sessions).toEqual([]);
   });
 });
 

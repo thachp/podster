@@ -8,7 +8,12 @@
  * - **No shell unless the policy names it.** Network is the container's, from the policy's hosts (`run-interface.ts`).
  * - **Every path stays inside the task's folder:** relative, without `..` or empty segments, and without backslashes or
  *   control characters. A `.` segment is dropped. Git's own folder is refused too, at any depth: Runner's own Git works on
- *   this folder later (step 10), and hooks or config written there would act outside the container.
+ *   this folder later (step 10), and hooks or config written there would act outside the container. Segments are compared
+ *   folded (compatibility-normalised, marks and default-ignorable characters removed, case folded), so no look-alike of
+ *   `.git` passes, and a segment ending in a space or a dot is refused, as some file systems drop them (L2 on #459).
+ * - **No segment starts with `-`,** so no path reads as an option to the program running a tool (L1 on #459). Step
+ *   9(b)'s sandbox runs each tool from an argument array with no shell: search as `rg` with fixed flags, `-e PATTERN --
+ *   ./path`; read, write and edit never through a shell.
  * - **Each tool's input in exactly its shape;** anything else refuses.
  * - **The structured result is bounded** here, so an oversize one is refused at the decision point as well as after.
  *
@@ -45,6 +50,13 @@ const CALL_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** Control characters, other than tab and newline in free text. */
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
 const PATH_BAD = /[\u0000-\u001f\u007f-\u009f\\]/;
+const IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+const MARKS = /\p{M}/gu;
+
+/** A segment as a file system might see it: compatibility forms, marks and invisible characters gone, case folded. */
+export function foldedSegment(segment: string): string {
+  return segment.normalize("NFKD").replace(MARKS, "").replace(IGNORABLE, "").toUpperCase().toLowerCase().normalize("NFKC");
+}
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -65,7 +77,9 @@ export function taskPath(raw: unknown, folderAllowed = false): { ok: true; path:
   for (const segment of segments) {
     if (segment === ".." || segment === "") return outside;
     if (segment === ".") continue;
-    if (segment.toLowerCase() === ".git") return { ok: false, reason: "path_not_allowed" };
+    const folded = foldedSegment(segment);
+    const plain = segment.normalize("NFC").replace(IGNORABLE, "");
+    if (folded === ".git" || segment.startsWith("-") || folded.startsWith("-") || /[ .]$/.test(plain) || /[ .]$/.test(folded)) return { ok: false, reason: "path_not_allowed" };
     kept.push(segment);
   }
   if (kept.length === 0) return folderAllowed ? { ok: true, path: "." } : outside;

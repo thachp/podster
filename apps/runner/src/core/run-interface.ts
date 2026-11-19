@@ -17,8 +17,13 @@
  *   tokens are hard stops there; run time is Runner's own timer, checked again before every call. Any cap reached
  *   cancels the run at once. Spend the SDK reports is never read.
  * - **Cancellation.** A stop cancels the driver's process tree and kills the task's container, which takes every process
- *   in it (spike B ruling 4: killing a `docker exec` client leaves its process running). A stop is `stopped` only when
- *   the driver and the container both confirm nothing is left; a stop that throws is `unknown`, never a throw.
+ *   in it (spike B ruling 4: killing a `docker exec` client leaves its process running). The cancel and the kill go at
+ *   once, side by side, and each step (cancel, kill, and each confirmation) is bounded by `STOP_STEP_MS` (M2 on #459). A
+ *   stop is `stopped` only when the driver and the container both confirm nothing is left; a stop that throws or runs out
+ *   of time is `unknown`, never a throw. A driver's run that arrives after a halt is always cancelled and its container
+ *   killed again (M3 on #459), and its `done` is always handled.
+ * - **Run time** counts from the moment the run is made, so a container or driver that never starts is stopped too (L4
+ *   on #459).
  * - **No credential in the task's container.** The container gets a fixed environment and only the task's folder; the
  *   driver gets a placeholder key. The owner's provider key is held by the transport, outside both (step 9(b)).
  *
@@ -33,6 +38,9 @@ import { decideToolCall, MAX_RESULT_FILES, MAX_SUMMARY_CHARS, parseRunResult, ty
 
 /** What the driver gives its SDK as the provider key. The broker never reads it; the real key never leaves the transport. */
 export const PLACEHOLDER_KEY = "runner-broker-placeholder";
+
+/** How long each step of a stop may take before the stop is `unknown`. **Proposed** figure. */
+export const STOP_STEP_MS = 10_000;
 
 /** The largest prompt Runner hands a driver. */
 export const MAX_PROMPT_BYTES = 1024 * 1024;
@@ -317,6 +325,10 @@ class LiveRun {
     this.started = deps.clock.now();
     const done = new Promise<RunReport>((resolve) => (this.resolveDone = resolve));
     this.handle = { done, stop: () => this.halt("stopped") };
+    // Run time is Runner's own timer, from now: the SDK has none (spike B ruling 4), and a start that hangs counts too.
+    void deps.clock.idle(run.facts.caps.run_time_ms, this.timer.signal).then(() => {
+      if (!this.timer.signal.aborted) void this.halt("run_time");
+    });
   }
 
   /** Neither ended by itself nor stopped by Runner. */
@@ -325,8 +337,8 @@ class LiveRun {
   }
 
   async begin() {
-    const { sandbox, clock } = this.deps;
-    await sandbox.open(this.spec, this.abort.signal);
+    await this.deps.sandbox.open(this.spec, this.abort.signal);
+    if (!this.active) throw new Error("halted");
     const facts = this.run.facts;
     const session: DriverSession = {
       run_ref: this.run.run_ref,
@@ -342,22 +354,20 @@ class LiveRun {
       model: (request) => this.model(request),
     };
     this.emit("started");
-    this.driverRun = await this.driver.begin(session);
-    if (!this.active) {
-      // Stopped while the driver was beginning, before its run could be cancelled: stop again, now that it can be.
-      await this.stopping;
-      await this.stop();
-      return;
-    }
-    // Run time is Runner's own timer: the SDK has none (spike B ruling 4).
-    const left = Math.max(0, facts.caps.run_time_ms - (clock.now() - this.started));
-    void clock.idle(left, this.timer.signal).then(() => {
-      if (!this.timer.signal.aborted) void this.halt("run_time");
-    });
-    this.driverRun.done.then(
+    const driverRun = await this.driver.begin(session);
+    this.driverRun = driverRun;
+    // Always handled, whatever happened meanwhile, so a rejection is never left unhandled (M3 on #459).
+    driverRun.done.then(
       (outcome) => this.finish(outcome, false),
       () => this.finish(null, true),
     );
+    if (!this.active) {
+      // Halted while the driver was beginning, before its run could be cancelled: cancel it and kill the container
+      // again now, whatever an earlier stop confirmed (M3 on #459).
+      await this.stopping;
+      this.confirmed = false;
+      await this.stop();
+    }
   }
 
   private overTime() {
@@ -392,24 +402,30 @@ class LiveRun {
     return this.stopping;
   }
 
+  /** The cancel and the kill at once, then both confirmations at once; each step bounded, and a throw or time-out fails it. */
   private async kill(): Promise<StopResult> {
-    let sure = true;
-    try {
-      await this.driverRun?.cancel();
-    } catch {
-      sure = false;
-    }
-    try {
-      await this.deps.sandbox.kill(this.run.run_ref);
-    } catch {
-      sure = false;
-    }
-    if (!sure) return "unknown";
-    try {
-      return (await this.driver.confirmGone(this.run.run_ref)) && (await this.deps.sandbox.gone(this.run.run_ref)) ? "stopped" : "unknown";
-    } catch {
-      return "unknown";
-    }
+    const ref = this.run.run_ref;
+    const driverRun = this.driverRun;
+    const [cancelled, killed] = await Promise.all([this.within(async () => void (await driverRun?.cancel())), this.within(() => this.deps.sandbox.kill(ref))]);
+    if (!cancelled.ok || !killed.ok) return "unknown";
+    const [driverGone, containerGone] = await Promise.all([this.within(() => this.driver.confirmGone(ref)), this.within(() => this.deps.sandbox.gone(ref))]);
+    return driverGone.ok && driverGone.value === true && containerGone.ok && containerGone.value === true ? "stopped" : "unknown";
+  }
+
+  /** `work`, or a failure if it throws or takes longer than `STOP_STEP_MS`. */
+  private within<T>(work: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
+    const settled = new AbortController();
+    const result = (async () => {
+      try {
+        return { ok: true as const, value: await work() };
+      } catch {
+        return { ok: false as const };
+      } finally {
+        settled.abort();
+      }
+    })();
+    const timeout = this.deps.clock.idle(STOP_STEP_MS, settled.signal).then(() => (settled.signal.aborted ? new Promise<never>(() => undefined) : { ok: false as const }));
+    return Promise.race([result, timeout]);
   }
 
   /** The driver ended by itself. Ignored once Runner has stopped the run: Runner's reason is the outcome. */

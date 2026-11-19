@@ -22,7 +22,7 @@ import { createInterface } from "node:readline/promises";
 import { gatewayOrigin } from "../core/gateway.js";
 import { pair, type PairingOutcome } from "../core/pairing.js";
 import { clampGrace, clampInterval, DEFAULT_GRACE_MS, DEFAULT_INTERVAL_MS, Poller } from "../core/poller.js";
-import { lineLogger, systemClock } from "../core/runtime.js";
+import { lineLogger, logLine, systemClock } from "../core/runtime.js";
 import { RunnerStorage } from "../core/storage.js";
 import { FileRunStore, forgetRuns } from "./file-runs.js";
 import { FileStateStore } from "./file-state.js";
@@ -212,6 +212,13 @@ async function locked(command: string, args: string[], home: string, state: File
   say(USAGE);
   return 2;
 }
+
+// A rejection nothing handled fails closed: a fixed line, never its reason (which could carry agent content or a token),
+// and the process ends. A run left going is held on the next start, until its stop is confirmed (M3 on #459).
+process.on("unhandledRejection", () => {
+  process.stderr.write(`${logLine("runner", "unhandled_rejection")}\n`);
+  process.exit(70);
+});
 
 main(process.argv.slice(2)).then(
   (code) => {

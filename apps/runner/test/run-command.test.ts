@@ -1,12 +1,13 @@
 // M7 step 9(a): `run` wired to the lifecycle (step 8's notes, "what step 9 needs"): `Lifecycle.open`, `runWithLifecycle`,
 // `FileRunStore`, `TerminalPrompter` and `policyFile(home)`, against the stand-in gateway with a fake driver. With no run
 // engine, which is this build's case, `run` opens no lifecycle and accepts nothing.
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ProviderProfile } from "../src/core/broker.js";
 import { pair } from "../src/core/pairing.js";
+import { parsePolicyConfig } from "../src/core/policy.js";
 import { Poller, type PollerDeps } from "../src/core/poller.js";
 import { SupervisedAdapter, type AgentDriver, type ContainerSpec, type DriverSession } from "../src/core/run-interface.js";
 import type { Clock } from "../src/core/runtime.js";
@@ -200,5 +201,25 @@ describe("run, with a run engine", () => {
 
   it("builds the interface the lifecycle is given from the engine", async () => {
     expect(new SupervisedAdapter({ ...engine().run, clock: new TestClock(), log: () => undefined })).toBeInstanceOf(SupervisedAdapter);
+  });
+});
+
+describe("the run policy's workspace root (L4 on #459)", () => {
+  it("refuses a root with a comma, colon or equals sign, which a container mount's options would read", () => {
+    expect(parsePolicyConfig(policy).ok).toBe(true);
+    for (const root of ["/work/a,b", "/work/a:b", "/work/a=b", "/work/x,readonly=false"]) expect([root, parsePolicyConfig({ ...policy, workspace_root: root }).ok]).toEqual([root, false]);
+  });
+});
+
+describe("the command line", () => {
+  it("fails closed on a promise rejection nothing handled, logging no more than a fixed line (M3 on #459)", async () => {
+    const cli = await readFile(new URL("../src/node/cli.ts", import.meta.url), "utf8");
+    const handler = cli.slice(cli.indexOf('process.on("unhandledRejection"'));
+    expect(handler.length).toBeLessThan(cli.length);
+    const body = handler.slice(0, handler.indexOf("});") + 3);
+    expect(body).toMatch(/logLine\("runner", "unhandled_rejection"\)/);
+    expect(body).toMatch(/process\.exit\(/);
+    // The rejection's reason is never written: it could carry agent content or a token.
+    expect(body).not.toMatch(/reason|String\(|message|stack/);
   });
 });

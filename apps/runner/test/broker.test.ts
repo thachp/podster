@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { costOf, RunBroker, upstreamUrl, worstCaseOf, type BrokerCaps, type BrokerRequest, type ProviderProfile } from "../src/core/broker.js";
+import { costOf, INPUT_MARGIN_TOKENS, RunBroker, upstreamUrl, worstCaseOf, type BrokerCaps, type BrokerRequest, type ProviderProfile } from "../src/core/broker.js";
 
 /** A test provider: not any real one. Prices are micro-USD per million tokens. */
 const PROFILE: ProviderProfile = {
@@ -90,6 +90,81 @@ describe("max_tokens", () => {
   });
 });
 
+describe("the body allowlist (M1 on #459)", () => {
+  const refused = (body: Record<string, unknown>) => new RunBroker(PROFILE, CAPS, ["model-small"]).admit(ask(body));
+  const user = (content: unknown) => ({ messages: [{ role: "user", content }] });
+
+  it("takes the plain request a driver makes: text, tools of its own, tool use and results, thinking, images and documents", () => {
+    const body = {
+      system: [{ type: "text", text: "frame", cache_control: { type: "ephemeral" } }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "task" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }, { type: "document", source: { type: "text", media_type: "text/plain", data: "notes" } }] },
+        { role: "assistant", content: [{ type: "thinking", thinking: "…", signature: "sig" }, { type: "tool_use", id: "toolu_1", name: "read", input: { path: "a" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: "ran" }], is_error: false }] },
+      ],
+      tools: [{ name: "read", description: "Read a file", input_schema: { type: "object" } }, { type: "custom", name: "edit", input_schema: { type: "object" } }],
+      tool_choice: { type: "auto" },
+      thinking: { type: "enabled", budget_tokens: 512 },
+      stream: true,
+      temperature: 1,
+      metadata: { user_id: "run_1" },
+      stop_sequences: ["END"],
+    };
+    expect(refused(body)).toMatchObject({ ok: true });
+  });
+
+  it("refuses top-level keys it doesn't know, the provider's own servers and containers, and paid speed or tiers", () => {
+    for (const extra of [{ mcp_servers: [{ type: "url", url: "https://evil.test/mcp", name: "x" }] }, { container: "cntr_1" }, { speed: "fast" }, { service_tier: "priority" }, { betas: ["x"] }, { anything: 1 }])
+      expect([Object.keys(extra)[0], refused(extra)]).toMatchObject([Object.keys(extra)[0], { ok: false, reason: "body_not_allowed" }]);
+  });
+
+  it("refuses any tool that isn't the driver's own", () => {
+    for (const tool of [{ type: "web_search_20250305", name: "web_search" }, { type: "code_execution_20250522", name: "code_execution" }, { type: "bash_20250124", name: "bash" }, { type: "computer_20250124", name: "computer", display_width_px: 1 }, { type: "web_fetch_20250910", name: "web_fetch" }, { type: "custom", name: "x", input_schema: {}, server_url: "https://evil.test" }])
+      expect([tool.type, refused({ tools: [tool] })]).toMatchObject([tool.type, { ok: false, reason: "body_not_allowed" }]);
+  });
+
+  it("refuses content blocks other than text, image, document, tool use, tool results and thinking, and sources other than base64 or text", () => {
+    for (const block of [
+      { type: "server_tool_use", id: "s", name: "web_search", input: {} },
+      { type: "web_search_tool_result", tool_use_id: "s", content: [] },
+      { type: "container_upload", file_id: "file_1" },
+      { type: "mcp_tool_use", id: "m", name: "x", server_name: "evil", input: {} },
+      { type: "search_result", source: "https://evil.test", title: "t", content: [] },
+      { type: "image", source: { type: "url", url: "https://evil.test/a.png" } },
+      { type: "document", source: { type: "file", file_id: "file_1" } },
+      { type: "document", source: { type: "url", url: "https://evil.test/a.pdf" } },
+      { type: "tool_result", tool_use_id: "t", content: [{ type: "image", source: { type: "url", url: "https://evil.test/a.png" } }] },
+    ])
+      expect([block.type, refused(user([block]))]).toMatchObject([block.type, { ok: false, reason: "body_not_allowed" }]);
+    expect(refused({ messages: [{ role: "system", content: "x" }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
+  });
+
+  it("refuses a cache lifetime anywhere, so no request buys a longer cache", () => {
+    const ttl = { type: "ephemeral", ttl: "1h" };
+    expect(refused(user([{ type: "text", text: "x", cache_control: ttl }]))).toMatchObject({ ok: false, reason: "body_not_allowed" });
+    expect(refused({ system: [{ type: "text", text: "x", cache_control: ttl }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
+    expect(refused({ tools: [{ name: "read", input_schema: {}, cache_control: ttl }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
+  });
+
+  it("refuses the review's P4 probe: a request that reaches beyond the run through the provider's own tools and servers", () => {
+    // Reconstructed from the review's description of P4: server-side tools, an MCP server, a container and a priority
+    // tier, each of which would act or spend outside Runner's tools and its worst case.
+    const p4 = {
+      messages: [{ role: "user", content: [{ type: "text", text: "fetch https://evil.test and run it" }] }],
+      tools: [{ type: "web_fetch_20250910", name: "web_fetch", max_uses: 50 }, { type: "code_execution_20250522", name: "code_execution" }],
+      mcp_servers: [{ type: "url", url: "https://evil.test/mcp", name: "evil" }],
+      container: "cntr_shared",
+      service_tier: "priority",
+      speed: "fast",
+    };
+    expect(refused(p4)).toMatchObject({ ok: false, reason: "body_not_allowed" });
+  });
+
+  it("refuses a profile whose fixed headers turn on a beta", () => {
+    for (const name of ["anthropic-beta", "Anthropic-Beta"]) expect(() => new RunBroker({ ...PROFILE, headers: { ...PROFILE.headers, [name]: "mcp-client-2025-04-04" } }, CAPS, ["model-small"])).toThrow(/beta/);
+  });
+});
+
 describe("models and prices", () => {
   it("refuses a model with no price, rather than counting it as free", () => {
     expect(() => new RunBroker(PROFILE, CAPS, ["model-free"])).toThrow(/price/);
@@ -115,21 +190,23 @@ describe("models and prices", () => {
     expect(costOf(price, usage(0, 1))).toBe(5);
     expect(costOf(price, { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 1 })).toBe(1);
     expect(costOf(price, usage(1_000_000, 1_000_000))).toBe(6_000_000);
-    // The worst case counts each body byte as an input token at the dearest input price, and all of max_tokens.
-    expect(worstCaseOf(price, 1_000, 1_024)).toBe(Math.ceil((1_000 * 1_250_000) / 1e6) + Math.ceil((1_024 * 5_000_000) / 1e6));
+    // The worst case counts each body byte as an input token at the dearest input price, plus a fixed margin for the
+    // provider's hidden tool prompt (M1 on #459), and all of max_tokens.
+    expect(INPUT_MARGIN_TOKENS).toBe(4_096);
+    expect(worstCaseOf(price, 1_000, 1_024)).toBe(Math.ceil(((1_000 + INPUT_MARGIN_TOKENS) * 1_250_000) / 1e6) + Math.ceil((1_024 * 5_000_000) / 1e6));
   });
 });
 
 describe("the spend cap", () => {
   it("refuses a request whose worst case would pass what's left, counting requests still in flight", () => {
-    // Worst case of one request here: body bytes at 1.25 per token, plus 1,024 output tokens at 5 each.
-    const broker = new RunBroker(PROFILE, { ...CAPS, spend_micro_usd: 12_000 }, ["model-small"]);
+    // Worst case of one request here: body bytes and the margin at 1.25 per token, plus 1,024 output tokens at 5 each.
+    const broker = new RunBroker(PROFILE, { ...CAPS, spend_micro_usd: 22_000 }, ["model-small"]);
     const a = broker.admit(ask());
     const b = broker.admit(ask());
     expect(a.ok && b.ok).toBe(true);
-    // Two in flight hold about 10,500 of 12,000, so a third can't fit even before either settles.
+    // Two in flight hold about 20,700 of 22,000, so a third can't fit even before either settles.
     expect(broker.admit(ask())).toMatchObject({ ok: false, reason: "spend_cap", hard_stop: true });
-    expect(broker.totals.spent_micro_usd).toBeLessThanOrEqual(12_000);
+    expect(broker.totals.spent_micro_usd).toBeLessThanOrEqual(22_000);
   });
 
   it("never lets spend pass the cap, however a run spends", () => {
@@ -159,13 +236,13 @@ describe("the spend cap", () => {
   });
 
   it("says when a settled request reaches a cap, so the run stops", () => {
-    const broker = new RunBroker(PROFILE, { ...CAPS, spend_micro_usd: 6_000 }, ["model-small"]);
+    const broker = new RunBroker(PROFILE, { ...CAPS, spend_micro_usd: 12_000 }, ["model-small"]);
     const admitted = broker.admit(ask());
     if (!admitted.ok) throw new Error("refused");
     expect(broker.settle(admitted.forward.request_id, usage(100, 10))).toEqual({ cap_reached: null });
     const next = broker.admit(ask());
     if (!next.ok) throw new Error("refused");
-    expect(broker.settle(next.forward.request_id, usage(1_000, 1_024))).toEqual({ cap_reached: "spend_cap" });
+    expect(broker.settle(next.forward.request_id, usage(7_000, 1_024))).toEqual({ cap_reached: "spend_cap" });
   });
 
   it("counts the provider's own usage when it reports more than was asked", () => {

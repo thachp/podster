@@ -8,8 +8,12 @@
  * - **`max_tokens` is rewritten on every request** to the run's bound, and never above what's left of the run's output
  *   tokens. The body is parsed and written again, so a duplicate key can't carry another value past the rewrite.
  * - **The worst case is reserved before a request goes.** Each body byte counts as an input token at the dearest input
- *   price, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
+ *   price, plus a fixed margin for the provider's hidden tool prompt, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
+ * - **Only a known body** (M1 on #459): known top-level keys; tools only the driver's own (`custom`), never the
+ *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
+ *   and thinking; no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
+ *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
  * - **A model with no price is refused,** never counted as free. A run's model list is checked against the price table
  *   when the broker is made.
  * - **Turns** are model requests: exactly the cap's number go, and the next is refused.
@@ -50,6 +54,7 @@ export type BrokerRefusal =
   | "query_not_allowed"
   | "body_too_large"
   | "body_invalid"
+  | "body_not_allowed"
   | "model_not_allowed"
   | "model_unpriced"
   | "turns_exhausted"
@@ -67,6 +72,8 @@ export type Usage = { input_tokens: number; output_tokens: number; cache_creatio
 
 /** The largest request body taken: far above a run's needs, and bounded so a body can't exhaust Runner. */
 export const MAX_BODY_BYTES = 8 * 1024 * 1024;
+/** Input tokens added to every request's worst case for what the provider adds unseen, such as its tool-use prompt. */
+export const INPUT_MARGIN_TOKENS = 4_096;
 
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const PATH = /^(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$/;
@@ -76,6 +83,7 @@ const isCount = (v: unknown): v is number => typeof v === "number" && Number.isS
 const isCap = (v: unknown): v is number => isCount(v) && v > 0;
 
 function checkProfile(profile: ProviderProfile) {
+  if (Object.keys(profile.headers).some((name) => name.toLowerCase() === "anthropic-beta")) throw new Error("the provider profile's fixed headers may not turn on a beta");
   const labels = profile.host.split(".");
   if (profile.host.length > 253 || labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l))) throw new Error("the provider profile's host isn't a plain host name");
   if (!PATH.test(profile.path) || profile.path.split("/").some((s) => s === "." || s === "..")) throw new Error("the provider profile's path isn't a plain path");
@@ -100,7 +108,7 @@ export function costOf(price: Price, usage: Usage): number {
 
 /** The most a request can cost: each body byte as an input token at the dearest input price, and all of `max_tokens`. */
 export function worstCaseOf(price: Price, bodyBytes: number, maxTokens: number): number {
-  return priced(bodyBytes, Math.max(price.input, price.cache_write, price.cache_read)) + priced(maxTokens, price.output);
+  return priced(bodyBytes + INPUT_MARGIN_TOKENS, Math.max(price.input, price.cache_write, price.cache_read)) + priced(maxTokens, price.output);
 }
 
 function usageOf(v: unknown): Usage | null {
@@ -112,6 +120,69 @@ function usageOf(v: unknown): Usage | null {
   const read = u.cache_read_input_tokens ?? 0;
   if (!isCount(input) || !isCount(output) || !isCount(write) || !isCount(read)) return null;
   return { input_tokens: input, output_tokens: output, cache_creation_input_tokens: write, cache_read_input_tokens: read };
+}
+
+// ---- The body allowlist (M1 on #459) ----
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+const only = (o: Obj, keys: readonly string[]) => Object.keys(o).every((k) => keys.includes(k));
+const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
+const isText = (v: unknown) => typeof v === "string";
+
+const TOP_KEYS = ["model", "messages", "max_tokens", "system", "metadata", "stop_sequences", "stream", "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking"];
+
+/** Only `{ type: "ephemeral" }`: no lifetime, which would buy a longer, dearer cache. */
+const cacheOk = (v: unknown) => v === undefined || (isObj(v) && only(v, ["type"]) && v.type === "ephemeral");
+
+function sourceOk(v: unknown, kinds: readonly string[]): boolean {
+  if (!isObj(v) || typeof v.type !== "string" || !kinds.includes(v.type)) return false;
+  return only(v, ["type", "media_type", "data"]) && isText(v.media_type) && isText(v.data);
+}
+
+/** A content block; inside a tool result, only text, images and documents. */
+function blockOk(v: unknown, inResult = false): boolean {
+  if (!isObj(v) || typeof v.type !== "string" || !cacheOk(v.cache_control)) return false;
+  switch (v.type) {
+    case "text":
+      return only(v, ["type", "text", "cache_control"]) && isText(v.text);
+    case "image":
+      return only(v, ["type", "source", "cache_control"]) && sourceOk(v.source, ["base64"]);
+    case "document":
+      return only(v, ["type", "source", "cache_control", "title", "context"]) && sourceOk(v.source, ["base64", "text"]) && optional(v.title, isText) && optional(v.context, isText);
+    case "tool_use":
+      return !inResult && only(v, ["type", "id", "name", "input", "cache_control"]) && isText(v.id) && isText(v.name) && isObj(v.input);
+    case "tool_result":
+      return !inResult && only(v, ["type", "tool_use_id", "content", "is_error", "cache_control"]) && isText(v.tool_use_id) && optional(v.is_error, (e) => typeof e === "boolean") && optional(v.content, (c) => isText(c) || (Array.isArray(c) && c.every((b) => blockOk(b, true))));
+    case "thinking":
+      return !inResult && only(v, ["type", "thinking", "signature"]) && isText(v.thinking) && optional(v.signature, isText);
+    case "redacted_thinking":
+      return !inResult && only(v, ["type", "data"]) && isText(v.data);
+    default:
+      return false;
+  }
+}
+
+const contentOk = (v: unknown) => isText(v) || (Array.isArray(v) && v.every((b) => blockOk(b)));
+
+function toolOk(v: unknown): boolean {
+  if (!isObj(v) || !only(v, ["type", "name", "description", "input_schema", "cache_control"])) return false;
+  return (v.type === undefined || v.type === "custom") && isText(v.name) && optional(v.description, isText) && isObj(v.input_schema) && cacheOk(v.cache_control);
+}
+
+/** The request body, by the allowlist: anything not named here is refused. */
+function bodyAllowed(b: Obj): boolean {
+  if (!only(b, TOP_KEYS)) return false;
+  if (!Array.isArray(b.messages) || !b.messages.every((m) => isObj(m) && only(m, ["role", "content"]) && (m.role === "user" || m.role === "assistant") && contentOk(m.content))) return false;
+  if (!optional(b.system, (v) => isText(v) || (Array.isArray(v) && v.every((x) => isObj(x) && x.type === "text" && blockOk(x))))) return false;
+  if (!optional(b.tools, (v) => Array.isArray(v) && v.every(toolOk))) return false;
+  if (!optional(b.tool_choice, (v) => isObj(v) && only(v, ["type", "name", "disable_parallel_tool_use"]) && ["auto", "any", "tool", "none"].includes(v.type as string))) return false;
+  if (!optional(b.thinking, (v) => isObj(v) && only(v, ["type", "budget_tokens"]) && (v.type === "enabled" || v.type === "disabled"))) return false;
+  if (!optional(b.metadata, (v) => isObj(v) && only(v, ["user_id"]))) return false;
+  if (!optional(b.stop_sequences, (v) => Array.isArray(v) && v.every(isText))) return false;
+  if (!optional(b.stream, (v) => typeof v === "boolean")) return false;
+  for (const k of ["temperature", "top_k", "top_p"]) if (!optional(b[k], (v) => typeof v === "number" && Number.isFinite(v))) return false;
+  return true;
 }
 
 type InFlight = { worst: number; max_tokens: number; price: Price };
@@ -169,6 +240,7 @@ export class RunBroker {
     if (typeof model !== "string") return refuse("body_invalid");
     if (!Object.hasOwn(this.profile.prices, model)) return refuse("model_unpriced");
     if (!this.models.has(model)) return refuse("model_not_allowed");
+    if (!bodyAllowed(fields)) return refuse("body_not_allowed");
 
     if (this.turns >= this.caps.turns) return refuse("turns_exhausted");
     let heldOutput = 0;

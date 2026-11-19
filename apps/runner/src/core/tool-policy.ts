@@ -6,8 +6,11 @@
  *   result tool the policy names (spike B ruling 2). Any other name refuses: an SDK's built-in tools, a repository's MCP
  *   tools, subagents and skills included.
  * - **No shell unless the policy names it.** Network is the container's, from the policy's hosts (`run-interface.ts`).
- * - **Every path stays inside the task's folder:** relative, without `..` or empty segments, and without backslashes or
- *   control characters. A `.` segment is dropped. Git's own folder is refused too, at any depth: Runner's own Git works on
+ * - **Every path stays inside the task's folder:** relative, or under `/work`, the folder's own name in both containers
+ *   and Claude Code's working folder there; without `..` or empty segments, and without backslashes or control
+ *   characters. A `.` segment is dropped, and a folder's path (search's) may end in one `/`. The real run of 2026-11-19
+ *   showed a call naming a file the model's own way being refused as outside the folder, so only the one fixed prefix
+ *   is taken off; what follows it is checked as any relative path. Git's own folder is refused too, at any depth: Runner's own Git works on
  *   this folder later (step 10), and hooks or config written there would act outside the container. Segments are compared
  *   folded (compatibility-normalised, marks and default-ignorable characters removed, case folded), so no look-alike of
  *   `.git` passes, and a segment ending in a space or a dot is refused, as some file systems drop them (L2 on #459).
@@ -68,11 +71,26 @@ function shaped(v: unknown, required: string[], optional: string[] = []): v is O
 }
 const text = (v: unknown, max: number, min = 0): v is string => typeof v === "string" && v.length >= min && v.length <= max;
 
-/** A path inside the task's folder, written plainly: `src/./a.ts` is `src/a.ts`; `.` (the folder) only when allowed. */
+/** The task's folder, as both containers name it: mounted there in the task's, and Claude Code's working folder in its own. */
+export const TASK_FOLDER_IN_CONTAINER = "/work";
+
+/**
+ * A path inside the task's folder, written plainly: `src/./a.ts` and `/work/src/a.ts` are `src/a.ts`; `.` (the folder),
+ * `/work` and a trailing `/` only when a folder is allowed.
+ */
 export function taskPath(raw: unknown, folderAllowed = false): { ok: true; path: string } | { ok: false; reason: "path_outside_folder" | "path_not_allowed" } {
   const outside = { ok: false as const, reason: "path_outside_folder" as const };
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS || PATH_BAD.test(raw) || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return outside;
-  const segments = raw.split("/");
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_PATH_CHARS || PATH_BAD.test(raw) || /^[A-Za-z]:/.test(raw)) return outside;
+  let rel = raw;
+  if (rel === TASK_FOLDER_IN_CONTAINER) rel = ".";
+  else if (rel.startsWith(`${TASK_FOLDER_IN_CONTAINER}/`)) rel = rel.slice(TASK_FOLDER_IN_CONTAINER.length + 1);
+  if (rel.startsWith("/")) return outside;
+  if (folderAllowed && rel.endsWith("/")) rel = rel.slice(0, -1);
+  if (rel.length === 0) {
+    if (!folderAllowed) return outside;
+    rel = ".";
+  }
+  const segments = rel.split("/");
   const kept: string[] = [];
   for (const segment of segments) {
     if (segment === ".." || segment === "") return outside;
@@ -84,6 +102,21 @@ export function taskPath(raw: unknown, folderAllowed = false): { ok: true; path:
   }
   if (kept.length === 0) return folderAllowed ? { ok: true, path: "." } : outside;
   return { ok: true, path: kept.join("/") };
+}
+
+/**
+ * What a refusal tells the model: fixed text for each code, so a model that named a path its own way can name it again
+ * the folder's way. Nothing of the call's input is in it.
+ */
+export function refusalText(reason: ToolRefusal): string {
+  switch (reason) {
+    case "path_outside_folder":
+      return `Runner refused this call: the path is outside the task's folder. Give a path relative to the task's folder, such as notes.txt or src/a.ts; the folder is also ${TASK_FOLDER_IN_CONTAINER}, your working folder.`;
+    case "path_not_allowed":
+      return "Runner refused this call: that path isn't allowed. Git's own folder, a name starting with - and a name ending in a space or a dot are refused.";
+    default:
+      return "Runner refused this call.";
+  }
 }
 
 /** The structured result, bounded: a status, a summary of at most `MAX_SUMMARY_CHARS`, and files inside the folder. */

@@ -242,6 +242,47 @@ describe("the tool decision", () => {
     expect(taskPath("src/a.ts")).toEqual({ ok: true, path: "src/a.ts" });
   });
 
+  // The real run of 2026-11-19: Claude Code's working folder is `/work` in its own container, and the task's folder is
+  // mounted at `/work` in the task's, so a call naming `/work/...` names the task's folder.
+  it("takes a path inside the task's folder as Claude Code sends it: under /work, with ./ or a folder's trailing slash", () => {
+    const allowed: [string, Record<string, unknown>, string][] = [
+      ["read", { path: "/work/hello.txt" }, "hello.txt"],
+      ["read", { path: "/work/./src/a.ts" }, "src/a.ts"],
+      ["write", { path: "/work/proof.txt", content: "x" }, "proof.txt"],
+      ["write", { path: "/work/notes/today.md", content: "x" }, "notes/today.md"],
+      ["edit", { path: "/work/src/a.ts", old: "a", new: "b" }, "src/a.ts"],
+      ["search", { pattern: "x", path: "/work" }, "."],
+      ["search", { pattern: "x", path: "/work/" }, "."],
+      ["search", { pattern: "x", path: "." }, "."],
+      ["search", { pattern: "x", path: "./" }, "."],
+      ["search", { pattern: "x", path: "src/" }, "src"],
+      ["search", { pattern: "x", path: "/work/src/" }, "src"],
+      ["search", { pattern: "x" }, "."],
+      ["write", { path: "proof.txt", content: "x" }, "proof.txt"],
+    ];
+    for (const [tool, input, path] of allowed) expect([tool, input, decideToolCall(FACTS, call(tool, input))]).toMatchObject([tool, input, { allow: true, call: { path } }]);
+    expect(parseRunResult({ ...RESULT, files: ["/work/proof.txt", "notes/today.md"] })).toEqual({ ok: true, value: { ...RESULT, files: ["proof.txt", "notes/today.md"] } });
+    expect(parseRunResult({ ...RESULT, files: ["/work/proof.txt", "proof.txt"] }).ok).toBe(false);
+  });
+
+  it("still refuses an escape from /work, any other absolute path, and a file named with a trailing slash", () => {
+    const outside = [
+      "/work/../etc/passwd", "/work/..", "/work/a/../../x", "/work//x", "//work/x", "/work\\x", "/workspace/x", "/work2/x", "/WORK/x", "/work.x",
+      "/tmp/x", "/", "/etc/passwd", "/Users/owner/podster-work/ws_room_one/tsk_one/x", "~/x/../../y", "/work/a//b", "/work/a/", "src/", "./", "/work", "/work/",
+    ];
+    for (const bad of outside) {
+      expect([bad, decideToolCall(FACTS, call("read", { path: bad }))]).toEqual([bad, { allow: false, reason: "path_outside_folder" }]);
+      expect([bad, decideToolCall(FACTS, call("write", { path: bad, content: "x" }))]).toEqual([bad, { allow: false, reason: "path_outside_folder" }]);
+    }
+    for (const bad of ["/work/..", "/work/../x", "/work//", "/workspace", "/work2", "/WORK", "/Work/", "/", "//", "src//", "/tmp/"])
+      expect([bad, decideToolCall(FACTS, call("search", { pattern: "x", path: bad }))]).toEqual([bad, { allow: false, reason: "path_outside_folder" }]);
+    for (const bad of ["/work/.git", "/work/.git/config", "/work/sub/.GIT/hooks/pre-push", "/work/.g​it/config", "/work/-n", "/work/notes."])
+      expect([bad, decideToolCall(FACTS, call("write", { path: bad, content: "x" }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);
+    expect(decideToolCall(FACTS, call("search", { pattern: "x", path: "/work/.git/" }))).toEqual({ allow: false, reason: "path_not_allowed" });
+    expect(parseRunResult({ ...RESULT, files: ["/work/../x"] }).ok).toBe(false);
+    expect(parseRunResult({ ...RESULT, files: ["/tmp/x"] }).ok).toBe(false);
+  });
+
   it("keeps tools out of Git's own folder, whose hooks and config Runner's Git would act on", () => {
     for (const bad of [".git", ".git/config", "sub/.GIT/hooks/pre-push", ".Git/HEAD"])
       expect([bad, decideToolCall(FACTS, call("write", { path: bad, content: "x" }))]).toEqual([bad, { allow: false, reason: "path_not_allowed" }]);

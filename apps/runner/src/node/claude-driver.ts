@@ -50,6 +50,7 @@ import { createSdkMcpServer, query, tool, type HookCallback, type Options, type 
 import { z } from "zod";
 import { CLAUDE_MODEL, CLAUDE_MODELS, CLAUDE_PROFILE, PINNED_CLAUDE_CODE_VERSION, versionRefusal } from "../core/claude-profile.js";
 import { RESULT_TOOL } from "../core/policy.js";
+import { refusalText, TASK_FOLDER_IN_CONTAINER } from "../core/tool-policy.js";
 import type { AgentDriver, DriverOutcome, DriverRun, DriverSession } from "../core/run-interface.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
@@ -90,7 +91,8 @@ export const SDK_ENV_NAMES: readonly string[] = Object.freeze(["CLAUDE_CODE_ENTR
 export const CLAUDE_IN_CONTAINER = "/opt/claude/claude";
 export const CONTAINER_HOME = "/claude/home";
 export const CONTAINER_CONFIG = "/claude/config";
-export const CONTAINER_WORK = "/work";
+/** Claude Code's working folder: the same name the task's folder has in the task's container, so a path under it is one. */
+export const CONTAINER_WORK = TASK_FOLDER_IN_CONTAINER;
 export const RELAY_ALIAS = "relay";
 export const RELAY_PORT = 8080;
 /** Where the relay sees the run's listener socket on Linux: the one file mounted into it. */
@@ -293,10 +295,10 @@ export function fixedOptionsRefusal(o: Options): string | null {
 
 /** Each of Runner's tools, its input shape for the SDK, and what it tells the model. Fixed. */
 const TOOL_SHAPES = {
-  read: { description: "Read a file in the task's folder.", shape: { path: z.string() } },
-  search: { description: "Search the task's folder for a regular expression.", shape: { pattern: z.string(), path: z.string().optional() } },
-  write: { description: "Write a whole file in the task's folder.", shape: { path: z.string(), content: z.string() } },
-  edit: { description: "Replace one exact piece of text, which must appear once, in a file in the task's folder.", shape: { path: z.string(), old: z.string(), new: z.string() } },
+  read: { description: "Read a file in the task's folder. Its path is relative to the folder, such as src/a.ts.", shape: { path: z.string() } },
+  search: { description: "Search the task's folder, or a folder in it given by a relative path, for a regular expression.", shape: { pattern: z.string(), path: z.string().optional() } },
+  write: { description: "Write a whole file in the task's folder. Its path is relative to the folder, such as notes.txt.", shape: { path: z.string(), content: z.string() } },
+  edit: { description: "Replace one exact piece of text, which must appear once, in a file in the task's folder. Its path is relative to the folder.", shape: { path: z.string(), old: z.string(), new: z.string() } },
   shell: { description: "Run a shell command in the task's container, in its folder, with no network.", shape: { command: z.string() } },
 } as const;
 
@@ -563,10 +565,10 @@ export class ClaudeDriver implements AgentDriver {
     const pending = new Map<string, string[]>();
     const keyOf = (name: string, input: unknown) => `${name}\u0000${canonical(input)}`;
 
-    const deny = { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Runner refused this call." } };
+    const deny = (reason = refusalText("run_stopped")) => ({ hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: reason } });
     const hook: HookCallback = async (input, toolUseID) => {
       if (input.hook_event_name !== "PreToolUse") return {};
-      if (!(await waitForInit())) return deny;
+      if (!(await waitForInit())) return deny();
       const name = runnerToolName(input.tool_name);
       const call_id = typeof input.tool_use_id === "string" ? input.tool_use_id : (toolUseID ?? "");
       this.deps.observe?.({ kind: "callback", run_ref: ref, tool: name });
@@ -574,7 +576,7 @@ export class ClaudeDriver implements AgentDriver {
       checked.add(call_id);
       const key = keyOf(name, input.tool_input);
       pending.set(key, [...(pending.get(key) ?? []), call_id]);
-      return decision.allow ? {} : deny;
+      return decision.allow ? {} : deny(refusalText(decision.reason));
     };
 
     const handler = (name: string) => async (args: Record<string, unknown>, extra: unknown) => {

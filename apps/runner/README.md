@@ -62,6 +62,90 @@ Runner refuses a key file that's a link, that someone else can read, or that hol
 
 Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, and the Claude Code image downloads Claude Code from npm's registry. If a build fails, `run` stops before running anything.
 
+## Your run policy (`policy.json`)
+
+Runner runs a task only if your run policy says so. The policy is a file, `policy.json`, in Runner's home: by default `~/.podster-runner/policy.json`, or the folder you give with `--home`. You write it; nothing Podster sends can change it. Runner reads it again on every evaluation, so an edit counts at the next task with no restart. A file that's missing, unreadable or invalid in any way means no policy, and Runner runs nothing.
+
+A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` placeholders with your own IDs, and `/Users/you/podster-work` with a plain absolute folder of your own that isn't inside Runner's home:
+
+```json
+{
+  "version": 1,
+  "revision": 1,
+  "owner_org": "org_…",
+  "adapter": "claude_agent_sdk",
+  "workspace_root": "/Users/you/podster-work",
+  "caps": {
+    "spend_micro_usd": 500000,
+    "run_time_ms": 900000,
+    "turns": 30,
+    "output_tokens": 20000,
+    "max_tokens": 8000
+  },
+  "day_caps": { "spend_micro_usd": 2000000 },
+  "rooms": [
+    {
+      "room_id": "ws_…",
+      "mode": "ask",
+      "outputs": "hold",
+      "tools": ["read", "search", "write", "edit"],
+      "network": [],
+      "repository": null,
+      "allowed_orgs": [],
+      "acknowledged": { "trust_statement": true, "public_room_warning": true }
+    }
+  ]
+}
+```
+
+| Field | What it means |
+| --- | --- |
+| `version` | Always `1`. |
+| `revision` | A whole number from 1 up. Raise it when you edit the file. |
+| `owner_org` | Your own organization's ID. Tasks from your own organization are always allowed. |
+| `adapter` | Always `"claude_agent_sdk"`. |
+| `workspace_root` | An absolute folder where task folders are made. Plain path characters only, no `,` `:` `=`, not inside Runner's home and not holding it, and not on a Windows drive under WSL2 (`/mnt/c`). |
+| `caps` | Limits for one run. Each can be set lower than its ceiling, never above, and none can be left out. Money is in micro-USD: 1000000 is 1 USD, so `500000` is 0.50 USD. Time is in milliseconds. |
+| `caps.spend_micro_usd` | Spend for one run, 1 to 25000000 (25 USD). |
+| `caps.run_time_ms` | Time for one run, 60000 (1 minute) to 86400000 (24 hours). |
+| `caps.turns` | Model turns in one run, 1 to 1000. |
+| `caps.output_tokens` | Output tokens in one run, 1 to 1000000. |
+| `caps.max_tokens` | Tokens in one model reply, 1 to 32000, and no more than `output_tokens`. |
+| `day_caps.spend_micro_usd` | Spend across all runs in a day. At least `caps.spend_micro_usd`, and at most 250000000 (250 USD). |
+| `max_active_tasks` | Optional. How many tasks Runner holds at once, 1 to 4. Leave it out for 1. |
+| `rooms` | One entry per workroom you allow. A workroom not listed here is never run. |
+| `rooms[].room_id` | The workroom's `ws_…` ID. |
+| `rooms[].mode` | `"ask"` shows each run at your terminal for you to approve. `"unattended"` runs without asking. Unattended runs are off by default: leave `mode` out or set `"ask"` until you choose otherwise. |
+| `rooms[].outputs` | `"hold"` keeps a finished run's result on your machine until you approve publishing it. `"share"` publishes it. Leaving it out means `"hold"`. |
+| `rooms[].tools` | Runner's own tools for a task. `read`, `search`, `write` and `edit` are the default. `shell` is never on unless you list it. |
+| `rooms[].network` | Host names a task may reach, such as `"registry.npmjs.org"`. An empty list, the default, means no network. |
+| `rooms[].repository` | `null` for a task that starts in an empty folder, or `{ "full_name": "owner/name", "provider_repo_id": 123456 }` for one GitHub repository. |
+| `rooms[].allowed_orgs` | Other organizations whose tasks you'll run in this room. Do not list `owner_org`: your own organization is always allowed, and Runner refuses a policy that lists it. An empty list is fine. |
+| `rooms[].acknowledged` | Both flags are required. Until `trust_statement` is `true`, Runner asks you at your terminal each time. Until `public_room_warning` is `true`, it also asks for a public room. |
+
+Every ID is lower case. Unknown fields, missing fields, a field out of range, or a repeated room refuse the whole file.
+
+**Where to find the IDs.** A workroom's `ws_…` ID is in its address in the web app: `/w/ws_…/…`. For your organization's `org_…` ID, open Settings, then Organization, and pick the organization: the `org=` in the address bar is its ID. If you can't find it, ask your Podster admin.
+
+### Writing the key file without the clipboard
+
+Pasting a key into an editor often adds a newline or a space, and Runner refuses a key file that holds anything but one key. Write it from your terminal instead, so the key never touches the clipboard history of an editor:
+
+```bash
+read -rs k
+printf '%s' "$k" > <path>
+chmod 600 <path>
+unset k
+```
+
+Paste the key when `read` waits (nothing shows as you paste), then press Return. Check the file without printing the key:
+
+```bash
+head -c 7 <path>
+```
+
+It should print `sk-ant-`.
+
 ## Nudges (optional, off by default)
 
 Runner polls, and that's enough to get every offer. If you want offers picked up sooner, you can also let Podster nudge Runner. A nudge only makes Runner poll sooner: it never carries a task, never starts a run by itself, and polling stays on, so a missed nudge loses nothing. **Proposed** (M7 step 14), not security-reviewed.

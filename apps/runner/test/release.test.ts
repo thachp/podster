@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_GATEWAY, pairingGateway } from "../src/core/gateway.js";
+import { CEILINGS, DAY_SPEND_CEILING_MICRO_USD, parsePolicyConfig } from "../src/core/policy.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as Record<string, any>;
@@ -99,5 +100,34 @@ describe("the publish guard", () => {
   it("lets the pre-release workflow on main publish", () => {
     expect(guard({ GITHUB_ACTIONS: "true", GITHUB_WORKFLOW_REF: WORKFLOW })).toBe(0);
     expect(guard({ GITHUB_ACTIONS: "true", GITHUB_WORKFLOW_REF: WORKFLOW, npm_package_version: pkg.version })).toBe(0);
+  });
+});
+
+describe("the README's run policy example", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const section = readme.slice(readme.indexOf("## Your run policy (`policy.json`)"));
+  const block = /```json\n([\s\S]*?)\n```/.exec(section)?.[1];
+
+  it("is there, and it parses once the placeholders are real IDs", () => {
+    expect(block).toBeDefined();
+    const text = (block as string).replace("org_…", "org_example").replace("ws_…", "ws_example");
+    expect(text).not.toContain("…");
+    const parsed = parsePolicyConfig(JSON.parse(text), { runner_home: "/Users/you/.podster-runner" });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.value.rooms).toHaveLength(1);
+      expect(parsed.value.rooms[0]).toMatchObject({ mode: "ask", outputs: "hold", network: [], repository: null, allowed_orgs: [] });
+      expect(parsed.value.caps.spend_micro_usd).toBe(500_000);
+    }
+  });
+
+  it("shows the key-file recipe and the field table's ceilings", () => {
+    expect(section).toContain("read -rs k");
+    expect(section).toContain("chmod 600");
+    expect(section).toContain("head -c 7");
+    expect(section).toContain(String(CEILINGS.spend_micro_usd));
+    expect(section).toContain(String(CEILINGS.run_time_ms));
+    expect(section).toContain(String(CEILINGS.max_tokens));
+    expect(section).toContain(String(DAY_SPEND_CEILING_MICRO_USD));
   });
 });

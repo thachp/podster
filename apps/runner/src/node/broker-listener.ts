@@ -6,7 +6,9 @@
  * - **A per-run token:** 32 random bytes, which Claude Code sends as its API key. It is compared in constant time (both
  *   sides hashed to the same length first). It is not the provider key, which never leaves the transport.
  * - **`Origin` refused:** any request carrying one is a browser's, and is refused, so no web page can reach it.
- * - **`Host` checked:** exactly `127.0.0.1:<port>`, so a DNS-rebound name is refused.
+ * - **`Host` checked:** exactly `127.0.0.1:<port>`, or the one name its caller fixes (the relay's `relay:8080`, when
+ *   Claude Code runs in its own container and reaches this listener only through the relay), so a DNS-rebound name is
+ *   refused.
  * - **Closed on a halt:** the run's signal closes the server and every connection.
  * - Hands the broker only the method, the path, the query and the body: no header is ever forwarded. The one query
  *   Claude Code adds, exactly `beta=true`, is dropped here, since nothing of the request reaches the upstream URL and
@@ -24,6 +26,8 @@ export type ListenerDeps = {
   model: (request: BrokerRequest) => Promise<ModelAnswer>;
   signal: AbortSignal;
   token?: string;
+  /** The one `Host` taken, when not `127.0.0.1:<port>`: the relay's name, fixed in the driver's code. */
+  host?: string;
   /** For tests; the defaults bound a stalled client. */
   headersTimeoutMs?: number;
   requestTimeoutMs?: number;
@@ -71,7 +75,7 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
   const server = createServer({ connectionsCheckingInterval: deps.checkIntervalMs ?? 5_000, headersTimeout: deps.headersTimeoutMs ?? 30_000, requestTimeout: deps.requestTimeoutMs ?? 120_000 }, async (req, res) => {
     if (closed || deps.signal.aborted) return refuse(res, 503, "run_stopped");
     if (req.headers.origin !== undefined) return refuse(res, 403, "origin_refused");
-    if (req.headers.host !== `127.0.0.1:${port}`) return refuse(res, 403, "host_refused");
+    if (req.headers.host !== (deps.host ?? `127.0.0.1:${port}`)) return refuse(res, 403, "host_refused");
     if (!tokenMatches(req.headers["x-api-key"], token)) return refuse(res, 401, "token_refused");
     const target = req.url ?? "";
     if (!target.startsWith("/")) return refuse(res, 400, "target_refused");

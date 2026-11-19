@@ -167,7 +167,7 @@ export interface DriverSession {
   readonly allowed_tools: readonly string[];
   readonly result_schema: typeof RESULT_SCHEMA;
   /** For the SDK's own limits, also a second lock: the broker stops the run whatever the SDK does. */
-  readonly limits: { turns: number; max_tokens: number; output_tokens: number };
+  readonly limits: { turns: number; max_tokens: number; output_tokens: number; run_time_ms: number };
   readonly provider: { api_key: typeof PLACEHOLDER_KEY };
   /** Aborts when Runner stops the run. */
   readonly signal: AbortSignal;
@@ -379,7 +379,7 @@ class LiveRun {
       frame: UNTRUSTED_FRAME,
       allowed_tools: [...facts.tools.filter((t) => t !== "shell" || facts.shell), facts.result_tool],
       result_schema: RESULT_SCHEMA,
-      limits: { turns: facts.caps.turns, max_tokens: facts.caps.max_tokens, output_tokens: facts.caps.output_tokens },
+      limits: { turns: facts.caps.turns, max_tokens: facts.caps.max_tokens, output_tokens: facts.caps.output_tokens, run_time_ms: facts.caps.run_time_ms },
       provider: { api_key: PLACEHOLDER_KEY },
       signal: this.abort.signal,
       check: (call) => this.check(call),

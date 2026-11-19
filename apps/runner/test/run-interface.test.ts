@@ -341,7 +341,7 @@ describe("a run that keeps to its policy", () => {
     expect(session.prompt).toEqual({ trust: "untrusted", origin: "podster_task", text: WORDS });
     expect(session.frame).toBe(UNTRUSTED_FRAME);
     expect(session.allowed_tools).toEqual(["read", "search", "write", "edit", "StructuredOutput"]);
-    expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens });
+    expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens, run_time_ms: CAPS.run_time_ms });
     expect(session.provider).toEqual({ api_key: PLACEHOLDER_KEY });
     expect(exposed(t)).not.toContain(KEY);
   });

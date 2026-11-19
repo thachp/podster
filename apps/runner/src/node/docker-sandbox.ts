@@ -43,7 +43,7 @@ import { ensureFolder, folderBytes } from "./safe-fs.js";
 
 export type DockerResult = { code: number; stdout: string; stderr: string; cut: boolean };
 /** Runs `docker` with these arguments. Never through a shell. */
-export type DockerCli = (args: string[], opts: { input?: string; signal?: AbortSignal; timeoutMs: number; maxOutputBytes: number }) => Promise<DockerResult>;
+export type DockerCli = (args: string[], opts: { input?: string; signal?: AbortSignal; timeoutMs: number; maxOutputBytes: number; env?: Record<string, string> }) => Promise<DockerResult>;
 
 export const LABEL_RUN = "dev.podster.runner.run";
 export const LABEL_HOME = "dev.podster.runner.home";
@@ -371,9 +371,12 @@ export function dockerHost(env: NodeJS.ProcessEnv = process.env, platform = proc
 /** The real `docker`, from an argument array, with the allow-listed environment and bounded output. */
 export function dockerCli(program: string, opts: { config_dir: string; host?: string }): DockerCli {
   const env = childEnv({ DOCKER_CONFIG: opts.config_dir, DOCKER_HOST: opts.host, DOCKER_CLI_HINTS: "false" });
-  return (args, { input, signal, timeoutMs, maxOutputBytes }) =>
+  // `extra` carries values a `docker exec --env NAME` hands on by name, so none is ever an argument.
+  return (args, { input, signal, timeoutMs, maxOutputBytes, env: extra }) =>
     new Promise((resolve, reject) => {
-      const child = spawn(program, args, { env, stdio: ["pipe", "pipe", "pipe"], shell: false });
+      // The handed-on values win, except Docker's own settings, which stay Runner's.
+      const merged = extra ? { ...env, ...extra, ...Object.fromEntries(Object.entries(env).filter(([n]) => n.startsWith("DOCKER_"))) } : env;
+      const child = spawn(program, args, { env: merged, stdio: ["pipe", "pipe", "pipe"], shell: false });
       let stdout = "";
       let stderr = "";
       let size = 0;

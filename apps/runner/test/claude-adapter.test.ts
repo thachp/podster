@@ -13,7 +13,7 @@ import type { RunFacts } from "../src/core/policy.js";
 import { containerSpec, PLACEHOLDER_KEY, RESULT_SCHEMA, UNTRUSTED_FRAME, type DriverSession, type ModelAnswer } from "../src/core/run-interface.js";
 import { decideToolCall } from "../src/core/tool-policy.js";
 import { startBrokerListener, tokenMatches } from "../src/node/broker-listener.js";
-import { claudeEnv, ClaudeDriver, claudeOptions, fixedOptionsRefusal, QUIET, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
+import { claudeEnv, ClaudeDriver, claudeExecArgs, claudeNames, claudeOptions, claudeRunArgs, CLAUDE_IN_CONTAINER, CONTAINER_CONFIG, CONTAINER_HOME, fixedOptionsRefusal, LABEL_ROLE, PLUGIN_ALLOWLIST, QUIET, relayRunArgs, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
 import { installedClaudeVersions, readKeyFile, taskImage } from "../src/node/claude-engine.js";
 import { dockerHost, DockerSandbox, findDocker, homeLabel, LABEL_HOME, LABEL_RUN, RG_FLAGS, runArgs, toolArgv, type DockerCli } from "../src/node/docker-sandbox.js";
 import { answerUsage, envProxyRequested, ProviderKeyTransport, streamUsage } from "../src/node/provider-transport.js";
@@ -405,6 +405,23 @@ const RESULT = { status: "completed", summary: "Done.", files: [] };
 type ToolDef = { name: string; handler: (args: Record<string, unknown>, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> };
 type Step = { kind: "tool"; id: string; name: string; input: Record<string, unknown>; meta?: boolean } | { kind: "model" } | { kind: "message"; message: Record<string, unknown> } | { kind: "handler_only"; name: string; input: Record<string, unknown> };
 
+/**
+ * Claude Code's request as the relay delivers it: to the listener's loopback port, with the relay's Host. In tests the
+ * driver's listener is wrapped to record its port here, standing in for the relay container.
+ */
+const relayTarget = { port: 0 };
+function viaRelay(env: Record<string, string>, path: string, body: string): Promise<number> {
+  expect(env.ANTHROPIC_BASE_URL).toBe("http://relay:8080");
+  return new Promise((resolve) => {
+    const req = request({ host: "127.0.0.1", port: relayTarget.port, method: "POST", path, headers: { host: "relay:8080", "x-api-key": env.ANTHROPIC_API_KEY, "content-type": "application/json" } }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode ?? 0));
+    });
+    req.on("error", () => resolve(0));
+    req.end(body);
+  });
+}
+
 /** A stand-in for the SDK: it spawns through the driver's seam, sends init, then plays its steps as Claude Code would. */
 function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts: { modelFirst?: boolean } = {}) {
   const seen: { options: Record<string, unknown>; prompt: string; denied: string[]; outputs: string[]; spawned: { command: string; env: Record<string, string> } | null; model: { status: number }[] } = { options: {}, prompt: "", denied: [], outputs: [], spawned: null, model: [] };
@@ -422,9 +439,7 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
         let early: Promise<void> | null = null;
         if (opts.modelFirst) {
           const e = options.env as Record<string, string>;
-          early = globalThis
-            .fetch(`${e.ANTHROPIC_BASE_URL}/v1/messages`, { method: "POST", headers: { "x-api-key": e.ANTHROPIC_API_KEY }, body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1, messages: [{ role: "user", content: "x" }] }) })
-            .then((r) => void seen.model.push({ status: r.status }), () => void seen.model.push({ status: 0 }));
+          early = viaRelay(e, "/v1/messages", JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1, messages: [{ role: "user", content: "x" }] })).then((status) => void seen.model.push({ status }));
           await new Promise((r) => setImmediate(r));
         }
         if (init !== null) yield { type: "system", subtype: "init", claude_code_version: PINNED_CLAUDE_CODE_VERSION, permissionMode: "dontAsk", tools: ["StructuredOutput", "mcp__runner__read", "mcp__runner__write"], mcp_servers: [{ name: "runner", status: "connected" }], plugins: [], ...init };
@@ -437,8 +452,7 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
           if (step.kind === "message") yield step.message;
           else if (step.kind === "model") {
             const e = options.env as Record<string, string>;
-            const r = await globalThis.fetch(`${e.ANTHROPIC_BASE_URL}/v1/messages?beta=true`, { method: "POST", headers: { "x-api-key": e.ANTHROPIC_API_KEY, "content-type": "application/json" }, body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128000, messages: [{ role: "user", content: "x" }] }) });
-            seen.model.push({ status: r.status });
+            seen.model.push({ status: await viaRelay(e, "/v1/messages?beta=true", JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128000, messages: [{ role: "user", content: "x" }] })) });
           } else {
             const tool = servers.runner.tools.find((t) => t.name === step.name.replace("mcp__runner__", ""));
             if (step.kind === "tool") {
@@ -462,30 +476,39 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
 }
 
 function fakeProcesses() {
-  const groups = new Map<number, boolean>();
-  const killed: number[] = [];
+  const killed: string[] = [];
   const spawned: { command: string; args: string[]; cwd: string; env: Record<string, string> }[] = [];
-  let next = 4000;
   const processes: ProcessControl = {
     spawn(command, args, opts) {
       spawned.push({ command, args, ...opts });
-      const pid = ++next;
-      groups.set(pid, true);
-      return { pid, stdin: null, stdout: null, killed: false, exitCode: null, kill: () => true, on: () => undefined, once: () => undefined, off: () => undefined } as never;
+      return { pid: 4001, stdin: null, stdout: null, killed: false, exitCode: null, kill: (signal: string) => (killed.push(signal), true), on: () => undefined, once: () => undefined, off: () => undefined } as never;
     },
-    signalGroup(pid, signal) {
-      if (!groups.get(pid)) return false;
-      if (signal === "SIGKILL") {
-        killed.push(pid);
-        groups.set(pid, false);
-      }
-      return true;
-    },
-    describe: async (pid) => (groups.get(pid) ? { kind: "found", command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_000 } : { kind: "none" }),
-    group: async (pgid) => (groups.get(pgid) ? [{ pid: pgid, command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_000 }] : []),
-    bootTime: async () => 1_700_000_000_000,
   };
-  return { processes, groups, killed, spawned };
+  return { processes, killed, spawned };
+}
+
+const DOCKER_PROGRAM = "/usr/local/bin/docker";
+const CLAUDE_IMAGE = `sha256:${"c".repeat(64)}`;
+
+/** A fake `docker` for the driver: containers and networks it was asked to make, by name, and their labels. */
+function fakeDriverDocker() {
+  const containers = new Map<string, string[]>();
+  const networks = new Map<string, string[]>();
+  const calls: string[][] = [];
+  const labelsOf = (args: string[]) => args.filter((_, i) => args[i - 1] === "--label");
+  const matches = (labels: string[], filters: string[]) => filters.every((f) => (f.includes("=", f.indexOf("=") + 1) ? labels.includes(f.slice(f.indexOf("=") + 1)) : labels.some((l) => l.startsWith(`${f.slice(f.indexOf("=") + 1)}=`))));
+  const docker: DockerCli = async (args) => {
+    calls.push(args);
+    const filters = args.filter((_, i) => args[i - 1] === "--filter");
+    if (args[0] === "network" && args[1] === "create") networks.set(args.at(-1) as string, labelsOf(args));
+    else if (args[0] === "network" && args[1] === "rm") for (const n of args.slice(2)) networks.delete(n);
+    else if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: [...networks].filter(([, l]) => matches(l, filters)).map(([n]) => n).join("\n"), stderr: "", cut: false };
+    else if (args[0] === "run") containers.set(args[args.indexOf("--name") + 1], labelsOf(args));
+    else if (args[0] === "rm") for (const c of args.slice(2)) containers.delete(c);
+    else if (args[0] === "ps") return { code: 0, stdout: [...containers].filter(([, l]) => matches(l, filters)).map(([n]) => n).join("\n"), stderr: "", cut: false };
+    return { code: 0, stdout: "", stderr: "", cut: false };
+  };
+  return { docker, calls, containers, networks };
 }
 
 function session(over: Partial<DriverSession> & { root?: string } = {}) {
@@ -500,7 +523,7 @@ function session(over: Partial<DriverSession> & { root?: string } = {}) {
     frame: UNTRUSTED_FRAME,
     allowed_tools: ["read", "write", "StructuredOutput"],
     result_schema: RESULT_SCHEMA,
-    limits: { turns: 5, max_tokens: 1024, output_tokens: 20_000 },
+    limits: { turns: 5, max_tokens: 1024, output_tokens: 20_000, run_time_ms: 600_000 },
     provider: { api_key: PLACEHOLDER_KEY },
     signal: halt.signal,
     check: (call) => {
@@ -524,16 +547,24 @@ async function driverFor(steps: Step[], init: Record<string, unknown> | null = {
   const home = await temp("runner-home-");
   const { sdk, seen } = fakeSdk(steps, init, opts);
   const procs = fakeProcesses();
+  const dk = fakeDriverDocker();
   const observed: DriverObservation[] = [];
-  const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: procs.processes, env: { PATH: "/usr/bin:/bin", LANG: "C", HOME: "/Users/owner", DBUS_SESSION_BUS_ADDRESS: "unix:path=/bus", SSH_AUTH_SOCK: "/agent", ANTHROPIC_API_KEY: KEY, GITHUB_TOKEN: "ghp_x" }, clock: () => 1_800_000_000_000, observe: (e) => void observed.push(e), ...extra });
-  return { home, driver, seen, procs, observed };
+  const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: procs.processes, docker: dk.docker, dockerProgram: DOCKER_PROGRAM, dockerEnv: { PATH: "/usr/bin:/bin", DOCKER_CONFIG: "/h/docker-config" }, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20, observe: (e) => void observed.push(e), listen: async (deps) => {
+    const listener = await startBrokerListener(deps);
+    relayTarget.port = listener.port;
+    return listener;
+  }, ...extra });
+  return { home, driver, seen, procs, observed, dk };
 }
 
 describe("the Claude Agent SDK driver", () => {
   it("refuses any SDK or Claude Code but the pinned pair when it is made", async () => {
     const home = await temp();
-    expect(() => new ClaudeDriver({ home, installed: { sdk: "0.3.326", claude_code: PINNED_CLAUDE_CODE_VERSION } })).toThrow(/pinned/);
-    expect(() => new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: "2.1.326" } })).toThrow(/pinned/);
+    const base = { home, docker: fakeDriverDocker().docker, dockerProgram: DOCKER_PROGRAM, dockerEnv: {}, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20 };
+    expect(() => new ClaudeDriver({ ...base, installed: { sdk: "0.3.326", claude_code: PINNED_CLAUDE_CODE_VERSION } })).toThrow(/pinned/);
+    expect(() => new ClaudeDriver({ ...base, installed: { sdk: PINNED_SDK_VERSION, claude_code: "2.1.326" } })).toThrow(/pinned/);
+    expect(() => new ClaudeDriver({ ...base, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, claudeImage: "node:22" })).toThrow(/pinned/);
+    expect(() => new ClaudeDriver({ ...base, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, uid: 0 })).toThrow(/root/);
   });
 
   it("sets every fixed setting, never the permission-skipping mode, and puts the frame in the system prompt and the words verbatim", async () => {
@@ -564,36 +595,33 @@ describe("the Claude Agent SDK driver", () => {
     expect(fixedOptionsRefusal({ ...base, env: { ...(base.env as object), DBUS_SESSION_BUS_ADDRESS: "x" } } as never)).toBe("env");
   });
 
-  it("gives Claude Code an allow-listed environment: empty HOME and config, no D-Bus, nonessential traffic off, no provider key", async () => {
+  it("gives Claude Code, in its container, an allow-listed environment: empty home and config, the relay, its token, no provider key", async () => {
     const t = await driverFor([]);
     const { s } = session();
     await (await t.driver.begin(s)).done;
     const spawned = t.procs.spawned[0];
     const env = spawned.env;
-    const root = join(t.home, "runs", "run-1");
-    expect(env.HOME).toBe(join(root, "home"));
-    expect(env.CLAUDE_CONFIG_DIR).toBe(join(root, "config"));
-    expect(env.TMPDIR).toBe(join(root, "tmp"));
-    expect(spawned.cwd).toBe(join(root, "work"));
-    for (const [name, value] of Object.entries(QUIET)) expect(env[name]).toBe(value);
-    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
-    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("1024");
-    expect(env.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    expect(env.ANTHROPIC_API_KEY).toMatch(/^[0-9a-f]{64}$/);
-    expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("sdk-ts");
+    // The values reach `docker exec` through its own environment, never its arguments.
+    const names = spawned.args.filter((_, i) => spawned.args[i - 1] === "--env");
+    expect(names.every((n) => /^[A-Z_][A-Z0-9_]*$/.test(n))).toBe(true);
+    expect(spawned.args.join(" ")).not.toContain(env.ANTHROPIC_API_KEY);
+    const inner = Object.fromEntries(names.map((n) => [n, env[n]]));
+    expect(inner).toMatchObject({ HOME: CONTAINER_HOME, CLAUDE_CONFIG_DIR: CONTAINER_CONFIG, TMPDIR: "/tmp", GIT_CEILING_DIRECTORIES: "/work", ANTHROPIC_BASE_URL: "http://relay:8080", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1024", CLAUDE_CODE_ENTRYPOINT: "sdk-ts" });
+    expect(inner.ANTHROPIC_API_KEY).toMatch(/^[0-9a-f]{64}$/);
+    for (const [name, value] of Object.entries(QUIET)) expect(inner[name]).toBe(value);
     expect(JSON.stringify(env)).not.toContain(KEY);
-    for (const name of ["DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]) expect(env).not.toHaveProperty(name);
-    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CONFIG_DIR", "GIT_CEILING_DIRECTORIES", "HOME", "LANG", "PATH", "TMPDIR", ...Object.keys(QUIET)].sort());
+    for (const name of ["DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "DOCKER_CONFIG", "DOCKER_HOST"]) expect(names).not.toContain(name);
+    expect(names.sort()).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CONFIG_DIR", "GIT_CEILING_DIRECTORIES", "HOME", "LANG", "PATH", "TMPDIR", ...Object.keys(QUIET)].sort());
     // The SDK's own value for one of Runner's names never wins.
     expect(spawnEnv({ ANTHROPIC_API_KEY: "t" }, { ANTHROPIC_API_KEY: "x", CLAUDE_AGENT_SDK_VERSION: "1", CLAUDE_CODE_SECRET: "s", OTHER: "o" })).toEqual({ ANTHROPIC_API_KEY: "t", CLAUDE_AGENT_SDK_VERSION: "1" });
-    expect(claudeEnv({ root: "/r", work: "/r/w", home: "/r/h", config: "/r/c", tmp: "/r/t" }, { url: "http://127.0.0.1:1", token: "t" }, 9, { HOME: "/Users/o", DBUS_SESSION_BUS_ADDRESS: "x" })).toMatchObject({ HOME: "/r/h", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9" });
+    expect(claudeEnv("t", 9)).toMatchObject({ HOME: CONTAINER_HOME, ANTHROPIC_API_KEY: "t", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9" });
   });
 
-  it("makes the run's folders empty, mode 0700, and refuses a run folder already there", async () => {
+  it("makes the run's home and config folders empty, mode 0700, and refuses a run folder already there", async () => {
     const t = await driverFor([]);
     const { s } = session();
     await (await t.driver.begin(s)).done;
-    for (const sub of ["", "work", "home", "config", "tmp"]) expect((await stat(join(t.home, "runs", "run-1", sub))).mode & 0o777).toBe(0o700);
+    for (const sub of ["", "home", "config"]) expect((await stat(join(t.home, "runs", "run-1", sub))).mode & 0o777).toBe(0o700);
     await expect(t.driver.begin(s)).rejects.toThrow(UnsafePath);
   });
 
@@ -667,47 +695,6 @@ describe("the Claude Agent SDK driver", () => {
     expect(t.seen.model).toEqual([{ status: 200 }]);
     expect(models).toHaveLength(1);
     expect(models[0]).toMatchObject({ method: "POST", path: "/v1/messages", query: "" });
-  });
-
-  it("cancels by killing Claude Code's whole process group and closing the listener, and confirms it gone", async () => {
-    const t = await driverFor([{ kind: "message", message: { type: "assistant" } }]);
-    const { s } = session();
-    const run = await t.driver.begin(s);
-    await run.done;
-    const pid = t.procs.spawned.length > 0 ? 4001 : 0;
-    expect(await t.driver.confirmGone("run-1")).toBe(false);
-    await run.cancel();
-    expect(t.procs.killed).toEqual([pid]);
-    expect(await t.driver.confirmGone("run-1")).toBe(true);
-    await expect(lstat(join(t.home, "runs", "run-1"))).rejects.toThrow();
-  });
-
-  it("after a restart, reaps a recorded Claude Code group that is still Runner's, and leaves a reused PID alone (M4)", async () => {
-    const t = await driverFor([]);
-    const { s } = session();
-    await (await t.driver.begin(s)).done;
-    // A fresh driver, as after a restart, on the same home.
-    const again = new ClaudeDriver({ home: t.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: t.procs.processes, sdk: fakeSdk([]).sdk });
-    expect(await again.confirmGone("run-1")).toBe(false);
-    await again.reapAll();
-    expect(t.procs.killed).toEqual([4001]);
-    expect(await again.confirmGone("run-1")).toBe(true);
-    // A PID now another program's is never killed, and reads as gone.
-    const u = await driverFor([]);
-    await (await u.driver.begin(session().s)).done;
-    u.procs.processes.describe = async () => ({ kind: "found", command: "/usr/bin/vim", started_at: 1_800_000_000_000 });
-    const other = new ClaudeDriver({ home: u.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: u.procs.processes, sdk: fakeSdk([]).sdk });
-    await other.reap("run-1");
-    expect(u.procs.killed).toEqual([]);
-    expect(await other.confirmGone("run-1")).toBe(true);
-    // An unreadable record never reads as gone.
-    const v = await driverFor([]);
-    await (await v.driver.begin(session().s)).done;
-    await rm(join(v.home, "runs", "run-1", "process.json"));
-    await writeFile(join(v.home, "runs", "run-1", "process.json"), "{not json");
-    const broken = new ClaudeDriver({ home: v.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: v.procs.processes, sdk: fakeSdk([]).sdk });
-    expect(await broken.confirmGone("run-1")).toBe(false);
-    await expect(broken.reap("run-1")).rejects.toThrow();
   });
 
   it("builds options only from the session: nothing from the task's words, the environment or Podster widens them", async () => {
@@ -848,7 +835,7 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
     // Claude Code got a refusal or a closed connection, never an answer.
     expect(w.t.seen.model.every((m) => m.status !== 200)).toBe(true);
     expect(w.docker.calls.some((c) => c.args[0] === "rm")).toBe(true);
-    expect(w.t.procs.killed).toEqual([4001]);
+    expect(w.t.procs.killed).toEqual(["SIGKILL"]);
     expect(await w.adapter.confirmStopped("run-1")).toBe(true);
   });
 });
@@ -899,10 +886,8 @@ describe("review item 1 (M1, S-44): prevent, don't only detect", () => {
     expect(tools).toEqual([]);
   });
 
-  it("(c) fails on any plugin, since the reviewed allowlist is empty", async () => {
-    const { PLUGIN_ALLOWLIST } = await import("../src/node/claude-driver.js");
-    expect(PLUGIN_ALLOWLIST).toEqual([]);
-    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], { plugins: [{ name: "cc-plugin-privacy", path: "/x" }] });
+  it("(c) fails on any plugin not on the reviewed allowlist", async () => {
+    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], { plugins: [{ name: "cc-plugin-privacy", path: "/x" }, { name: "some-other-plugin", path: "/y" }] });
     const { s, tools } = session();
     await expect((await t.driver.begin(s)).done).rejects.toThrow(/plugins_unexpected/);
     expect(tools).toEqual([]);
@@ -918,29 +903,6 @@ describe("review item 1 (M1, S-44): prevent, don't only detect", () => {
     const bare = await driverFor([], {}, { bare: true });
     await (await bare.driver.begin(session().s)).done;
     expect(bare.procs.spawned[0].env.CLAUDE_CODE_SIMPLE).toBe("1");
-  });
-
-  it("(f) on macOS, opt-in, starts Claude Code under sandbox-exec: no exec but its own binary, no login keychain files", async () => {
-    const { sandboxProfile, SANDBOX_EXEC } = await import("../src/node/claude-driver.js");
-    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
-    expect(profile).toMatch(/\(deny process-exec\)/);
-    expect(profile).toContain('(allow process-exec (literal "/sdk/claude"))');
-    expect(profile).toContain('(deny file-read* file-write* (subpath "/Users/owner/Library/Keychains"))');
-    expect(profile.indexOf("(deny process-exec)")).toBeLessThan(profile.indexOf("(allow process-exec"));
-    expect(() => sandboxProfile('/sdk/cl"aude', "/Users/owner")).toThrow();
-    expect(() => sandboxProfile("/sdk/claude", "/Users/o\\wner")).toThrow();
-    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async (_p: string, args: string[]) => ({ code: args.includes("--version") ? 0 : 1 }) });
-    await (await t.driver.begin(session().s)).done;
-    const spawned = t.procs.spawned[0];
-    expect(spawned.command).toBe(SANDBOX_EXEC);
-    expect(spawned.args.slice(0, 3)).toEqual(["-p", sandboxProfile("/sdk/claude", "/Users/owner"), "/sdk/claude"]);
-    expect(spawned.args.slice(3)).toEqual(["--output-format", "stream-json"]);
-    // Off by default, and refused off macOS.
-    const plain = await driverFor([]);
-    await (await plain.driver.begin(session().s)).done;
-    expect(plain.procs.spawned[0].command).toBe("/sdk/claude");
-    const home = await temp();
-    expect(() => new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, macSandbox: true, platform: "linux" })).toThrow(/macOS/);
   });
 
   it("(g) reports Runner's own callback as it runs, for the real run's positive control", async () => {
@@ -1028,60 +990,6 @@ describe("review item 3 (M3): no TLS trust taken from the environment", () => {
   });
 });
 
-describe("review item 4 (L1): a reap kills only what it can prove is Runner's", () => {
-  async function recorded() {
-    const t = await driverFor([]);
-    await (await t.driver.begin(session().s)).done;
-    const again = () => new ClaudeDriver({ home: t.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: t.procs.processes, sdk: fakeSdk([]).sdk });
-    return { t, again };
-  }
-
-  it("never kills when ps fails, and never reads that as gone", async () => {
-    const { t, again } = await recorded();
-    t.procs.processes.describe = async () => ({ kind: "failed" });
-    await again().reap("run-1");
-    expect(t.procs.killed).toEqual([]);
-    expect(await again().confirmGone("run-1")).toBe(false);
-  });
-
-  it("for a group with no leader, checks a member's command before killing", async () => {
-    const { t, again } = await recorded();
-    t.procs.processes.describe = async () => ({ kind: "none" });
-    t.procs.processes.group = async () => [{ pid: 4100, command: "/usr/bin/vim", started_at: 1 }];
-    await again().reap("run-1");
-    expect(t.procs.killed).toEqual([]);
-    t.procs.processes.group = async () => [{ pid: 4100, command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_500 }];
-    await again().reap("run-1");
-    expect(t.procs.killed).toEqual([4001]);
-    // A failed group listing never kills.
-    const u = await recorded();
-    u.t.procs.processes.describe = async () => ({ kind: "none" });
-    u.t.procs.processes.group = async () => null;
-    await u.again().reap("run-1");
-    expect(u.t.procs.killed).toEqual([]);
-  });
-
-  it("never kills a group recorded before the machine's last boot, or when the boot time can't be read", async () => {
-    const { t, again } = await recorded();
-    t.procs.processes.bootTime = async () => 1_900_000_000_000;
-    await again().reap("run-1");
-    expect(t.procs.killed).toEqual([]);
-    expect(await again().confirmGone("run-1")).toBe(true);
-    const u = await recorded();
-    u.t.procs.processes.bootTime = async () => null;
-    await u.again().reap("run-1");
-    expect(u.t.procs.killed).toEqual([]);
-    expect(await u.again().confirmGone("run-1")).toBe(false);
-  });
-
-  it("reapAll stops on an unreadable record", async () => {
-    const { t, again } = await recorded();
-    await rm(join(t.home, "runs", "run-1", "process.json"));
-    await writeFile(join(t.home, "runs", "run-1", "process.json"), "{not json");
-    await expect(again().reapAll()).rejects.toThrow(/process_record_unreadable/);
-  });
-});
-
 describe("review item 5 (L2): the container's sleep is bounded by the run time", () => {
   it("sleeps for the run-time cap plus a margin, not forever", () => {
     const spec = containerSpec("run-1", facts("/w", { caps: { ...CAPS, run_time_ms: 600_000 } }));
@@ -1119,7 +1027,7 @@ describe("review item 6 (L3): a tool-use ID the hook never saw ends the run", ()
       }) as never,
     };
     const home = await temp();
-    const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: fakeProcesses().processes });
+    const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: fakeProcesses().processes, docker: fakeDriverDocker().docker, dockerProgram: DOCKER_PROGRAM, dockerEnv: {}, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20 });
     const { s, tools } = session();
     await expect((await driver.begin(s)).done).rejects.toThrow(/hook_bypassed/);
     expect(tools).toEqual([]);
@@ -1190,9 +1098,8 @@ describe("review item 10 (L7): the real run is opt-in twice and outside the defa
 });
 
 describe("review item 11 (L8): Git never looks above the run's folder", () => {
-  it("sets GIT_CEILING_DIRECTORIES to the run's folder", () => {
-    const env = claudeEnv({ root: "/r", work: "/r/w", home: "/r/h", config: "/r/c", tmp: "/r/t" }, { url: "http://127.0.0.1:1", token: "t" }, 9, {});
-    expect(env.GIT_CEILING_DIRECTORIES).toBe("/r");
+  it("sets GIT_CEILING_DIRECTORIES to Claude Code's own working folder in its container", () => {
+    expect(claudeEnv("t", 9).GIT_CEILING_DIRECTORIES).toBe("/work");
   });
 });
 
@@ -1290,14 +1197,17 @@ describe("the reviewer's untested paths", () => {
     const keyFile = join(home, "fake.key");
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
-    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : {}));
-    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [], platform: "darwin" });
+    await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : args[0] === "network" ? { stdout: "podster-net-old" } : {}));
+    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [] });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
     await engine.reap();
     expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
-    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [], platform: "darwin" })).rejects.toThrow();
+    // And every network a previous process left for this home.
+    expect(calls.some((c) => c.args[0] === "network" && c.args[1] === "rm" && c.args.includes("podster-net-old"))).toBe(true);
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [] })).rejects.toThrow();
   });
 });
 
@@ -1329,60 +1239,6 @@ describe("re-review item 1: hook identity", () => {
       await expect((await t.driver.begin(s)).done).rejects.toThrow(/hook_unexpected/);
       expect(tools).toEqual([]);
     }
-  });
-});
-
-describe("re-review item 3: the macOS sandbox", () => {
-  it("(a) denies the Security and keychain Mach services as well as the keychain files", async () => {
-    const { sandboxProfile, KEYCHAIN_MACH_SERVICES } = await import("../src/node/claude-driver.js");
-    for (const name of ["com.apple.SecurityServer", "com.apple.securityd.xpc", "com.apple.secd"]) expect(KEYCHAIN_MACH_SERVICES).toContain(name);
-    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
-    expect(profile).toContain(`(deny mach-lookup ${KEYCHAIN_MACH_SERVICES.map((n: string) => `(global-name "${n}")`).join(" ")})`);
-    expect(profile).toContain('(deny file-read* file-write* (subpath "/Users/owner/Library/Keychains"))');
-  });
-
-  it("(b) takes the owner's home from the user database, not $HOME", async () => {
-    const { userInfo } = await import("node:os");
-    const { sandboxProfile } = await import("../src/node/claude-driver.js");
-    const before = process.env.HOME;
-    process.env.HOME = "/tmp/not-the-owners-home";
-    try {
-      const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async (_p: string, args: string[]) => ({ code: args.includes("--version") ? 0 : 1 }) });
-      await (await t.driver.begin(session().s)).done;
-      expect(t.procs.spawned[0].args[1]).toBe(sandboxProfile("/sdk/claude", userInfo().homedir));
-      expect(t.procs.spawned[0].args[1]).not.toContain("/tmp/not-the-owners-home");
-    } finally {
-      process.env.HOME = before;
-    }
-  });
-
-  it("(c) runs a preflight under the same profile: sh and security must fail, Claude Code's --version must work", async () => {
-    const { sandboxPreflight, sandboxProfile, SANDBOX_EXEC } = await import("../src/node/claude-driver.js");
-    const calls: { program: string; args: string[] }[] = [];
-    const run = good(calls);
-    expect(await sandboxPreflight("/sdk/claude", "/Users/owner", run)).toMatchObject({ ok: true, shell_denied: true, security_denied: true, claude_ran: true, keychain_closed: true, keychain_open: false });
-    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
-    const variant = sandboxProfile("/sdk/claude", "/Users/owner", { allowSecurity: true });
-    expect(calls.map((c) => [c.program, ...c.args])).toEqual([
-      [SANDBOX_EXEC, "-p", profile, "/bin/sh", "-c", "true"],
-      [SANDBOX_EXEC, "-p", profile, "/usr/bin/security", "list-keychains"],
-      [SANDBOX_EXEC, "-p", profile, "/sdk/claude", "--version"],
-      [SANDBOX_EXEC, "-p", variant, "/usr/bin/security", "list-keychains"],
-      [SANDBOX_EXEC, "-p", variant, "/usr/bin/security", "find-generic-password", "-s", "podster-preflight-nonexistent"],
-    ]);
-    for (const over of [{ sh: { code: 0 } }, { security: { code: 0 } }, { claude: { code: 1 } }]) expect((await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over))).ok).toBe(false);
-  });
-
-  it("(c) the driver refuses to start Claude Code under a sandbox whose preflight fails", async () => {
-    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: good([], { sh: { code: 0 } }) });
-    const run = await t.driver.begin(session().s);
-    await expect(run.done).rejects.toThrow(/sandbox_preflight_failed/);
-    expect(t.procs.spawned).toEqual([]);
-  });
-
-  it("(d) the real run's sandbox scenario is in bare mode", async () => {
-    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
-    expect(real).toMatch(/bare: mode === "bare" \|\| mode === "sandbox"/);
   });
 });
 
@@ -1442,87 +1298,124 @@ describe("re-review item 5 (M2 lows)", () => {
   });
 });
 
-describe("re-review items 2, 4 and 6: the real run as redesigned", () => {
-  it("settles S-44 on four conditions and spends in its spend scenario", async () => {
-    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
-    expect(real).toMatch(/plugins_empty/);
-    expect(real).toMatch(/no_hook_events/);
-    expect(real).toMatch(/callback_ran/);
-    expect(real).toMatch(/no_child_process/);
-    expect(real).toMatch(/exec_denied/);
-    expect(real).toMatch(/spent_micro_usd \?\? 0\)\.toBeGreaterThan\(0\)/);
+
+// ---- After the real run of #460 at 7a6b4ce4: the architect's ruling, Claude Code in its own container ----
+
+describe("the two-container placement", () => {
+  it("allows exactly the three built-in plugins of the pinned Claude Code, and any other still fails", async () => {
+    expect([...PLUGIN_ALLOWLIST].sort()).toEqual(["cc-plugin-agents-md", "cc-plugin-plugin-authoring", "cc-plugin-privacy"]);
+    expect(PINNED_CLAUDE_CODE_VERSION).toBe("2.1.327");
+    const builtins = [{ name: "cc-plugin-agents-md", path: "/a" }, { name: "cc-plugin-privacy", path: "/b" }, { name: "cc-plugin-plugin-authoring", path: "/c" }];
+    const ok = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], { plugins: builtins });
+    expect(await (await ok.driver.begin(session().s)).done).toEqual({ result: RESULT });
+    const bad = await driverFor([], { plugins: [...builtins, { name: "cc-plugin-new", path: "/d" }] });
+    await expect((await bad.driver.begin(session().s)).done).rejects.toThrow(/plugins_unexpected/);
+  });
+
+  it("opens a per-run internal network, a relay to the host's listener, and Claude Code's own hardened container", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const names = claudeNames("run-1");
+    const [net, relay, connect, cc] = t.dk.calls;
+    expect(net.slice(0, 3)).toEqual(["network", "create", "--internal"]);
+    expect(net.at(-1)).toBe(names.network);
+    expect(relay[0]).toBe("run");
+    expect(relay).toContain(names.relay);
+    expect(connect).toEqual(["network", "connect", "--alias", "relay", names.network, names.relay]);
+    expect(cc[0]).toBe("run");
+    expect(cc).toContain(names.container);
+    const flag = (args: string[], name: string) => args.filter((_, i) => args[i - 1] === name);
+    for (const args of [relay, cc]) {
+      expect(flag(args, "--user")).toEqual(["501:20"]);
+      expect(flag(args, "--cap-drop")).toEqual(["ALL"]);
+      expect(flag(args, "--security-opt")).toEqual(["no-new-privileges"]);
+      expect(args).toContain("--read-only");
+      expect(flag(args, "--pull")).toEqual(["never"]);
+      expect(flag(args, "--pids-limit")).toEqual(["256"]);
+      expect(flag(args, "--memory")).toEqual(["2g"]);
+      expect(args).toContain(CLAUDE_IMAGE);
+      expect(flag(args, "--label")).toContain(`${LABEL_RUN}=run-1`);
+      expect(args.join(" ")).not.toMatch(/docker\.sock|--device|--privileged|--volume|-v |--network host|--cap-add|--env /);
+    }
+    // Claude Code: only the run's internal network, and only its empty home and config from the host.
+    expect(flag(cc, "--network")).toEqual([names.network]);
+    const root = join(t.home, "runs", "run-1");
+    expect(flag(cc, "--mount")).toEqual([`type=bind,source=${join(root, "home")},target=${CONTAINER_HOME}`, `type=bind,source=${join(root, "config")},target=${CONTAINER_CONFIG}`]);
+    expect(flag(cc, "--label")).toContain(`${LABEL_ROLE}=claude`);
+    expect(cc.slice(-2)[0]).toBe("sleep");
+    // The relay: no mount, a fixed forward to the host's listener port, and nothing else.
+    expect(flag(relay, "--mount")).toEqual([]);
+    expect(flag(relay, "--label")).toContain(`${LABEL_ROLE}=relay`);
+    expect(flag(relay, "--add-host")).toEqual(["host.docker.internal:host-gateway"]);
+    expect(relay.slice(-3)).toEqual(["socat", "TCP-LISTEN:8080,fork,reuseaddr", expect.stringMatching(/^TCP:host\.docker\.internal:\d+$/)]);
+  });
+
+  it("starts Claude Code with docker exec in its container: its Linux binary, /work, values only through the environment", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const spawned = t.procs.spawned[0];
+    expect(spawned.command).toBe(DOCKER_PROGRAM);
+    const at = spawned.args.indexOf(claudeNames("run-1").container);
+    expect(spawned.args.slice(0, 4)).toEqual(["exec", "--interactive", "--workdir", "/work"]);
+    expect(spawned.args.slice(at, at + 4)).toEqual([claudeNames("run-1").container, CLAUDE_IN_CONTAINER, "--output-format", "stream-json"]);
+    expect(spawned.env.DOCKER_CONFIG).toBe("/h/docker-config");
+    expect(claudeExecArgs("run-1", ["A", "B"], ["--x"])).toEqual(["exec", "--interactive", "--workdir", "/work", "--env", "A", "--env", "B", claudeNames("run-1").container, CLAUDE_IN_CONTAINER, "--x"]);
+  });
+
+  it("checks the relay's Host at the listener, not the host's loopback name", async () => {
+    let host: string | undefined;
+    const t = await driverFor([], {}, { listen: async (deps) => ((host = deps.host), startBrokerListener(deps)) });
+    await (await t.driver.begin(session().s)).done;
+    expect(host).toBe("relay:8080");
+  });
+
+  it("cancels by ending the exec client and removing both containers and the network, and confirms them gone", async () => {
+    const t = await driverFor([]);
+    const run = await t.driver.begin(session().s);
+    await run.done;
+    expect(await t.driver.confirmGone("run-1")).toBe(false);
+    await run.cancel();
+    expect(t.procs.killed).toEqual(["SIGKILL"]);
+    expect(t.dk.containers.size).toBe(0);
+    expect(t.dk.networks.size).toBe(0);
+    expect(await t.driver.confirmGone("run-1")).toBe(true);
+    await expect(lstat(join(t.home, "runs", "run-1"))).rejects.toThrow();
+  });
+
+  it("after a restart, reaps the run's containers and network by label, and reapAll every one of this home's", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const again = new ClaudeDriver({ home: t.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk: fakeSdk([]).sdk, processes: fakeProcesses().processes, docker: t.dk.docker, dockerProgram: DOCKER_PROGRAM, dockerEnv: {}, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20 });
+    expect(await again.confirmGone("run-1")).toBe(false);
+    await again.reap("run-1");
+    expect(t.dk.containers.size).toBe(0);
+    expect(t.dk.networks.size).toBe(0);
+    expect(await again.confirmGone("run-1")).toBe(true);
+    const u = await driverFor([]);
+    await (await u.driver.begin(session().s)).done;
+    const fresh = new ClaudeDriver({ home: u.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk: fakeSdk([]).sdk, processes: fakeProcesses().processes, docker: u.dk.docker, dockerProgram: DOCKER_PROGRAM, dockerEnv: {}, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20 });
+    await fresh.reapAll();
+    expect(u.dk.containers.size).toBe(0);
+    expect(u.dk.networks.size).toBe(0);
+  });
+
+  it("never reads a Docker failure as gone", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const failing: DockerCli = async () => ({ code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon", cut: false });
+    const again = new ClaudeDriver({ home: t.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk: fakeSdk([]).sdk, processes: fakeProcesses().processes, docker: failing, dockerProgram: DOCKER_PROGRAM, dockerEnv: {}, claudeImage: CLAUDE_IMAGE, uid: 501, gid: 20 });
+    expect(await again.confirmGone("run-1")).toBe(false);
+  });
+
+  it("the run args are the same hardening as the task container's, from its own helpers", () => {
+    const cc = claudeRunArgs({ ref: "run-1", image: CLAUDE_IMAGE, uid: 501, gid: 20, home_dir: "/r/home", config_dir: "/r/config", home_label: "h", max_seconds: 660 });
+    const relay = relayRunArgs({ ref: "run-1", image: CLAUDE_IMAGE, uid: 501, gid: 20, port: 4321, home_label: "h", max_seconds: 660 });
+    expect(cc.slice(-2)).toEqual(["sleep", "660"]);
+    expect(relay.at(-1)).toBe("TCP:host.docker.internal:4321");
   });
 });
 
-// ---- The re-review of #460 at 45eebb9f: before the real run ----
-
-const EXEC_DENIED = { code: 71, stderr: "sandbox-exec: execvp() of '/usr/bin/security' failed: Operation not permitted" };
-type Outcome = { code: number; stderr?: string };
-/** A preflight's programs as a sandbox that holds would answer them; `over` changes one answer. */
-function good(calls: { program: string; args: string[] }[], over: Partial<Record<"sh" | "security" | "claude" | "list" | "find", Outcome>> = {}) {
-  return async (program: string, args: string[]) => {
-    calls.push({ program, args });
-    const variant = args[1].includes('(allow process-exec (literal "/usr/bin/security"))');
-    const target = args[2];
-    if (target === "/bin/sh") return over.sh ?? { code: 71, stderr: "sandbox-exec: execvp() of '/bin/sh' failed: Operation not permitted" };
-    if (target === "/usr/bin/security" && !variant) return over.security ?? EXEC_DENIED;
-    if (target === "/usr/bin/security" && args[3] === "list-keychains") return over.list ?? { code: 1, stderr: "security: SecKeychainCopySearchList: Connection invalid" };
-    if (target === "/usr/bin/security") return over.find ?? { code: 1, stderr: "security: SecKeychainSearchCopyNext: Connection invalid" };
-    return over.claude ?? { code: 0, stderr: "" };
-  };
-}
-
-describe("re-review 2 item 1: the Mach deny, isolated", () => {
-  it("denies ctkd and the cloud keychain proxy too", async () => {
-    const { KEYCHAIN_MACH_SERVICES } = await import("../src/node/claude-driver.js");
-    expect(KEYCHAIN_MACH_SERVICES).toContain("com.apple.ctkd");
-    expect(KEYCHAIN_MACH_SERVICES).toContain("com.apple.security.cloudkeychainproxy3");
-  });
-
-  it("has a variant profile identical but for one rule allowing /usr/bin/security to start", async () => {
-    const { sandboxProfile } = await import("../src/node/claude-driver.js");
-    const base = sandboxProfile("/sdk/claude", "/Users/owner");
-    const variant = sandboxProfile("/sdk/claude", "/Users/owner", { allowSecurity: true });
-    const extra = variant.split("\n").filter((line) => !base.split("\n").includes(line));
-    expect(extra).toEqual(['(allow process-exec (literal "/usr/bin/security"))']);
-    expect(base.split("\n").every((line) => variant.split("\n").includes(line))).toBe(true);
-    expect(base).not.toContain('(allow process-exec (literal "/usr/bin/security"))');
-  });
-
-  it("reads the keychain as open when security succeeds, or reaches it and finds no item, under the variant", async () => {
-    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
-    for (const over of [{ list: { code: 0, stderr: "" } }, { find: { code: 44, stderr: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." } }, { find: { code: 0 } }]) {
-      const r = await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over));
-      expect([over, r.ok, r.keychain_open]).toEqual([over, false, true]);
-    }
-  });
-
-  it("treats an exec deny under the variant as an invalid preflight, not a closed keychain", async () => {
-    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
-    for (const over of [{ list: EXEC_DENIED }, { find: EXEC_DENIED }]) {
-      const r = await sandboxPreflight("/sdk/claude", "/Users/owner", good([], over));
-      expect([r.ok, r.keychain_closed, r.keychain_open]).toEqual([false, false, false]);
-    }
-  });
-
-  it("runs only security's read commands, against a name that doesn't exist", async () => {
-    const { sandboxPreflight } = await import("../src/node/claude-driver.js");
-    const calls: { program: string; args: string[] }[] = [];
-    await sandboxPreflight("/sdk/claude", "/Users/owner", good(calls));
-    const security = calls.filter((c) => c.args[2] === "/usr/bin/security").map((c) => c.args.slice(3));
-    for (const args of security) expect(["list-keychains", "find-generic-password"]).toContain(args[0]);
-    expect(security.filter((a) => a[0] === "find-generic-password")).toEqual([["find-generic-password", "-s", "podster-preflight-nonexistent"]]);
-    expect(JSON.stringify(security)).not.toMatch(/add-|delete-|set-|create-|import|unlock|-w\b|-g\b/);
-  });
-
-  it("the driver fails the run with sandbox_keychain_open when the keychain answers under the variant", async () => {
-    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: good([], { list: { code: 0 } }) });
-    await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/sandbox_keychain_open/);
-    expect(t.procs.spawned).toEqual([]);
-  });
-});
-
-describe("re-review 2 item 2: production runs what is verified", () => {
+describe("production: the two-container placement everywhere, bare mode, no sandbox-exec", () => {
   async function engineFor(platform: NodeJS.Platform) {
     const { claudeEngine } = await import("../src/node/claude-engine.js");
     const home = await temp();
@@ -1530,29 +1423,63 @@ describe("re-review 2 item 2: production runs what is verified", () => {
     const keyFile = join(home, "fake.key");
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
+    await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
     const { docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
-    return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [], platform });
+    return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform });
   }
 
-  it("on darwin, always bare mode and always the sandbox", async () => {
-    const engine = await engineFor("darwin");
-    expect((engine.drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, mac_sandbox: true });
+  it("builds the same engine on darwin and linux: bare mode, Claude Code in its container", async () => {
+    for (const platform of ["darwin", "linux"] as const) expect((await engineFor(platform)).drivers.claude_agent_sdk && ((await engineFor(platform)).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, placement: "container" });
   });
 
-  it("anywhere else, refuses to start with platform_unverified until S-47's Linux run exists", async () => {
-    await expect(engineFor("linux")).rejects.toThrow(/platform_unverified/);
-    await expect(engineFor("freebsd")).rejects.toThrow(/platform_unverified/);
+  it("refuses without a pinned Claude Code image", async () => {
+    const { claudeEngine } = await import("../src/node/claude-engine.js");
+    const home = await temp();
+    await chmod(home, 0o700);
+    const keyFile = join(home, "fake.key");
+    await writeFile(keyFile, KEY, { mode: 0o600 });
+    await writeFile(join(home, "task-image"), IMAGE);
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker: fakeDocker().docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [] })).rejects.toThrow(/Claude Code image/);
+  });
+
+  it("has no sandbox-exec wrapper, preflight or host-side Claude Code left in Runner's source", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const src = new URL("../src/", import.meta.url);
+    for (const file of (await readdir(src, { recursive: true })).filter((f) => f.endsWith(".ts"))) {
+      // Code only: the comments say what was removed and why.
+      const text = (await readFile(new URL(file, src), "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+      expect([file, /sandbox-exec|sandboxPreflight|macSandbox|platform_unverified/.test(text)]).toEqual([file, false]);
+      // Only Runner's own keychain tool may name `security`.
+      if (file !== "node/keychain.ts") expect([file, /\/usr\/bin\/security/.test(text)]).toEqual([file, false]);
+    }
   });
 });
 
-describe("re-review 2 item 3: the spend scenario reaches its cap", () => {
-  it("makes a.txt first, caps spend near 8,000 µUSD, keeps its asserts, and the ceiling is 0.326 USD", async () => {
+describe("the Claude Code image", () => {
+  it("is pinned: the same debian base by digest, socat from the snapshot, the Linux Claude Code 0.3.327 checked by sha512", async () => {
+    const dockerfile = await readFile(new URL("../claude-image/Dockerfile", import.meta.url), "utf8");
+    expect(dockerfile).toMatch(/FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc/);
+    expect(dockerfile).toMatch(/snapshot\.debian\.org\/archive\/debian\/20261101T000000Z bookworm main/);
+    expect(dockerfile).toMatch(/socat=1\.7\.4\.4-2/);
+    expect(dockerfile).toContain("https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-arm64/-/claude-agent-sdk-linux-arm64-0.3.327.tgz");
+    expect(dockerfile).toContain("https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.327.tgz");
+    expect(dockerfile).toContain("fe4e817d5f8bd9eafaed4a0b51a6dca74c372f50cc7a6263a228ddc6f5c3894f30f357c67c768a58a851ba151016622b30bc8cc9070129aa3250d48b5a8bcf9f");
+    expect(dockerfile).toContain("a0074beca33d5150199404de4a387685a7848dec7537b65c1f358ed6d636860ca19322cd570fed5948484ceb9cc4cc28901c7efa1d9d3158f188f262679b9539");
+    expect(dockerfile).toMatch(/sha512sum -c/);
+    expect(dockerfile).not.toMatch(/# syntax=|--checksum|ca-certificates/);
+    expect(dockerfile).toContain(CLAUDE_IN_CONTAINER);
+  });
+});
+
+describe("the real run after the ruling", () => {
+  it("runs the six scenarios in bare mode only, with the two containers, the positive control, and an isolation probe inside Claude Code's container", async () => {
     const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
-    expect(real).toMatch(/spend: 8_000/);
-    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(326_000\)/);
-    expect(real).toMatch(/writeFile\(join\(folder, "a\.txt"\)/);
-    expect(real).toMatch(/spent_micro_usd \?\? 0\)\.toBeGreaterThan\(0\)/);
-    expect(real).toMatch(/requests \?\? 0\)\.toBeGreaterThan\(1\)/);
-    expect(real).toMatch(/overshoot_micro_usd/);
+    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(148_000\)/);
+    expect(real).not.toMatch(/"default" \| "bare"|mode === "sandbox"|macSandbox/);
+    expect(real).toMatch(/callback_ran/);
+    expect(real).toMatch(/PLUGIN_ALLOWLIST/);
+    expect(real).toMatch(/\/usr\/bin\/security/);
+    expect(real).toMatch(/only_token/);
+    expect(real).toMatch(/claude-image/);
   });
 });

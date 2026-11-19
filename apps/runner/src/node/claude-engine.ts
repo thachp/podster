@@ -5,14 +5,14 @@
  * Before anything runs, it refuses unless:
  * - the installed SDK and its bundled Claude Code are exactly the pinned pair (S-48);
  * - the key file is a regular file, not a link, owned by the owner and readable by no one else, holding one key;
- * - Runner's task image is pinned: `task-image` in Runner's home names an image ID (`sha256:…`);
+ * - Runner's two images are pinned: `task-image` and `claude-image` in Runner's home each name an image ID
+ *   (`sha256:…`), built from `apps/runner/sandbox` and `apps/runner/claude-image`;
  * - `docker` is installed in a fixed place;
- * - no proxy would be taken from the environment.
- * It runs exactly what was verified (re-review 2 item 2): Claude Code always in bare mode, and on macOS always under
- * the `sandbox-exec` wrapper with its preflight. Any other system is refused (`platform_unverified`) until S-47's
- * Linux run exists.
- * Then it reaps (M4 on #459): every container of this home, and every Claude Code group a previous process left, go
- * before the lifecycle opens and confirms any stop.
+ * - no proxy or TLS trust would be taken from the environment.
+ * It runs what was ruled after #460's real run: Claude Code always in bare mode, in its own container (the
+ * two-container placement), on macOS and Linux alike. The macOS `sandbox-exec` wrapper is gone.
+ * Then it reaps (M4 on #459): every container and network of this home a previous process left goes before the
+ * lifecycle opens and confirms any stop.
  *
  * The key is read once into the transport and never logged, written, put in an error or passed to another program.
  */
@@ -68,24 +68,29 @@ export async function taskImage(home: string): Promise<string> {
   return text;
 }
 
+/** Runner's pinned Claude Code image, from `claude-image` in its home. */
+export async function claudeImage(home: string): Promise<string> {
+  const text = (await readNoFollow(join(home, "claude-image"), 256))?.trim();
+  if (!text || !IMAGE_ID.test(text)) throw new Error("Runner's Claude Code image isn't pinned. Build apps/runner/claude-image and write its image ID (sha256:…) to claude-image in Runner's home.");
+  return text;
+}
+
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
-export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform }): Promise<ClaudeEngine> {
-  const platform = opts.platform ?? process.platform;
-  if (platform !== "darwin") throw new Error("platform_unverified: Runner runs tasks only on macOS, under its sandbox, until its checks have run on this system.");
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: true, macSandbox: true, platform });
+export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; dockerProgram?: string; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform }): Promise<ClaudeEngine> {
   const key = await readKeyFile(opts.key_file);
   const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key, { env: opts.env, execArgv: opts.execArgv });
   const image = await taskImage(opts.home);
+  const ccImage = await claudeImage(opts.home);
+  const program = opts.dockerProgram ?? findDocker();
+  if (!program) throw new Error("Runner needs Docker for the task's and Claude Code's containers, and found none.");
+  const config = join(opts.home, "docker-config");
+  const host = dockerHost(opts.env ?? process.env, opts.platform ?? process.platform);
   let docker = opts.docker;
-  if (!docker) {
-    const program = findDocker();
-    if (!program) throw new Error("Runner needs Docker for the task's container, and found none.");
-    const config = await ensureFolder(opts.home, join(opts.home, "docker-config"));
-    docker = dockerCli(program, { config_dir: config, host: dockerHost() });
-  }
+  if (!docker) docker = dockerCli(program, { config_dir: await ensureFolder(opts.home, config), host });
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: true, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid });
   const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home });
   return {
     drivers: { claude_agent_sdk: driver },

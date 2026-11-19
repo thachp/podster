@@ -40,12 +40,54 @@ export function codeFrom(body: unknown): string {
   return "unknown";
 }
 
+/** The most of a refusal's body Runner reads. */
+export const MAX_ERROR_BYTES = 16_384;
+
+/**
+ * A response's body as text, read only up to `max` bytes: past that the rest is never read, the stream is cancelled,
+ * and the answer is null. So an answer that is huge, or never ends, can't make Runner hold it whole (step 12's harness:
+ * `text()` read it all before its length was checked). Null too when the body can't be read or isn't UTF-8.
+ */
+export async function readBounded(response: Response, max: number): Promise<string | null> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        void reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    void reader.cancel().catch(() => undefined);
+    return null;
+  }
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 /** A refusal from a response that isn't 2xx. Reads at most a small body, and never keeps more than its code. */
 export async function errorFrom(response: Response): Promise<GatewayError> {
   let body: unknown = null;
   try {
-    const text = await response.text();
-    body = text.length <= 16_384 ? JSON.parse(text) : null;
+    const text = await readBounded(response, MAX_ERROR_BYTES);
+    body = text === null ? null : JSON.parse(text);
   } catch {
     body = null;
   }

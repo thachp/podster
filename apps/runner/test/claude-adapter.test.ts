@@ -51,6 +51,7 @@ const facts = (root: string, over: Partial<RunFacts> = {}): RunFacts => ({
   change_request_event_id: null,
   requester: "per_A@org_one",
   authors: [{ input: "title", authors: ["per_A@org_one"] }],
+  repository: null,
   ...over,
 });
 
@@ -1131,7 +1132,8 @@ describe("review item 10 (L7): the real run is opt-in twice and outside the defa
     const config = await readFile(new URL("../vitest.config.ts", import.meta.url), "utf8");
     expect(config).toMatch(/exclude: \[[^\]]*"test\/claude-real\.test\.ts"/);
     const realConfig = await readFile(new URL("../vitest.real.config.ts", import.meta.url), "utf8");
-    expect(realConfig).toMatch(/include: \["test\/claude-real\.test\.ts"\]/);
+    // Exactly the two opt-in files: this one and step 12's real half.
+    expect(realConfig).toMatch(/include: \["test\/claude-real\.test\.ts", "test\/hostile-real\.test\.ts"\]/);
   });
 });
 

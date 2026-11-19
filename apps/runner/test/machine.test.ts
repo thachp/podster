@@ -300,6 +300,46 @@ describe("Runner's own source", () => {
     expect(cli).toMatch(/readHidden\(prompt, process\.stdin/);
   });
 
+  it("asks for `get_repo_access` only in the repository path, and never names a merge or a release (decision 230, step 10)", async () => {
+    for (const { file, text } of await sources()) {
+      const calls = /["']get_repo_access["']/.test(text);
+      expect([file, calls]).toEqual([file, file === "core/capabilities.ts" || file === "node/repo-path.ts"]);
+      const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const merges = /["'](merge_task|deploy_release)["']|\/merges?\b|\/merge["'`]/.test(code);
+      expect([file, merges]).toEqual([file, file === "core/capabilities.ts"]);
+      // GitHub's hosts are named in one place, where the fixed requests are built.
+      expect([file, /github\.com/.test(code)]).toEqual([file, file === "core/repository.ts"]);
+    }
+  });
+
+  it("leaves room in the macOS keychain line for Runner's agent with step 10's capability list, measured again (#454 re-review)", async () => {
+    // The longest real values: Better Auth's 32-character IDs, staging's issuer, and every capability active.
+    const items = new Map<string, string>();
+    const lines: string[] = [];
+    const runner: Runner = async (_file, args, input) => {
+      if (args[0] === "-i") {
+        lines.push(input);
+        const parts = input.trim().split(" ");
+        items.set(parts[parts.indexOf("-a") + 1], parts[parts.indexOf("-w") + 1]);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      const account = args[args.indexOf("-a") + 1];
+      return items.has(account) ? { code: 0, stdout: `${items.get(account)}\n`, stderr: "" } : { code: 44, stdout: "", stderr: "" };
+    };
+    const storage = new RunnerStorage(new MacKeychain("/Users/someone-with-a-long-name/Library/Application-Support/podster-runner", runner));
+    const id = "A".repeat(32);
+    const grants = RUNNER_CAPABILITIES.map((capability) => ({ capability, status: "active" as const }));
+    await storage.setAgentConnection(id, { agentId: id, hostId: "B".repeat(32), providerName: "podster", issuer: "https://gateway-staging.podster.dev/api/auth", mode: "delegated", agentKeypair: await generateKeypair(), capabilityGrants: grants, createdAt: 1_800_000_000_000 });
+    const line = Buffer.byteLength(lines.at(-1) as string);
+    expect(RUNNER_CAPABILITIES).toContain("get_repo_access");
+    expect(line).toBeLessThan(MAC_LINE_LIMIT);
+    // Measured 2026-11-18 with 18 capabilities and a long home: 3,029 of 3,584 bytes. Each more capability as long as
+    // `get_repo_access` costs its grant's JSON twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more.
+    const perCapability = 2 * Buffer.byteLength(`${JSON.stringify({ capability: "get_repo_access", status: "active" })},`);
+    expect(line).toBeLessThanOrEqual(3_100);
+    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBeGreaterThanOrEqual(5);
+  });
+
   it("names only capabilities inside the gateway's RUNNER_CAPABILITIES, and none it must never hold", async () => {
     const gateway = await read("apps/gateway/src/pairing.ts");
     const list = /export const RUNNER_CAPABILITIES = \[([^\]]*)\]/.exec(gateway)?.[1];

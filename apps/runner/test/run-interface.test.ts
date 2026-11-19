@@ -57,6 +57,7 @@ const FACTS: RunFacts = {
   change_request_event_id: null,
   requester: "per_Person1@org_one",
   authors: [{ input: "title", authors: ["per_Person1@org_one"] }],
+  repository: null,
 };
 const RESULT = { status: "completed", summary: "Fixed the build.", files: ["src/build.ts"] };
 

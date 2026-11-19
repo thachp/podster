@@ -310,13 +310,23 @@ export class SupervisedAdapter implements RunAdapter {
         const late = this.deps.clock.idle(STOP_STEP_MS, settled.signal).then(() => (settled.signal.aborted ? new Promise<boolean>(() => undefined) : false));
         if (!(await Promise.race([reaped, late]))) return false;
       }
-      for (const driver of Object.values(this.deps.drivers)) if (driver && !(await driver.confirmGone(run_ref))) return false;
-      if (!(await this.deps.sandbox.gone(run_ref))) return false;
+      // Each confirmation bounded like a stop's steps: one that never answers reads as not stopped, so a held run is
+      // asked again at the next pass and the lifecycle never waits without end (step 12's harness).
+      for (const driver of Object.values(this.deps.drivers)) if (driver && !(await this.bounded(() => driver.confirmGone(run_ref)))) return false;
+      if (!(await this.bounded(() => this.deps.sandbox.gone(run_ref)))) return false;
     } catch {
       return false;
     }
     this.live.delete(run_ref);
     return true;
+  }
+
+  /** True only when `confirm` answers true within `STOP_STEP_MS`; a throw or a time-out is false. */
+  private bounded(confirm: () => Promise<boolean>): Promise<boolean> {
+    const settled = new AbortController();
+    const answer = confirm().then((v) => v === true, () => false).finally(() => settled.abort());
+    const late = this.deps.clock.idle(STOP_STEP_MS, settled.signal).then(() => (settled.signal.aborted ? new Promise<boolean>(() => undefined) : false));
+    return Promise.race([answer, late]);
   }
 }
 

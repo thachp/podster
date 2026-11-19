@@ -60,8 +60,15 @@ const FIRST_BACKOFF_MS = 2_000;
 export const MAX_ATTEMPTS_PER_DAY = 20;
 /** How long an ask the owner put off waits before it's asked again. */
 export const ASK_AGAIN_MS = 10 * 60 * 1000;
-/** How long a task waits on a local condition before it's evaluated again. */
+/** How long a task waits on a local condition before it's evaluated again; also the wait between publication tries. */
 export const WAIT_MS = 60_000;
+/**
+ * How long a finished run's publication is retried after its first passing failure before the task is released as
+ * `repo_publish_failed` (the ruling on #462's held publications). **Proposed** figure.
+ */
+export const PUBLISH_RETRY_MS = 60 * 60 * 1000;
+/** A finished run whose stop is confirmed and whose publication is held for a retry: it runs nothing. */
+const publicationHeld = (e: RunEntry) => e.phase === "held" && e.after_stop?.kind === "finish" && typeof e.publish_since === "number";
 
 /** Refusals about Runner's own state, not the task: they leave the task waiting rather than give it up. */
 const LOCAL = new Set(["authority_stale", "config_invalid", "budget_invalid", "clock_invalid"]);
@@ -343,14 +350,21 @@ export class Lifecycle {
     // No run is supervised between passes, so any entry still recorded as running is an orphan: held (M2 on #458).
     for (const entry of this.entries("running")) await this.holdOrphan(entry, "run_interrupted");
     for (const entry of this.entries("held")) {
+      if (publicationHeld(entry)) {
+        // Its stop was confirmed before the publication was first tried: tried again once its wait is over.
+        if (signal.aborted) return "stopped";
+        if (entry.retry_at === null || this.now() >= entry.retry_at) await this.afterStop(entry, { kind: "finish" });
+        continue;
+      }
       const stopped = entry.run_ref !== null && (await this.deps.adapter.confirmStopped(entry.run_ref).catch(() => false));
       if (!stopped) continue;
       this.log("lifecycle.run", "confirmed_stopped", entry);
       await this.afterStop(entry, entry.after_stop ?? { kind: "none" });
     }
-    if (this.entries("held").length > 0) {
+    const unconfirmed = this.entries("held").filter((e) => !publicationHeld(e));
+    if (unconfirmed.length > 0) {
       // A run that may still be going: nothing is released and nothing new starts until it's confirmed stopped.
-      this.deps.log("lifecycle.held", "waiting_for_owner", { agent: this.deps.poller.agentId, count: this.entries("held").length });
+      this.deps.log("lifecycle.held", "waiting_for_owner", { agent: this.deps.poller.agentId, count: unconfirmed.length });
       return "idle";
     }
     for (const entry of this.entries("giving_up")) {
@@ -360,6 +374,12 @@ export class Lifecycle {
     for (const entry of this.entries("accepting")) {
       if (signal.aborted) return "stopped";
       await this.accept(entry, signal);
+    }
+    // The owner's limit on tasks held at once counts every held publication, and the run that would start now.
+    const waiting = Object.values(this.state.entries).filter(publicationHeld).length;
+    if (waiting > 0 && waiting + 1 > (await this.maxActive())) {
+      this.deps.log("lifecycle.held", "publication_waiting", { agent: this.deps.poller.agentId, count: waiting });
+      return "idle";
     }
     for (const entry of this.entries("ready")) {
       if (signal.aborted) return "stopped";
@@ -396,6 +416,12 @@ export class Lifecycle {
       if (ready?.phase === "ready") return this.start(ready, signal);
     }
     return "idle";
+  }
+
+  /** The owner's `max_active_tasks`, read afresh; one when the policy can't be read. */
+  private async maxActive(): Promise<number> {
+    const parsed = parsePolicyConfig(await readConfig(this.deps.config), homeOf(this.deps));
+    return parsed.ok ? parsed.value.max_active_tasks : 1;
   }
 
   /** A fresh `get_task`. Null when the gateway refuses the read (the task isn't this agent's to read) or it's malformed. */
@@ -962,13 +988,26 @@ export class Lifecycle {
     if (after.kind === "finish") {
       // Step 10: a run in a room with a repository is published before it counts as finished.
       const published = await this.publish(base, this.tickSignal);
-      if (published === "wait" || (published !== null && "wait" in published)) {
-        // Held, its stop already confirmed: the next pass publishes it again, and nothing new starts meanwhile.
-        await this.put({ ...entry, phase: "held", after_stop: after, ...(published === "wait" ? {} : { outcome: published.wait }) });
+      if (published === "wait") {
+        // A local stop: held as it was, for a restart.
+        await this.put({ ...entry, phase: "held", after_stop: after });
+        return;
+      }
+      if (published !== null && "wait" in published) {
+        // Held, its stop already confirmed and its folder and commit kept, and tried again after a wait, for at most
+        // an hour from its first failure; then released (the ruling on #462's held publications).
+        const since = typeof entry.publish_since === "number" ? entry.publish_since : this.now();
+        if (this.now() - since >= PUBLISH_RETRY_MS) {
+          this.log("lifecycle.publish", "given_up", entry, { code: "repo_publish_failed" });
+          this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+          await this.giveUp({ ...base, publish_since: null, retry_at: null }, "accepted", "repo_publish_failed");
+          return;
+        }
+        await this.put({ ...entry, phase: "held", after_stop: after, outcome: published.wait, publish_since: since, retry_at: this.now() + WAIT_MS });
         return;
       }
       if (published === null) return;
-      await this.put({ ...base, phase: "finished", ran_hash: entry.consumed?.input_hash ?? null, published: published.published, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome });
+      await this.put({ ...base, phase: "finished", publish_since: null, retry_at: null, ran_hash: entry.consumed?.input_hash ?? null, published: published.published, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome });
     }
     else if (after.kind === "release") {
       if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);

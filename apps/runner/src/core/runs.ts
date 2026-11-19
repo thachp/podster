@@ -70,6 +70,8 @@ export type RunEntry = {
   ran_hash: string | null;
   /** What Runner last pushed for this task, or null; absent in a record from before step 10. */
   published?: Published | null;
+  /** When a finished run's publication first failed in passing, while it is held for a retry; else null or absent. */
+  publish_since?: number | null;
   retry_at: number | null;
   attempts: { day: number; count: number };
   updated_at: number;
@@ -201,6 +203,7 @@ export function checkRuns(v: unknown): string | null {
     if (!orNull(e.ran_hash, (x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x))) return `${at}.ran_hash`;
     const pub = e.published;
     if (pub !== undefined && pub !== null && (!isObj(pub) || typeof pub.repository_id !== "string" || !/^[1-9][0-9]{0,15}$/.test(pub.repository_id) || !isText(pub.branch, 200) || typeof pub.commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pub.commit) || !isCount(pub.pr_number) || pub.pr_number < 1)) return `${at}.published`;
+    if (e.publish_since !== undefined && !orNull(e.publish_since, isCount)) return `${at}.publish_since`;
     const give = e.give_up;
     if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
     const after = e.after_stop;

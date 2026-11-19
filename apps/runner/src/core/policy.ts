@@ -70,6 +70,12 @@ export const MIN_RUN_TIME_MS = 60_000;
 export const DAY_SPEND_CEILING_MICRO_USD = 250_000_000;
 /** How long a run decision may wait before it is used. */
 export const DECISION_TTL_MS = 10 * 60 * 1000;
+/**
+ * How many tasks Runner holds at once: the run under way and every finished run whose publication is held for a retry
+ * (the ruling on #462's held publications). Runner runs one task at a time, so above one this lets new tasks run while a
+ * publication waits. One unless the owner sets `max_active_tasks`; the ceiling is **Proposed**.
+ */
+export const MAX_ACTIVE_TASKS_CEILING = 4;
 
 const MAX_ROOMS = 200;
 const MAX_ORGS = 50;
@@ -120,6 +126,7 @@ export type PolicyConfig = {
   caps: Caps;
   day_caps: { spend_micro_usd: number };
   rooms: RoomPolicy[];
+  max_active_tasks: number;
 };
 
 export type RefuseReason =
@@ -349,7 +356,9 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
     const runnerHome = isObj(home) && Object.hasOwn(home, "runner_home") ? home.runner_home : undefined;
     if (runnerHome !== undefined && !isRoot(runnerHome)) return fail("runner_home");
     const raw = copy(input);
-    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"])) return fail("config");
+    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"], ["max_active_tasks"])) return fail("config");
+    const maxActive = Object.hasOwn(raw, "max_active_tasks") ? raw.max_active_tasks : 1;
+    if (!inRange(maxActive, 1, MAX_ACTIVE_TASKS_CEILING)) return fail("max_active_tasks");
     if (raw.version !== POLICY_VERSION) return fail("version");
     const revision = raw.revision;
     if (!inRange(revision, 1, Number.MAX_SAFE_INTEGER)) return fail("revision");
@@ -374,7 +383,7 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
       if (rooms.some((x) => x.room_id === room.value.room_id)) return fail("rooms[].room_id");
       rooms.push(room.value);
     }
-    return { ok: true, value: { version: 1, revision, owner_org: ownerOrg, adapter: adapter as Adapter, workspace_root: root, caps: caps.value, day_caps: { spend_micro_usd: daySpend }, rooms } };
+    return { ok: true, value: { version: 1, revision, owner_org: ownerOrg, adapter: adapter as Adapter, workspace_root: root, caps: caps.value, day_caps: { spend_micro_usd: daySpend }, rooms, max_active_tasks: maxActive } };
   } catch {
     return fail("config");
   }

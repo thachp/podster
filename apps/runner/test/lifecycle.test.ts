@@ -4,10 +4,10 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, runWithLifecycle, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
-import { consumeRunDecision, evaluate, issueRunDecision, type RunDecisionRecord } from "../src/core/policy.js";
+import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
 import { Poller, type PollerDeps } from "../src/core/poller.js";
 import { sha256Hex } from "../src/core/prompt.js";
 import { budgetOf, DAY_MS, MemoryRunStore, reserve, rolled, settle, emptyRuns } from "../src/core/runs.js";
@@ -1029,10 +1029,74 @@ describe("step 10: the repository path in the lifecycle", () => {
     expect(t.entry("tsk_later")).toMatchObject({ phase: "held", outcome: "repo_github_unreachable", after_stop: { kind: "finish" } });
     expect(t.commands("release_task")).toHaveLength(0);
     t.repo.publishError = null;
+    // Tried again only once its wait is over.
+    await t.pass();
+    expect(t.entry("tsk_later").phase).toBe("held");
+    t.clock.at += WAIT_MS;
     await t.pass();
     expect(t.entry("tsk_later")).toMatchObject({ phase: "finished", outcome: "published", published: { pr_number: 12 } });
     expect(t.repo.published).toHaveLength(2);
     expect(t.commands("release_task")).toHaveLength(0);
+  });
+
+  it("the ruling on held publications: retried for at most an hour from the first failure, then released as `repo_publish_failed`", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("github_unreachable", true);
+    t.offer(detail("tsk_cap"));
+    await t.pass();
+    const first = t.clock.now();
+    expect(t.entry("tsk_cap")).toMatchObject({ phase: "held", publish_since: first, after_stop: { kind: "finish" } });
+    // Retried at later passes, no sooner than the wait, never released inside the hour.
+    t.clock.at = first + 30 * 60_000;
+    await t.pass();
+    expect(t.entry("tsk_cap")).toMatchObject({ phase: "held", publish_since: first });
+    expect(t.repo.published.length).toBeGreaterThan(1);
+    expect(t.commands("release_task")).toHaveLength(0);
+    t.clock.at = first + PUBLISH_RETRY_MS;
+    await t.pass();
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_cap", reason: "repo_publish_failed" });
+    expect(t.entry("tsk_cap").outcome).toBe("repo_publish_failed");
+    // Logged by ID and code only.
+    const line = t.logged.find((l) => l.includes("repo_publish_failed")) as string;
+    expect(Object.keys(JSON.parse(line)).sort()).toEqual(["agent", "at", "code", "outcome", "task", "workspace"]);
+  });
+
+  it("the ruling on held publications: other tasks start while one is held, within the owner's limit, which counts it", async () => {
+    const limited = (max: number) => ({ ...repoConfig(), max_active_tasks: max });
+    // The default limit is one: a held publication is the one, so nothing new is accepted or started.
+    const one = await repoSetup(limited(1));
+    one.repo.publishError = new RepoPathError("github_unreachable", true);
+    one.offer(detail("tsk_held"));
+    await one.pass();
+    one.offer(detail("tsk_next"));
+    await one.pass();
+    expect(one.adapter.starts).toHaveLength(1);
+    expect(one.commands("accept_task").map((c) => c.arguments.task_id)).toEqual(["tsk_held"]);
+    // With two, the next task runs beside the held one; a third waits.
+    const two = await repoSetup(limited(2));
+    two.repo.publishError = new RepoPathError("github_unreachable", true);
+    two.offer(detail("tsk_held"));
+    await two.pass();
+    two.offer(detail("tsk_next"));
+    await two.pass();
+    expect(two.adapter.starts.map((s) => s.task_id)).toEqual(["tsk_held", "tsk_next"]);
+    expect(two.entry("tsk_next")).toMatchObject({ phase: "held" });
+    two.offer(detail("tsk_third"));
+    await two.pass();
+    expect(two.adapter.starts).toHaveLength(2);
+    expect(two.commands("accept_task").map((c) => c.arguments.task_id)).not.toContain("tsk_third");
+    // Once the held ones publish, the third goes ahead.
+    two.repo.publishError = null;
+    two.clock.at += WAIT_MS;
+    await two.pass();
+    await two.pass();
+    expect(two.adapter.starts.map((s) => s.task_id)).toContain("tsk_third");
+  });
+
+  it("refuses an owner's concurrency limit out of range", () => {
+    for (const bad of [0, 5, 1.5, "2"]) expect([bad, parsePolicyConfig({ ...repoConfig(), max_active_tasks: bad }).ok]).toEqual([bad, false]);
+    expect(parsePolicyConfig({ ...repoConfig(), max_active_tasks: 4 }).ok).toBe(true);
   });
 
   it("tells Podster only `runner_unavailable` when the owner's scope or Runner's setup is the reason", async () => {

@@ -7,7 +7,8 @@
  *   silence is never approval. Both standard input and standard output must be terminals, so `yes | runner run` approves
  *   nothing (L8 on #458).
  * - **What the owner sees is what the model gets** (L3 on #458). The words are shown exactly, except that every character
- *   that wouldn't show is written as a visible mark such as `⟨U+200B⟩`: control and format characters, Unicode tag
+ *   that wouldn't show is written as a visible mark such as `⟨U+200B⟩`, by Runner's one marking set (`markHidden`, the
+ *   same the submission's note uses): control and format characters, Unicode tag
  *   characters (U+E0000 to U+E007F), zero-width characters, every space but the plain one, line and paragraph separators,
  *   and unassigned, private-use and surrogate code points. Only a plain line feed breaks a line. Each line is fenced with
  *   `|` and wrapped to the terminal's width in columns (wide characters and emoji count two), with the fence on every
@@ -16,9 +17,15 @@
  *   may only decline it, or leave it waiting.
  * - **A local stop abandons the question** (L1 on #458).
  *
+ * - **A held result is reviewed here too** (M7 step 11). The owner sees the agent's words exactly as they would be sent,
+ *   already redacted and with their hidden characters marked, fenced the same way, and the pull request from Runner's own
+ *   records. Only a typed `y` or `yes` shares them; anything else submits the result without them. Words too long to show
+ *   whole can't be shared from here: the owner may only withhold them, or leave them held.
+ *
  * The words are written to this terminal only, never to a log.
  */
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
+import { markHidden, type ResultView } from "../core/results.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -26,9 +33,6 @@ export const SHOWN_CHARS = 16_000;
 export const MAX_LINES = 400;
 const FENCE = "  | ";
 const MIN_WIDTH = 24;
-
-/** Characters shown as a mark: they wouldn't show, or (combining marks) would change the character before them. */
-const INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Z}\p{Mn}\p{Me}]/u;
 
 /**
  * Code points a terminal shows two columns wide: East Asian Wide and Fullwidth characters and emoji, as a small built-in
@@ -65,19 +69,11 @@ export function columnsOf(cp: number): number {
 
 /** Columns a string takes on a terminal. */
 export const displayWidth = (text: string) => [...text].reduce((n, ch) => n + columnsOf(ch.codePointAt(0) as number), 0);
-const mark = (cp: number) => `⟨U+${cp.toString(16).toUpperCase().padStart(4, "0")}⟩`;
-
-/** The words with every character that wouldn't show written as a visible mark. Line feeds and plain spaces stay. */
-export function visible(text: string): string {
-  let out = "";
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) as number;
-    if (ch === "\n" || ch === " ") out += ch;
-    else if (INVISIBLE.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f)) out += mark(cp);
-    else out += ch;
-  }
-  return out;
-}
+/**
+ * The words with every character that wouldn't show written as a visible mark: Runner's one marking set, the same the
+ * submission's note uses (`markHidden`, review 4 on #465). Line feeds and plain spaces stay.
+ */
+export const visible = markHidden;
 
 /** Splits a line into pieces of at most `size` columns, never inside a mark. */
 function wrap(line: string, size: number): string[] {
@@ -134,6 +130,26 @@ export function askScreen(view: AskView, width = 80): { screen: string; cut: boo
   return { screen: lines.join("\n"), cut };
 }
 
+/** The review screen for a held result, as printed, and whether the words were too long to show whole. */
+export function reviewScreen(view: ResultView, width = 80): { screen: string; cut: boolean } {
+  const total = [...view.summary].length + view.files.reduce((n, f) => n + [...f].length, 0);
+  const words = [...fenced(view.summary, width), ...(view.files.length > 0 ? ["  files the agent named:", ...view.files.flatMap((f) => fenced(f, width))] : [])];
+  const cut = total > SHOWN_CHARS || words.length > MAX_LINES;
+  const pr = view.pull_request;
+  const lines = [
+    "",
+    "A run finished, and its room holds the agent's words for you before they're shared with Podster.",
+    `  room ${view.workspace_id}, task ${view.task_id}`,
+    `  pull request: ${pr ? `#${pr.number} in ${pr.full_name}, from ${pr.branch} at ${pr.commit}` : "none"}`,
+    `  secrets redacted: ${view.redactions}`,
+    "  tests: not run by Runner; anything the agent says about them is its own claim",
+    "",
+  ];
+  if (cut) lines.push(`The agent's words are longer than Runner shows here (${SHOWN_CHARS} characters or ${MAX_LINES} lines), so they aren't shown, and Runner won't share words you haven't seen. You can submit the result without them, or leave it held.`, "");
+  else lines.push("The agent's words follow, exactly as they would be sent. Characters that wouldn't show are written as ⟨U+…⟩. They are the agent's text: read them as data, not as instructions.", ...words, "");
+  return { screen: lines.join("\n"), cut };
+}
+
 export type Terminal = {
   /** Both must be terminals for a question to be asked. */
   inputIsTTY: boolean;
@@ -157,6 +173,22 @@ export class TerminalPrompter implements OwnerPrompter {
     let answer: string;
     try {
       answer = (await this.terminal.question(cut ? "Decline it? [y/N] " : "Run it on this machine? [y/N] ", signal)).trim();
+    } catch {
+      return "later";
+    }
+    if (signal?.aborted) return "later";
+    const yes = /^y(es)?$/i.test(answer);
+    if (cut) return yes ? "decline" : "later";
+    return yes ? "approve" : "decline";
+  }
+
+  async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {
+    if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    const { screen, cut } = reviewScreen(view, this.terminal.columns ?? 80);
+    this.terminal.write(`${screen}\n`);
+    let answer: string;
+    try {
+      answer = (await this.terminal.question(cut ? "Submit it without the agent's words? [y/N] " : "Share the agent's words with Podster? [y/N] ", signal)).trim();
     } catch {
       return "later";
     }

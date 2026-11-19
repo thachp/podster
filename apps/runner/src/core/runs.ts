@@ -28,7 +28,8 @@ export const dayOf = (now: number) => Math.floor(now / DAY_MS);
  * - `giving_up`: a decline or release is owed, with its key stored before it was first sent.
  * - `held`: a run's process wasn't confirmed stopped. Nothing is released and no new run starts until it is.
  * - `waiting`: nothing to do until `retry_at`, or a new event for the task.
- * - `finished`: a run ended successfully; its result is step 11's to submit.
+ * - `finished`: a run ended successfully. While its `submission` is `owed`, step 11 submits it; once Podster took it,
+ *   `submitted`.
  * - `done`: nothing more for this task until a new event.
  */
 export type RunPhase = "accepting" | "ready" | "running" | "giving_up" | "held" | "waiting" | "finished" | "done";
@@ -42,6 +43,31 @@ export type After = { kind: "release"; reason: string } | { kind: "reconsider" }
  * request. A rerun starts from that commit, and only while the branch on GitHub still points at it. Step 11 submits it.
  */
 export type Published = { repository_id: string; branch: string; commit: string; pr_number: number };
+
+/**
+ * A finished run's submission (M7 step 11). It holds keys, codes and a hash only: the agent's words are kept in memory
+ * until they're sent, never here, so a restart loses them and Runner's fixed words go instead.
+ *
+ * - `sharing`: what may go to Podster of the agent's words, decided once, after the run: `pending` until then; `share`
+ *   when the run's facts and the room's policy as it stands both allow it; `review` while it waits for the owner on this
+ *   machine, since `held_since`; then `approved` or `withheld`. It is stored once decided, so every send, a replay
+ *   included, carries the same note.
+ * - `key`: the submission's idempotency key, stored before it's first sent, with the SHA-256 of the note it was sent
+ *   with: the same note is always sent with the same key, and a different one (the words lost at a restart) with a new
+ *   one, so a replay never carries another body.
+ * - `told_key`, `told`: the fixed progress message for a held result, sent once.
+ */
+export type Submission = {
+  state: "owed" | "submitted";
+  sharing: "pending" | "share" | "review" | "approved" | "withheld";
+  key: string | null;
+  note_hash: string | null;
+  told_key: string | null;
+  told: boolean;
+  /** When the words were first held for the owner's review; null until then. */
+  held_since: number | null;
+};
+export const owedSubmission = (): Submission => ({ state: "owed", sharing: "pending", key: null, note_hash: null, told_key: null, told: false, held_since: null });
 
 export type RunEntry = {
   workspace_id: string;
@@ -70,6 +96,8 @@ export type RunEntry = {
   ran_hash: string | null;
   /** What Runner last pushed for this task, or null; absent in a record from before step 10. */
   published?: Published | null;
+  /** A finished run's submission (step 11); null or absent otherwise. */
+  submission?: Submission | null;
   /** When a finished run's publication first failed in passing, while it is held for a retry; else null or absent. */
   publish_since?: number | null;
   retry_at: number | null;
@@ -204,6 +232,20 @@ export function checkRuns(v: unknown): string | null {
     const pub = e.published;
     if (pub !== undefined && pub !== null && (!isObj(pub) || typeof pub.repository_id !== "string" || !/^[1-9][0-9]{0,15}$/.test(pub.repository_id) || !isText(pub.branch, 200) || typeof pub.commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pub.commit) || !isCount(pub.pr_number) || pub.pr_number < 1)) return `${at}.published`;
     if (e.publish_since !== undefined && !orNull(e.publish_since, isCount)) return `${at}.publish_since`;
+    const sub = e.submission;
+    if (
+      sub !== undefined &&
+      sub !== null &&
+      (!isObj(sub) ||
+        (sub.state !== "owed" && sub.state !== "submitted") ||
+        !["pending", "share", "review", "approved", "withheld"].includes(sub.sharing as string) ||
+        !orNull(sub.key, (x) => isText(x, 128)) ||
+        !orNull(sub.note_hash, (x) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x)) ||
+        !orNull(sub.told_key, (x) => isText(x, 128)) ||
+        typeof sub.told !== "boolean" ||
+        !orNull(sub.held_since, isCount))
+    )
+      return `${at}.submission`;
     const give = e.give_up;
     if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
     const after = e.after_stop;

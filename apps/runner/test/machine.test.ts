@@ -312,7 +312,7 @@ describe("Runner's own source", () => {
     }
   });
 
-  it("leaves room in the macOS keychain line for Runner's agent with step 10's capability list, measured again (#454 re-review)", async () => {
+  it("leaves room in the macOS keychain line for Runner's agent with its capability list, measured again at step 11 (#454 re-review)", async () => {
     // The longest real values: Better Auth's 32-character IDs, staging's issuer, and every capability active.
     const items = new Map<string, string>();
     const lines: string[] = [];
@@ -333,10 +333,14 @@ describe("Runner's own source", () => {
     const line = Buffer.byteLength(lines.at(-1) as string);
     expect(RUNNER_CAPABILITIES).toContain("get_repo_access");
     expect(line).toBeLessThan(MAC_LINE_LIMIT);
-    // Measured 2026-11-18 with 18 capabilities and a long home: 3,029 of 3,584 bytes. Each more capability as long as
-    // `get_repo_access` costs its grant's JSON twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more.
+    // Measured 2026-11-18 with 18 capabilities and a long home: 3,029 of 3,584 bytes. Measured again 2026-11-19 for step
+    // 11, which submits with `submit_task` and posts its one progress message with `send_message`, both already listed, so
+    // still 18 capabilities and 3,029 bytes. Each more capability as long as `get_repo_access` costs its grant's JSON
+    // twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more.
+    expect(RUNNER_CAPABILITIES).toHaveLength(18);
+    expect(RUNNER_CAPABILITIES).toEqual(expect.arrayContaining(["submit_task", "send_message"]));
     const perCapability = 2 * Buffer.byteLength(`${JSON.stringify({ capability: "get_repo_access", status: "active" })},`);
-    expect(line).toBeLessThanOrEqual(3_100);
+    expect(line).toBe(3_029);
     expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBeGreaterThanOrEqual(5);
   });
 

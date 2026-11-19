@@ -240,7 +240,7 @@ async function locked(command: string, args: string[], home: string, state: File
             stop.abort();
           }
         },
-        nudging === null ? null : (bell) => openNudge({ ...nudging, poller, secrets: keys.store, clock: systemClock, log, say, signal: stop.signal, bell }),
+        nudging === null ? null : (bell, ended) => openNudge({ ...nudging, poller, secrets: keys.store, clock: systemClock, log, say, signal: AbortSignal.any([stop.signal, ended]), bell }),
       );
     } finally {
       unwatch();

@@ -8,7 +8,10 @@
  * the owner, or another admin of the agent's organization, switches the nudge on in Podster for the version shown here.
  *
  * Polling starts first and never waits for any of this (`alongsidePolling`, the architect's ruling on #473): setup runs
- * beside the poll loop, and the bell rings only once setup has a registration to check requests against.
+ * beside the poll loop. Once the listener is up, the bell can ring for a request signed under a registration Runner
+ * already holds from an earlier run, before this run's registration and challenge finish; a ring only brings the next
+ * poll forward. When the run ends, or the owner stops it, setup stops where it is: no registration or challenge is
+ * asked for after that, and the listener closes at once.
  *
  * Anything that fails here is said in one line and leaves polling as it was: the nudge is only ever a faster way to the
  * same poll. What the owner reads goes to standard output; log lines carry IDs and codes only, never the URL or secret.
@@ -82,9 +85,17 @@ export async function openNudge(deps: OpenNudgeDeps): Promise<OpenNudge | null> 
   }
   deps.onListening?.(listener.port);
   deps.say(`Listening for nudges on 127.0.0.1:${listener.port}, for ${deps.url} (your proxy or tunnel forwards to it). Polling stays on.`);
+  // Stopped or ended before setup is through: nothing more is asked of Podster.
+  const ended = async () => {
+    if (!deps.signal.aborted) return false;
+    await listener.close();
+    return true;
+  };
   try {
+    if (await ended()) return null;
     const registered = await registerNudge(deps.poller, storage, deps.url, deps.log);
     current = registered.registration;
+    if (await ended()) return null;
     let { control, nudge_on: on } = registered;
     if (control !== "verified") {
       const verified = await verifyNudge(deps.poller, deps.log);
@@ -106,19 +117,24 @@ export async function openNudge(deps: OpenNudgeDeps): Promise<OpenNudge | null> 
 
 /**
  * Runs the poll loop and, beside it, the nudge's setup. The loop starts first, with the bell already in hand, so its
- * first poll never waits for registration or the challenge; the bell rings only once setup succeeds. Setup failing
- * (it says its own line) leaves the loop as it is. When the loop ends, whatever setup opened is closed.
+ * first poll never waits for registration or the challenge. Once setup's listener is up, the bell can ring for a request
+ * signed under a registration Runner already holds, which only brings the next poll forward. Setup failing (it says its
+ * own line) leaves the loop as it is.
+ *
+ * When the loop ends, whatever its outcome (a stop, Ctrl-C or a revoked agent), `ended` is aborted: setup's listener,
+ * which listens on it, closes at once, and setup asks nothing more of Podster. The run never waits for setup to finish.
  */
-export async function alongsidePolling<T>(loop: (bell: NudgeBell | undefined) => Promise<T>, setUp: ((bell: NudgeBell) => Promise<OpenNudge | null>) | null): Promise<T> {
+export async function alongsidePolling<T>(loop: (bell: NudgeBell | undefined) => Promise<T>, setUp: ((bell: NudgeBell, ended: AbortSignal) => Promise<OpenNudge | null>) | null): Promise<T> {
   if (setUp === null) return loop(undefined);
   const bell = new NudgeBell();
+  const ended = new AbortController();
   const running = loop(bell);
-  const opened = Promise.resolve()
-    .then(() => setUp(bell))
+  void Promise.resolve()
+    .then(() => setUp(bell, ended.signal))
     .catch(() => null);
   try {
     return await running;
   } finally {
-    await (await opened)?.close();
+    ended.abort();
   }
 }

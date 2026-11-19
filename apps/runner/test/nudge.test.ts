@@ -6,6 +6,7 @@ import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type { Server } from "node:http";
+import type { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
   checkNudgeUrl,
@@ -495,7 +496,8 @@ describe("the listener", () => {
       },
     };
     const stop = new AbortController();
-    const listener = await startNudgeListener({ port: 0, endpoint: greedy, signal: stop.signal });
+    const sockets: Socket[] = [];
+    const listener = await startNudgeListener({ port: 0, endpoint: greedy, signal: stop.signal, onServer: (server) => void server.on("connection", (socket: Socket) => void sockets.push(socket)) });
     const total = 1024 * 1024;
     const outcome = await new Promise<string>((resolve) => {
       const req = httpRequest({ host: "127.0.0.1", port: listener.port, path: PATH, method: "POST", headers: { "content-type": "application/json" } }, (res) => {
@@ -517,6 +519,9 @@ describe("the listener", () => {
     expect(received).toBeLessThanOrEqual(MAX_NUDGE_BODY_BYTES + 64 * 1024);
     expect(received).toBeLessThan(total);
     expect(outcome === "cut" || outcome === "status 413").toBe(true);
+    // The server's own socket for that request was destroyed once the body passed the bound (delta review 4).
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0].destroyed).toBe(true);
     stop.abort();
     await listener.closed;
   });
@@ -662,6 +667,37 @@ describe("registration and verify, against the stand-in gateway", () => {
     expect(order.indexOf("read_inbox")).toBeGreaterThanOrEqual(0);
     expect(order.indexOf("read_inbox")).toBeLessThan(order.indexOf("verify_a2a_endpoint"));
     expect(s.gateway.endpoint?.control).toBe("verified");
+  });
+
+  it("on Ctrl-C while registration waits on Podster, ends the run at once and never verifies (delta review 1)", async () => {
+    const s = await setUp();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const asked: string[] = [];
+    s.gateway.onCall = async (capability) => {
+      asked.push(capability);
+      if (capability === "set_a2a_endpoint") await held;
+    };
+    const ctrlC = new AbortController();
+    let setup: Promise<unknown> = Promise.resolve();
+    const outcome = await alongsidePolling(
+      async (bell) => {
+        s.clock.onIdle = async () => {
+          // The owner's Ctrl-C, once a poll has run and registration is waiting on the gateway.
+          if (asked.includes("set_a2a_endpoint")) ctrlC.abort();
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        };
+        return s.poller.run(ctrlC.signal, bell);
+      },
+      (bell, ended) => (setup = openNudge({ listen: { port: 0 }, url: URL_, poller: s.poller, secrets: s.secrets, clock: s.clock, log: s.deps.log, say: (line) => void s.said.push(line), signal: AbortSignal.any([ctrlC.signal, ended]), bell })),
+    );
+    // The run ended while the gateway still held the registration.
+    expect(outcome).toBe("stopped");
+    expect(asked.filter((c) => c === "verify_a2a_endpoint")).toEqual([]);
+    release();
+    expect(await setup).toBeNull();
+    expect(asked).not.toContain("verify_a2a_endpoint");
+    expect(s.gateway.challenges).toEqual([]);
   });
 
   it("goes on polling when setup fails, with one line said (review 7)", async () => {

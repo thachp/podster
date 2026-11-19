@@ -265,7 +265,11 @@ describe("Runner's own source", () => {
     // Only `run` with the owner's two options starts it.
     for (const { file, text: other } of await sources()) expect([file, /startNudgeListener\(/.test(other)]).toEqual([file, file === NUDGE_LISTENER_FILE || file === "node/nudge-command.ts"]);
     const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
-    expect(cli).toMatch(/nudging === null \? null : \(bell\) => openNudge\(/);
+    expect(cli).toMatch(/nudging === null \? null : \(bell, ended\) => openNudge\(\{[^\n]*signal: AbortSignal\.any\(\[stop\.signal, ended\]\)/);
+  });
+
+  it("leaves the listener's `onServer` hook to tests: no source file passes it (delta review 3)", async () => {
+    for (const { file, text } of await sources()) expect([file, /\bonServer\b/.test(text)]).toEqual([file, file === NUDGE_LISTENER_FILE]);
   });
 
   it("names the endpoint calls only where the nudge registers, and closes the listener when run stops (step 14)", async () => {
@@ -282,7 +286,8 @@ describe("Runner's own source", () => {
     // The loop's own end aborts the run's signal, which closes the listener; alongsidePolling closes what setup opened.
     expect(run).toMatch(/return await runInbox\([^\n]*\n\s*\} finally \{\n(\s*\/\/[^\n]*\n)*\s*stop\.abort\(\);/);
     const command = await readFile(new URL("apps/runner/src/node/nudge-command.ts", repo), "utf8");
-    expect(command).toMatch(/\} finally \{\n\s*await \(await opened\)\?\.close\(\);/);
+    // The loop's end closes setup's listener at once, without waiting for setup (delta review 1).
+    expect(command).toMatch(/\} finally \{\n\s*ended\.abort\(\);\n\s*\}/);
   });
 
   it("pins the profile file's one versioned path to api.anthropic.com, with no beta header (scoped exception 2)", async () => {

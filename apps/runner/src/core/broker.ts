@@ -12,7 +12,7 @@
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
  * - **Only a known body** (M1 on #459): known top-level keys, `output_config`, adaptive `thinking`, top-level
  *   `cache_control` and a tool's `eager_input_streaming` only in their reviewed shapes (three reviewed widenings, all
- *   2026-11-18); every beta-only key and every other declared key not ruled in stays refused by name; tools only the driver's own (`custom`), never the
+ *   2026-11-18), and a system-role message of text only (the fourth); every beta-only key and every other declared key not ruled in stays refused by name; tools only the driver's own (`custom`), never the
  *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
  *   and thinking, with documents in plain text only (a PDF bills beyond the body's bytes); no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
  *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
@@ -262,6 +262,25 @@ function blockRefusal(v: unknown, inResult = false): string | null {
   return `block_shape:${type}`;
 }
 
+/**
+ * A system-role message's content blocks: the fourth reviewed widening (the architect's ruling of 2026-11-18, after
+ * #460's seventh real run, where Claude Code sent one with every request). Only `text` blocks, each with at most an
+ * ephemeral `cache_control`, as with a string. The architect's reasoning: it is Claude Code's own system-reminder text,
+ * not the task's, so it gives the model nothing beyond the system prompt Runner already sends; its bytes count toward
+ * the worst case like any other content.
+ */
+function systemMessageRefusal(blocks: unknown[]): string | null {
+  for (const block of blocks) {
+    if (!isObj(block) || typeof block.type !== "string") return "system_message_shape";
+    if (block.type !== "text") return `system_message_type:${nameCode(block.type)}`;
+    const extra = Object.keys(block).find((k) => k !== "type" && k !== "text" && k !== "cache_control");
+    if (extra !== undefined) return `system_message_key:${nameCode(extra)}`;
+    if (block.cache_control !== undefined && !cacheOk(block.cache_control)) return isObj(block.cache_control) && Object.hasOwn(block.cache_control, "ttl") ? "cache_control_ttl" : "cache_control";
+    if (!isText(block.text)) return "system_message_shape";
+  }
+  return null;
+}
+
 /** `thinking.display` for adaptive thinking, exactly the enum SDK 0.3.327 declares (its `ThinkingConfigAdaptive`). */
 const THINKING_DISPLAYS = ["summarized", "omitted"];
 
@@ -303,9 +322,14 @@ function bodyRefusal(b: Obj): string | null {
     if (!isObj(m)) return "message_shape";
     const key = Object.keys(m).find((k) => k !== "role" && k !== "content");
     if (key !== undefined) return `message_key:${nameCode(key)}`;
-    if (m.role !== "user" && m.role !== "assistant") return `message_role:${nameCode(m.role)}`;
+    if (m.role !== "user" && m.role !== "assistant" && m.role !== "system") return `message_role:${nameCode(m.role)}`;
     if (isText(m.content)) continue;
     if (!Array.isArray(m.content)) return "message_content";
+    if (m.role === "system") {
+      const refused = systemMessageRefusal(m.content);
+      if (refused !== null) return refused;
+      continue;
+    }
     for (const block of m.content) {
       const refused = blockRefusal(block);
       if (refused) return refused;

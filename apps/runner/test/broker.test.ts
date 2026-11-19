@@ -139,7 +139,10 @@ describe("the body allowlist (M1 on #459)", () => {
       { type: "tool_result", tool_use_id: "t", content: [{ type: "image", source: { type: "url", url: "https://evil.test/a.png" } }] },
     ])
       expect([block.type, refused(user([block]))]).toMatchObject([block.type, { ok: false, reason: "body_not_allowed" }]);
-    expect(refused({ messages: [{ role: "system", content: "x" }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
+    // A system-role message is allowed since the fourth reviewed widening (2026-11-18), but only as text: any other
+    // role, and any other block in a system message, is still refused.
+    expect(refused({ messages: [{ role: "tool", content: "x" }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
+    expect(refused({ messages: [{ role: "system", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "x" } }] }] })).toMatchObject({ ok: false, reason: "body_not_allowed" });
   });
 
   it("refuses a cache lifetime anywhere, so no request buys a longer cache", () => {

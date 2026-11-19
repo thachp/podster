@@ -128,7 +128,9 @@ describe("the key store, behind the SDK's Storage", () => {
     const agentKeypair = await generateKeypair();
     // As the plugin answers it: every grant with its description and schemas, about 14 KB in all.
     const schema = { type: "object", properties: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`field_${i}`, { type: "string", description: "x".repeat(40) }])) };
-    const capabilityGrants = RUNNER_CAPABILITIES.map((capability, i) => ({ capability, status: (i === 3 ? "pending" : "active") as "active" | "pending", description: "d".repeat(300), input: schema, output: schema }));
+    // The description's marker is `~`, which base64url key material can never hold, so the check below can't match the
+    // keypair by chance (it once matched "ddd" in a random key: about 1 run in 5,000).
+    const capabilityGrants = RUNNER_CAPABILITIES.map((capability, i) => ({ capability, status: (i === 3 ? "pending" : "active") as "active" | "pending", description: "~".repeat(300), input: schema, output: schema }));
     const full = { agentId: "plg_1", hostId: "host_1", hostName: "Podster Runner", providerName: "podster", issuer: "https://podster.dev/api/auth", mode: "delegated" as const, agentKeypair, capabilityGrants, createdAt: 5 };
     expect(JSON.stringify(full).length).toBeGreaterThan(12_000);
     await storage.setAgentConnection("plg_1", full);
@@ -137,7 +139,8 @@ describe("the key store, behind the SDK's Storage", () => {
     const read = await storage.getAgentConnection("plg_1");
     expect(read).toMatchObject({ agentId: "plg_1", hostId: "host_1", issuer: "https://podster.dev/api/auth", mode: "delegated", agentKeypair });
     expect(read?.capabilityGrants).toEqual(RUNNER_CAPABILITIES.filter((_, i) => i !== 3).map((capability) => ({ capability, status: "active" })));
-    expect(stored).not.toContain("ddd");
+    expect(stored).not.toContain("~");
+    expect(stored).not.toMatch(/"(description|input|output|hostName)"/);
   });
 
   it("names an agent in its index before writing its item, so a failed write is still deleted by deleteAll", async () => {

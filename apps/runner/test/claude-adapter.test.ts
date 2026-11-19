@@ -1882,7 +1882,7 @@ describe("the broker names the exact part of a message it refuses", () => {
     new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS).admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 10, messages })) });
   const user = (content: unknown) => [{ role: "user", content }];
   const cases: [unknown, string][] = [
-    [[{ role: "system", content: "x" }], "message_role:system"],
+    [[{ role: "tool", content: "x" }], "message_role:tool"],
     [[{ role: "Weird Role", content: "x" }], "message_role:other"],
     [[{ role: "user", content: "x", name: "n" }], "message_key:name"],
     [["just a string"], "message_shape"],
@@ -1954,5 +1954,56 @@ describe("the real run's structure-only capture of a refused body", () => {
     const { readdir } = await import("node:fs/promises");
     const src = new URL("../src/", import.meta.url);
     for (const file of (await readdir(src, { recursive: true })).filter((f) => f.endsWith(".ts"))) expect([file, (await readFile(new URL(file, src), "utf8")).includes("body-shape")]).toEqual([file, false]);
+  });
+});
+
+// ---- After the seventh real run of #460 at b60e89b: the fourth reviewed widening ----
+
+describe("a system-role message, in its reviewed shape only (the architect's ruling of 2026-11-18)", () => {
+  const admit = (body: Record<string, unknown>) => new RunBroker(CLAUDE_PROFILE, { ...CAPS, spend_micro_usd: 10_000_000 }, CLAUDE_MODELS).admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify(body)) });
+  const ephemeral = { type: "ephemeral" };
+  const tool = (name: string) => ({ name, description: "d", input_schema: { type: "object", properties: {} } });
+  /** A body of exactly the shape the seventh real run captured, with stand-in words. */
+  const captured = (systemMessage: unknown = { role: "system", content: "A system reminder." }) => ({
+    model: CLAUDE_MODEL,
+    max_tokens: 32_000,
+    messages: [{ role: "user", content: [{ type: "text", text: "The task.", cache_control: ephemeral }] }, systemMessage],
+    system: [{ type: "text", text: "a", cache_control: ephemeral }, { type: "text", text: "b", cache_control: ephemeral }, { type: "text", text: "c", cache_control: ephemeral }],
+    tools: [tool("mcp__runner__read"), tool("mcp__runner__write"), tool("StructuredOutput")],
+    metadata: { user_id: "u" },
+    thinking: { type: "adaptive" },
+    output_config: { effort: "medium" },
+    stream: true,
+  });
+
+  it("admits the captured body", () => {
+    expect(admit(captured())).toMatchObject({ ok: true });
+  });
+
+  it("takes a system message's content as a string or as text blocks, each with at most an ephemeral cache_control", () => {
+    expect(admit(captured({ role: "system", content: [{ type: "text", text: "r" }, { type: "text", text: "s", cache_control: ephemeral }] })).ok).toBe(true);
+  });
+
+  it("refuses any other block type, block key or message key in a system message, by name", () => {
+    const cases: [unknown, string][] = [
+      [{ role: "system", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "x" } }] }, "system_message_type:image"],
+      [{ role: "system", content: [{ type: "tool_use", id: "t", name: "n", input: {} }] }, "system_message_type:tool_use"],
+      [{ role: "system", content: [{ type: "tool_result", tool_use_id: "t", content: "x" }] }, "system_message_type:tool_result"],
+      [{ role: "system", content: [{ type: "text", text: "r", citations: [] }] }, "system_message_key:citations"],
+      [{ role: "system", content: [{ type: "text", text: "r", cache_control: { type: "ephemeral", ttl: "1h" } }] }, "cache_control_ttl"],
+      [{ role: "system", content: [{ type: "text", text: 5 }] }, "system_message_shape"],
+      [{ role: "system", content: 5 }, "message_content"],
+      [{ role: "system", content: "x", name: "n" }, "message_key:name"],
+    ];
+    for (const [message, detail] of cases) expect([detail, admit(captured(message))]).toMatchObject([detail, { ok: false, reason: "body_not_allowed", detail }]);
+  });
+
+  it("counts a system message's bytes toward the worst case like any other content", () => {
+    const short = admit(captured({ role: "system", content: "x" }));
+    const long = admit(captured({ role: "system", content: "x".repeat(10_000) }));
+    if (!short.ok || !long.ok) throw new Error("both should be admitted");
+    const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
+    expect(long.forward.worst_micro_usd).toBe(worstCaseOf(price, long.forward.body.byteLength, long.forward.max_tokens));
+    expect(long.forward.worst_micro_usd).toBeGreaterThan(short.forward.worst_micro_usd);
   });
 });

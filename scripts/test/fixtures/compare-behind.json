@@ -1,0 +1,14 @@
+{
+  "url": "https://api.github.com/repos/thachp/podster/compare/3de630f86ee64dbb22d960d3f572fcee668dd431...8ad17ab754fd456c9ff988dcde11d32bdadc8f4f",
+  "html_url": "https://github.com/thachp/podster/compare/3de630f86ee64dbb22d960d3f572fcee668dd431...8ad17ab754fd456c9ff988dcde11d32bdadc8f4f",
+  "status": "diverged",
+  "ahead_by": 1,
+  "behind_by": 6,
+  "total_commits": 1,
+  "base_commit": {
+    "sha": "3de630f86ee64dbb22d960d3f572fcee668dd431"
+  },
+  "merge_base_commit": {
+    "sha": "8210e91f51759fc085279646dfc3b6d7f2be815f"
+  }
+}

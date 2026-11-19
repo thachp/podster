@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The one way to merge a pull request: at a reviewed full sha, with every required check there, done and green, no
-# open code scanning alert and a clean merge state. It refuses otherwise, and never fixes what it finds.
+# The one way to merge a pull request: at a reviewed full sha that contains main's tip, with every required check
+# there, done and green, no open code scanning alert and a clean merge state. It refuses otherwise, and never fixes
+# what it finds.
 set -euo pipefail
 
 usage() {
@@ -21,6 +22,11 @@ With no flag it only reports. It passes when ALL of these hold, and prints each 
   - ci.yml on main still has exactly the jobs this script expects
   - code scanning has no open alert for this pull request
   - mergeStateStatus is CLEAN (it waits while UNKNOWN, up to a minute; anything else fails)
+  - its head contains main's tip, read fresh from GitHub as the last check, so with --merge just
+    before the merge. A head behind main is refused, docs/ branches too, whatever its CI says:
+    that CI never ran on the code the merge makes. The refusal says how many commits behind it is
+    and to run `gh pr update-branch <pr>`; the new head then needs its CI, and a quick look at the
+    delta, before merge-gate is run again at that new sha. There is no flag past this.
 
 It reads code scanning alerts for this pull request's own refs only, which in this repository
 means its head. It never reads main's alerts: one open on main doesn't stop a merge, and isn't
@@ -258,6 +264,28 @@ while :; do
   sleep 6
 done
 if [ "$merge_state" = CLEAN ]; then ok "merge state is CLEAN"; else bad "merge state is $merge_state, not CLEAN"; fi
+
+# The head must contain main's tip. main has no up-to-date rule, so GitHub calls a pull request that is behind main
+# CLEAN, and its green CI never ran on what the merge makes: #461 broke typecheck on main after #462 added a field.
+# main is read fresh, last, so with --merge nothing but the tally stands between this read and the merge. GitHub's
+# merge call can't be pinned to main's tip, so a push to main in that moment isn't caught; main's CI, which --merge
+# waits for, is what would show it. There is no flag past this, for docs/ branches either: their CI is skipped, so
+# updating one costs little.
+up=$(gh api "repos/{owner}/{repo}/compare/$base...$sha?per_page=1" \
+  --jq '[.status, (.behind_by | tostring), .base_commit.sha, .merge_base_commit.sha] | @tsv') || up=
+IFS=$tab read -r up_status behind tip merge_base <<< "$up" || true
+if ! [[ "$tip" =~ ^[0-9a-f]{40}$ && "$behind" =~ ^[0-9]+$ ]]; then
+  bad "could not read whether its head contains $base's tip"
+elif [ "$behind" -eq 0 ] && [ "$tip" = "$merge_base" ] && { [ "$up_status" = ahead ] || [ "$up_status" = identical ]; }; then
+  ok "its head contains $base's tip, $tip"
+elif [ "$behind" -gt 0 ] && { [ "$up_status" = diverged ] || [ "$up_status" = behind ]; }; then
+  if [ "$behind" -eq 1 ]; then commits="1 commit"; else commits="$behind commits"; fi
+  bad "its head is $commits behind $base ($base is at $tip), so its CI never ran on the code a merge would make"
+  echo "        Bring it up to date with \`gh pr update-branch $pr\`."
+  echo "        The new head then needs its CI, and a quick look at the delta, before merge-gate is run again at that new sha."
+else
+  bad "could not read whether its head contains $base's tip: GitHub's compare answered $up_status, $behind behind"
+fi
 
 if [ "$problems" -ne 0 ]; then
   echo "merge-gate: refused, $problems problem(s). Nothing was merged."

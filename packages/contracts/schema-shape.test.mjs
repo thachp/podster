@@ -1,7 +1,7 @@
 // The schema-shape guard and the validator, checked on inputs of their own, so "no problems" in check.mjs means something.
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { schemaShapeProblems, validate } from "./schema-shape.mjs";
+import { schemaShapeProblems, unknownKeywordProblems, validate } from "./schema-shape.mjs";
 
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failed++; };
@@ -31,6 +31,25 @@ for (const name of ["type", "additionalProperties", "required", "properties"]) {
 check(schemaShapeProblems({ s: { properties: { items: { type: "array" } } } }).length === 1, "a property named `items` is found");
 check(schemaShapeProblems({ s: { allOf: [{ properties: { a: { type: "array", items: null } } }] } }).length === 1, "a null `items` deep in allOf is found");
 check(schemaShapeProblems({ s: { properties: { a: null } } }).length === 1, "a null property schema is found");
+
+// #468's shape: a property written inside its neighbour's schema map, where YAML takes it as a key of that schema.
+const slipped = parse(`
+paths:
+  /x:
+    put:
+      requestBody: { content: { application/json: { schema: { type: object, properties: { rotate_secret: { type: boolean, description: "d", delivery: { type: string } } } } } } }
+components:
+  schemas:
+    Ok: { type: object, additionalProperties: false, properties: { a: { type: [string, "null"], maxLength: 3, x-note: 1 }, b: { allOf: [{ $ref: "#/c" }] } } }
+    Bad: { type: array, items: { type: string, delivery: 1 } }
+`);
+const slippedFound = unknownKeywordProblems(slipped);
+check(slippedFound.includes("#/paths//x/put/requestBody/content/application/json/schema/properties/rotate_secret/delivery: not a schema keyword, so a field sits in the wrong map"), "a key inside a boolean schema is found, by path");
+check(slippedFound.some((p) => p.startsWith("#/components/schemas/Bad/items/delivery:")), "a key inside an items schema is found");
+check(!slippedFound.some((p) => p.includes("/Ok/")), "keywords, x- extensions and allOf entries pass");
+check(slippedFound.length === 2, "nothing else is found");
+check(unknownKeywordProblems({ type: "object", properties: { a: { tpye: "string" } } }, true).length === 1, "a misspelt keyword in a root schema file is found");
+check(unknownKeywordProblems({ paths: { "/y": { get: { summary: "s", tags: ["q"] } } } }).length === 0, "an operation's own keys aren't schema keys");
 
 const fixed = parse(`
 components:

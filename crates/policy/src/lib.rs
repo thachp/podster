@@ -7,6 +7,7 @@ use podster_core::{PrincipalId, Task};
 
 pub mod files;
 pub mod moderation;
+pub mod nudge;
 pub mod outputs;
 pub mod pairing;
 pub mod provenance;

@@ -6,7 +6,7 @@ import { parse } from "yaml";
 import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
-import { schemaShapeProblems } from "./schema-shape.mjs";
+import { schemaShapeProblems, unknownKeywordProblems } from "./schema-shape.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
 import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
 
@@ -228,7 +228,10 @@ if (api.components.responses.TaskDetail?.content?.["application/json"]?.schema?.
 // marks of a mis-indented YAML block (TaskProvenance, #443). schema-shape.test.mjs shows it finds both.
 for (const file of ["openapi.yaml", "capabilities.yaml", "organizations.yaml", "pairing.yaml", "public-workroom-view.schema.json"]) {
   const text = readFileSync(new URL(file, import.meta.url), "utf8");
-  problems.push(...schemaShapeProblems(file.endsWith(".json") ? JSON.parse(text) : parse(text)).map((problem) => `${file} ${problem}`));
+  const doc = file.endsWith(".json") ? JSON.parse(text) : parse(text);
+  problems.push(...schemaShapeProblems(doc).map((problem) => `${file} ${problem}`));
+  // And every schema holds only schema keywords, so a field written inside its neighbour's schema is found (#468).
+  problems.push(...unknownKeywordProblems(doc, file.endsWith(".schema.json")).map((problem) => `${file} ${problem}`));
 }
 // No command may take a provenance or an author, however deep its schema puts the name (F5), and only the room's recorded
 // command paths write a task's prompt text or its provenance (F6). provenance-checks.test.mjs shows each finds what it must.

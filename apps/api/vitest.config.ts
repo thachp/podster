@@ -1,5 +1,5 @@
 import { coreSets } from "../../packages/contracts/core-sets.mjs";
-import { generateKeyPairSync } from "node:crypto";
+import { createHmac, generateKeyPairSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
@@ -55,6 +55,24 @@ function a2aAnswer(path: string, body: string) {
   if (path.startsWith("/a2a/bad-id")) return rpc({ task: { id: "has a space", status: { state: "TASK_STATE_SUBMITTED" } } });
   if (path.startsWith("/a2a/nothing")) return rpc({});
   return rpc({ task: { id: `remote-${path.split("/").pop()}`, contextId: "c", status: { state: "TASK_STATE_SUBMITTED" } } });
+}
+
+// A nudge endpoint's answers (M7 step 13), chosen by path. A challenge is answered with the proof, an HMAC under the
+// signing secret a test scripted for that path as `proof:<path>`, as a Runner holding the secret would. `/nudge/echo`
+// answers with the challenge itself and `/nudge/wrong` with a proof under another secret, as a server that doesn't hold
+// it would. `/nudge/flaky` proves control and then fails every nudge. Anything else answers a nudge with a message.
+function nudgeAnswer(path: string, body: string) {
+  const parsed = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+  const id = parsed.id ?? null;
+  const rpc = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { headers: { "content-type": "application/json" } });
+  if (parsed.method === "podster.dev/verifyEndpoint") {
+    const { agent_id, version, challenge } = parsed.params ?? {};
+    if (path.startsWith("/nudge/echo")) return rpc({ proof: challenge });
+    const secret = path.startsWith("/nudge/wrong") ? "a2asec_not_this_one" : String(scripted(`proof:${path}`) ?? "");
+    return rpc({ proof: createHmac("sha256", secret).update(`podster-endpoint-proof/1.${agent_id}.${version}.${challenge}`).digest("hex") });
+  }
+  if (path.startsWith("/nudge/flaky")) return new Response("no", { status: 503 });
+  return rpc({ message: { messageId: "m-nudge", role: "ROLE_AGENT", parts: [{ text: "Fetching." }] } });
 }
 
 // Uploads, in test builds only: the Worker calls `/receiving/<object>` each time it starts reading an upload's bytes, past the
@@ -124,6 +142,7 @@ async function fakeHook(request: Request, partition: ContentPartition) {
   if (url.pathname.startsWith("/fail")) return new Response("no", { status: 500 });
   if (url.pathname.startsWith("/redirect")) return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });
   if (url.pathname.startsWith("/a2a")) return a2aAnswer(url.pathname, body);
+  if (url.pathname.startsWith("/nudge")) return nudgeAnswer(url.pathname, body);
   return new Response("ok");
 }
 

@@ -3,6 +3,7 @@
 
 pub mod app_key;
 pub mod endpoint;
+pub mod nudge;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

@@ -39,13 +39,24 @@ export type LogFields = {
   count?: number;
   status?: number;
   code?: string;
+  /** Key names a refused answer carried: comma-joined, each `[a-z_]{1,40}` or `?`, at most 10. */
+  names?: string;
+  /** A refused token's length. */
+  length?: number;
+  /** Whether a refused token began with three lower-case letters and an underscore. */
+  prefix?: string;
+  /** The JSON type name of a refused value. */
+  type?: string;
 };
 export type Logger = (at: string, outcome: string, fields?: LogFields) => void;
 
 const NAME = /^[a-z][a-z0-9_.]{0,63}$/;
 const ID_VALUE = /^[A-Za-z0-9_-]{1,128}$/;
 const CODE_VALUE = /^[a-z][a-z0-9_]{0,63}$/;
-const NUMBER_FIELDS = new Set(["seq", "count", "status"]);
+const NAMES_VALUE = /^[a-z_?]{1,40}(,[a-z_?]{1,40}){0,9}$/;
+const PREFIX_VALUE = /^(yes|no)$/;
+const TYPE_VALUE = /^(null|array|object|string|number|boolean|undefined|bigint|symbol|function)$/;
+const NUMBER_FIELDS = new Set(["seq", "count", "status", "length"]);
 const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id"]);
 
 /** The line a logger writes, with everything that isn't allowed dropped. */
@@ -54,6 +65,9 @@ export function logLine(at: string, outcome: string, fields: LogFields = {}): st
   for (const [name, value] of Object.entries(fields)) {
     if (NUMBER_FIELDS.has(name) && typeof value === "number" && Number.isSafeInteger(value)) line[name] = value;
     else if (ID_FIELDS.has(name) && typeof value === "string" && ID_VALUE.test(value)) line[name] = value;
+    else if (name === "names" && typeof value === "string" && NAMES_VALUE.test(value)) line[name] = value;
+    else if (name === "prefix" && typeof value === "string" && PREFIX_VALUE.test(value)) line[name] = value;
+    else if (name === "type" && typeof value === "string" && TYPE_VALUE.test(value)) line[name] = value;
     else if (name === "code" && typeof value === "string" && CODE_VALUE.test(value)) line[name] = value;
   }
   return JSON.stringify(line);

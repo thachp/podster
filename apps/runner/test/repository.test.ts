@@ -165,11 +165,62 @@ describe("decision 230's own rules", () => {
       ["a clone URL with credentials", { ...ACCESS, clone_url: `https://x:${TOKEN}@github.com/podsterdev/todo-app.git` }, "clone_url_unexpected"],
       ["administration", { ...ACCESS, permissions: { ...ACCESS.permissions, administration: "write" } }, "access_permissions"],
       ["workflows", { ...ACCESS, permissions: { contents: "write", metadata: "read", workflows: "write" } }, "access_permissions"],
-      ["an extra field", { ...ACCESS, merge_url: "x" }, "access_invalid"],
-      ["a token with a newline", { ...ACCESS, token: `${TOKEN}\nprotocol=https` }, "access_invalid"],
+      ["an extra field", { ...ACCESS, merge_url: "x" }, "access_fields"],
+      ["a token with a newline", { ...ACCESS, token: `${TOKEN}\nprotocol=https` }, "access_token_format"],
       ["an expired token", { ...ACCESS, expires_at: NOW }, "access_expired"],
     ];
     for (const [what, answer, code] of refused) expect([what, (() => { try { readAccess(answer, SCOPE, NOW); return "taken"; } catch (e) { return (e as RepoPathError).code; } })()]).toEqual([what, code]);
+  });
+
+  it("names why it refused an answer: not an object, the fields, the token's format, the authority", () => {
+    const code = (v: unknown) => { try { readAccess(v, SCOPE, NOW); return "taken"; } catch (e) { return (e as RepoPathError).code; } };
+    expect(code("text")).toBe("access_not_object");
+    expect(code(null)).toBe("access_not_object");
+    expect(code([ACCESS])).toBe("access_not_object");
+    expect(code({ ...ACCESS, merge_url: "x" })).toBe("access_fields");
+    const { token: _t, ...without } = ACCESS;
+    expect(code(without)).toBe("access_fields");
+    expect(code({ ...ACCESS, token: "short" })).toBe("access_token_format");
+    expect(code({ ...ACCESS, token: 7 })).toBe("access_token_format");
+    expect(code({ ...ACCESS, token: `${TOKEN}-x` })).toBe("access_token_format");
+    expect(code({ ...ACCESS, authority_ends_at: "soon" })).toBe("access_authority_invalid");
+    expect(code({ ...ACCESS, authority_ends_at: undefined })).toBe("access_authority_invalid");
+  });
+
+  it("logs one fixed-shape line for each refusal, with key names, a token's length and shape, or a type, and no token character", async () => {
+    const secret = "ghs_Zq9Xk3Lm7Vb2Nc8Wd4Ts-6Yh!"; // not a valid token: it has a "-" and a "!"
+    const run = async (answer: unknown) => {
+      const logged: string[] = [];
+      const broker = new RepoBroker(async () => answer, { now: () => NOW, idle: async () => undefined }, lineLogger((l) => logged.push(l)));
+      const error = await broker.access(ROOM, TASK, SCOPE).catch((e: RepoPathError) => e);
+      return { error: error as RepoPathError, lines: logged.map((l) => JSON.parse(l) as Record<string, unknown>), text: logged.join("\n") };
+    };
+    const odd = "Bad Key!";
+    const fields = await run({ ...ACCESS, [odd]: secret, zeta: 1, alpha: 2 });
+    expect(fields.error.code).toBe("access_fields");
+    expect(fields.lines).toEqual([{ at: "repo.access", outcome: "refused", workspace: ROOM, task: TASK, code: "access_fields", count: 9, names: "?,alpha,authority_ends_at,clone_url,expires_at,permissions,repository,token,zeta" }]);
+    expect(fields.text).not.toContain(secret);
+    expect(fields.text).not.toContain("Bad");
+    const many = await run(Object.fromEntries(Array.from({ length: 14 }, (_, i) => [`k${String.fromCharCode(97 + i)}`, secret])));
+    expect(many.lines[0].count).toBe(14);
+    expect(String(many.lines[0].names).split(",").length).toBe(10);
+    expect(many.text).not.toContain(secret);
+    const token = await run({ ...ACCESS, token: secret });
+    expect(token.error.code).toBe("access_token_format");
+    expect(token.lines).toEqual([{ at: "repo.access", outcome: "refused", workspace: ROOM, task: TASK, code: "access_token_format", length: secret.length, prefix: "yes" }]);
+    for (const piece of ["ghs", "Zq9", "Xk3", secret.slice(0, 6), secret.slice(-6)]) expect(token.text).not.toContain(piece);
+    const bare = await run({ ...ACCESS, token: "NoPrefixHere-123456789012" });
+    expect(bare.lines[0]).toMatchObject({ code: "access_token_format", length: 25, prefix: "no" });
+    expect(bare.text).not.toContain("NoPrefix");
+    const notObject = await run(secret);
+    expect(notObject.error.code).toBe("access_not_object");
+    expect(notObject.lines).toEqual([{ at: "repo.access", outcome: "refused", workspace: ROOM, task: TASK, code: "access_not_object", type: "string" }]);
+    expect(notObject.text).not.toContain(secret);
+    expect((await run(null)).lines[0]).toMatchObject({ type: "null" });
+    expect((await run([secret])).lines[0]).toMatchObject({ type: "array" });
+    const authority = await run({ ...ACCESS, authority_ends_at: secret });
+    expect(authority.lines).toEqual([{ at: "repo.access", outcome: "refused", workspace: ROOM, task: TASK, code: "access_authority_invalid" }]);
+    expect(authority.text).not.toContain(secret);
   });
 
   it("renews a token only near its expiry or past the task's authority", () => {

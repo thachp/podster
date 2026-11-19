@@ -30,12 +30,22 @@ export { isFullName, type RepoScope };
 export type RepoAccess = { token: string; expires_at: number; repository: string; clone_url: string; authority_ends_at: number | null };
 
 /** Why the repository path refused or failed, as a fixed code. Never text from GitHub, Git or Podster. */
+export type AccessDetail = { names?: string; count?: number; length?: number; prefix?: "yes" | "no"; type?: string };
+
+const KEY_NAME = /^[a-z_]{1,40}$/;
+
+/** The JSON type name of a value, as a fixed word. */
+const typeName = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+
 export class RepoPathError extends Error {
   readonly code: string;
   /** Worth trying again later: the network, a rate limit, a branch that moved while read. */
   readonly transient: boolean;
-  constructor(code: string, transient = false) {
+  /** Fixed-shape facts about a refused answer, for the log: key names, a length, a type. Never a value. */
+  readonly detail: AccessDetail;
+  constructor(code: string, transient = false, detail: AccessDetail = {}) {
     super(`repository path: ${code}`);
+    this.detail = detail;
     this.code = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "unknown";
     this.transient = transient;
   }
@@ -97,13 +107,18 @@ export const pullRequestUrl = (full_name: string, number: number) => `https://${
  * refuses it.
  */
 export function readAccess(answer: unknown, scope: RepoScope, now: number): RepoAccess {
-  if (!isObj(answer)) throw new RepoPathError("access_invalid");
+  if (!isObj(answer)) throw new RepoPathError("access_not_object", false, { type: typeName(answer) });
   const keys = ["token", "expires_at", "repository", "clone_url", "permissions", "authority_ends_at"];
-  if (Object.keys(answer).length !== keys.length || !keys.every((k) => Object.hasOwn(answer, k))) throw new RepoPathError("access_invalid");
+  if (Object.keys(answer).length !== keys.length || !keys.every((k) => Object.hasOwn(answer, k))) {
+    // Only key names that look like names, at most 10, so a hostile answer can't put text in a log.
+    const names = Object.keys(answer).sort().slice(0, 10).map((k) => (KEY_NAME.test(k) ? k : "?")).join(",");
+    throw new RepoPathError("access_fields", false, { count: Object.keys(answer).length, ...(names ? { names } : {}) });
+  }
   const { token, expires_at, repository, clone_url, permissions, authority_ends_at } = answer;
-  if (typeof token !== "string" || !TOKEN.test(token)) throw new RepoPathError("access_invalid");
+  if (typeof token !== "string") throw new RepoPathError("access_token_format", false, { type: typeName(token) });
+  if (!TOKEN.test(token)) throw new RepoPathError("access_token_format", false, { length: token.length, prefix: /^[a-z]{3}_/.test(token) ? "yes" : "no" });
   if (!isCount(expires_at) || expires_at <= now) throw new RepoPathError("access_expired");
-  if (!(authority_ends_at === null || isCount(authority_ends_at))) throw new RepoPathError("access_invalid");
+  if (!(authority_ends_at === null || isCount(authority_ends_at))) throw new RepoPathError("access_authority_invalid");
   if (!isObj(permissions) || Object.keys(permissions).length !== 3 || permissions.contents !== "write" || permissions.pull_requests !== "write" || permissions.metadata !== "read") throw new RepoPathError("access_permissions");
   if (!isFullName(repository) || !sameName(repository, scope.full_name)) throw new RepoPathError("repository_out_of_scope");
   if (typeof clone_url !== "string" || !sameName(clone_url, cloneUrl(scope.full_name))) throw new RepoPathError("clone_url_unexpected");

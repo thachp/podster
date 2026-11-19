@@ -4,13 +4,15 @@
  * (`src/node/keychain.ts`), or on Linux without a Secret Service, owner-only files (`src/node/key-store.ts`, S-47).
  *
  * What it holds: the host key (the one pairing binds), and the one agent connection Runner registers on that host, each
- * with its private key. Provider discovery documents aren't secret, and the SDK finds them again at each start, so they
+ * with its private key; and, only once the owner switches the inbound nudge on (M7 step 14), the nudge endpoint's signing
+ * secret with the URL, agent and registration version it was issued for, as an item of its own. Provider discovery documents aren't secret, and the SDK finds them again at each start, so they
  * stay in memory.
  *
  * The SDK makes a host key by itself when it finds none (`resolveHost`). Runner refuses that: only a key Runner
  * installed for a pairing may be stored as the host key, so a registration can never go out under a key nobody paired.
  */
 import type { AgentConnection, HostIdentity, Keypair, ProviderConfig, Storage } from "@auth/agent";
+import { isRegistration, type NudgeRegistration } from "./nudge.js";
 import { thumbprintOf } from "./thumbprint.js";
 
 /** Named secrets, as strings. On the owner's machine, the OS keychain. */
@@ -35,6 +37,7 @@ export class MemorySecretStore implements SecretStore {
 }
 
 const HOST = "host";
+const NUDGE = "nudge";
 const AGENTS = "agents";
 const agentName = (id: string) => `agent:${id}`;
 
@@ -116,8 +119,26 @@ export class RunnerStorage implements Storage {
     return found.filter((connection): connection is AgentConnection => connection !== null);
   }
 
-  /** Deletes every key Runner holds: the host key and each agent's. */
+  /** The nudge endpoint's registration, or null. Anything stored that isn't one reads as an error, never as none. */
+  async getNudge(): Promise<NudgeRegistration | null> {
+    const value = await this.read<unknown>(NUDGE);
+    if (value === null) return null;
+    if (!isRegistration(value)) throw new Error("Runner's key store holds something it can't read. Run `forget`, then pair again.");
+    return value;
+  }
+
+  async setNudge(registration: NudgeRegistration): Promise<void> {
+    if (!isRegistration(registration)) throw new Error("not a nudge registration");
+    await this.secrets.set(NUDGE, JSON.stringify({ url: registration.url, agent_id: registration.agent_id, version: registration.version, secret: registration.secret }));
+  }
+
+  async deleteNudge(): Promise<void> {
+    await this.secrets.delete(NUDGE);
+  }
+
+  /** Deletes every key Runner holds: the host key, each agent's, and the nudge endpoint's secret. */
   async deleteAll(): Promise<void> {
+    await this.secrets.delete(NUDGE);
     for (const id of (await this.read<string[]>(AGENTS)) ?? []) await this.secrets.delete(agentName(id));
     await this.secrets.delete(AGENTS);
     await this.secrets.delete(HOST);

@@ -11,6 +11,7 @@
  */
 import { createInterface } from "node:readline/promises";
 import { Lifecycle, runWithLifecycle, type RepositoryPath } from "../core/lifecycle.js";
+import type { NudgeBell } from "../core/nudge.js";
 import type { LoopOutcome, Poller } from "../core/poller.js";
 import { SupervisedAdapter, type ProgressEvent, type SupervisedDeps } from "../core/run-interface.js";
 import type { Clock, Logger } from "../core/runtime.js";
@@ -39,6 +40,8 @@ export type RunInboxDeps = {
    * with a repository refuses its tasks.
    */
   repository?: RepositoryPath | null;
+  /** The inbound nudge's bell (M7 step 14), only when the owner switched it on: it ends a wait early, nothing more. */
+  bell?: NudgeBell;
 };
 
 /** A run's progress, as a log line: IDs, a fixed kind, a code and the turn count. */
@@ -47,7 +50,7 @@ const progressLog = (log: Logger) => (event: ProgressEvent) =>
 
 export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   const engine = deps.engine;
-  if (engine === null || !Object.values(engine.drivers).some((driver) => driver !== undefined)) return deps.poller.run(deps.signal);
+  if (engine === null || !Object.values(engine.drivers).some((driver) => driver !== undefined)) return deps.poller.run(deps.signal, deps.bell);
   const adapter = new SupervisedAdapter({ ...engine, clock: deps.clock, log: deps.log, progress: progressLog(deps.log) });
   const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log);
   const lifecycle = await Lifecycle.open({
@@ -61,7 +64,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
     clock: deps.clock,
     log: deps.log,
   });
-  return runWithLifecycle(deps.poller, lifecycle, deps.clock, deps.signal);
+  return runWithLifecycle(deps.poller, lifecycle, deps.clock, deps.signal, deps.bell);
 }
 
 /** This process's terminal. A question is asked only when both standard input and standard output are terminals. */

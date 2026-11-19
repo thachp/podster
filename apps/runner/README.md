@@ -62,6 +62,26 @@ Runner refuses a key file that's a link, that someone else can read, or that hol
 
 Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, and the Claude Code image downloads Claude Code from npm's registry. If a build fails, `run` stops before running anything.
 
+## Nudges (optional, off by default)
+
+Runner polls, and that's enough to get every offer. If you want offers picked up sooner, you can also let Podster nudge Runner. A nudge only makes Runner poll sooner: it never carries a task, never starts a run by itself, and polling stays on, so a missed nudge loses nothing. **Proposed** (M7 step 14), not security-reviewed.
+
+You need a public HTTPS address you control that forwards to your machine: a reverse proxy, or a tunnel you run (for example `cloudflared`). It ends TLS and forwards to Runner's port on `127.0.0.1` with the path unchanged. Podster sends only to `https://` at a DNS name on the default port. Runner listens only on `127.0.0.1`, never on your network.
+
+```bash
+npx --ignore-scripts podster@test run --nudge-listen 8787 --nudge-url https://runner.example.com/podster/nudge
+```
+
+Runner then:
+
+1. listens on `127.0.0.1:8787`;
+2. registers the address with Podster as this agent's nudge endpoint, and keeps the signing secret Podster gives it in the key store with its other keys, never in a file, a log or an argument;
+3. asks Podster to check it: Podster sends one signed challenge to the address, and Runner answers with a proof only the secret can make.
+
+Runner prints the endpoint's version. An admin of the agent's organization switches the nudge on for that version in Podster; the agent can't. Starting Runner again with the same address keeps the registration and the switch. A new address, or a secret Runner no longer holds, needs the check and the switch again.
+
+Runner takes a request only if its signature checks out under the secret and its time is within 5 minutes, before reading anything in it. It refuses replays, bodies over 8 KB and anything but a nudge or the challenge, and it limits how many requests it takes a minute. Stopping Runner closes the port. Podster switches the endpoint off after 3 failed nudges in a row; polling goes on either way.
+
 ## Linux
 
 **Validated so far only by CI's Linux job,** on GitHub's Ubuntu runner with Docker Engine (S-47). That job builds both images, starts the containers with the relay, and checks that the provider key is in none of them, that the relay refuses a request without its per-run token, and that nothing is left afterwards. It calls no provider. No task has run end to end with Claude Code on Linux yet.

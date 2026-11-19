@@ -12,6 +12,51 @@ const pub = publicKey.export({ format: "jwk" });
 // test build with failpoints. A build with other features, or changed since it was made, stops the run here.
 const API_BUILD = new URL("./build/api/", import.meta.url);
 assertApiBuild(API_BUILD, [], "npm run pretest (in apps/gateway)");
+// The far end of Runner's nudge endpoint, for runner-core.spec.ts (M7 step 14). The API's requests to NUDGE_HOST are parked
+// here instead of reaching the network; the test takes each one through its NUDGE_RELAY binding, answers it with Runner's
+// own endpoint code holding the secret Runner was given, and hands the answer back, which the API then reads. Requests to
+// any other host go on as they did before this was added.
+const NUDGE_HOST = "runner-nudge.example.com";
+type Parked = { id: string; url: string; headers: [string, string][]; body: string; answer: (response: Response) => void };
+const parked: Parked[] = [];
+const waiting: ((item: Parked) => void)[] = [];
+const taken = new Map<string, Parked>();
+async function nudgeOutbound(request: Request): Promise<Response> {
+  if (new URL(request.url).hostname !== NUDGE_HOST) return fetch(request);
+  const body = await request.text();
+  return new Promise<Response>((answer) => {
+    const item: Parked = { id: crypto.randomUUID(), url: request.url, headers: [...request.headers], body, answer };
+    const waiter = waiting.shift();
+    if (waiter) waiter(item);
+    else parked.push(item);
+  });
+}
+async function nudgeRelay(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.pathname === "/next") {
+    const item = parked.shift() ?? (await new Promise<Parked | null>((resolve) => {
+      const waiter = (found: Parked) => {
+        clearTimeout(timer);
+        resolve(found);
+      };
+      const timer = setTimeout(() => {
+        waiting.splice(waiting.indexOf(waiter), 1);
+        resolve(null);
+      }, 10_000);
+      waiting.push(waiter);
+    }));
+    if (!item) return new Response(null, { status: 204 });
+    taken.set(item.id, item);
+    return Response.json({ id: item.id, url: item.url, headers: item.headers, body: item.body });
+  }
+  const answered = /^\/answer\/([\w-]+)$/.exec(url.pathname);
+  const item = answered ? taken.get(answered[1]) : undefined;
+  if (!item) return new Response(null, { status: 404 });
+  taken.delete(item.id);
+  item.answer(new Response(await request.arrayBuffer(), { status: Number(request.headers.get("x-status") ?? 500), headers: { "content-type": request.headers.get("content-type") ?? "application/json" } }));
+  return new Response(null, { status: 204 });
+}
+
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8").replace(/--.*$/gm, "");
 
 export default defineConfig({
@@ -43,7 +88,7 @@ export default defineConfig({
         d1Databases: { DB: "gateway-db", API_DB: "api-db" },
         // Suites make many requests from one address, so limit tests pass their own limiters.
         ratelimits: { RL_GENERAL: { namespace_id: "9001", simple: { limit: 1_000_000, period: 60 } }, RL_ACCOUNT: { namespace_id: "9002", simple: { limit: 1_000_000, period: 60 } }, RL_SENSITIVE: { namespace_id: "9003", simple: { limit: 1_000_000, period: 60 } } },
-        serviceBindings: { API: "podster-api" },
+        serviceBindings: { API: "podster-api", NUDGE_RELAY: nudgeRelay },
         workers: [
           {
             // The real Rust API, as the production build.
@@ -60,6 +105,7 @@ export default defineConfig({
             },
             d1Databases: { DB: "api-db" },
             queueProducers: { WAKE: { queueName: "podster-wake" } },
+            outboundService: nudgeOutbound,
           },
         ],
       },

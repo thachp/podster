@@ -4,6 +4,7 @@
  * type, audience and expiry the way the real one does, and lets a test script failures. The real gateway and API are
  * apps/gateway/test/runner-core.spec.ts.
  */
+import { createHmac, randomBytes } from "node:crypto";
 import type { Clock } from "../src/core/runtime.js";
 import { thumbprintOf } from "../src/core/thumbprint.js";
 
@@ -97,6 +98,19 @@ export class FakeGateway {
   loseAnswers: string[] = [];
   /** Every call fails at the network, as Podster unreachable would. */
   unreachable = false;
+  /**
+   * The agent's A2A endpoint as the API keeps it (M7 step 13): a new URL or mode is a new version and secret, the same
+   * URL keeps both and answers no secret, and `rotate_secret` makes a new secret for the same version. A new secret
+   * clears the proof and the owner's opt-in.
+   */
+  endpoint: { url: string; version: number; secret: string; delivery: string; control: "verified" | "unverified"; nudge_on: boolean } | null = null;
+  endpointVersion = 0;
+  /** Every `set_a2a_endpoint`'s arguments, in order. */
+  endpointSets: Record<string, unknown>[] = [];
+  /** Where a challenge goes: the far end, as Runner's listener gets it through the owner's proxy. */
+  deliver: ((request: Request) => Promise<Response>) | null = null;
+  /** Each challenge sent and the proof that came back. */
+  challenges: { challenge: string; proof: unknown }[] = [];
   /** Run when a capability is called, before it answers: lets a test act as the person mid-wait. */
   onCall: ((capability: string) => void | Promise<void>) | null = null;
 
@@ -184,7 +198,7 @@ export class FakeGateway {
       if (capability === "list_tasks" && this.refusedWorkspaces.has(String(args.workspace_id))) return Response.json({ message: "not_found", code: "not_found" }, { status: 404 });
       let data: unknown;
       try {
-        data = this.answer(capability, args);
+        data = capability === "verify_a2a_endpoint" ? await this.verifyEndpoint() : this.answer(capability, args);
       } catch (error) {
         if (error instanceof Refusal) return Response.json({ error: { code: error.code } }, { status: error.status });
         throw error;
@@ -199,7 +213,55 @@ export class FakeGateway {
     return Response.json({ error: { code: "not_found" } }, { status: 404 });
   }) as typeof fetch;
 
+  /** The endpoint as a read shows it: never the secret. */
+  private endpointStatus() {
+    const e = this.endpoint;
+    if (!e) return null;
+    return { url: e.url, version: e.version, enabled: true, delivery: e.delivery, ...(e.delivery === "nudge" ? { control: e.control, nudge_on: e.nudge_on } : {}) };
+  }
+
+  /**
+   * `verify_a2a_endpoint`, as the API's challenge does it: one signed `podster.dev/verifyEndpoint` request, and the
+   * proof checked with this file's own HMAC, not Runner's.
+   */
+  private async verifyEndpoint() {
+    const e = this.endpoint;
+    if (!e) throw new Refusal(404, "no_endpoint");
+    if (e.delivery !== "nudge") throw new Refusal(409, "not_a_nudge_endpoint");
+    const challenge = randomBytes(32).toString("hex");
+    const body = JSON.stringify({ jsonrpc: "2.0", id: challenge, method: "podster.dev/verifyEndpoint", params: { agent_id: this.identity, version: e.version, challenge } });
+    const t = Math.floor(this.clock.now() / 1000);
+    const signature = `t=${t},v1=${createHmac("sha256", e.secret).update(`${t}.${body}`).digest("hex")}`;
+    let proof: unknown;
+    try {
+      const answer = this.deliver ? await this.deliver(new Request(e.url, { method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0", "x-podster-signature": signature }, body })) : null;
+      proof = answer?.ok ? ((await answer.json()) as { result?: { proof?: unknown } }).result?.proof : undefined;
+    } catch {
+      proof = undefined;
+    }
+    this.challenges.push({ challenge, proof });
+    const verified = proof === createHmac("sha256", e.secret).update(`podster-endpoint-proof/1.${this.identity}.${e.version}.${challenge}`).digest("hex");
+    if (verified) e.control = "verified";
+    return { ...this.endpointStatus(), verified, ...(verified ? {} : { reason: "no_proof" }) };
+  }
+
   private answer(capability: string, args: Record<string, unknown>): unknown {
+    if (capability === "set_a2a_endpoint") {
+      this.endpointSets.push(structuredClone(args));
+      const url = String(args.url);
+      const delivery = typeof args.delivery === "string" ? args.delivery : (this.endpoint?.delivery ?? "offers");
+      const secret = () => `a2asec_${randomBytes(24).toString("hex")}`;
+      let fresh = false;
+      if (!this.endpoint || this.endpoint.url !== url || this.endpoint.delivery !== delivery) {
+        this.endpointVersion += 1;
+        this.endpoint = { url, version: this.endpointVersion, secret: secret(), delivery, control: "unverified", nudge_on: false };
+        fresh = true;
+      } else if (args.rotate_secret === true) {
+        Object.assign(this.endpoint, { secret: secret(), control: "unverified", nudge_on: false });
+        fresh = true;
+      }
+      return { ...this.endpointStatus(), ...(fresh ? { signing_secret: this.endpoint.secret } : {}) };
+    }
     if (capability === "get_identity") return { id: this.identity, org_id: "org_one" };
     if (capability === "list_workspaces") return { workspaces: this.workspaces.map((id) => ({ workspace_id: id, workspace_name: "a room", role: "member", status: "active" })) };
     if (capability === "list_tasks") {

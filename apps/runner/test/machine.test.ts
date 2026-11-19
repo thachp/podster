@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { generateKeypair } from "@auth/agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { NEVER, RUNNER_CAPABILITIES } from "../src/core/capabilities.js";
+import { checkNudgeUrl, MAX_NUDGE_URL_BYTES } from "../src/core/nudge.js";
 import { emptyState } from "../src/core/state.js";
 import { childEnv, forbidden, INHERITED } from "../src/node/child-env.js";
 import { FileStateStore } from "../src/node/file-state.js";
@@ -217,6 +218,8 @@ describe("the environment of a program Runner starts", () => {
 
 /** The two files step 9(b)'s scoped source-test exceptions name, and no others. */
 const LISTENER_FILE = "node/broker-listener.ts";
+/** Step 14's scoped exception: the inbound nudge's loopback listener. */
+const NUDGE_LISTENER_FILE = "node/nudge-listener.ts";
 const PROFILE_FILE = "core/claude-profile.ts";
 
 describe("Runner's own source", () => {
@@ -239,7 +242,8 @@ describe("Runner's own source", () => {
       expect([file, /\/v1\//.test(v1)]).toEqual([file, false]);
       // Scoped exception (1), step 9(b): only the broker listener may use node:http and `.listen(` (with node:http's
       // createServer); node:net, node:dgram and node:https stay banned there too.
-      const listening = file === LISTENER_FILE ? text.replace(/\bcreateServer\b|\.listen\(|node:http\b(?!s)/g, "") : text;
+      // Scoped exception (3), step 14: the nudge listener, under the same rule as the broker listener.
+      const listening = file === LISTENER_FILE || file === NUDGE_LISTENER_FILE ? text.replace(/\bcreateServer\b|\.listen\(|node:http\b(?!s)/g, "") : text;
       expect([file, /createServer|\.listen\(|node:net|node:dgram|node:http\b|node:https\b/.test(listening)]).toEqual([file, false]);
     }
   });
@@ -251,6 +255,39 @@ describe("Runner's own source", () => {
     expect(text).toContain('server.listen(0, "127.0.0.1", () => resolve());');
     expect(text).toContain("server.listen({ path: deps.socket, readableAll: false, writableAll: false }, () => resolve());");
     expect(text).not.toMatch(/0\.0\.0\.0|::|localhost/);
+  });
+
+  it("lets the nudge listener listen only on the literal loopback address, at the owner's port (scoped exception 3; S-13)", async () => {
+    const text = await readFile(new URL(`apps/runner/src/${NUDGE_LISTENER_FILE}`, repo), "utf8");
+    expect([...text.matchAll(/\.listen\(/g)].length).toBe(1);
+    expect(text).toContain('server.listen(deps.port, "127.0.0.1", () => resolve());');
+    expect(text).not.toMatch(/0\.0\.0\.0|::|localhost|node:https|node:net/);
+    // Only `run` with the owner's two options starts it.
+    for (const { file, text: other } of await sources()) expect([file, /startNudgeListener\(/.test(other)]).toEqual([file, file === NUDGE_LISTENER_FILE || file === "node/nudge-command.ts"]);
+    const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
+    expect(cli).toMatch(/nudging === null \? null : \(bell, ended\) => openNudge\(\{[^\n]*signal: AbortSignal\.any\(\[stop\.signal, ended\]\)/);
+  });
+
+  it("leaves the listener's `onServer` hook to tests: no source file passes it (delta review 3)", async () => {
+    for (const { file, text } of await sources()) expect([file, /\bonServer\b/.test(text)]).toEqual([file, file === NUDGE_LISTENER_FILE]);
+  });
+
+  it("names the endpoint calls only where the nudge registers, and closes the listener when run stops (step 14)", async () => {
+    for (const { file, text } of await sources()) {
+      const named = /["'](set_a2a_endpoint|verify_a2a_endpoint)["']/.test(text);
+      expect([file, named]).toEqual([file, file === "core/capabilities.ts" || file === "core/nudge.ts"]);
+    }
+    const nudge = await readFile(new URL("apps/runner/src/core/nudge.ts", repo), "utf8");
+    // Only ever a nudge endpoint: no call sends `offers`, which would carry task text to the machine.
+    expect(nudge).not.toMatch(/delivery: "offers"/);
+    expect([...nudge.matchAll(/delivery: "nudge"/g)].length).toBe(2);
+    const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
+    const run = cli.slice(cli.indexOf('if (command === "run")'));
+    // The loop's own end aborts the run's signal, which closes the listener; alongsidePolling closes what setup opened.
+    expect(run).toMatch(/return await runInbox\([^\n]*\n\s*\} finally \{\n(\s*\/\/[^\n]*\n)*\s*stop\.abort\(\);/);
+    const command = await readFile(new URL("apps/runner/src/node/nudge-command.ts", repo), "utf8");
+    // The loop's end closes setup's listener at once, without waiting for setup (delta review 1).
+    expect(command).toMatch(/\} finally \{\n\s*ended\.abort\(\);\n\s*\}/);
   });
 
   it("pins the profile file's one versioned path to api.anthropic.com, with no beta header (scoped exception 2)", async () => {
@@ -314,7 +351,7 @@ describe("Runner's own source", () => {
     }
   });
 
-  it("leaves room in the macOS keychain line for Runner's agent with its capability list, measured again at step 11 (#454 re-review)", async () => {
+  it("leaves room in the macOS keychain line for Runner's agent with its capability list, measured again at step 14 (#454 re-review)", async () => {
     // The longest real values: Better Auth's 32-character IDs, staging's issuer, and every capability active.
     const items = new Map<string, string>();
     const lines: string[] = [];
@@ -338,19 +375,45 @@ describe("Runner's own source", () => {
     // Measured 2026-11-18 with 18 capabilities and a long home: 3,029 of 3,584 bytes. Measured again 2026-11-19 for step
     // 11, which submits with `submit_task` and posts its one progress message with `send_message`, both already listed, so
     // still 18 capabilities and 3,029 bytes. Each more capability as long as `get_repo_access` costs its grant's JSON
-    // twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more.
-    expect(RUNNER_CAPABILITIES).toHaveLength(18);
-    expect(RUNNER_CAPABILITIES).toEqual(expect.arrayContaining(["submit_task", "send_message"]));
+    // twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more. Measured again 2026-11-19 for step 14,
+    // which adds `set_a2a_endpoint` and `verify_a2a_endpoint`: 20 capabilities, 3,243 of 3,584 bytes, 341 left, so 3 more
+    // as long as `get_repo_access` fit.
+    expect(RUNNER_CAPABILITIES).toHaveLength(20);
+    expect(RUNNER_CAPABILITIES).toEqual(expect.arrayContaining(["submit_task", "send_message", "set_a2a_endpoint", "verify_a2a_endpoint"]));
     const perCapability = 2 * Buffer.byteLength(`${JSON.stringify({ capability: "get_repo_access", status: "active" })},`);
-    expect(line).toBe(3_029);
-    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBeGreaterThanOrEqual(5);
+    expect(line).toBe(3_243);
+    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBe(3);
+  });
+
+  it("leaves room in the macOS keychain line for the nudge's registration at its longest URL (step 14)", async () => {
+    const items = new Map<string, string>();
+    const lines: string[] = [];
+    const runner: Runner = async (_file, args, input) => {
+      if (args[0] === "-i") {
+        lines.push(input);
+        const parts = input.trim().split(" ");
+        items.set(parts[parts.indexOf("-a") + 1], parts[parts.indexOf("-w") + 1]);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      const account = args[args.indexOf("-a") + 1];
+      return items.has(account) ? { code: 0, stdout: `${items.get(account)}\n`, stderr: "" } : { code: 44, stdout: "", stderr: "" };
+    };
+    const storage = new RunnerStorage(new MacKeychain("/Users/someone-with-a-long-name/Library/Application-Support/podster-runner", runner));
+    // The API's secret is `a2asec_` and two simple UUIDs; the agent ID is Better Auth's longest.
+    const url = `https://runner.example.com/${"a".repeat(MAX_NUDGE_URL_BYTES - "https://runner.example.com/".length)}`;
+    expect(checkNudgeUrl(url)).toBe(url);
+    await storage.setNudge({ url, agent_id: `agt_${"A".repeat(32)}`, version: 2 ** 31, secret: `a2asec_${"f".repeat(64)}` });
+    const line = Buffer.byteLength(lines.at(-1) as string);
+    // Measured 2026-11-19: 2,452 of 3,584 bytes.
+    expect(line).toBe(2_452);
+    expect(line).toBeLessThan(MAC_LINE_LIMIT);
   });
 
   it("names only capabilities inside the gateway's RUNNER_CAPABILITIES, and none it must never hold", async () => {
     const gateway = await read("apps/gateway/src/pairing.ts");
     const list = /export const RUNNER_CAPABILITIES = \[([^\]]*)\]/.exec(gateway)?.[1];
     expect(list).toBeTruthy();
-    const allowed = [...(list as string).matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+    const allowed = [...(list as string).matchAll(/"([a-z0-9_]+)"/g)].map((m) => m[1]);
     expect(allowed.length).toBeGreaterThan(5);
     for (const capability of RUNNER_CAPABILITIES) expect([capability, allowed.includes(capability)]).toEqual([capability, true]);
     for (const never of NEVER) expect(RUNNER_CAPABILITIES as readonly string[]).not.toContain(never);

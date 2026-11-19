@@ -15,8 +15,13 @@
  *   registers or resumes by itself. Its next step is the owner's: pair again from Podster.
  *
  * No CLI or task process starts here; that is later steps' (M7 steps 7 to 9).
+ *
+ * **The nudge (M7 step 14)**, only when the owner switches it on: `run` passes a `NudgeBell`, which a verified nudge
+ * rings to end the wait after a good poll early (never sooner than `NUDGE_GAP_MS` after it). The next poll is this same
+ * one. Polling stays on, and a missed nudge loses nothing.
  */
 import { Connection } from "./connection.js";
+import type { NudgeBell } from "./nudge.js";
 import { GatewayError, meaningOf } from "./errors.js";
 import { retire } from "./pairing.js";
 import { applyEvents, applyListing, readEvents, readTask, type ListedTask } from "./record.js";
@@ -61,6 +66,11 @@ export type PollResult = "ok" | "unreachable" | "revoked";
 
 /** Thrown when the agent's authority has ended: the caller stops what it's doing, then calls `endAuthority`. */
 export class AuthorityEnded extends Error {}
+
+/** The wait after a poll: shortened by a nudge only after a good poll, so a nudge never cuts a backoff or a Retry-After. */
+export function waitForNext(clock: Clock, ms: number, result: PollResult, signal: AbortSignal, bell?: NudgeBell): Promise<void> {
+  return bell && result === "ok" ? bell.idle(clock, ms, signal) : clock.idle(ms, signal);
+}
 
 export const clampInterval = (ms: number) => Math.min(Math.max(Math.round(ms), MIN_INTERVAL_MS), MAX_INTERVAL_MS);
 export const clampGrace = (ms: number) => Math.min(Math.max(Math.round(ms), MIN_GRACE_MS), MAX_GRACE_MS);
@@ -247,8 +257,8 @@ export class Poller {
     return Math.max(backoff, asked ?? 0);
   }
 
-  /** Polls until the owner stops it (`signal`) or the agent's authority ends. */
-  async run(signal: AbortSignal): Promise<LoopOutcome> {
+  /** Polls until the owner stops it (`signal`) or the agent's authority ends. A nudge's `bell` may end a wait early. */
+  async run(signal: AbortSignal, bell?: NudgeBell): Promise<LoopOutcome> {
     let toldOffline = false;
     while (!signal.aborted) {
       const result = await this.pollOnce();
@@ -258,7 +268,7 @@ export class Poller {
         toldOffline = true;
         this.deps.log("runner.offline", "grace_passed", { agent: this.state.agent_id ?? undefined });
       }
-      await this.deps.clock.idle(this.nextWaitMs(result), signal);
+      await waitForNext(this.deps.clock, this.nextWaitMs(result), result, signal, bell);
     }
     return "stopped";
   }

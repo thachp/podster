@@ -905,3 +905,155 @@ describe("the guard against a GitHub outage reading as every repository gone (th
     expect(await ceiling()).toEqual({ granted: [], held: [], tripped: false, findings: [] });
   });
 });
+
+// While an agent holds a token, the room reads the repository's rules back every `HELD_TOKEN_READ_MS` (10 minutes,
+// proposed), so a rule removed after a mint is seen within about one interval, not at the next mint or a day on.
+describe("the read-back while an agent holds a token", () => {
+  const INTERVAL = 10 * 60_000;
+  /** `room()`, with the read while a token is held switched on for it (test builds read only where this table is). */
+  async function heldRoom() {
+    const r = await room();
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_held_token_reads (x INTEGER)"));
+    return r;
+  }
+  /** The attempts the room counted of reads while a token is held. */
+  const heldReads = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read WHERE kind = 'held'").one().n as number);
+  /** When the held token was minted. */
+  const mintedAt = (id: string) => inRoom(id, (sql) => sql.exec("SELECT created_at FROM repo_token WHERE state = 'held'").one().created_at as number);
+  const taskOf = (id: string) => inRoom(id, (sql) => sql.exec("SELECT id FROM task").one().id as string);
+  /**
+   * Moves the room `ms` into the past as time passing would: the token's mint, the last time the link was found right,
+   * the reads counted, and, unless `kept` is false, the read-back a mint may reuse. All in one turn of the room.
+   */
+  const later = (id: string, ms: number, opts: { kept?: boolean } = {}) => runInDurableObject(stub(id), async (_: any, state: any) => {
+    const sql = state.storage.sql;
+    sql.exec("UPDATE repo_token SET created_at = created_at - ?", ms);
+    sql.exec("UPDATE repo_link SET verified_at = verified_at - ?", ms);
+    sql.exec("UPDATE repo_read SET at = at - ?", ms);
+    if (opts.kept === false) return;
+    const key = `repo_token_read_back:${REPO_ID}`;
+    // Kept as the Worker wrote it: a map of the read's repository, time and the link's stamp.
+    const kept = await state.storage.get(key);
+    if (kept) await state.storage.put(key, new Map([...kept, ["at", kept.get("at") - ms]]));
+  });
+
+  it("degrades the link and revokes the held token within one interval of a ruleset being removed", async () => {
+    const r = await heldRoom();
+    const mint = await mintedAt(r.id);
+    // Nothing is due yet: the mint read the rules a moment ago. The alarm is set for no later than an interval on.
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await heldReads(r.id)).toBe(0);
+    expect(await nextAlarm(stub(r.id))).toBeLessThanOrEqual(mint + INTERVAL);
+    // Someone removes the update rule. An interval on, one alarm pass reads it back, degrades, and takes the token back.
+    await ready({ rulesets: "no_update" });
+    await later(r.id, INTERVAL);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
+    expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "ruleset_missing" }]);
+    expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+    expect(await heldReads(r.id)).toBe(1);
+    // It went through the provisioning App, left no token of its own live, and didn't use the daily read's place.
+    expect((await readBack()).reads.map((read) => read.path)).toContain(`/repositories/${REPO_ID}/rulesets/1`);
+    expect((await readBack()).live).toBe(0);
+    expect(await scheduledReads(r.id)).toBe(0);
+    // Degraded, with no token held, nothing more is due.
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
+  });
+
+  it("reads nothing while no token is held", async () => {
+    const r = await heldRoom();
+    // The token ran out: an hour on, nothing is read, and the alarm isn't set to come back for it.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() - 1));
+    await later(r.id, 2 * INTERVAL);
+    await ready({ rulesets: "no_update" });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await heldReads(r.id)).toBe(0);
+    expect(await tokens(r.id)).toEqual([]);
+    expect((await link(r.id)).status).toBe("ready");
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
+    // Without the switch on, a held token doesn't bring a read either.
+    await ready({ rulesets: "ready" });
+    const s = await room();
+    await later(s.id, 2 * INTERVAL);
+    await alarmPass(stub(s.id));
+    expect(await heldReads(s.id)).toBe(0);
+    expect(await tokens(s.id)).toEqual(["held"]);
+  });
+
+  it("changes nothing when the read can't be made, and tries again an interval later", async () => {
+    const r = await heldRoom();
+    await ready({ script: { readRepo: 503 } });
+    await later(r.id, INTERVAL);
+    const before = await link(r.id);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toEqual(before);
+    expect(await tokens(r.id)).toEqual(["held"]);
+    expect(await events(r.id)).toEqual([]);
+    expect(await heldReads(r.id)).toBe(1);
+    // Not straight away: the alarm isn't set sooner than most of an interval, and a pass now reads nothing.
+    await expectNoAlarmSooner(stub(r.id), INTERVAL - 60_000);
+    const reads = (await readBack()).reads.length;
+    await alarmPass(stub(r.id));
+    expect(await heldReads(r.id)).toBe(1);
+    expect((await readBack()).reads.length).toBe(reads);
+    // An interval on, GitHub answers again and the read finds the link right.
+    await ready({ script: {} });
+    await later(r.id, INTERVAL);
+    const stale = (await link(r.id)).verified_at;
+    await alarmPass(stub(r.id));
+    expect(await heldReads(r.id)).toBe(2);
+    expect((await readBack()).reads.length).toBeGreaterThan(reads);
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect((await link(r.id)).verified_at).toBeGreaterThan(stale);
+    expect(await tokens(r.id)).toEqual(["held"]);
+  });
+
+  it("makes at most six reads in an hour", async () => {
+    const r = await heldRoom();
+    await later(r.id, 60 * 60_000);
+    // Six attempts in the last hour, the newest well over an interval ago: the interval would allow one, the cap doesn't.
+    const now = Date.now();
+    await inRoom(r.id, (sql) => {
+      for (let n = 0; n < 6; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'held', NULL)", now - 59 * 60_000 + n * 60_000);
+    });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await heldReads(r.id)).toBe(6);
+    // The alarm comes back once the oldest is an hour old, not before.
+    await expectNoAlarmSooner(stub(r.id), 30_000);
+    // A minute and a half on, the oldest has aged out of the hour: one read, and the cap is full again.
+    await later(r.id, 90_000);
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads.length).toBeGreaterThan(0);
+    const inTheHour = await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read WHERE kind = 'held' AND at > ?", Date.now() - 60 * 60_000).one().n);
+    expect(inTheHour).toBe(6);
+  });
+
+  it("reuses a mint's read-back from the last minute, and a mint reuses its own", async () => {
+    const r = await heldRoom();
+    // Due by the token's age and the link's, but the mint's read-back is still under a minute old: it stands, and
+    // nothing is read from GitHub. The link counts as found right when that read was made.
+    await later(r.id, INTERVAL + 60_000, { kept: false });
+    const kept = await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.get(`repo_token_read_back:${REPO_ID}`)) as Map<string, number>;
+    expect(typeof kept.get("at")).toBe("number");
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await heldReads(r.id)).toBe(1);
+    expect((await link(r.id)).verified_at).toBe(kept.get("at"));
+    // An interval on, the kept read is too old: the alarm reads the repository back itself.
+    await later(r.id, INTERVAL);
+    await alarmPass(stub(r.id));
+    expect(await heldReads(r.id)).toBe(2);
+    const reads = (await readBack()).reads.length;
+    expect(reads).toBeGreaterThan(0);
+    // A renewal within the minute after it reuses that read: the mint reads nothing more.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE repo_token SET expires_at = ? WHERE state = 'held'", Date.now() + 4 * 60_000));
+    const renewed = await api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${await taskOf(r.id)}/repo-access`, undefined, { key: null });
+    expect(renewed.status, renewed.text).toBe(200);
+    expect(renewed.body.token).not.toBe(r.token);
+    expect((await readBack()).reads.length).toBe(reads);
+  });
+});

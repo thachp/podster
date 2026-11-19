@@ -10,6 +10,7 @@ import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fa
 import { FAKE_RESOLVER, fakeResolver } from "./test/fake-resolver.ts";
 import { FAKE_HOSTNAMES, fakeHostnames } from "./test/fake-hostnames.ts";
 import { FAKE_STORES, fakeStores } from "./test/fake-stores.ts";
+import { A2A_SDK_CONTROL_HOST, A2A_SDK_HOST, a2aSdkBase, a2aSdkControl } from "./test/a2a-sdk-endpoint.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 import { assertApiBuild } from "../../scripts/build-api-worker.mjs";
 
@@ -129,6 +130,8 @@ async function fakeHook(request: Request, partition: ContentPartition) {
   const url = new URL(request.url);
   if (url.hostname === "upload-gate.example.com") return uploadGate(url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
+  // The independent A2A server's controls, for a2a-nudge-interop.spec.ts (M7 step 15). Kept out of the hook log.
+  if (url.hostname === A2A_SDK_CONTROL_HOST) return a2aSdkControl(request);
   if (url.hostname === "a2a-script.example.com") {
     const { key, answers } = await request.json() as { key: string; answers: unknown[] };
     scripts.set(key, answers);
@@ -138,6 +141,8 @@ async function fakeHook(request: Request, partition: ContentPartition) {
   hookRequests.push({ host: url.hostname, path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), authorization: request.headers.get("authorization"), a2aVersion: request.headers.get("a2a-version"), body });
   if (url.hostname === "langgraph.example.com") return independent(process.env.PODSTER_LANGGRAPH_URL, request, url, body);
   if (url.hostname === "fasta2a.example.com") return independent(process.env.PODSTER_FASTA2A_URL, request, url, body);
+  // The A2A project's own SDK server, in this process on 127.0.0.1, so this one runs in every `npm test` (M7 step 15).
+  if (url.hostname === A2A_SDK_HOST) return independent(await a2aSdkBase(), request, url, body);
   if (url.pathname.startsWith("/hang")) await new Promise((resolve) => setTimeout(resolve, 5000));
   if (url.pathname.startsWith("/fail")) return new Response("no", { status: 500 });
   if (url.pathname.startsWith("/redirect")) return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });

@@ -10,7 +10,7 @@
  * - **The worst case is reserved before a request goes.** Each body byte counts as an input token at the dearest input
  *   price, plus a fixed margin for the provider's hidden tool prompt, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
- * - **Only a known body** (M1 on #459): known top-level keys; tools only the driver's own (`custom`), never the
+ * - **Only a known body** (M1 on #459): known top-level keys, `output_config` among them only in its reviewed shape; tools only the driver's own (`custom`), never the
  *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
  *   and thinking, with documents in plain text only (a PDF bills beyond the body's bytes); no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
  *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
@@ -149,7 +149,28 @@ const only = (o: Obj, keys: readonly string[]) => Object.keys(o).every((k) => ke
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const isText = (v: unknown) => typeof v === "string";
 
-const TOP_KEYS = ["model", "messages", "max_tokens", "system", "metadata", "stop_sequences", "stream", "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking"];
+const TOP_KEYS = ["model", "messages", "max_tokens", "system", "metadata", "stop_sequences", "stream", "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking", "output_config"];
+
+/** `output_config.effort`, exactly the enum the pinned SDK 0.3.327 declares (its Messages `OutputConfig` type). */
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * `output_config`, the first reviewed widening of the allowlist (the architect's ruling of 2026-11-18, after #460's
+ * third real run, where Claude Code sent it on every request): an object holding at most `effort`, from the SDK's
+ * enum, and `format`, exactly `{ type: "json_schema", schema: {…} }`. Any other key is refused by name. It touches
+ * neither `max_tokens` nor the worst case, which are computed the same with or without it.
+ */
+function outputConfigRefusal(v: unknown): string | null {
+  if (!isObj(v)) return "output_config";
+  const extra = Object.keys(v).find((k) => k !== "effort" && k !== "format");
+  if (extra !== undefined) return `output_config_key:${nameCode(extra)}`;
+  if (v.effort !== undefined && !(typeof v.effort === "string" && EFFORTS.includes(v.effort))) return "output_config:effort";
+  if (v.format !== undefined) {
+    const f = v.format;
+    if (!isObj(f) || !only(f, ["type", "schema"]) || f.type !== "json_schema" || !isObj(f.schema)) return "output_config:format";
+  }
+  return null;
+}
 
 /** Only `{ type: "ephemeral" }`: no lifetime, which would buy a longer, dearer cache. */
 const cacheOk = (v: unknown) => v === undefined || (isObj(v) && only(v, ["type"]) && v.type === "ephemeral");
@@ -206,6 +227,10 @@ function blockRefusal(v: unknown, inResult = false): string | null {
 function bodyRefusal(b: Obj): string | null {
   const extra = Object.keys(b).find((k) => !TOP_KEYS.includes(k));
   if (extra !== undefined) return `top_key:${nameCode(extra)}`;
+  if (b.output_config !== undefined) {
+    const refused = outputConfigRefusal(b.output_config);
+    if (refused !== null) return refused;
+  }
   if (!Array.isArray(b.messages)) return "messages";
   for (const m of b.messages) {
     if (!isObj(m) || !only(m, ["role", "content"]) || (m.role !== "user" && m.role !== "assistant")) return "message_shape";

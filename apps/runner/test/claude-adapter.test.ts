@@ -1638,7 +1638,7 @@ describe("the exact reason a run failed, as fixed codes", () => {
   it("the broker says which part of a body it refused, by a fixed code naming the key, never its value", async () => {
     const broker = new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS);
     const ask = (extra: Record<string, unknown>) => broker.admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 10, messages: [{ role: "user", content: "x" }], ...extra })) });
-    expect(ask({ output_config: { effort: "low" } })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "top_key:output_config" });
+    expect(ask({ output_config: { effort: "low", verbosity: "x" } })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "output_config_key:verbosity" });
     expect(ask({ context_management: {} })).toMatchObject({ detail: "top_key:context_management" });
     expect(ask({ "Weird Key!": 1 })).toMatchObject({ detail: "top_key:other" });
     expect(ask({ thinking: { type: "adaptive" } })).toMatchObject({ detail: "thinking:adaptive" });
@@ -1713,5 +1713,37 @@ describe("mounts: Docker's init", () => {
     expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/docker-init ext4 ro,relatime 0 0"].join("\n"))).toEqual([]);
     expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/docker-init ext4 rw,relatime 0 0"].join("\n"))).toEqual(["/usr/sbin/docker-init"]);
     expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/other ext4 ro 0 0"].join("\n"))).toEqual(["/usr/sbin/other"]);
+  });
+});
+
+// ---- After the third real run of #460 at 9be5864: the first reviewed widening of the broker's allowlist ----
+
+describe("output_config, allowed only in its reviewed shape (the architect's ruling of 2026-11-18)", () => {
+  const broker = () => new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS);
+  const ask = (b: RunBroker, output_config: unknown) => b.admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128_000, messages: [{ role: "user", content: "x" }], output_config })) });
+
+  it("takes effort from the SDK 0.3.327 enum and a json_schema format with a schema object", () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"]) expect([effort, ask(broker(), { effort }).ok]).toEqual([effort, true]);
+    expect(ask(broker(), { format: { type: "json_schema", schema: { type: "object" } } }).ok).toBe(true);
+    expect(ask(broker(), { effort: "medium", format: { type: "json_schema", schema: {} } }).ok).toBe(true);
+    expect(ask(broker(), {}).ok).toBe(true);
+  });
+
+  it("refuses any other key inside it, by name, and any other effort or format", () => {
+    expect(ask(broker(), { effort: "low", task_budget: { type: "tokens", total: 1 } })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "output_config_key:task_budget" });
+    expect(ask(broker(), { "Odd Key": 1 })).toMatchObject({ detail: "output_config_key:other" });
+    for (const effort of ["ultra", "", null, 3, "LOW"]) expect([effort, ask(broker(), { effort })]).toMatchObject([effort, { ok: false, reason: "body_not_allowed", detail: "output_config:effort" }]);
+    for (const format of [{ type: "json_object", schema: {} }, { type: "json_schema" }, { type: "json_schema", schema: [] }, { type: "json_schema", schema: {}, strict: true }, null, "json_schema"])
+      expect([format, ask(broker(), { format })]).toMatchObject([format, { ok: false, reason: "body_not_allowed", detail: "output_config:format" }]);
+    for (const v of [null, [], "low", 1]) expect([v, ask(broker(), v)]).toMatchObject([v, { ok: false, detail: "output_config" }]);
+  });
+
+  it("changes nothing about max_tokens or the worst case", () => {
+    const plain = broker().admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128_000, messages: [{ role: "user", content: "x" }] })) });
+    const withConfig = ask(broker(), { effort: "max", format: { type: "json_schema", schema: {} } });
+    if (!plain.ok || !withConfig.ok) throw new Error("both should be admitted");
+    expect(withConfig.forward.max_tokens).toBe(plain.forward.max_tokens);
+    expect(withConfig.forward.max_tokens).toBe(CAPS.max_tokens);
+    expect(withConfig.forward.worst_micro_usd).toBe(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], withConfig.forward.body.byteLength, CAPS.max_tokens));
   });
 });

@@ -91,7 +91,7 @@ export class RepoBroker {
       access = readAccess(answer, scope, this.clock.now());
     } catch (error) {
       this.held.delete(k);
-      this.log("repo.access", "refused", { ...ids, code: error instanceof RepoPathError ? error.code : "access_invalid" });
+      this.log("repo.access", "refused", error instanceof RepoPathError ? { ...ids, code: error.code, ...error.detail } : { ...ids, code: "access_invalid" });
       throw error;
     }
     this.held.set(k, access);

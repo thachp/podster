@@ -489,6 +489,19 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 
+/**
+ * The canonical form of a decision's facts, as a stored record's `facts_key` holds it, or null for a refusal. Step 8's
+ * check-in compares a fresh evaluation's facts with the consumed record's by this.
+ */
+export function factsKey(decision: Decision): string | null {
+  try {
+    const d = copy(decision);
+    return isDecision(d) ? canonical(d.facts) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** What a run decision is bound to beyond the policy's facts: the task's version, its inputs' hash, repository and base. */
 export type RunBinding = {
   task_id: string;

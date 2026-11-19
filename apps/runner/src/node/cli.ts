@@ -4,11 +4,16 @@
  *
  *   pair    --gateway <https://…> --agent <agt_…>   Pair this machine. The code is read from standard input, never an argument.
  *   run     [--interval <seconds>] [--grace <minutes>]   Poll the inbox and record offers until stopped (Ctrl-C).
+ *   stop                                              Stop the Runner running from this home, and any run, at once.
  *   status                                            Show what this Runner's record says, by IDs.
  *   forget                                            Delete this Runner's keys and record. The agent stays connected in Podster.
  *
  * Every command takes `--home <folder>`, Runner's own folder (default `~/.podster-runner`). What the owner reads goes to
  * standard output in fixed words; log lines, IDs only, go to standard error.
+ *
+ * `pair`, `run` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
+ * runs. `run` still starts no task: the lifecycle (M7 step 8, `src/core/lifecycle.ts`) needs step 9's adapter, and until
+ * it exists Runner accepts nothing it couldn't run.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,9 +23,12 @@ import { pair, type PairingOutcome } from "../core/pairing.js";
 import { clampGrace, clampInterval, DEFAULT_GRACE_MS, DEFAULT_INTERVAL_MS, Poller } from "../core/poller.js";
 import { lineLogger, systemClock } from "../core/runtime.js";
 import { RunnerStorage } from "../core/storage.js";
+import { FileRunStore, forgetRuns } from "./file-runs.js";
 import { FileStateStore } from "./file-state.js";
 import { readHidden } from "./hidden-input.js";
 import { systemKeychain } from "./keychain.js";
+import { acquireLock, LockRefused } from "./lock.js";
+import { clearStop, requestStop, watchStop } from "./local-stop.js";
 
 const USAGE = `Podster Runner (M7 step 6: pairing and the inbox loop; it runs no task yet)
 
@@ -28,6 +36,8 @@ const USAGE = `Podster Runner (M7 step 6: pairing and the inbox loop; it runs no
                                                    Paste the code when asked: it's never taken as an argument.
   run     [--interval <seconds>] [--grace <minutes>]
                                                    Poll the inbox and record offers until you stop it (Ctrl-C).
+  stop                                             Stop the Runner running from this home at once, and any run.
+                                                   It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
   forget                                           Delete this Runner's keys and record. The agent stays
                                                    connected in Podster until you disconnect it there.
@@ -67,12 +77,50 @@ async function main(argv: string[]) {
 
   if (command === "status") {
     const record = await state.load();
-    say(JSON.stringify({ gateway: record.gateway, agent: record.agent_id, phase: record.phase, stopped: record.stopped, inbox_cursor: record.inbox_cursor, offers: Object.keys(record.offers).length, last_contact_at: record.last_contact_at, reconciled_at: record.reconciled_at }));
+    const runs = await new FileRunStore(home).load();
+    const phases: Record<string, number> = {};
+    for (const entry of Object.values(runs.entries)) phases[entry.phase] = (phases[entry.phase] ?? 0) + 1;
+    say(JSON.stringify({ gateway: record.gateway, agent: record.agent_id, phase: record.phase, stopped: record.stopped, inbox_cursor: record.inbox_cursor, offers: Object.keys(record.offers).length, last_contact_at: record.last_contact_at, reconciled_at: record.reconciled_at, runs: phases }));
     return 0;
   }
 
+  if (command === "stop") {
+    // A local stop: no call to Podster, no signal to a process ID. The running Runner sees the request at once.
+    say((await requestStop(home)) ? "Asked the Runner running here to stop. Any run ends at once, and it polls nothing until started again." : "No Runner is running from this home.");
+    return 0;
+  }
+
+  if (command !== "pair" && command !== "run" && command !== "forget") {
+    say(USAGE);
+    return 2;
+  }
+  // One Runner per agent on this machine (decision 227). Held until this command ends.
+  let lock;
+  try {
+    lock = await acquireLock(home, { command });
+  } catch (error) {
+    if (error instanceof LockRefused) {
+      say(error.message);
+      return 1;
+    }
+    throw error;
+  }
+  try {
+    return await locked(command, args, home, state, lock.holder.nonce);
+  } finally {
+    await lock.release();
+  }
+}
+
+async function locked(command: string, args: string[], home: string, state: FileStateStore, nonce: string): Promise<number> {
   if (command === "forget") {
     // Never the SDK's disconnect: it only pretends to revoke. Disconnecting is the owner's act in Podster.
+    // Refused while a run may still be going or budget is reserved; the day's spend is kept (L5 on #458).
+    const blocked = await forgetRuns(new FileRunStore(home));
+    if (blocked) {
+      say(`Runner won't forget this agent while it has ${blocked}. Start it again with \`run\`: it keeps checking a held run until its stop is confirmed, then releases it and settles the budget. If this agent's connection has ended, pair again from Podster first, then \`run\`. Once nothing is held or reserved, \`forget\` goes through.`);
+      return 1;
+    }
     await new RunnerStorage(systemKeychain(home)).deleteAll();
     await state.remove();
     say("Runner's keys and record on this machine are deleted. The agent is still connected in Podster until you disconnect it there.");
@@ -137,8 +185,17 @@ async function main(argv: string[]) {
     });
     const stop = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => stop.abort());
-    say(`Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C.`);
-    const outcome = await poller.run(stop.signal);
+    // The owner's `stop`, from another terminal: a request naming this Runner's lock by its nonce, so one left for an
+    // earlier Runner can't stop this one (L2 on #458).
+    const unwatch = watchStop(home, nonce, () => stop.abort());
+    say(`Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C or \`stop\`.`);
+    let outcome;
+    try {
+      outcome = await poller.run(stop.signal);
+    } finally {
+      unwatch();
+      await clearStop(home);
+    }
     if (outcome === "revoked") {
       say("This agent's connection ended in Podster, so Runner stopped and retired its key. To go on, pair again from Podster.");
       return 1;

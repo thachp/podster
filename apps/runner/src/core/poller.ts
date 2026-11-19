@@ -59,8 +59,8 @@ export type LoopOutcome =
 
 export type PollResult = "ok" | "unreachable" | "revoked";
 
-/** Thrown inside the loop when the agent's authority has ended. */
-class AuthorityEnded extends Error {}
+/** Thrown when the agent's authority has ended: the caller stops what it's doing, then calls `endAuthority`. */
+export class AuthorityEnded extends Error {}
 
 export const clampInterval = (ms: number) => Math.min(Math.max(Math.round(ms), MIN_INTERVAL_MS), MAX_INTERVAL_MS);
 export const clampGrace = (ms: number) => Math.min(Math.max(Math.round(ms), MIN_GRACE_MS), MAX_GRACE_MS);
@@ -127,6 +127,24 @@ export class Poller {
       }
       throw failure;
     }
+  }
+
+  /** The Podster agent this Runner acts as. */
+  get agentId(): string {
+    return this.state.agent_id as string;
+  }
+
+  /**
+   * One call as the agent, for the lifecycle (M7 step 8). An authority error throws `AuthorityEnded` and changes nothing
+   * here: the caller stops any run first, then calls `endAuthority`.
+   */
+  request(capability: Parameters<Connection["call"]>[0], args: Record<string, unknown> = {}): Promise<unknown> {
+    return this.call(capability, args);
+  }
+
+  /** Retires the key after an authority error the lifecycle met: the same stop the loop makes for its own. */
+  async endAuthority(): Promise<void> {
+    if (this.state.stopped === null) this.state = await retire(this.deps, this.storage, this.state, "revoked");
   }
 
   /** Checks who Runner is, then records every offer its workspaces list for it. */

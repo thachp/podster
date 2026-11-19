@@ -1,6 +1,8 @@
 # Runner's test pre-release
 
-**Status, 2026-11-19:** built, not published. The workflow hasn't run.
+**Status, 2026-11-19, later:** `0.0.1-test.1` is on npm, published by the owner through path B. The trusted publisher is added, with staging required, and `0.0.1-test.2` is the first version for the workflow to stage. [What happened.](#2026-11-19-the-first-publish-and-staged-publishing)
+
+*Earlier status, 2026-11-19:* built, not published. The workflow hadn't run.
 
 The owner decided on 2026-11-19 to publish a marked test pre-release of Runner to npm before M7's staging run ([step 16](m7-plan.md#build-order)), so the owner and Long can run it with `npx`. This narrows [decision 26](spec/PRODUCT.md#decisions-needed) for this pre-release only. The gated release is unchanged, and once M7's step 17 passes it supersedes this one.
 
@@ -33,6 +35,33 @@ The check a branch can't edit is the environment's own rule in GitHub's settings
 
 The page doesn't settle whether a trusted publisher can be added before the first publish. So this plan assumes it can't, and the first version reaches npm through path B. Try path A first only if npmjs.com offers the setting for `podster` before it exists.
 
+## 2026-11-19: the first publish and staged publishing
+
+**Path B was done for `0.0.1-test.1`.** The owner ran the workflow with `dry_run` on (run 44559029335), checked the `.tgz` against its SHA-256 `d22db7e7…d00e3`, and published it by hand as step 3 says. `npm view podster dist-tags` then showed `{ latest: '0.0.1-test.1', test: '0.0.1-test.1' }`, as step 4 expected. npm also lists a version `0.0.0-stage`; see [the placeholder](#the-000-stage-placeholder).
+
+**The trusted publisher was added with "Allow npm publish" off.** Step 5 was done with `thachp` / `podster` / `runner-prerelease.yml` / `npm-test-prerelease`. npm's form now has an "Allow npm publish" option, which npm marks "Not recommended" and suggests leaving off to require staged publishing. The owner left it off. So the workflow can't publish a version directly: it can only stage one, and a staged version goes live only when the owner approves it.
+
+What npm's docs say, read 2026-11-19:
+
+- [Trusted publishers](https://docs.npmjs.com/trusted-publishers) (last edited 2026-10-06), "Allowed actions": `npm stage publish` "is always allowed". Whether the publisher can "also publish directly with `npm publish`" is a separate choice. The page doesn't say what a plain `npm publish` prints or exits with when that choice is off.
+- [Staged publishing](https://docs.npmjs.com/staged-publishing) (last edited 2026-11-10): staging needs npm 11.15.0 or later and Node 22.14.0 or later. The workflow installs npm 11.21.2.
+- Approving: on npmjs.com, the **Staged Packages** tab, which the page places in your account settings, then **Approve**. Or `npm stage list podster`, then `npm stage approve <stage-id>`. Both ask for two-factor authentication, and a trusted publisher can't approve: `npm stage list`, `view`, `approve` and `reject` don't accept OIDC tokens ([trusted publishers](https://docs.npmjs.com/trusted-publishers)). `npm stage reject <stage-id>` removes a staged version.
+- [`npm stage`](https://docs.npmjs.com/cli/v11/commands/npm-stage) (v11.21.3): `npm stage publish` takes `--tag`, `--access`, `--provenance`, `--dry-run` and `--otp`. The tag is fixed when the version is staged: to change it, reject the staged version and stage it again. A pre-release needs an explicit `--tag`.
+- Provenance: `--provenance` is a flag of `npm stage publish`, and trusted publishing generates provenance by default. The docs don't say whether the attestation is made at staging or at approval, so step 8's check, after approval, is what settles it.
+- Expiry: the docs don't say whether staged versions expire. The 2-day rule on the trusted-publisher page is about a new publisher's first publish, not about staged versions, and the docs don't say whether a staged version counts as that first publish. Approve soon after the workflow stages it.
+
+**So the workflow now runs `npm stage publish`** instead of `npm publish`, with the same `--provenance --tag test --access public`, the same SHA-256 check and the same jobs and permissions. A local `npm stage publish ./podster-0.0.1-test.2.tgz --dry-run --tag test` with npm 11.21.2, against an unreachable registry, accepted the `.tgz` and reported it "staged with tag test".
+
+**The owner's new step,** after approving the `npm-test-prerelease` environment in GitHub: approve the staged version on npmjs.com (Staged Packages, Approve, two-factor code), or with `npm stage approve <stage-id>` at their own terminal. Until then, `npm view podster versions` doesn't list it and `npx podster@test` still gets `0.0.1-test.1`.
+
+### The `0.0.0-stage` placeholder
+
+npm lists it as "Temporary package placeholder for staged publishing". [Staged publishing](https://docs.npmjs.com/staged-publishing) says that when you stage a package that doesn't exist yet, npm publishes a placeholder version `0.0.0-stage`, which is public, while the staged version stays private until approved. The docs don't say whether npm removes it once a real version exists.
+
+Whether it can or should be deprecated: npm documents deprecating one version with `npm deprecate <package>@<version> "<message>"` ([deprecating](https://docs.npmjs.com/deprecating-and-undeprecating-packages-or-package-versions)), and unpublishing one version within 72 hours of publish ([unpublishing](https://docs.npmjs.com/unpublishing-packages-from-the-registry), [policy](https://docs.npmjs.com/policies/unpublish)). None of those pages mentions the staging placeholder, so the docs don't say whether either applies to it. The architect's view: leave it. It's npm's own record, it sorts below every `0.0.x-test.N`, no tag points at it, and unpublishing a version can't be undone. If the owner wants a signpost anyway, deprecating it is the reversible choice (`npm deprecate podster@0.0.0-stage "npm's staging placeholder; use podster@test"`); that's the owner's, at their own terminal, and agents don't run it.
+
+**Step 7 still applies.** Once the first workflow version is approved and live, set publishing access to "Require two-factor authentication and disallow tokens". Staging doesn't replace it: it covers how the trusted publisher's versions go live, and step 7 covers tokens.
+
 ## The owner's steps
 
 Every step here is the owner's. Agents don't sign in to npm, publish, create tokens, or change GitHub settings.
@@ -59,14 +88,18 @@ Every step here is the owner's. Agents don't sign in to npm, publish, create tok
    - environment: `npm-test-prerelease`
 
    npm doesn't check these when you save them, and the publisher must publish within 2 days of being added.
+
+   *Done 2026-11-19, with "Allow npm publish" left off, so the workflow stages each version. [See above.](#2026-11-19-the-first-publish-and-staged-publishing)*
 6. **The owner's, recommended after path B:** bump `apps/runner/package.json` to `0.0.1-test.2` in a PR, then run the workflow on `main` with that version and `dry_run` off, and approve its publish job. It publishes with provenance, and `npx podster@test` then gets that version. This also uses the trusted publisher inside its 2 days.
+
+   *Note, 2026-11-19:* the workflow now stages the version instead. After approving the publish job, approve the staged `0.0.1-test.2` on npmjs.com (Staged Packages, Approve), with your two-factor code. Only then does `npx podster@test` get it.
 7. **The owner's, required once the first workflow publish has succeeded:** in `podster`'s settings on npmjs.com, set publishing access to "Require two-factor authentication and disallow tokens". From then on, only the trusted publisher can publish.
 8. **The owner's and Long's, before running a version:** check its provenance, either way:
    - `npm view podster@0.0.1-test.2 dist.attestations --json` shows a `provenance` entry with `predicateType` `https://slsa.dev/provenance/v1`. Open the attestation from the version's page on npmjs.com to see it was built from `thachp/podster`, workflow `runner-prerelease.yml`, on `refs/heads/main`.
    - Or, in an empty scratch folder: `npm init -y`, then `npm install --ignore-scripts podster@test`, then `npm audit signatures`. It reports verified registry signatures and verified attestations.
 
    `0.0.1-test.1` from path B has no attestation, by design.
-9. **The owner's, later runs:** each new pre-release is a PR that bumps the version, then a run of the workflow on `main` with that version and `dry_run` off.
+9. **The owner's, later runs:** each new pre-release is a PR that bumps the version, then a run of the workflow on `main` with that version and `dry_run` off. *Since 2026-11-19:* then approve the staged version on npmjs.com.
 
 ## What the workflow does
 
@@ -74,7 +107,7 @@ Every step here is the owner's. Agents don't sign in to npm, publish, create tok
 
 1. **`main-only`** fails a run from any ref but `main`, and the jobs after it are skipped.
 2. **`build`** has `contents: read`, and no OIDC token or environment. It refuses a `version` input that isn't the version in `apps/runner/package.json`, or isn't `0.0.x-test.N`. Then it runs `npm ci --ignore-scripts`, the typecheck, the tests, the build and `npm pack --dry-run`. It packs the `.tgz`, prints its SHA-256, passes the file name and SHA-256 on as job outputs, and uploads the `.tgz` as an artifact kept 7 days.
-3. **`publish`**, only with `dry_run` off and on `main`, runs in the `npm-test-prerelease` environment, with `contents: read` and `id-token: write`. It checks out nothing and runs no dependency code. It installs npm 11.21.2, downloads the artifact, checks the `.tgz` against build's SHA-256, then runs `npm publish ./podster-<version>.tgz --provenance --tag test --access public`.
+3. **`publish`**, only with `dry_run` off and on `main`, runs in the `npm-test-prerelease` environment, with `contents: read` and `id-token: write`. It checks out nothing and runs no dependency code. It installs npm 11.21.2, downloads the artifact, checks the `.tgz` against build's SHA-256, then runs `npm stage publish ./podster-<version>.tgz --provenance --tag test --access public`. (Until 2026-11-19 this was `npm publish`; it changed when the trusted publisher was added with staging required.)
 
 The package holds:
 - `build/`;

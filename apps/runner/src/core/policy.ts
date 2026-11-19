@@ -252,7 +252,8 @@ const isTool = (v: unknown): v is Tool => typeof v === "string" && (TOOLS as rea
 
 function isRoot(v: unknown): v is string {
   if (typeof v !== "string" || v.length < 2 || v.length > MAX_ROOT || !v.startsWith("/") || v.endsWith("/")) return false;
-  if (/[\u0000-\u001f\u007f\\]/.test(v)) return false;
+  // A comma, colon or equals sign would be read as a container mount's options (L4 on #459).
+  if (/[\u0000-\u001f\u007f\\,:=]/.test(v)) return false;
   return v.slice(1).split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 

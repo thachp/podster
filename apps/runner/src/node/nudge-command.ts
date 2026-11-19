@@ -7,6 +7,9 @@
  * already counts it as verified, Runner asks Podster to challenge it and answers with the proof (`verifyNudge`). Then
  * the owner, or another admin of the agent's organization, switches the nudge on in Podster for the version shown here.
  *
+ * Polling starts first and never waits for any of this (`alongsidePolling`, the architect's ruling on #473): setup runs
+ * beside the poll loop, and the bell rings only once setup has a registration to check requests against.
+ *
  * Anything that fails here is said in one line and leaves polling as it was: the nudge is only ever a faster way to the
  * same poll. What the owner reads goes to standard output; log lines carry IDs and codes only, never the URL or secret.
  */
@@ -48,6 +51,8 @@ export type OpenNudgeDeps = {
   say: (line: string) => void;
   /** The run's stop: it closes the listener too. */
   signal: AbortSignal;
+  /** The poll loop's bell, already passed to the loop. A new one when left out. */
+  bell?: NudgeBell;
   /** Told the port once listening (tests listen on port 0). */
   onListening?: (port: number) => void;
 };
@@ -58,7 +63,7 @@ const codeOf = (error: unknown) => (error instanceof GatewayError ? error.code :
 
 export async function openNudge(deps: OpenNudgeDeps): Promise<OpenNudge | null> {
   const storage = new RunnerStorage(deps.secrets);
-  const bell = new NudgeBell();
+  const bell = deps.bell ?? new NudgeBell();
   let current: NudgeRegistration | null = null;
   try {
     const held = await storage.getNudge();
@@ -69,7 +74,7 @@ export async function openNudge(deps: OpenNudgeDeps): Promise<OpenNudge | null> 
   const endpoint = new NudgeEndpoint({ registration: () => current, path: new URL(deps.url).pathname, clock: deps.clock, log: deps.log, bell });
   let listener;
   try {
-    listener = await startNudgeListener({ port: deps.listen.port, endpoint, signal: deps.signal });
+    listener = await startNudgeListener({ port: deps.listen.port, endpoint, signal: deps.signal, log: deps.log });
   } catch {
     deps.log("nudge.listen", "failed", { agent: deps.poller.agentId });
     deps.say("Runner couldn't listen on that loopback port, so nudges are off for this run. Polling goes on as before.");
@@ -97,4 +102,23 @@ export async function openNudge(deps: OpenNudgeDeps): Promise<OpenNudge | null> 
     return null;
   }
   return { bell, close: () => listener.close() };
+}
+
+/**
+ * Runs the poll loop and, beside it, the nudge's setup. The loop starts first, with the bell already in hand, so its
+ * first poll never waits for registration or the challenge; the bell rings only once setup succeeds. Setup failing
+ * (it says its own line) leaves the loop as it is. When the loop ends, whatever setup opened is closed.
+ */
+export async function alongsidePolling<T>(loop: (bell: NudgeBell | undefined) => Promise<T>, setUp: ((bell: NudgeBell) => Promise<OpenNudge | null>) | null): Promise<T> {
+  if (setUp === null) return loop(undefined);
+  const bell = new NudgeBell();
+  const running = loop(bell);
+  const opened = Promise.resolve()
+    .then(() => setUp(bell))
+    .catch(() => null);
+  try {
+    return await running;
+  } finally {
+    await (await opened)?.close();
+  }
 }

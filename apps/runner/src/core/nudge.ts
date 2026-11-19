@@ -219,7 +219,12 @@ export class NudgeEndpoint {
     this.refilledAt = deps.clock.now();
   }
 
-  private log(outcome: string, code?: string, ids: { workspace?: string; task?: string } = {}) {
+  /** How many keys the replay memory holds now, for tests. */
+  get remembered(): number {
+    return this.seen.size;
+  }
+
+  private log(outcome: string, code?: string, ids: { workspace?: string; task?: string; attempt_id?: string } = {}) {
     this.deps.log("nudge.request", outcome, { ...ids, ...(code ? { code } : {}) });
   }
 
@@ -294,7 +299,7 @@ export class NudgeEndpoint {
       return rpc(id, { error: { code: -32602, message: "Not this endpoint's registration." } });
     }
     if (this.seen.has(`challenge:${challenge}`)) {
-      this.remember(`sig:${digest}`);
+      // Refused, and not remembered: a repeat is harmless, and remembering it could fill the memory.
       this.log("refused", "replayed");
       return rpc(id, { error: { code: -32602, message: "This challenge was answered already." } });
     }
@@ -324,11 +329,12 @@ export class NudgeEndpoint {
       this.log("refused", "wrong_kind");
       return rpc(id, { error: { code: -32602, message: "Only a Podster nudge is taken here." } });
     }
-    const ids = { workspace: data.workspace_id as string, task: data.task_id as string };
+    // The attempt's ID ties this line to Podster's own audit of the nudge (R-18).
+    const ids = { workspace: data.workspace_id as string, task: data.task_id as string, attempt_id: data.attempt_id as string };
     const taken = { result: { message: { messageId: crypto.randomUUID(), role: "ROLE_AGENT", parts: [{ text: "Nudged. Runner checks its inbox." }] } } };
     if (this.seen.has(`attempt:${data.attempt_id}`)) {
-      // Podster's retry of an attempt already taken: answered, so it stops retrying, and nothing more is rung.
-      this.remember(`sig:${digest}`);
+      // Podster's retry of an attempt already taken: answered, so it stops retrying, and nothing more is rung. Not
+      // remembered: answering it again is harmless, and remembering it could fill the memory.
       this.log("duplicate", undefined, ids);
       return rpc(id, taken);
     }

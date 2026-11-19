@@ -4,6 +4,8 @@
 // Signatures and proofs here are made with node:crypto, never with Runner's own code.
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import type { Server } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   checkNudgeUrl,
@@ -22,7 +24,8 @@ import { pair } from "../src/core/pairing.js";
 import { Poller, type PollerDeps } from "../src/core/poller.js";
 import { MemoryStateStore } from "../src/core/state.js";
 import { MemorySecretStore, RunnerStorage } from "../src/core/storage.js";
-import { openNudge, nudgeOptions } from "../src/node/nudge-command.js";
+import { logLine } from "../src/core/runtime.js";
+import { alongsidePolling, openNudge, nudgeOptions } from "../src/node/nudge-command.js";
 import { parseListen, startNudgeListener } from "../src/node/nudge-listener.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock } from "./fake-gateway.js";
 
@@ -188,6 +191,48 @@ describe("the nudge endpoint", () => {
     expect((await h.post(nudgeBody("att_more"))).status).toBe(200);
   });
 
+  it("never grows its memory past the bound for retried attempts or challenges, and answers them (review 1)", async () => {
+    const h = harness();
+    for (let i = 0; i < SEEN_LIMIT / 2; i++) {
+      h.clock.at += 1_000;
+      expect((await h.post(nudgeBody(`att_${i}`))).status).toBe(200);
+    }
+    expect(h.endpoint.remembered).toBe(SEEN_LIMIT);
+    // Podster's retries of attempts already taken, each freshly signed: answered, nothing rung, nothing remembered.
+    const rings = h.rings();
+    for (let i = 0; i < 20; i++) {
+      h.clock.at += 1_000;
+      const res = await h.post(nudgeBody(`att_${i}`));
+      expect([i, res.status]).toEqual([i, 200]);
+      expect(((await res.json()) as { result?: unknown }).result).toEqual(expect.any(Object));
+    }
+    expect(h.endpoint.remembered).toBe(SEEN_LIMIT);
+    expect(h.rings()).toBe(rings);
+  });
+
+  it("refuses a challenge for another version, and sends no proof for either (review 4)", async () => {
+    const h = harness();
+    for (const version of [2, 4]) {
+      const res = await h.post(verifyBody({ version }));
+      const text = await res.text();
+      const answer = JSON.parse(text) as Record<string, unknown>;
+      expect(answer.result).toBeUndefined();
+      expect(answer.error).toMatchObject({ code: -32602 });
+      for (const v of [2, 3, 4]) expect(text).not.toContain(expectedProof(SECRET, AGENT, v, CHALLENGE));
+    }
+    expect(h.lines.filter((line) => line.includes('"code":"wrong_registration"'))).toHaveLength(2);
+  });
+
+  it("logs the attempt's ID on the nudged line, for the audit beside Podster's (R-18; review 5)", async () => {
+    const h = harness();
+    await h.post(nudgeBody("att_audit"));
+    const nudged = h.lines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.outcome === "nudged");
+    expect(nudged).toMatchObject({ at: "nudge.request", workspace: ROOM, task: "tsk_one", attempt_id: "att_audit" });
+    // The same ID check as every logged field.
+    expect(JSON.parse(logLine("nudge.request", "nudged", { attempt_id: "att ok?" }))).not.toHaveProperty("attempt_id");
+    expect(JSON.parse(logLine("nudge.request", "nudged", { attempt_id: "att_ok-1" }))).toMatchObject({ attempt_id: "att_ok-1" });
+  });
+
   it("refuses an oversized body, declared or streamed, without reading past the bound", async () => {
     const h = harness();
     const big = nudgeBody("att_big", { padding: "x".repeat(MAX_NUDGE_BODY_BYTES) });
@@ -285,6 +330,31 @@ describe("the bell", () => {
     clock.idles = [];
     await bell.idle(clock, 30_000, stop.signal);
     expect(clock.idles).toEqual([NUDGE_GAP_MS, 30_000 - NUDGE_GAP_MS]);
+  });
+
+  it("still waits the whole gap when rung partway into it (review 3)", async () => {
+    // A clock that moves in 1 s steps, so a ring can land about 1 s into the gap.
+    const clock = new TestClock();
+    const bell = new NudgeBell();
+    const stop = new AbortController();
+    const start = clock.now();
+    let rang = false;
+    const stepping = {
+      now: () => clock.now(),
+      idle: async (ms: number, signal?: AbortSignal) => {
+        for (let left = ms; left > 0 && !signal?.aborted; left -= 1_000) {
+          await clock.idle(Math.min(1_000, left), signal);
+          if (!rang && clock.now() - start >= 1_000) {
+            rang = true;
+            bell.ring();
+          }
+        }
+      },
+    };
+    await bell.idle(stepping, 30_000, stop.signal);
+    expect(rang).toBe(true);
+    expect(clock.now() - start).toBeGreaterThanOrEqual(NUDGE_GAP_MS);
+    expect(clock.now() - start).toBe(NUDGE_GAP_MS);
   });
 
   it("ends a wait early when rung during it, with a real clock", async () => {
@@ -392,6 +462,65 @@ describe("a nudge in the poll loop", () => {
 });
 
 describe("the listener", () => {
+  it("survives a server error after it starts listening: logs a code and closes, and nothing reaches the process (review 2)", async () => {
+    const h = harness();
+    const stop = new AbortController();
+    let server: Server | null = null;
+    const lines: string[] = [];
+    const listener = await startNudgeListener({ port: 0, endpoint: h.endpoint, signal: stop.signal, log: (at, outcome, fields) => void lines.push(JSON.stringify({ at, outcome, ...fields })), onServer: (s) => void (server = s) });
+    const error = Object.assign(new Error("accept EMFILE"), { code: "EMFILE" });
+    expect(() => server!.emit("error", error)).not.toThrow();
+    await listener.closed;
+    expect(lines).toEqual([JSON.stringify({ at: "nudge.listen", outcome: "server_error", code: "emfile" })]);
+    await expect(fetch(`http://127.0.0.1:${listener.port}${PATH}`, { method: "POST", body: "x" })).rejects.toThrow();
+  });
+
+  it("buffers no more than about the bound however much is sent, and cuts the connection (review 6)", async () => {
+    // A greedy reader in place of the endpoint: it reads everything it's given, so what it gets is what was buffered.
+    let received = 0;
+    let errored = false;
+    const greedy = {
+      handle: async (request: Request) => {
+        const reader = (request.body as ReadableStream<Uint8Array>).getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            received += value.byteLength;
+          }
+        } catch {
+          errored = true;
+        }
+        return new Response(null, { status: 413 });
+      },
+    };
+    const stop = new AbortController();
+    const listener = await startNudgeListener({ port: 0, endpoint: greedy, signal: stop.signal });
+    const total = 1024 * 1024;
+    const outcome = await new Promise<string>((resolve) => {
+      const req = httpRequest({ host: "127.0.0.1", port: listener.port, path: PATH, method: "POST", headers: { "content-type": "application/json" } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(`status ${res.statusCode}`));
+      });
+      req.on("error", () => resolve("cut"));
+      let sent = 0;
+      const pump = () => {
+        while (sent < total) {
+          sent += 16 * 1024;
+          if (!req.write(Buffer.alloc(16 * 1024, 0x20))) return void req.once("drain", pump);
+        }
+        req.end();
+      };
+      pump();
+    });
+    expect(errored).toBe(true);
+    expect(received).toBeLessThanOrEqual(MAX_NUDGE_BODY_BYTES + 64 * 1024);
+    expect(received).toBeLessThan(total);
+    expect(outcome === "cut" || outcome === "status 413").toBe(true);
+    stop.abort();
+    await listener.closed;
+  });
+
   it("parses only a port or the loopback address with a port", () => {
     expect(parseListen("8787")).toEqual({ port: 8787 });
     expect(parseListen("127.0.0.1:8787")).toEqual({ port: 8787 });
@@ -431,8 +560,8 @@ describe("registration and verify, against the stand-in gateway", () => {
       const url = new URL(request.url);
       return fetch(`http://127.0.0.1:${port}${url.pathname}`, { method: "POST", headers: request.headers, body: request.body, duplex: "half" } as RequestInit);
     };
-    const open = () =>
-      openNudge({ listen: { port: 0 }, url: URL_, poller, secrets: env.secrets, clock: env.clock, log: env.deps.log, say: (line) => void said.push(line), signal: stop.signal, onListening: (p) => void (port = p) });
+    const open = (bell?: NudgeBell) =>
+      openNudge({ listen: { port: 0 }, url: URL_, poller, secrets: env.secrets, clock: env.clock, log: env.deps.log, say: (line) => void said.push(line), signal: stop.signal, ...(bell ? { bell } : {}), onListening: (p) => void (port = p) });
     return { ...env, poller, said, stop, open };
   }
 
@@ -501,6 +630,54 @@ describe("registration and verify, against the stand-in gateway", () => {
     expect(t.gateway.endpoint?.control).toBe("unverified");
     expect(t.said.join("\n")).toMatch(/couldn't prove/i);
     await unproved?.close();
+  });
+
+  it("starts polling before the nudge's setup finishes, and attaches the bell once it does (ruling, review 7)", async () => {
+    const s = await setUp();
+    const order: string[] = [];
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    s.gateway.onCall = async (capability) => {
+      order.push(capability);
+      // Registration waits until a poll has read the inbox: if polling waited for setup, this would never finish.
+      if (capability === "set_a2a_endpoint") await held;
+      if (capability === "read_inbox") release();
+    };
+    let reads = 0;
+    const outcome = await alongsidePolling(
+      async (bell) => {
+        // The loop stops once the setup is through and one more poll has run.
+        const stop = new AbortController();
+        s.clock.onIdle = async () => {
+          reads = order.filter((c) => c === "read_inbox").length;
+          if (s.gateway.challenges.length === 1 && reads >= 2) stop.abort();
+          // Lets the listener's real I/O run between polls.
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        };
+        return s.poller.run(stop.signal, bell);
+      },
+      (bell) => s.open(bell),
+    );
+    expect(outcome).toBe("stopped");
+    expect(order.indexOf("read_inbox")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("read_inbox")).toBeLessThan(order.indexOf("verify_a2a_endpoint"));
+    expect(s.gateway.endpoint?.control).toBe("verified");
+  });
+
+  it("goes on polling when setup fails, with one line said (review 7)", async () => {
+    const said: string[] = [];
+    let polled = false;
+    const outcome = await alongsidePolling(
+      async () => {
+        polled = true;
+        return "stopped" as const;
+      },
+      async () => {
+        said.push("Runner couldn't register its nudge endpoint with Podster, so nudges are off for this run. Polling goes on as before.");
+        throw new Error("setup failed");
+      },
+    );
+    expect([outcome, polled, said.length]).toEqual(["stopped", true, 1]);
   });
 
   it("is off unless both options are given, and refuses a bad address or URL before anything is touched", () => {

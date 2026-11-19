@@ -6,17 +6,20 @@
  *   owner's public HTTPS address (decision 236), through a reverse proxy or tunnel the owner runs on this machine, which
  *   terminates TLS and forwards to this port with the path unchanged. Runner opens nothing to the network itself.
  * - **Bounded:** headers within 5 s and the whole request within 10 s, small headers, few connections, and every answer
- *   closes its connection. The body is read only by `NudgeEndpoint`, which rate-limits before it reads and reads no
- *   more than `MAX_NUDGE_BODY_BYTES`.
+ *   closes its connection. The body is read only when `NudgeEndpoint` asks for it, after its rate check, one chunk at a
+ *   time straight from the request, with each request's own buffer held to `MAX_NUDGE_BODY_BYTES`. The moment the count
+ *   passes that, the socket is destroyed, so no more is buffered whatever the client sends.
+ * - **A server error after it starts** (EMFILE, say) is logged as a code and closes the listener. It never reaches the
+ *   process's uncaught-exception handler, so polling goes on.
  * - **Nothing but the endpoint:** each request goes to `NudgeEndpoint.handle` as a Web `Request`, and its answer back.
  *   It can only ring the poll loop's bell.
  * - **Closed on stop:** the run's signal, or `close()`, closes the server and every connection.
  *
  * Logs carry codes only, never a body, a header or an address.
  */
-import { createServer, type IncomingMessage } from "node:http";
-import { Readable } from "node:stream";
-import type { NudgeEndpoint } from "../core/nudge.js";
+import { createServer, type IncomingMessage, type Server } from "node:http";
+import { MAX_NUDGE_BODY_BYTES, type NudgeEndpoint } from "../core/nudge.js";
+import type { Logger } from "../core/runtime.js";
 
 export type NudgeListener = { port: number; close(): Promise<void>; closed: Promise<void> };
 
@@ -34,6 +37,37 @@ export function parseListen(value: string): { port: number } {
   return { port };
 }
 
+/**
+ * The request's body as a stream that reads `req` only when pulled, one chunk at a time, counting bytes, and destroys the
+ * socket the moment the count passes `max`. Not `Readable.toWeb`, whose own buffering isn't bounded by this count.
+ */
+function boundedBody(req: IncomingMessage, max: number): ReadableStream<Uint8Array> {
+  const chunks = req[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+  let total = 0;
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const { done, value } = await chunks.next();
+          if (done) return controller.close();
+          total += value.byteLength;
+          if (total > max) {
+            req.socket.destroy();
+            return controller.error(new Error("too_large"));
+          }
+          controller.enqueue(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+        } catch {
+          controller.error(new Error("unreadable"));
+        }
+      },
+      cancel() {
+        req.socket.destroy();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
 function requestOf(req: IncomingMessage, port: number): Request {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
@@ -42,16 +76,25 @@ function requestOf(req: IncomingMessage, port: number): Request {
   }
   const method = req.method ?? "GET";
   const target = (req.url ?? "/").startsWith("/") ? (req.url ?? "/") : "/";
-  const body = method === "GET" || method === "HEAD" ? undefined : (Readable.toWeb(req) as unknown as ReadableStream<Uint8Array>);
+  const body = method === "GET" || method === "HEAD" ? undefined : boundedBody(req, MAX_NUDGE_BODY_BYTES);
   return new Request(`http://127.0.0.1:${port}${target}`, { method, headers, body, duplex: "half" } as RequestInit);
 }
 
-export async function startNudgeListener(deps: { port: number; endpoint: NudgeEndpoint; signal: AbortSignal }): Promise<NudgeListener> {
+export type NudgeListenerDeps = {
+  port: number;
+  endpoint: Pick<NudgeEndpoint, "handle">;
+  signal: AbortSignal;
+  log?: Logger;
+  /** For tests: the server, once listening. */
+  onServer?: (server: Server) => void;
+};
+
+export async function startNudgeListener(deps: NudgeListenerDeps): Promise<NudgeListener> {
   let port = 0;
   let closing: Promise<void> | null = null;
   let opened: () => void = () => undefined;
   const closed = new Promise<void>((resolve) => (opened = resolve));
-  const server = createServer({ headersTimeout: 5_000, requestTimeout: 10_000, connectionsCheckingInterval: 1_000, maxHeaderSize: 8 * 1024, keepAliveTimeout: 1_000 }, (req, res) => {
+  const server = createServer({ highWaterMark: MAX_NUDGE_BODY_BYTES, headersTimeout: 5_000, requestTimeout: 10_000, connectionsCheckingInterval: 1_000, maxHeaderSize: 8 * 1024, keepAliveTimeout: 1_000 }, (req, res) => {
     const finish = (status: number, headers: Record<string, string>, body: Uint8Array) => {
       if (res.headersSent) return void res.destroy();
       res.writeHead(status, { ...headers, connection: "close" });
@@ -86,6 +129,12 @@ export async function startNudgeListener(deps: { port: number; endpoint: NudgeEn
     throw new Error("listener_not_loopback");
   }
   port = address.port;
+  // From here on, an error is the listener's end, never the process's (review 2 on #473).
+  server.on("error", (error: NodeJS.ErrnoException) => {
+    const code = typeof error?.code === "string" && /^E[A-Z]{1,30}$/.test(error.code) ? error.code.toLowerCase() : "unknown";
+    deps.log?.("nudge.listen", "server_error", { code });
+    void close();
+  });
   const close = () => {
     closing ??= new Promise<void>((resolve) => {
       server.close(() => resolve());
@@ -95,5 +144,6 @@ export async function startNudgeListener(deps: { port: number; endpoint: NudgeEn
   };
   if (deps.signal.aborted) await close();
   else deps.signal.addEventListener("abort", () => void close(), { once: true });
+  deps.onServer?.(server);
   return { port, close, closed };
 }

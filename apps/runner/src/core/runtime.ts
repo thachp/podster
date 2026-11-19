@@ -33,6 +33,8 @@ export type LogFields = {
   plugin_agent?: string;
   workspace?: string;
   task?: string;
+  /** An A2A attempt's ID, from a nudge (M7 step 14), so Runner's log lines up with Podster's audit. */
+  attempt_id?: string;
   seq?: number;
   count?: number;
   status?: number;
@@ -44,7 +46,7 @@ const NAME = /^[a-z][a-z0-9_.]{0,63}$/;
 const ID_VALUE = /^[A-Za-z0-9_-]{1,128}$/;
 const CODE_VALUE = /^[a-z][a-z0-9_]{0,63}$/;
 const NUMBER_FIELDS = new Set(["seq", "count", "status"]);
-const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task"]);
+const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id"]);
 
 /** The line a logger writes, with everything that isn't allowed dropped. */
 export function logLine(at: string, outcome: string, fields: LogFields = {}): string {

@@ -41,7 +41,7 @@ import { chooseKeyStore } from "./key-store.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
 import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
-import { nudgeOptions, openNudge, type OpenNudge } from "./nudge-command.js";
+import { alongsidePolling, nudgeOptions, openNudge } from "./nudge-command.js";
 import { processTerminal, runInbox } from "./run-command.js";
 
 const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through the Claude Agent SDK)
@@ -229,13 +229,20 @@ async function locked(command: string, args: string[], home: string, state: File
     say(nudging === null ? `Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C or \`stop\`.` : `Polling every ${poller.intervalMs / 1000} seconds. Stop with Ctrl-C or \`stop\`.`);
     if (engine === null) say("No provider key file was given, so this Runner records offers and accepts none.");
     let outcome;
-    let nudge: OpenNudge | null = null;
     try {
-      if (nudging !== null) nudge = await openNudge({ ...nudging, poller, secrets: keys.store, clock: systemClock, log, say, signal: stop.signal });
-      outcome = await runInbox({ home, poller, clock: systemClock, log, signal: stop.signal, terminal: processTerminal(), engine, ...(nudge ? { bell: nudge.bell } : {}) });
+      // Polling starts first; the nudge's setup, if the owner asked for it, runs beside it (the ruling on #473).
+      outcome = await alongsidePolling(
+        async (bell) => {
+          try {
+            return await runInbox({ home, poller, clock: systemClock, log, signal: stop.signal, terminal: processTerminal(), engine, ...(bell ? { bell } : {}) });
+          } finally {
+            // Shutdown closes the nudge endpoint at once (R-15), even while its setup is still waiting on Podster.
+            stop.abort();
+          }
+        },
+        nudging === null ? null : (bell) => openNudge({ ...nudging, poller, secrets: keys.store, clock: systemClock, log, say, signal: stop.signal, bell }),
+      );
     } finally {
-      // Shutdown closes the nudge endpoint before anything else (R-15).
-      await nudge?.close();
       unwatch();
       await clearStop(home);
     }

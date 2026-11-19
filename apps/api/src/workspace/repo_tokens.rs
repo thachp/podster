@@ -27,7 +27,7 @@
 //! `repo_not_ready`; a read that couldn't be made refuses `provider_unavailable` and changes nothing. Either way the
 //! lease goes and nothing is minted. A held token with time left is returned without any of this, so it reads nothing.
 //! The read has a deadline inside the lease, and past it counts as unread. After a read that passed, the mint goes on
-//! only while the lease is still this call's with `MINT_LEASE_MARGIN_MS` left (`core::lease_left_for_mint`), so a
+//! only while the lease is still this call's with [`MINT_LEASE_MARGIN_MS`] left (`core::lease_left_for_mint`), so a
 //! lease taken as abandoned during a slow read never leads to a second live token. A read-back that passed may stand
 //! for the same repository's next mint for `READ_BACK_REUSE_MS` (proposed), kept in the object's durable storage and
 //! stamped with the link's `updated_at`: a degrade, a link made ready again, or any read that isn't exactly right ends
@@ -46,7 +46,7 @@ use podster_core::provisioning::RecheckRead;
 use podster_core::repo_access::{
     decide_access, decide_mint_recheck, lease_left_for_mint, mint_needs_recheck,
     minted_token_matches, read_back_reusable, AccessCheck, AccessRefusal, Budget, Deadline,
-    HeldToken, LeaseLeft, MintBlock, ReadBack, TokenPermissions,
+    HeldToken, LeaseLeft, MintBlock, ReadBack, TokenPermissions, MINT_LEASE_MARGIN_MS,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
@@ -69,12 +69,15 @@ pub(super) const MINTS_PER_ROOM_HOUR: i64 = 60;
 const HOUR_MS: i64 = 3_600_000;
 /// How long a lease holds. The read-back before a mint is up to 12 calls at 10 seconds each (a provisioning token, the
 /// repository's reads, a presence check and its token, and the revocations), so it's cut off at
-/// [`RECHECK_DEADLINE_MS`] and counts as unread. The mint after it needs `MINT_LEASE_MARGIN_MS` still left: signing
+/// [`RECHECK_DEADLINE_MS`] and counts as unread. The mint after it needs [`MINT_LEASE_MARGIN_MS`] still left: signing
 /// the App's JWT and the mint's one call.
 const LEASE_MS: i64 = 2 * 60_000;
 /// How long the read-back before a mint may take in all: the lease less 20 seconds, which leaves the margin the mint
 /// needs and 5 seconds over.
 const RECHECK_DEADLINE_MS: i64 = LEASE_MS - 20_000;
+// A read cut off at its deadline still leaves the mint its margin inside the lease. Changing any of the three values
+// can't break that silently.
+const _: () = assert!(RECHECK_DEADLINE_MS + MINT_LEASE_MARGIN_MS < LEASE_MS);
 /// The key in the room's durable storage holding the read-back a mint may reuse, for one repository. No schema step.
 fn read_back_key(repo_id: i64) -> String {
     format!("repo_token_read_back:{repo_id}")
@@ -944,6 +947,8 @@ impl Workspace {
         } else {
             #[cfg(feature = "failpoints")]
             let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
+            // The kept read's minute counts from before the read starts, so a slow read never stands longer.
+            let started = now_ms();
             let deadline = Delay::from(std::time::Duration::from_millis(
                 recheck_deadline_ms(sql).max(0) as u64,
             ));
@@ -960,7 +965,7 @@ impl Workspace {
                 }
             };
             if read == RecheckRead::ExactlyRight {
-                let kept = json!({ "repo_id": lease.repo_id, "at": now_ms(), "link_stamp": lease.link_stamp });
+                let kept = json!({ "repo_id": lease.repo_id, "at": started, "link_stamp": lease.link_stamp });
                 if self.state.storage().put(&key, kept).await.is_err() {
                     console_error!(
                         "{}",

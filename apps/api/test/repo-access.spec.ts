@@ -491,9 +491,11 @@ describe("reading the repository back before a new token", () => {
   /** Moves the read-back a mint may reuse a minute and a moment into the past, as time passing would. */
   const aMinuteOn = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => {
     const key = `repo_token_read_back:${REPO_ID}`;
+    // Kept as the Worker wrote it: a map of the read's repository, time and the link's stamp.
     const kept = await state.storage.get(key);
-    expect(kept).toBeTruthy();
-    await state.storage.put(key, { ...kept, at: kept.at - 61_000 });
+    expect(kept).toBeInstanceOf(Map);
+    expect(typeof kept.get("at")).toBe("number");
+    await state.storage.put(key, new Map([...kept, ["at", kept.get("at") - 61_000]]));
   });
 
   it("reads the default branch's rules and bypass list back, then mints", async () => {
@@ -643,6 +645,22 @@ describe("the read-back's time and cost", () => {
       expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_token WHERE state = 'minting'").one().n), name).toBe(0);
       expect(await unknownLeases(r.id), name).toBe(unknown);
     }
+  });
+
+  it("counts a kept read-back's minute from when the read started, not when it finished", async () => {
+    const r = await room();
+    await ready({ script: { gate: true } });
+    const pending = access(AGENT, r.id, r.task);
+    await readHeld();
+    // The read is under way. Anything stamped after it finishes is later than this.
+    const during = Date.now();
+    await inRoom(r.id, (sql) => sql.exec("SELECT 1"));
+    await letReadGo();
+    const got = await pending;
+    expect(got.status, got.text).toBe(200);
+    const kept = (await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.get(`repo_token_read_back:${REPO_ID}`))) as Map<string, number>;
+    expect(typeof kept.get("at")).toBe("number");
+    expect(kept.get("at")).toBeLessThanOrEqual(during);
   });
 
   it("reuses a read-back that passed within the minute for the next mint, and reads again after a degrade", async () => {

@@ -55,6 +55,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
     runs: new FileRunStore(deps.home),
     config: policyFile(deps.home),
     adapter,
+    home: deps.home,
     ...(repository ? { repository } : {}),
     prompter: new TerminalPrompter(deps.terminal),
     clock: deps.clock,

@@ -3,7 +3,7 @@
 // and host Git that reads nothing from the task's folder (L2/L3 on #459; #461's finding). Git runs for real here only on
 // this machine's folders: the fetch and push are pointed at a local bare repository, and GitHub's API is a fake.
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath as realpathOf, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -99,6 +99,18 @@ describe("the owner's repository scope in the run policy (L4 on #455)", () => {
   });
 });
 
+describe("Runner's home and the workspace root never overlap (ruling 4 on #462)", () => {
+  const HOME = "/Users/owner/.podster-runner";
+  it("refuses the whole configuration when either holds the other, checked both ways", () => {
+    for (const root of [`${HOME}/git`, HOME, `${HOME}/work`, "/Users/owner", "/Users"]) {
+      expect([root, parsePolicyConfig(config(SCOPE, { workspace_root: root }), { runner_home: HOME }).ok]).toEqual([root, false]);
+      expect(evaluate({ config: config(SCOPE, { workspace_root: root }), runner_home: HOME, provenance: PROVENANCE, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: { id: TASK, workspace_id: ROOM }, authority_fresh: true, budget: { spent_today_micro_usd: 0, reserved_micro_usd: 0 }, now: NOW })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
+    }
+    for (const root of ["/Users/owner/podster-runner/work", `${HOME}-work`, "/Users/owner/.podster"]) expect([root, parsePolicyConfig(config(SCOPE, { workspace_root: root }), { runner_home: HOME }).ok]).toEqual([root, true]);
+    expect(parsePolicyConfig(config(SCOPE, { workspace_root: `${HOME}/git` }), { runner_home: "relative/home" }).ok).toBe(false);
+  });
+});
+
 describe("a decision bound to the repository and a pinned base", () => {
   it("is issued naming the scoped repository and no base, and nothing else", () => {
     expect(issueRunDecision(decide(), BINDING, NOW)).toMatchObject({ ok: true, record: { repository_id: "9001", base_commit: null } });
@@ -117,6 +129,8 @@ describe("a decision bound to the repository and a pinned base", () => {
     if (!pinned.ok) throw new Error("not pinned");
     expect(pinned.record.base_commit).toBe(BASE);
     expect(pinRunBase(pinned.record, "c".repeat(40), NOW + 2)).toEqual({ ok: false, reason: "already_pinned" });
+    // A restart between the pin and the consume checks out the same commit again: accepted as already pinned (ruling 6).
+    expect(pinRunBase(pinned.record, BASE, NOW + 2)).toEqual({ ok: true, record: pinned.record });
     expect(consumeRunDecision(pinned.record, decide(), { ...BINDING, base_commit: "c".repeat(40) }, NOW + 2)).toEqual({ ok: false, reason: "binding_changed" });
     expect(consumeRunDecision(pinned.record, decide(), { ...BINDING, repository_id: "9002", base_commit: BASE }, NOW + 2)).toEqual({ ok: false, reason: "binding_changed" });
     // The owner rescoped the room after the decision: its facts changed.
@@ -241,7 +255,12 @@ describe("the credential helper", () => {
       const child = spawn(HELPER_PATH, [action], { stdio: ["pipe", "pipe", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" } });
       let out = "";
       child.stdout?.on("data", (c) => (out += c));
-      (child.stdio[3] as NodeJS.WritableStream).end(`${token}\n`);
+      // The helper may exit without reading either, as it should for anything but GitHub: a write it never reads is
+      // reset, as in `git.ts`, and that is no failure here.
+      const fd3 = child.stdio[3] as NodeJS.WritableStream & { on(event: "error", fn: () => void): void };
+      fd3.on("error", () => undefined);
+      child.stdin?.on("error", () => undefined);
+      fd3.end(`${token}\n`);
       child.stdin?.end(input);
       child.on("close", () => resolve(out));
     });
@@ -269,9 +288,20 @@ describe("the credential helper", () => {
 describe("Git as Runner runs it", () => {
   it("never inherits Git's or a secret's variables, and reads no system or global configuration", () => {
     const env = gitEnv("/h/git-home", { PATH: "/usr/bin", HOME: "/Users/owner", GIT_DIR: "/evil", GIT_CONFIG_PARAMETERS: "'core.fsmonitor=x'", GH_TOKEN: TOKEN, GIT_SSL_NO_VERIFY: "1", HTTPS_PROXY: "http://proxy" });
-    expect(env).toMatchObject({ HOME: "/h/git-home", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
+    expect(env).toMatchObject({ HOME: "/h/git-home", PATH: "/usr/bin:/bin", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" });
     for (const name of ["GIT_DIR", "GIT_CONFIG_PARAMETERS", "GH_TOKEN", "GIT_SSL_NO_VERIFY", "HTTPS_PROXY"]) expect(env).not.toHaveProperty(name);
     expect(JSON.stringify(env)).not.toContain(TOKEN);
+  });
+
+  it("runs Git with its own empty home as the working folder, never the task's folder", async () => {
+    const dir = await temp();
+    const fake = join(dir, "git");
+    await writeFile(fake, `#!/bin/sh\npwd\n`);
+    await chmod(fake, 0o700);
+    const home = join(dir, "git-home");
+    await mkdir(home);
+    const answer = await gitCli(fake, home, { PATH: "/opt/evil/bin:/usr/bin" })([], {});
+    expect(await realpathOf(answer.stdout.trim())).toBe(await realpathOf(home));
   });
 
   it("hands the token to the child's descriptor 3 only: never an argument or the environment", async () => {
@@ -281,10 +311,10 @@ describe("Git as Runner runs it", () => {
     await writeFile(fake, `#!/bin/sh\nprintf 'args=%s\\n' "$*"\nenv | sed 's/^/env=/'\nIFS= read -r t <&3 && printf 'fd3=%s\\n' "$t"\nexit 0\n`);
     await chmod(fake, 0o700);
     const git = gitCli(fake, dir, { PATH: "/usr/bin:/bin" });
-    const withSecret = await git(["fetch", "https://github.com/podsterdev/todo-app.git"], { cwd: dir, secret: TOKEN });
+    const withSecret = await git(["fetch", "https://github.com/podsterdev/todo-app.git"], { secret: TOKEN });
     expect(withSecret.stdout).toContain(`fd3=${TOKEN}`);
     expect(withSecret.stdout.split("\n").filter((l) => !l.startsWith("fd3=")).join("\n")).not.toContain(TOKEN);
-    const without = await git(["status"], { cwd: dir });
+    const without = await git(["status"], {});
     expect(without.stdout).not.toContain("fd3=");
   });
 });
@@ -310,7 +340,7 @@ async function world() {
   const workRoot = join(root, "work");
   const taskFolder = join(workRoot, ROOM, TASK);
   const calls: { method: string; path: string }[] = [];
-  const api = { rules: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] as unknown, repoId: 9001, pullStatus: 201, revoked: false };
+  const api = { rules: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] as unknown, repoId: 9001, pullStatus: 201, revoked: false, lag: 0 };
   const github: GitHubCall = async (request, token) => {
     calls.push({ method: request.method, path: request.path });
     expect(token).toBe(TOKEN);
@@ -324,7 +354,10 @@ async function world() {
       const sha = head(ref[1]);
       return sha ? { status: 200, body: { ref: `refs/heads/${ref[1]}`, object: { type: "commit", sha } } } : { status: 404, body: null };
     }
-    const pr = { number: 12, state: "open", draft: false, head: { ref: "podster/task_1", sha: head("podster/task_1"), repo: { id: 9001 } }, base: { ref: "main", repo: { id: 9001 } } };
+    // GitHub's pull request can show the head it had before the push for a moment: `lag` reads answer the old one.
+    const lagging = api.lag > 0;
+    if (lagging && (p.includes("/pulls"))) api.lag--;
+    const pr = { number: 12, state: "open", draft: false, head: { ref: "podster/task_1", sha: lagging ? "0".repeat(40) : head("podster/task_1"), repo: { id: 9001 } }, base: { ref: "main", repo: { id: 9001 } } };
     if (p === "/repos/podsterdev/todo-app/pulls" && request.method === "POST") return { status: api.pullStatus, body: api.pullStatus === 201 ? pr : { message: "exists" } };
     if (p.startsWith("/repos/podsterdev/todo-app/pulls?")) return { status: 200, body: [pr] };
     return { status: 404, body: null };
@@ -334,9 +367,17 @@ async function world() {
   await mkdir(gitHome, { mode: 0o700 });
   const real = gitCli(realGit as string, gitHome, { PATH: "/usr/bin:/bin" });
   const gitCalls: { args: string[]; secret: boolean }[] = [];
-  const git: GitExec = (args, opts) => {
+  /** What the next push answers instead of pushing, as Git prints a refused credential. */
+  const fakes: { push: { code: number; stdout: string; stderr: string } | null; extraCommit: boolean } = { push: null, extraCommit: false };
+  const git: GitExec = async (args, opts) => {
     gitCalls.push({ args, secret: opts.secret !== undefined });
     expect(args.join(" ")).not.toContain(TOKEN);
+    if (args.includes("push") && fakes.push) return fakes.push;
+    if (args.includes("commit") && fakes.extraCommit) {
+      // Something other than Runner's one commit lands first: what the `HEAD^` check is there for.
+      fakes.extraCommit = false;
+      await real([...args.slice(0, args.indexOf("commit")), "commit", "--quiet", "--allow-empty", "--only", "-m", "extra"], opts);
+    }
     const swapped = args.map((a) => (a === cloneUrl(SCOPE.full_name) ? remote : a));
     const network = swapped.includes(remote);
     return real(network ? ["-c", "protocol.file.allow=always", ...swapped] : swapped, opts);
@@ -350,9 +391,9 @@ async function world() {
   const logged: string[] = [];
   const clock = { now: () => NOW, idle: async () => undefined };
   const broker = new RepoBroker(request, clock, lineLogger((l) => logged.push(l)));
-  const path = new GitRepositoryPath({ home, broker, git, github, helper: HELPER_PATH, log: lineLogger((l) => logged.push(l)) });
+  const path = new GitRepositoryPath({ home, broker, git, github, helper: HELPER_PATH, log: lineLogger((l) => logged.push(l)), wait: async () => undefined });
   const task = { workspace_id: ROOM, task_id: TASK, task_folder: taskFolder, repository: { ...SCOPE, branch: "podster/task_1" } };
-  return { root, home, remote, seed, taskFolder, calls, api, gitCalls, tokens, logged, broker, path, task, signal: new AbortController().signal, head: (b: string) => sh(remote, "rev-parse", `refs/heads/${b}`) };
+  return { root, home, remote, seed, taskFolder, calls, api, gitCalls, fakes, tokens, logged, broker, path, task, signal: new AbortController().signal, head: (b: string) => sh(remote, "rev-parse", `refs/heads/${b}`) };
 }
 
 describe.skipIf(realGit === null)("the repository path on real Git (no network)", () => {
@@ -501,6 +542,65 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await writeFile(join(w.taskFolder, "y.txt"), "y\n");
     expect(await w.path.publish({ ...w.task, base_commit: base }, w.signal)).toMatchObject({ kind: "published" });
     expect(w.tokens).toEqual(["get_repo_access", "get_repo_access"]);
+  });
+});
+
+describe.skipIf(realGit === null)("the review of #462: Git's own refusals and Runner's one commit", () => {
+  it("reads Git's refused credential on push as a revoked token, and drops it from the broker", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.fakes.push = { code: 128, stdout: "", stderr: "fatal: Authentication failed for 'https://github.com/podsterdev/todo-app.git/'\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "token_revoked" });
+    expect(w.broker.size).toBe(0);
+    expect(w.logged.some((l) => l.includes('"outcome":"revoked"'))).toBe(true);
+    w.fakes.push = { code: 128, stdout: "", stderr: "remote: Permission to podsterdev/todo-app.git denied.\nfatal: unable to access 'https://github.com/podsterdev/todo-app.git/': The requested URL returned error: 403\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "token_revoked" });
+    expect(w.broker.size).toBe(0);
+  });
+
+  it("refuses to push anything but one commit of its own on the pinned base", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.fakes.extraCommit = true;
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "commit_unexpected" });
+    expect(w.gitCalls.some((c) => c.args.includes("push"))).toBe(false);
+  });
+
+  it("refuses a task folder inside Runner's home, or its home inside the workspace root (ruling 4)", async () => {
+    const w = await world();
+    const inside = { ...w.task, task_folder: join(w.home, "git", ROOM, TASK) };
+    await expect(w.path.prepare({ ...inside, continue_from: null }, w.signal)).rejects.toMatchObject({ code: "path_unsafe" });
+    // A workspace root that holds Runner's home: the home sits inside the root.
+    const holding = { ...w.task, task_folder: join(w.root, ROOM, TASK) };
+    await expect(w.path.prepare({ ...holding, continue_from: null }, w.signal)).rejects.toMatchObject({ code: "path_unsafe" });
+    expect(w.gitCalls).toEqual([]);
+  });
+
+  it("retries the pull request read a few times while GitHub's head lags the push (ruling 5)", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.api.lag = 2;
+    expect(await w.path.publish({ ...w.task, base_commit: base }, w.signal)).toMatchObject({ kind: "published", pr_number: 12 });
+    w.api.lag = 100;
+    await writeFile(join(w.taskFolder, "b.txt"), "b\n");
+    const second = await w.path.prepare({ ...w.task, continue_from: w.head("podster/task_1") }, w.signal);
+    await writeFile(join(w.taskFolder, "b.txt"), "b\n");
+    await expect(w.path.publish({ ...w.task, base_commit: second.base_commit }, w.signal)).rejects.toMatchObject({ code: "pull_request_commit_changed", transient: true });
+  });
+
+  it("publishes again after a passing failure without making a second commit", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.fakes.push = { code: 128, stdout: "", stderr: "fatal: unable to access 'https://github.com/podsterdev/todo-app.git/': Could not resolve host: github.com\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "github_unreachable", transient: true });
+    w.fakes.push = null;
+    const again = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (again.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "rev-parse", `${again.commit}^`)).toBe(base);
   });
 });
 

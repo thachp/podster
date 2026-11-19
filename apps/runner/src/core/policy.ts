@@ -184,6 +184,8 @@ export type EvaluateInput = {
   prompt: unknown;
   /** The task, by its IDs. Anything else on it, its text included, is ignored. */
   task: unknown;
+  /** Runner's home, so a configuration whose workspace root overlaps it is refused (ruling 4 on #462). */
+  runner_home?: unknown;
   /** `Poller.authorityFresh()`. Only `true` passes. */
   authority_fresh: unknown;
   /**
@@ -330,9 +332,22 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
 }
 
-/** Checks the owner's configuration whole. Anything missing, unknown or out of range refuses it: fail closed. */
-export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
+/** Whether two plain absolute paths are the same or one holds the other. */
+function overlaps(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * Checks the owner's configuration whole. Anything missing, unknown or out of range refuses it: fail closed.
+ * `runner_home`, when given, is Runner's own home: a workspace root that holds it, or sits inside it, refuses the whole
+ * configuration, so no task folder is ever Runner's home, its Git folders or its keys' neighbours, and Runner's home is
+ * never inside a folder a container mounts (ruling 4 on #462). Runner's command line always gives it.
+ */
+export function parsePolicyConfig(input: unknown, context: { runner_home?: unknown } = {}): Parsed<PolicyConfig> {
   try {
+    const home = copy(context);
+    const runnerHome = isObj(home) && Object.hasOwn(home, "runner_home") ? home.runner_home : undefined;
+    if (runnerHome !== undefined && !isRoot(runnerHome)) return fail("runner_home");
     const raw = copy(input);
     if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"])) return fail("config");
     if (raw.version !== POLICY_VERSION) return fail("version");
@@ -344,6 +359,7 @@ export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
     if (typeof adapter !== "string" || !(ADAPTERS as readonly string[]).includes(adapter)) return fail("adapter");
     const root = raw.workspace_root;
     if (!isRoot(root)) return fail("workspace_root");
+    if (typeof runnerHome === "string" && overlaps(root, runnerHome)) return fail("workspace_root");
     const caps = parseCaps(raw.caps);
     if (!caps.ok) return caps;
     const day = raw.day_caps;
@@ -442,7 +458,7 @@ export function evaluate(input: EvaluateInput): Decision {
 function decide(input: EvaluateInput): Decision {
   const given = copy(input);
   if (!isObj(given)) return { outcome: "refuse", reason: "config_invalid" };
-  const parsed = parsePolicyConfig(own(given, "config"));
+  const parsed = parsePolicyConfig(own(given, "config"), Object.hasOwn(given, "runner_home") ? { runner_home: given.runner_home } : {});
   if (!parsed.ok) return { outcome: "refuse", reason: "config_invalid" };
   const config = parsed.value;
   const now = own(given, "now");
@@ -682,8 +698,8 @@ export function consumeRunDecision(stored: RunDecisionRecord, fresh: Decision, b
 /**
  * Pins the base of an issued, unspent decision for a room with a repository, exactly once: the commit Runner's fresh
  * checkout was verified at, before the decision is consumed against that same checkout (M7 step 10). A decision with no
- * repository, one already pinned, spent or expired, or a base that isn't a commit ID, is refused, so nothing can move a
- * pinned base afterwards.
+ * repository, one pinned to another base, spent or expired, or a base that isn't a commit ID, is refused, so nothing can
+ * move a pinned base afterwards. The same base again answers the record as it is, for a restart between pin and consume.
  */
 export function pinRunBase(stored: RunDecisionRecord, base_commit: string, now: number): { ok: true; record: RunDecisionRecord } | { ok: false; reason: PinRefusal } {
   try {
@@ -693,8 +709,10 @@ export function pinRunBase(stored: RunDecisionRecord, base_commit: string, now: 
     if (record.consumed) return { ok: false, reason: "consumed" };
     if (now > record.expires_at) return { ok: false, reason: "expired" };
     if (record.repository_id === null) return { ok: false, reason: "no_repository" };
-    if (record.base_commit !== null) return { ok: false, reason: "already_pinned" };
     if (typeof base_commit !== "string" || !COMMIT.test(base_commit)) return { ok: false, reason: "base_invalid" };
+    // A restart between the pin and the consume checks out again: the same commit is the pin already made (ruling 6).
+    if (record.base_commit === base_commit) return { ok: true, record };
+    if (record.base_commit !== null) return { ok: false, reason: "already_pinned" };
     return { ok: true, record: { ...record, base_commit } };
   } catch {
     return { ok: false, reason: "record_invalid" };

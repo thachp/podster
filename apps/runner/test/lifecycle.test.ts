@@ -126,6 +126,8 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
   const adapter = new FakeAdapter(timeline);
   const prompter = new FakePrompter();
   const runs = new MemoryRunStore();
+  /** What a test runs at points inside the policy calls. */
+  const hooks: { beforeConsume: (() => void) | null } = { beforeConsume: null };
   const policyCalls: { fn: string; budget?: Record<string, number>; opts?: unknown; returned?: unknown }[] = [];
   const policy: PolicyCalls = {
     evaluate: (input) => {
@@ -138,6 +140,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
       return returned;
     },
     consumeRunDecision: (stored, fresh, binding, now) => {
+      hooks.beforeConsume?.();
       const returned = consumeRunDecision(stored, fresh, binding, now);
       policyCalls.push({ fn: "consume", returned: structuredClone(returned) });
       return returned;
@@ -159,7 +162,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
   };
   const entry = (task: string) => lifecycle.record.entries[`${ROOM}/${task}`];
   const commands = (name: string) => gateway.calls.filter((c) => c.capability === name);
-  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline };
+  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, hooks, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline };
 }
 
 /** The next `n` accepts each answer 503, with nothing applied. */
@@ -911,12 +914,15 @@ describe("step 10: the repository path in the lifecycle", () => {
     forgotten = 0;
     prepareError: RepoPathError | null = null;
     publishError: RepoPathError | null = null;
+    /** Runs inside `prepare`, as the owner editing the policy mid-checkout would. */
+    onPrepare: (() => void) | null = null;
     commit = "c".repeat(40);
     timeline: string[] = [];
     async prepare(task: RepoTask & { continue_from: string | null }) {
       this.timeline.push("repo:prepare");
       this.prepared.push(task);
       if (this.prepareError) throw this.prepareError;
+      this.onPrepare?.();
       return { repository_id: "9001", base_commit: task.continue_from ?? BASE };
     }
     async publish(task: RepoTask & { base_commit: string }): Promise<Publication> {
@@ -930,9 +936,9 @@ describe("step 10: the repository path in the lifecycle", () => {
     }
   }
 
-  async function repoSetup() {
+  async function repoSetup(config: unknown | (() => unknown) = repoConfig()) {
     const repo = new FakeRepository();
-    const t = await setup(repoConfig(), { repository: repo });
+    const t = await setup(config, { repository: repo });
     repo.timeline = t.timeline;
     return { ...t, repo };
   }
@@ -982,6 +988,51 @@ describe("step 10: the repository path in the lifecycle", () => {
     expect(t.entry("tsk_b")).toMatchObject({ phase: "waiting", outcome: "repo_base_moved", decision: null, reservation: null });
     expect(t.commands("release_task").filter((c) => c.arguments.task_id === "tsk_b")).toHaveLength(0);
     expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
+  });
+
+  it("ruling 6: a crash between the pin and the consume is picked up after a restart, on the same base", async () => {
+    const t = await repoSetup();
+    t.hooks.beforeConsume = () => {
+      t.hooks.beforeConsume = null;
+      throw new Error("the process died here");
+    };
+    t.offer(detail("tsk_crash"));
+    await t.pass();
+    // The pin was stored before the crash, and nothing ran.
+    expect(t.entry("tsk_crash")).toMatchObject({ phase: "ready", decision: { base_commit: BASE, consumed: false } });
+    expect(t.adapter.starts).toHaveLength(0);
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    expect(await restarted.tick(t.stop.signal)).toBe("idle");
+    expect(t.repo.prepared).toHaveLength(2);
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(restarted.record.entries[`${ROOM}/tsk_crash`]).toMatchObject({ phase: "finished", consumed: { base_commit: BASE } });
+  });
+
+  it("ruling 7: a policy changed while the checkout ran refuses the consume with facts_changed", async () => {
+    let cfg = repoConfig();
+    const t = await repoSetup(() => cfg);
+    t.repo.onPrepare = () => {
+      cfg = { ...cfg, rooms: [{ ...(cfg.rooms as unknown as Record<string, unknown>[])[0], tools: ["read", "search", "write", "edit", "shell"] }] as unknown as typeof cfg.rooms };
+    };
+    t.offer(detail("tsk_stale"));
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(0);
+    const consumed = t.policyCalls.filter((c) => c.fn === "consume").at(-1)?.returned;
+    expect(consumed).toEqual({ ok: false, reason: "facts_changed" });
+  });
+
+  it("ruling 5: a passing publication failure holds the finished work and publishes it later; it is never released", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("github_unreachable", true);
+    t.offer(detail("tsk_later"));
+    await t.pass();
+    expect(t.entry("tsk_later")).toMatchObject({ phase: "held", outcome: "repo_github_unreachable", after_stop: { kind: "finish" } });
+    expect(t.commands("release_task")).toHaveLength(0);
+    t.repo.publishError = null;
+    await t.pass();
+    expect(t.entry("tsk_later")).toMatchObject({ phase: "finished", outcome: "published", published: { pr_number: 12 } });
+    expect(t.repo.published).toHaveLength(2);
+    expect(t.commands("release_task")).toHaveLength(0);
   });
 
   it("tells Podster only `runner_unavailable` when the owner's scope or Runner's setup is the reason", async () => {

@@ -15,7 +15,7 @@
  * Output is bounded and never logged; a caller reads only exit codes, commit IDs and porcelain lines from it.
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { isPlainPath, RepoPathError } from "../core/repository.js";
@@ -23,7 +23,7 @@ import { childEnv } from "./child-env.js";
 
 export type GitResult = { code: number; stdout: string; stderr: string };
 /** Runs one Git command. `secret` goes to the child's descriptor 3 and nowhere else. */
-export type GitExec = (args: string[], opts: { cwd: string; secret?: string; signal?: AbortSignal; timeout_ms?: number }) => Promise<GitResult>;
+export type GitExec = (args: string[], opts: { secret?: string; signal?: AbortSignal; timeout_ms?: number }) => Promise<GitResult>;
 
 /** The most Runner reads of either stream; more is cut and the command fails. */
 export const MAX_GIT_OUTPUT = 1024 * 1024;
@@ -50,11 +50,15 @@ export async function checkedHelper(path = HELPER_PATH): Promise<string> {
   return path;
 }
 
-/** The environment of every Git command: the allow-listed basics, an empty home, and no configuration but Runner's. */
+/**
+ * The environment of every Git command: the allow-listed basics, an empty home, no configuration but Runner's, and a
+ * fixed `PATH`, so nothing Git starts by name (its own helpers, `sh` for the credential helper) comes from the owner's.
+ */
 export function gitEnv(home: string, from: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return childEnv(
     {
       HOME: home,
+      PATH: "/usr/bin:/bin",
       LC_ALL: "C",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
@@ -69,12 +73,23 @@ export function gitEnv(home: string, from: NodeJS.ProcessEnv = process.env): Rec
   );
 }
 
-/** Git, run for real: `program` from `findGit`, `home` an empty folder of Runner's. */
+/**
+ * Git, run for real: `program` an absolute path from `findGit`, resolved once when this is made; `home` an empty folder
+ * of Runner's, which is also every command's working folder, so no command ever runs in a task's folder, which the
+ * task can write (#462's review, item 8).
+ */
 export function gitCli(program: string, home: string, from: NodeJS.ProcessEnv = process.env): GitExec {
   const env = gitEnv(home, from);
+  if (!program.startsWith("/")) throw new RepoPathError("git_unavailable");
+  let resolved: string;
+  try {
+    resolved = realpathSync(program);
+  } catch {
+    throw new RepoPathError("git_unavailable");
+  }
   return (args, opts) =>
     new Promise((resolve, reject) => {
-      const child = spawn(program, args, { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe", opts.secret === undefined ? "ignore" : "pipe"], signal: opts.signal, timeout: opts.timeout_ms ?? GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
+      const child = spawn(resolved, args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe", opts.secret === undefined ? "ignore" : "pipe"], signal: opts.signal, timeout: opts.timeout_ms ?? GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let size = 0;

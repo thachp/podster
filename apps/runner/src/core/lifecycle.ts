@@ -149,6 +149,11 @@ export type LifecycleDeps = {
    */
   config: unknown | (() => unknown | Promise<unknown>);
   adapter: RunAdapter;
+  /**
+   * Runner's home: a policy whose workspace root overlaps it is refused (ruling 4 on #462). `run` always gives it; tests
+   * may leave it out.
+   */
+  home?: string;
   /** The repository path; without it, a room with a repository refuses its tasks (`repository_unavailable`). */
   repository?: RepositoryPath;
   prompter: OwnerPrompter;
@@ -234,7 +239,7 @@ export class Lifecycle {
    * Runner last stopped is held until the adapter confirms it stopped, then released: a run is never resumed.
    */
   static async open(deps: LifecycleDeps): Promise<Lifecycle> {
-    const parsed = parsePolicyConfig(await readConfig(deps.config));
+    const parsed = parsePolicyConfig(await readConfig(deps.config), homeOf(deps));
     if (!parsed.ok) throw new Error(`Runner's run policy can't be used: ${parsed.at} is missing or out of range. Nothing was started.`);
     const identity = (await deps.poller.request("get_identity")) as Record<string, unknown> | null;
     if (identity?.id !== deps.poller.agentId) throw new AuthorityEnded();
@@ -415,7 +420,7 @@ export class Lifecycle {
     // A clock gone back before the ledger's day can't be trusted with the day's budget (L4 on #458).
     if (clockWentBack(this.state.ledger, this.now())) return { outcome: "refuse", reason: "clock_invalid", ...ids };
     const config = await readConfig(this.deps.config);
-    const parsed = parsePolicyConfig(config);
+    const parsed = parsePolicyConfig(config, homeOf(this.deps));
     if (parsed.ok && parsed.value.owner_org !== this.ownerOrg) return { outcome: "refuse", reason: "config_invalid", ...ids };
     return this.policy.evaluate({
       config,
@@ -424,6 +429,7 @@ export class Lifecycle {
       task: { id: entry.task_id, workspace_id: entry.workspace_id },
       authority_fresh: authorityFresh,
       budget: this.budget(ownReservation),
+      ...homeOf(this.deps),
       now: this.now(),
     });
   }
@@ -643,7 +649,7 @@ export class Lifecycle {
     const prompt = detail.prompt;
     const started = await this.gate.run(async () => {
       if (signal.aborted) return "aborted" as const;
-      const fresh = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
+      let fresh = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
       if (signal.aborted) return "aborted" as const;
       // The accept moved the version by exactly itself; any other change since shows as a different version and refuses.
       const version = task.version === entry.expected_version ? decision.task_version : task.version;
@@ -654,6 +660,10 @@ export class Lifecycle {
         if (checkout === "aborted") return "aborted" as const;
         if (checkout === null) return null;
         pinned = checkout;
+        // The checkout took time: the policy is read and evaluated again, so anything the owner changed meanwhile
+        // refuses the consume with `facts_changed` (ruling 7 on #462).
+        fresh = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
+        if (signal.aborted) return "aborted" as const;
       }
       const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: version, input_hash: prompt?.hash ?? "", repository_id: pinned.repository_id, base_commit: pinned.base_commit };
       const consumed = prompt ? this.policy.consumeRunDecision(pinned, fresh, binding, this.now()) : ({ ok: false, reason: "binding_changed" } as const);
@@ -771,7 +781,7 @@ export class Lifecycle {
    * through the broker. Answers what to store, or null when the task was given up instead. After a local stop nothing
    * reaches Podster or GitHub: the finish waits, held, for a restart.
    */
-  private async publish(entry: RunEntry, signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait"> {
+  private async publish(entry: RunEntry, signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait" | { wait: string }> {
     const consumed = entry.consumed;
     const facts = consumed && consumed.repository_id !== null ? repositoryOf(consumed) : null;
     if (!consumed || consumed.repository_id === null) return { published: entry.published ?? null, outcome: entry.outcome ?? "succeeded" };
@@ -796,6 +806,11 @@ export class Lifecycle {
     } catch (error) {
       if (signal?.aborted) return "wait";
       if (!(error instanceof RepoPathError)) throw error;
+      if (error.transient) {
+        // Passing: the finished work is kept and published again at a later pass, never released (ruling 5 on #462).
+        this.log("lifecycle.publish", "unavailable", entry, { code: error.code });
+        return { wait: `repo_${error.code}` };
+      }
       this.log("lifecycle.publish", "refused", entry, { code: error.code });
       await this.giveUp(entry, "accepted", `repo_${error.code}`);
       return null;
@@ -947,8 +962,9 @@ export class Lifecycle {
     if (after.kind === "finish") {
       // Step 10: a run in a room with a repository is published before it counts as finished.
       const published = await this.publish(base, this.tickSignal);
-      if (published === "wait") {
-        await this.put({ ...entry, phase: "held", after_stop: after });
+      if (published === "wait" || (published !== null && "wait" in published)) {
+        // Held, its stop already confirmed: the next pass publishes it again, and nothing new starts meanwhile.
+        await this.put({ ...entry, phase: "held", after_stop: after, ...(published === "wait" ? {} : { outcome: published.wait }) });
         return;
       }
       if (published === null) return;
@@ -999,6 +1015,8 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
   }
   return "stopped";
 }
+
+const homeOf = (deps: Pick<LifecycleDeps, "home">) => (deps.home === undefined ? {} : { runner_home: deps.home });
 
 /** The run policy as it stands: a function's answer read now, or the value given. A read that throws is no policy. */
 async function readConfig(config: LifecycleDeps["config"]): Promise<unknown> {

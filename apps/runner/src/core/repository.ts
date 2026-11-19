@@ -46,8 +46,14 @@ export const GIT_HOST = "github.com";
 export const API_ORIGIN = "https://api.github.com";
 /** The rules ADR 0009's two rulesets put on the default branch. All three must be there. */
 export const REQUIRED_RULES = ["pull_request", "required_status_checks", "update"] as const;
-/** The server returns the same token until 5 minutes before it expires; Runner asks again a minute before that. */
-export const RENEW_BEFORE_MS = 6 * 60 * 1000;
+/**
+ * When Runner asks for a held token again. Every `get_repo_access` call reruns the server's whole decision
+ * (`decide_access`), but the server answers the token it holds while more than 5 minutes of it are left
+ * (`TOKEN_RENEW_BEFORE_MS` in `crates/core/src/repo_access.rs`), and mints a new one only after that. At 6 minutes, as
+ * this was first set, a renewal got the same token back. At 4 minutes it is inside the server's window, so a renewal is
+ * a new token, minted after that full recheck (#462's review, item 9).
+ */
+export const RENEW_BEFORE_MS = 4 * 60 * 1000;
 /** The prefix of every task branch. */
 export const BRANCH_PREFIX = "podster/";
 /** The fixed identity of a commit Runner makes, so no name or address from anywhere else is ever used. */

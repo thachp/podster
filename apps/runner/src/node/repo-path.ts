@@ -18,8 +18,8 @@
  * Host-side folder access goes through `safe-fs.ts` (`lstat`, `O_NOFOLLOW`, `realpath`; L3 on #459). Git runs as
  * `git.ts` says (L2 on #459). Logs carry IDs and codes only.
  */
-import { lstat, opendir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, opendir, realpath } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { GatewayError, meaningOf } from "../core/errors.js";
 import type { Publication, RepoTask, RepositoryPath } from "../core/lifecycle.js";
 import {
@@ -124,7 +124,13 @@ export type RepoPathDeps = {
   /** Runner's credential helper (`git.ts`'s `checkedHelper`). */
   helper: string;
   log: Logger;
+  /** Waits between reads of a pull request whose head lags the push. */
+  wait?: (ms: number) => Promise<void>;
 };
+
+/** Reads of a pull request whose head still shows the commit before the push, and the wait between them. */
+export const PR_READS = 5;
+export const PR_READ_WAIT_MS = 2_000;
 
 export class GitRepositoryPath implements RepositoryPath {
   private readonly deps: RepoPathDeps;
@@ -167,7 +173,7 @@ export class GitRepositoryPath implements RepositoryPath {
 
   private async git(task: RepoTask, args: string[], opts: { secret?: string; signal: AbortSignal }): Promise<{ code: number; stdout: string; stderr: string }> {
     const helper = opts.secret === undefined ? null : this.deps.helper;
-    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { cwd: task.task_folder, secret: opts.secret, signal: opts.signal });
+    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal });
   }
 
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
@@ -183,7 +189,32 @@ export class GitRepositoryPath implements RepositoryPath {
     return answer.stdout === "";
   }
 
+  /**
+   * The task's folder never holds Runner's home or sits in it, checked both as written and as the file system resolves
+   * them (ruling 4 on #462). The policy refuses such a configuration too; this holds whatever reaches here.
+   */
+  private async apart(task: RepoTask): Promise<void> {
+    const plain = (a: string, b: string) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+    const root = dirname(dirname(task.task_folder));
+    if (plain(root, this.deps.home) || plain(task.task_folder, this.deps.home)) throw new RepoPathError("path_unsafe");
+    const real = async (p: string) => {
+      // The nearest part of the path that exists, resolved: a folder not made yet is judged by where it would land.
+      let at = p;
+      for (;;) {
+        try {
+          return join(await realpath(at), relative(at, p));
+        } catch {
+          const up = dirname(at);
+          if (up === at) return p;
+          at = up;
+        }
+      }
+    };
+    if (plain(await real(root), await real(this.deps.home))) throw new RepoPathError("path_unsafe");
+  }
+
   async prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }> {
+    await this.apart(task);
     const scope = scopeOf(task);
     const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
     const { default_branch } = await this.checked(task, access, signal);
@@ -227,14 +258,20 @@ export class GitRepositoryPath implements RepositoryPath {
     // Renewed after a full server recheck when it's due: a run can outlast the hour a token lives.
     const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
     const { default_branch } = await this.checked(task, access, signal);
+    await this.apart(task);
     await checkWorkTree(task.task_folder);
-    // Nothing in a container can reach the Git folder, so its head is still the pinned commit; checked anyway.
-    if ((await this.head(task, signal)) !== task.base_commit) throw new RepoPathError("checkout_moved");
-    if ((await this.git(task, ["add", "--all", "--", "."], { signal })).code !== 0) throw new RepoPathError("commit_failed");
-    if (await this.clean(task, signal)) return { kind: "no_changes" };
-    const identity = ["-c", `user.name=${COMMIT_IDENTITY.name}`, "-c", `user.email=${COMMIT_IDENTITY.email}`];
-    const committed = await this.deps.git([...hardening(null), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...identity, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", `Podster task ${task.task_id}`], { cwd: task.task_folder, signal });
-    if (committed.code !== 0) throw new RepoPathError("commit_failed");
+    // Nothing in a container can reach the Git folder, so its head is the pinned commit, or Runner's own one commit on
+    // it from an earlier try that a passing failure stopped (ruling 5 on #462); anything else refuses.
+    const before = await this.head(task, signal);
+    if (before !== task.base_commit && (await this.head(task, signal, "HEAD^")) !== task.base_commit) throw new RepoPathError("checkout_moved");
+    // `:/` names the whole work tree from its top, whatever Git's working folder is.
+    if ((await this.git(task, ["add", "--all", "--", ":/"], { signal })).code !== 0) throw new RepoPathError("commit_failed");
+    if (before === task.base_commit) {
+      if (await this.clean(task, signal)) return { kind: "no_changes" };
+      const identity = ["-c", `user.name=${COMMIT_IDENTITY.name}`, "-c", `user.email=${COMMIT_IDENTITY.email}`];
+      const committed = await this.git(task, [...identity, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", `Podster task ${task.task_id}`], { signal });
+      if (committed.code !== 0) throw new RepoPathError("commit_failed");
+    } else if (!(await this.clean(task, signal))) throw new RepoPathError("commit_unexpected");
     const commit = await this.head(task, signal);
     // Exactly one commit of Runner's on top of the pinned one.
     if ((await this.head(task, signal, "HEAD^")) !== task.base_commit) throw new RepoPathError("commit_unexpected");
@@ -245,15 +282,30 @@ export class GitRepositoryPath implements RepositoryPath {
 
     const want = { scope, branch, default_branch, commit };
     const opened = await this.api(task, access, GITHUB.openPull(scope.full_name, task.task_id, branch, default_branch), signal);
-    let pr: number;
-    if (opened.status === 201) pr = readPullRequest(opened.body, want);
-    else if (opened.status === 422) {
-      // One already open from the task branch: Runner's own from an earlier run, read and held to the same checks.
-      const found = await this.read(task, access, GITHUB.findPull(scope.full_name, branch, default_branch), signal, "pull_request_not_found");
-      if (!Array.isArray(found) || found.length !== 1) throw new RepoPathError("pull_request_not_found");
-      pr = readPullRequest(found[0], want);
-    } else if (opened.status >= 500 || opened.status === 403 || opened.status === 429) throw new RepoPathError("github_unavailable", true);
-    else throw new RepoPathError("pull_request_refused");
+    if (opened.status !== 201 && opened.status !== 422) {
+      if (opened.status >= 500 || opened.status === 403 || opened.status === 429) throw new RepoPathError("github_unavailable", true);
+      throw new RepoPathError("pull_request_refused");
+    }
+    // A 422 is one already open from the task branch: Runner's own from an earlier run, read and held to the same checks.
+    // GitHub can show a pull request's head from before the push for a moment, so a lagging head is read again, a few
+    // times, before it counts as a passing failure (ruling 5 on #462). Every other mismatch refuses at once.
+    let pr: number | null = null;
+    let body: unknown = opened.status === 201 ? opened.body : null;
+    for (let read = 0; pr === null; read++) {
+      if (body === null) {
+        const found = await this.read(task, access, GITHUB.findPull(scope.full_name, branch, default_branch), signal, "pull_request_not_found");
+        if (!Array.isArray(found) || found.length !== 1) throw new RepoPathError("pull_request_not_found");
+        body = found[0];
+      }
+      try {
+        pr = readPullRequest(body, want);
+      } catch (error) {
+        if (!(error instanceof RepoPathError) || error.code !== "pull_request_commit_changed") throw error;
+        if (read + 1 >= PR_READS) throw new RepoPathError("pull_request_commit_changed", true);
+        body = null;
+        await (this.deps.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))))(PR_READ_WAIT_MS);
+      }
+    }
     this.deps.log("repo.publish", "pull_request", { workspace: task.workspace_id, task: task.task_id, count: pr });
     return { kind: "published", branch, commit, pr_number: pr };
   }

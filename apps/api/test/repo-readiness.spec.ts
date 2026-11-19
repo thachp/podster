@@ -55,7 +55,12 @@ const ready = (patch: object = {}) => fake("/ready-repo", { id: REPO_ID, ...patc
  * The provisioning App's reads of this test's repository, how many of its tokens on it are live, and the presence check's
  * own tokens: how many asked about this repository and are live, and the status each revocation of one got.
  */
-const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number; presence: { live: number; revokes: number[] } };
+const readBack = async () => {
+  const back = (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number; presence: { live: number; revokes: number[] } };
+  return { ...back, reads: back.reads.slice(setupReads.get(REPO_ID) ?? 0) };
+};
+/** By repository, the reads its room's set-up made: the mint of the agent's token reads the repository back first. */
+const setupReads = new Map<number, number>();
 /** Every token the agent-token App minted for this test's repository, and whether it's still live. */
 const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean }[];
 
@@ -233,6 +238,9 @@ async function room() {
   const got = await api(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task.id}/repo-access`, undefined, { key: null });
   expect(got.status, got.text).toBe(200);
   expect(await tokens(id)).toEqual(["held"]);
+  // The mint read the repository back before it went on. What a test reads back is what came after.
+  setupReads.delete(REPO_ID);
+  setupReads.set(REPO_ID, (await readBack()).reads.length);
   // Quiet before it's handed back: a test that writes to the room's rows next meets no alarm run of the set-up's.
   await manualAlarms(stub(id));
   return { id, token: got.body.token as string };

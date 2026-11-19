@@ -332,3 +332,57 @@ pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
         authority_ends_at,
     })
 }
+
+/// Whether a request must read the repository's protections back before it goes on: only one that mints a new token.
+/// Returning a held token with more than [`TOKEN_RENEW_BEFORE_MS`] left asks GitHub for nothing.
+pub fn mint_needs_recheck(token: TokenPlan) -> bool {
+    matches!(token, TokenPlan::Mint { .. })
+}
+
+/// Why a mint was refused after reading the repository back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MintBlock {
+    /// The default branch's rules, its bypass list or anything else readiness checks differs definitely from what
+    /// provisioning set, for this reason. The link is degraded for it, which ends every token held on it, and the mint
+    /// is refused as [`AccessRefusal::RepoNotReady`].
+    Drifted(&'static str),
+    /// No definite answer: GitHub couldn't be reached or read, or a gone repository's second look isn't due. Nothing
+    /// changes, and the mint is refused for now: a token is never minted on a read that wasn't made.
+    Unread,
+}
+
+impl MintBlock {
+    /// The reason the link is degraded for, if it is.
+    pub fn degrade_reason(self) -> Option<&'static str> {
+        match self {
+            MintBlock::Drifted(reason) => Some(reason),
+            MintBlock::Unread => None,
+        }
+    }
+
+    /// The error code the caller gets.
+    // codes: errors
+    pub fn code(self) -> &'static str {
+        match self {
+            MintBlock::Drifted(_) => "repo_not_ready",
+            MintBlock::Unread => "provider_unavailable",
+        }
+    }
+
+    /// Whether asking again may succeed without anyone acting: only when nothing could be read.
+    pub fn transient(self) -> bool {
+        matches!(self, MintBlock::Unread)
+    }
+}
+
+/// Decides a new mint from a read-back of the repository made just before it, the same read and judgement as the daily
+/// readiness read, a merge and an operator's recheck. Only a read-back that is exactly right lets the mint go on, so a
+/// removed protection or an added bypass actor stops tokens at once rather than at the next scheduled read.
+pub fn decide_mint_recheck(read: crate::provisioning::RecheckRead) -> Result<(), MintBlock> {
+    use crate::provisioning::RecheckRead;
+    match read {
+        RecheckRead::ExactlyRight => Ok(()),
+        RecheckRead::Differs(reason) => Err(MintBlock::Drifted(reason)),
+        RecheckRead::CouldNotRead => Err(MintBlock::Unread),
+    }
+}

@@ -1075,6 +1075,17 @@ pub(super) enum Readiness {
     Mismatch(&'static str),
 }
 
+impl Readiness {
+    /// What the read came to, as `core` decides on it: an operator's recheck, and a new token's mint.
+    pub(super) fn read(self) -> RecheckRead {
+        match self {
+            Readiness::Ready => RecheckRead::ExactlyRight,
+            Readiness::Mismatch(code) => RecheckRead::Differs(code),
+            Readiness::CouldNotRead(_) => RecheckRead::CouldNotRead,
+        }
+    }
+}
+
 /// The Worker's call for an operator's recheck of a degraded link. Reached only from `crate::moderation`, which has
 /// checked the operator.
 pub(crate) const INTERNAL_REPOSITORY_RECHECK: &str = "/internal/operator-repository-recheck";
@@ -1206,19 +1217,14 @@ impl Workspace {
                 .and_then(|row| text(&row["id"]))
                 .unwrap_or_default();
             Some(
-                match self
-                    .readiness(
-                        repo_id,
-                        link["visibility"].as_str() == Some("public"),
-                        link["default_branch"].as_str().unwrap_or_default(),
-                        &room,
-                    )
-                    .await
-                {
-                    Readiness::Ready => RecheckRead::ExactlyRight,
-                    Readiness::Mismatch(code) => RecheckRead::Differs(code),
-                    Readiness::CouldNotRead(_) => RecheckRead::CouldNotRead,
-                },
+                self.readiness(
+                    repo_id,
+                    link["visibility"].as_str() == Some("public"),
+                    link["default_branch"].as_str().unwrap_or_default(),
+                    &room,
+                )
+                .await
+                .read(),
             )
         } else {
             None

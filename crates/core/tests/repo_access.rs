@@ -687,3 +687,64 @@ fn githubs_answer_must_be_exactly_what_was_asked_for() {
         );
     }
 }
+
+/// A new token is minted only after the default branch's rules and bypass list were read back exactly right just now.
+/// Returning a held token with time left asks GitHub for nothing, so it reads nothing back either.
+#[test]
+fn only_a_new_mint_reads_the_repository_back_first() {
+    assert!(mint_needs_recheck(TokenPlan::Mint {
+        replace_held: false
+    }));
+    assert!(mint_needs_recheck(TokenPlan::Mint { replace_held: true }));
+    assert!(!mint_needs_recheck(TokenPlan::ReuseHeld));
+    // A held token at its renewal window is a new mint, and so is read back first.
+    let (task, grant) = (task(TaskStatus::Accepted), push(None, None));
+    for (expires_in, reads) in [
+        (HOUR, false),
+        (TOKEN_RENEW_BEFORE_MS + 1, false),
+        (TOKEN_RENEW_BEFORE_MS, true),
+        (0, true),
+    ] {
+        let check = AccessCheck {
+            held: Some(HeldToken {
+                expires_at: NOW + expires_in,
+                grant_id: "g1",
+            }),
+            ..passing(&task, &grant)
+        };
+        assert_eq!(
+            mint_needs_recheck(decide_access(&check).unwrap().token),
+            reads,
+            "{expires_in}"
+        );
+    }
+}
+
+/// The read-back before a mint: exactly right mints; a definite difference, a ruleset removed or a bypass actor added,
+/// refuses as `repo_not_ready` and degrades the link for that reason; no definite answer refuses as a transient
+/// `provider_unavailable` and changes nothing. Nothing is ever minted on a read that wasn't made.
+#[test]
+fn a_mint_goes_on_only_after_a_read_back_that_is_exactly_right() {
+    use podster_core::provisioning::RecheckRead;
+    assert_eq!(decide_mint_recheck(RecheckRead::ExactlyRight), Ok(()));
+    for reason in [
+        "ruleset_missing",
+        "bypass_differs",
+        "default_branch_changed",
+        "repository_gone",
+    ] {
+        let refused = decide_mint_recheck(RecheckRead::Differs(reason));
+        assert_eq!(refused, Err(MintBlock::Drifted(reason)), "{reason}");
+        let block = refused.unwrap_err();
+        assert_eq!(block.degrade_reason(), Some(reason));
+        assert_eq!(block.code(), "repo_not_ready");
+        assert_eq!(block.code(), AccessRefusal::RepoNotReady.code());
+        assert!(!block.transient());
+    }
+    let unread = decide_mint_recheck(RecheckRead::CouldNotRead);
+    assert_eq!(unread, Err(MintBlock::Unread));
+    let block = unread.unwrap_err();
+    assert_eq!(block.degrade_reason(), None);
+    assert_eq!(block.code(), "provider_unavailable");
+    assert!(block.transient());
+}

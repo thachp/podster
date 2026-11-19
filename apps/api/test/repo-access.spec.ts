@@ -75,10 +75,15 @@ const minting = async () => {
 };
 /** Lets the mint waiting at the gate answer. */
 const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
-/** A fresh repository for this test, known to the fake's agent-token App. */
+/** This test's repository as provisioning left it, or changed, for the read-back before a mint: `rulesets`, and a `script` for its reads. */
+const ready = (patch: object = {}) => fetch("https://github-fake.example.com/ready-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...patch }) });
+/** The provisioning App's reads of this test's repository, and how many of its tokens on it are live. */
+const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number };
+/** A fresh repository for this test, known to the fake's agent-token App, and read back exactly as provisioning left it. */
 const freshRepo = async () => {
   REPO_ID = IDS.next();
   await script({});
+  await ready({ rulesets: "ready" });
 };
 
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
@@ -476,6 +481,99 @@ describe("refusing", () => {
     expect([hidden.status, hidden.code]).toEqual([404, "task_not_found"]);
     expect([missing.status, missing.code]).toEqual([404, "task_not_found"]);
     expect(await minted()).toEqual([]);
+  });
+});
+
+describe("reading the repository back before a new token", () => {
+  const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status_reason FROM repo_link").one() as any);
+  const degraded = (id: string) => inRoom(id, (sql) => sql.exec("SELECT reason FROM event WHERE type = 'repository.degraded'").toArray().map((e: any) => e.reason));
+  const rulesetReads = async () => (await readBack()).reads.filter((read) => read.path.includes("/rulesets")).length;
+
+  it("reads the default branch's rules and bypass list back, then mints", async () => {
+    const r = await room();
+    const got = await access(AGENT, r.id, r.task);
+    expect(got.status, got.text).toBe(200);
+    const paths = (await readBack()).reads.map((read) => read.path);
+    expect(paths).toContain(`/repositories/${REPO_ID}/rulesets/1`);
+    expect(paths).toContain(`/repositories/${REPO_ID}/rulesets/2`);
+    // The provisioning App's token for the read is given back.
+    expect((await readBack()).live).toBe(0);
+    expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    expect(await minted()).toEqual([expect.objectContaining({ token: got.body.token, live: true })]);
+  });
+
+  it("returns a held token with time left without reading anything from GitHub", async () => {
+    const r = await room();
+    const first = await access(AGENT, r.id, r.task);
+    expect(first.status, first.text).toBe(200);
+    const reads = (await readBack()).reads.length;
+    const again = await access(AGENT, r.id, r.task);
+    expect(again.body).toEqual(first.body);
+    expect((await readBack()).reads.length).toBe(reads);
+    expect(await minted()).toHaveLength(1);
+  });
+
+  it("refuses a mint after a ruleset was removed, degrades the link and takes back the token held on it", async () => {
+    const r = await room();
+    const held = await access(AGENT, r.id, r.task);
+    expect(held.status, held.text).toBe(200);
+    // Someone with admin rights removes the update rule. The daily read wouldn't see it for up to a day.
+    await ready({ rulesets: "no_update" });
+    // The held token comes up for renewal, which is a new mint.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 4 * 60_000));
+    const res = await access(AGENT, r.id, r.task);
+    expect([res.status, res.code]).toEqual([409, "repo_not_ready"]);
+    expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "ruleset_missing" });
+    expect(await degraded(r.id)).toEqual(["ruleset_missing"]);
+    // Nothing new was minted, no lease is left, and the held token is marked for revocation, which the alarm does.
+    expect(await minted()).toEqual([expect.objectContaining({ token: held.body.token })]);
+    expect((await tokens(r.id)).map((t) => t.state)).toEqual(["revoke"]);
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: held.body.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+    // Asked again, the link itself refuses, with no read.
+    const reads = (await readBack()).reads.length;
+    expect((await access(AGENT, r.id, r.task)).code).toBe("repo_not_ready");
+    expect((await readBack()).reads.length).toBe(reads);
+  });
+
+  it("refuses a first mint after a bypass actor was added, and degrades the link", async () => {
+    const r = await room();
+    await ready({ rulesets: "extra_bypass" });
+    const res = await access(AGENT, r.id, r.task);
+    expect([res.status, res.code]).toEqual([409, "repo_not_ready"]);
+    expect(await rulesetReads()).toBeGreaterThan(0);
+    expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "bypass_differs" });
+    expect(await degraded(r.id)).toEqual(["bypass_differs"]);
+    expect(await minted()).toEqual([]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
+
+  it("fails closed when GitHub can't be read: nothing is minted and nothing changes", async () => {
+    // [why the read can't be made]
+    const cases: [string, object][] = [
+      ["a server error", { script: { readRepo: 503 } }],
+      ["a rate limit", { script: { limited: { kind: "primary", seconds: 600 } } }],
+      ["no token for the read", { script: { token: 500 } }],
+      ["no answer in time", { script: { hang: true } }],
+    ];
+    for (const [name, patch] of cases) {
+      await freshRepo();
+      const r = await room();
+      await ready(patch);
+      // The test build lets the room's wait for the read be a second rather than ten.
+      await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_call_timeout (ms INTEGER, only TEXT); INSERT INTO test_call_timeout VALUES (1000, 'mint_recheck')"));
+      const res = await access(AGENT, r.id, r.task);
+      expect([res.status, res.code], name).toEqual([502, "provider_unavailable"]);
+      expect(await link(r.id), name).toEqual({ status: "ready", status_reason: null });
+      expect(await degraded(r.id), name).toEqual([]);
+      expect(await minted(), name).toEqual([]);
+      expect(await tokens(r.id), name).toEqual([]);
+      // Once GitHub answers again, the same call mints.
+      await ready({ script: {} });
+      const next = await access(AGENT, r.id, r.task);
+      expect(next.status, `${name}: ${next.text}`).toBe(200);
+    }
   });
 });
 

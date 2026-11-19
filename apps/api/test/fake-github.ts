@@ -103,7 +103,7 @@ const mergeCalls: { repo: number; method: string; path: string; permissions: Rec
  * rulesets, an initial commit. Each is one test's own, with its own script, and apart from the provisioning spec's
  * repositories, tokens and call log, which that spec resets while others run.
  */
-type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number; workflowRead?: number; limited?: Limited; presenceRevoke?: number };
+type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number; workflowRead?: number; limited?: Limited; presenceRevoke?: number; hang?: boolean };
 const readyRepos = new Map<number, Repo & { script: ReadyScript }>();
 const readyTokens = new Map<string, number[]>();
 const readyIssued = new Set<string>();
@@ -531,7 +531,7 @@ function agentRead(request: Request, path: string, bearer: string): Response | n
 }
 
 /** The provisioning App reading back one test's own repository, with a token narrowed to it. */
-function readyRoute(request: Request, path: string, bearer: string): Response {
+async function readyRoute(request: Request, path: string, bearer: string): Promise<Response> {
   const scope = readyTokens.get(bearer);
   if (!scope) return json({ message: "Bad credentials" }, 401);
   if (path === "/installation/token" && request.method === "DELETE") {
@@ -568,6 +568,8 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   readyReads.push({ repo: repo.id, path, scope });
   if (repo.script.limited) return limitedAnswer(repo.script.limited);
   const rest = scoped[2] ?? "";
+  // `hang`: the repository's own read never answers, so the caller's wait runs out.
+  if (rest === "" && repo.script.hang) await unanswered(request);
   if (rest === "") return repo.script.readRepo ? json({ message: "SECRET-PROVIDER-TEXT" }, repo.script.readRepo) : json(repoView(repo));
   if (rest === "/actions/permissions/workflow") return repo.script.workflowRead ? json({ message: "no" }, repo.script.workflowRead) : json(repo.workflow ?? READ_ONLY_WORKFLOWS);
   if (rest === `/branches/${repo.defaultBranch}`) return repo.hasCommit ? json({ name: repo.defaultBranch, commit: { sha: "c0".repeat(20) } }) : json({ message: "Branch not found" }, 404);

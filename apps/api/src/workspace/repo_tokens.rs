@@ -18,9 +18,15 @@
 //! coalescing instead: one live token per agent and task, a repeat call gets the held one until 5 minutes before it
 //! expires, and then a new one replaces it and the old one is revoked.
 //!
-//! **Order: decide, lease, mint, commit.** The first transaction decides and takes a lease row. The unique index on a
-//! lease per agent and task means a concurrent call sees it and is refused `repo_access_busy`, so two mints can't
-//! happen. Then the mint, outside any transaction. The second transaction decides again on current state, checks the
+//! **Order: decide, lease, read back, mint, commit.** The first transaction decides and takes a lease row. The unique
+//! index on a lease per agent and task means a concurrent call sees it and is refused `repo_access_busy`, so two mints
+//! can't happen. Then the repository's protections are read back, by the same read and judgement as the daily
+//! readiness read and a merge (`Workspace::readiness`), and `core::repo_access::decide_mint_recheck` decides on it: only
+//! a read that is exactly right lets the mint go on. A definite difference, such as a rule removed or a bypass actor
+//! added, degrades the link through `merges::degrade`, which marks every token held on it for revocation, and refuses
+//! `repo_not_ready`; a read that couldn't be made refuses `provider_unavailable` and changes nothing. Either way the
+//! lease goes and nothing is minted. A held token with time left is returned without any of this, so it reads nothing.
+//! Then the mint, outside any transaction. The second transaction decides again on current state, checks the
 //! lease is still this call's, and commits the sealed token, the replaced one's revocation and the event together. If it
 //! refuses or fails, the minted token is revoked at once, and if that fails it's queued for the alarm. A Worker that dies
 //! between the mint and the commit leaves a token nobody holds, which lives out its hour: the one acknowledged gap.
@@ -28,11 +34,12 @@
 //! **Revocation.** Each cascade that ends a token's authority marks it in its own transaction, through
 //! `store::mark_stale_repo_tokens`. The alarm revokes marked tokens with `DELETE /installation/token`, retrying with
 //! backoff until the token would have expired anyway, and removes the rows. A failed revoke never holds up the cascade.
+use super::merges::degrade;
 use super::*;
 use crate::github::{AgentConfig, AgentTokens, Failure, Minted, Revoked, TokenIssuer};
 use podster_core::repo_access::{
-    decide_access, minted_token_matches, AccessCheck, AccessRefusal, Budget, Deadline, HeldToken,
-    TokenPermissions, TokenPlan,
+    decide_access, decide_mint_recheck, minted_token_matches, AccessCheck, AccessRefusal, Budget,
+    Deadline, HeldToken, MintBlock, TokenPermissions, TokenPlan,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
@@ -48,8 +55,9 @@ pub(super) const MINTS_PER_AGENT_HOUR: i64 = 10;
 /// the whole organization, and every room shares them.
 pub(super) const MINTS_PER_ROOM_HOUR: i64 = 60;
 const HOUR_MS: i64 = 3_600_000;
-/// How long a lease holds: longer than signing the App's JWT and one call to GitHub, which times out in 10 seconds.
-const LEASE_MS: i64 = 30_000;
+/// How long a lease holds: longer than the read-back before a mint (a provisioning token, the repository's reads and
+/// that token's revocation, each call timing out in 10 seconds), then signing the App's JWT and the mint's one call.
+const LEASE_MS: i64 = 2 * 60_000;
 const REVOKE_FIRST_WAIT_MS: i64 = 60_000;
 const REVOKE_LONGEST_WAIT_MS: i64 = 15 * 60_000;
 /// Revocations one alarm attempts, so a room with many doesn't run long.
@@ -306,6 +314,9 @@ struct Lease {
     id: String,
     grant: String,
     repo_id: i64,
+    /// The ready link's visibility and default branch, for the read-back before the mint.
+    public: bool,
+    default_branch: String,
 }
 
 /// The caller's `push` grant row that isn't revoked.
@@ -583,10 +594,16 @@ impl Workspace {
                             return Ok(Outcome::Refused(ApiError::api(429, "rate_limited")));
                         }
                         let grant = inputs.grant.ok_or_else(|| ApiError::internal("no grant"))?.id;
+                        // The ready link the decision allowed, as the read-back before the mint needs it.
+                        let Some(link) = rows(sql, "SELECT visibility, default_branch FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'", vec![access.repo_id.into()])?.into_iter().next() else {
+                            return Ok(Outcome::Refused(refused(AccessRefusal::RepoNotReady)));
+                        };
                         let lease = Lease {
                             id: format!("rtk_{}", uuid::Uuid::new_v4().simple()),
                             grant,
                             repo_id: access.repo_id,
+                            public: link["visibility"].as_str() == Some("public"),
+                            default_branch: text(&link["default_branch"]).unwrap_or_default(),
                         };
                         exec(sql, "INSERT INTO repo_token (id, agent_id, task_id, grant_id, provider_repo_id, state, lease_until, created_at) VALUES (?, ?, ?, ?, ?, 'minting', ?, ?)", vec![
                             lease.id.as_str().into(), who.caller.id.as_str().into(), task.as_str().into(), lease.grant.as_str().into(),
@@ -606,6 +623,17 @@ impl Workspace {
         let (Some(config), Some(key)) = (config, keys.current.clone()) else {
             return Err(unavailable());
         };
+        // Before a new token, the repository's protections are read back now, never trusted from the last read.
+        if let Err(block) = self.recheck_before_mint(&sql, &room, &lease).await {
+            console_error!(
+                "{}",
+                json!({ "event": "repo_token.mint_refused", "ws": room, "task": task, "agent": agent, "code": block.code() })
+            );
+            return Err(match block {
+                MintBlock::Drifted(_) => refused(AccessRefusal::RepoNotReady),
+                MintBlock::Unread => ApiError::api(502, "provider_unavailable"),
+            });
+        }
         let issuer = AgentTokens::new(config);
         #[cfg(feature = "failpoints")]
         let _shortened = crate::test_clock::shorten_calls(&sql, &lease.id);
@@ -830,6 +858,50 @@ impl Workspace {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Reads the repository's protections back before a new token is minted, with the one readiness check the daily
+    /// read, a merge and an operator's recheck use, and decides on it in `core`. On a refusal the lease goes, and on a
+    /// definite difference the link is degraded in that same transaction, which marks every held token for revocation.
+    /// The alarm the request arms afterwards takes them back.
+    async fn recheck_before_mint(
+        &self,
+        sql: &SqlStorage,
+        room: &str,
+        lease: &Lease,
+    ) -> std::result::Result<(), MintBlock> {
+        #[cfg(feature = "failpoints")]
+        let _shortened = crate::test_clock::shorten_calls(sql, "mint_recheck");
+        #[cfg(not(feature = "failpoints"))]
+        let _ = sql;
+        let read = self
+            .readiness(lease.repo_id, lease.public, &lease.default_branch, room)
+            .await
+            .read();
+        let Err(block) = decide_mint_recheck(read) else {
+            return Ok(());
+        };
+        let (id, repo_id) = (lease.id.clone(), lease.repo_id);
+        let ended = self.in_transaction(move |sql| {
+            exec(
+                sql,
+                "DELETE FROM repo_token WHERE id = ? AND state = 'minting'",
+                vec![id.as_str().into()],
+            )?;
+            match block.degrade_reason() {
+                Some(code) => degrade(sql, repo_id, code, now_ms()),
+                None => Ok(()),
+            }
+        });
+        if ended.is_err() {
+            // The lease is then left to run out, and kept as a record, as one a Worker never came back from is. Nothing
+            // was minted, and the request still refuses: the decision doesn't depend on this write.
+            console_error!(
+                "{}",
+                json!({ "event": "repo_token.recheck_not_kept", "ws": room })
+            );
+        }
+        Err(block)
     }
 
     fn drop_lease(&self, id: &str) {

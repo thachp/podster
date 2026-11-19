@@ -9,6 +9,7 @@ import type { Server } from "node:http";
 import type { Socket } from "node:net";
 import { describe, expect, it } from "vitest";
 import {
+  asksForServedVersion,
   checkNudgeUrl,
   MAX_NUDGE_BODY_BYTES,
   MAX_NUDGE_URL_BYTES,
@@ -83,6 +84,40 @@ function harness(registration: NudgeRegistration | null = REG) {
   };
   return { clock, bell, endpoint, lines, rings: () => rings, post, now };
 }
+
+describe("the A2A version a request asks for (step 15)", () => {
+  it("serves 1.0 and any patch of it, and nothing else that isn't exactly a version", () => {
+    for (const header of ["1.0", "1.0.0", "1.0.1"]) expect([header, asksForServedVersion(header)]).toEqual([header, true]);
+    for (const header of [null, "1.00", "01.0", "1.0.", "1.0.0.0", " 1.0", "1.0 ", "1.0, 0.3", "0.3", "1.1", "2.0", "1", ""]) {
+      expect([header, asksForServedVersion(header)]).toEqual([header, false]);
+    }
+  });
+
+  it("is read only after the signature: an unsigned or forged request asking for another version gets 401, never -32009", async () => {
+    const h = harness();
+    for (const signature of [null, sign("a2asec_forger", h.now(), nudgeBody("att_v"))]) {
+      const res = await h.post(nudgeBody("att_v"), { signature, headers: { "a2a-version": "0.3" } });
+      expect(res.status).toBe(401);
+      expect(await res.text()).toBe("");
+    }
+    expect(h.rings()).toBe(0);
+  });
+
+  it("refuses a verify challenge for another version with -32009 and no proof, so the endpoint stays unproved", async () => {
+    const h = harness();
+    for (const version of ["0.3", "1.1"]) {
+      const res = await h.post(verifyBody(), { headers: { "a2a-version": version } });
+      const body = (await res.json()) as { result?: unknown; error?: { code: number } };
+      expect([version, body.result, body.error?.code]).toEqual([version, undefined, -32009]);
+    }
+    const empty = await h.post(verifyBody(), { headers: { "a2a-version": "" } });
+    expect(((await empty.json()) as { error?: { code: number } }).error?.code).toBe(-32009);
+    // The refused challenge wasn't taken as answered: the same one at 1.0 still gets its proof.
+    const answered = (await (await h.post(verifyBody())).json()) as { result?: { proof: string } };
+    expect(answered.result?.proof).toBe(expectedProof(SECRET, AGENT, 3, CHALLENGE));
+    expect(h.rings()).toBe(0);
+  });
+});
 
 describe("the nudge endpoint", () => {
   it("answers the verify challenge with the proof, bound to the agent, the version and the challenge", async () => {

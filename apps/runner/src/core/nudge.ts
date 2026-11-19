@@ -18,8 +18,9 @@
  * 5. the signature, `X-Podster-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, under the
  *    registration's signing secret, compared in constant time, and its time within the window either way;
  * 6. an exact replay of a signature seen within the window;
- * 7. only then the JSON, and the `A2A-Version` it asks for: only 1.0 is served, a patch of it counts as 1.0, and a missing
- *    header is 0.3 (A2A 1.0, 3.6), so anything else gets `VersionNotSupportedError` (step 15);
+ * 7. only then the JSON, and the `A2A-Version` it asks for: only 1.0 is served, the patch is ignored, and a missing header
+ *    is 0.3 (A2A 1.0, 3.6), so anything else gets `VersionNotSupportedError` (step 15). Reading it after the signature is
+ *    Podster's choice, not A2A's, so an unsigned request learns nothing;
  * 8. a `podster.dev/verifyEndpoint` challenge for this agent and registration version, or a nudge of exactly the shape
  *    above. Anything else is refused. A retry of an attempt already taken is answered and rings nothing.
  *
@@ -76,7 +77,7 @@ const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toSt
 const hmacKey = (secret: string, usage: "sign" | "verify") => crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
 
 /**
- * Whether `header` asks for A2A 1.0. A missing header is 0.3 (A2A 1.0, 3.6.2), a patch never counts (3.6), and anything
+ * Whether `header` asks for A2A 1.0. A missing header is 0.3 (A2A 1.0, 3.6.2), the patch is ignored (3.6), and anything
  * that isn't exactly a version is no version at all.
  */
 export function asksForServedVersion(header: string | null): boolean {

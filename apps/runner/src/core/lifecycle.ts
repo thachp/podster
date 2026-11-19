@@ -46,6 +46,7 @@ import { consumeRunDecision, evaluate, factsKey, issueRunDecision, parsePolicyCo
 import { RepoPathError } from "./repository.js";
 import { readTaskDetail, type TaskDetail } from "./prompt.js";
 import { AuthorityEnded, type Poller } from "./poller.js";
+import { MAX_PROMPT_BYTES } from "./run-interface.js";
 import type { Offer } from "./state.js";
 import type { Clock, Logger } from "./runtime.js";
 import { budgetOf, clockWentBack, dayOf, newEntry, reserve, settle, type After, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore } from "./runs.js";
@@ -433,7 +434,9 @@ export class Lifecycle {
       if (error instanceof GatewayError && meaningOf(error) === "refused") return null;
       throw error;
     }
-    return readTaskDetail(answer);
+    const detail = await readTaskDetail(answer);
+    // An answer about another task is never read as this one (step 12's harness).
+    return detail && detail.task.id === task ? detail : null;
   }
 
   private budget(ownReservation?: number) {
@@ -526,6 +529,13 @@ export class Lifecycle {
       // An input provenance lists isn't in the answer: no prompt can be built from exactly those inputs.
       this.log("lifecycle.decision", "refuse", entry, { code: "prompt_unavailable" });
       await this.giveUp(entry, task.status, "prompt_unavailable", task.version);
+      return null;
+    }
+    if (detail.prompt.bytes.byteLength > MAX_PROMPT_BYTES) {
+      // Words past the most a driver is handed could never start: declined before anything is reserved or accepted
+      // (step 12's harness: they were accepted, then failed at the start and were released).
+      this.log("lifecycle.decision", "refuse", entry, { code: "prompt_too_large" });
+      await this.giveUp(entry, task.status, "prompt_too_large", task.version);
       return null;
     }
     // Never `own_reservation_micro_usd` here: no reservation of this decision's exists before it's issued.

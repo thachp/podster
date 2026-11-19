@@ -17,6 +17,7 @@
     "@auth/agent": "0.6.2",
     "@axe-core/playwright": "4.14.0",
     "@modelcontextprotocol/sdk": "1.32.2",
+    "express": "5.3.0",
     "jose": "^6.2.15",
     "playwright": "1.64.1"
   },

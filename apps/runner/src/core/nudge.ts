@@ -18,8 +18,11 @@
  * 5. the signature, `X-Podster-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, under the
  *    registration's signing secret, compared in constant time, and its time within the window either way;
  * 6. an exact replay of a signature seen within the window;
- * 7. only then the JSON: a `podster.dev/verifyEndpoint` challenge for this agent and registration version, or a nudge of
- *    exactly the shape above. Anything else is refused. A retry of an attempt already taken is answered and rings nothing.
+ * 7. only then the JSON, and the `A2A-Version` it asks for: only 1.0 is served, the patch is ignored, and a missing header
+ *    is 0.3 (A2A 1.0, 3.6), so anything else gets `VersionNotSupportedError` (step 15). Reading it after the signature is
+ *    Podster's choice, not A2A's, so an unsigned request learns nothing;
+ * 8. a `podster.dev/verifyEndpoint` challenge for this agent and registration version, or a nudge of exactly the shape
+ *    above. Anything else is refused. A retry of an attempt already taken is answered and rings nothing.
  *
  * The memory of what was seen is bounded. While it's full of entries still inside the window, a new request is refused
  * rather than an entry forgotten early, which would let it be replayed.
@@ -52,6 +55,12 @@ export const MAX_NUDGE_URL_BYTES = 1024;
 export const NUDGE_GAP_MS = 5_000;
 
 const SIGNATURE = /^t=(\d{1,12}),v1=([0-9a-f]{64})$/;
+/** The A2A version Podster's nudge speaks, and the only one served (ADR 0007, decisions 108 and 192). */
+export const A2A_VERSION = "1.0";
+/** A2A 1.0's `VersionNotSupportedError`, as its JSON-RPC binding numbers it. */
+export const VERSION_NOT_SUPPORTED = -32009;
+/** `major.minor` with an optional `.patch`: digits only, no leading zeros, bounded, as the gateway reads it. */
+const VERSION = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})(?:\.(0|[1-9]\d{0,5}))?$/;
 const CHALLENGE = /^[0-9a-f]{64}$/;
 const ATTEMPT_KINDS = new Set(["offer", "change_request"]);
 const encoder = new TextEncoder();
@@ -66,6 +75,15 @@ export function isRegistration(value: unknown): value is NudgeRegistration {
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("");
 const hmacKey = (secret: string, usage: "sign" | "verify") => crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
+
+/**
+ * Whether `header` asks for A2A 1.0. A missing header is 0.3 (A2A 1.0, 3.6.2), the patch is ignored (3.6), and anything
+ * that isn't exactly a version is no version at all.
+ */
+export function asksForServedVersion(header: string | null): boolean {
+  const match = header === null ? null : VERSION.exec(header);
+  return match !== null && `${match[1]}.${match[2]}` === A2A_VERSION;
+}
 
 /** Lowercase hex HMAC-SHA256 of `text` under `secret`. */
 export async function hmacHex(secret: string, text: string): Promise<string> {
@@ -286,6 +304,10 @@ export class NudgeEndpoint {
     }
     if (!isObject(parsed) || parsed.jsonrpc !== "2.0" || !isObject(parsed.params)) return this.refuse(400, "bad_request");
     const { id, method, params } = parsed;
+    if (!asksForServedVersion(request.headers.get("a2a-version"))) {
+      this.log("refused", "wrong_version");
+      return rpc(id, { error: { code: VERSION_NOT_SUPPORTED, message: "Only A2A 1.0 is supported." } });
+    }
     if (method === VERIFY_METHOD) return this.verify(registration, id, params, signature.digest);
     if (method === "SendMessage") return this.nudge(id, params, signature.digest);
     this.log("refused", "wrong_kind");

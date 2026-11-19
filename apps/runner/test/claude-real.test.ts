@@ -19,9 +19,12 @@
 // S-44 is answered when, in the enforcement run: init shows only plugins on PLUGIN_ALLOWLIST (plugins_allowed); no hook
 // event of any kind was seen (no_hook_events), since Runner's callback emits none; at least one of Runner's hook
 // callbacks ran for a tool call (callback_ran, the positive control; `hook_bypassed` already ends any run whose tool
-// handler runs a call the hook didn't see); and the isolation probe inside Claude Code's container held (isolated): the
-// per-run token is the only credential in its environment (only_token), `security` doesn't exist there, the internet
-// doesn't resolve while the relay does, and the only host folders it has are its empty home and config.
+// handler runs a call the hook didn't see); and the isolation probe inside Claude Code's container held (isolated),
+// proved by connecting with socat (the review at 1335df4a, M1): the listener's port directly, the host-gateway IP on
+// that port and on 22, 1.1.1.1:443, relay:22, relay:80 and the task container all fail to connect, while relay:8080
+// answers 401 without the token; the per-run token is the only credential in its environment (only_token); its
+// /proc/mounts is exactly the expected set, with no host folder (mounts_exact); and the relay is on the run's network
+// and the default bridge only (relay_networks). Whether `security` exists there is reported as information only.
 //
 // What it shows, against spike B's results:
 // - (a) every tool call reaches Runner's hook before it runs, and a refused call doesn't run, with the SDK at dontAsk;
@@ -47,6 +50,7 @@ import { installedClaudeVersions, readKeyFile } from "../src/node/claude-engine.
 import { DockerSandbox, dockerCli, dockerHost, findDocker, type DockerCli } from "../src/node/docker-sandbox.js";
 import { ProviderKeyTransport } from "../src/node/provider-transport.js";
 import { ensureFolder } from "../src/node/safe-fs.js";
+import { answeredUnauthorized, connected, unexpectedMounts } from "./probe-checks.js";
 
 const OPTED_IN = process.env.RUNNER_REAL_RUN === "1" && !!process.env.RUNNER_REAL_KEY_FILE;
 const KEY_FILE = process.env.RUNNER_REAL_KEY_FILE;
@@ -61,7 +65,7 @@ export const REAL_SPEND_CEILING_MICRO_USD = Object.values(CAPS).reduce((a, b) =>
 
 type RunRecord = { scenario: string; status: string; stop_reason: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[] };
 type S44 = { plugins_allowed: boolean; no_hook_events: boolean; callback_ran: boolean; isolated: boolean; answered: boolean };
-type Probe = { only_token: boolean; no_security: boolean; no_internet: boolean; relay_resolves: boolean; only_own_folders: boolean };
+type Probe = { reaches_nothing_else: boolean; relay_answers_401: boolean; only_token: boolean; mounts_exact: boolean; relay_networks: boolean };
 
 describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spends on the owner's key, runs Docker)", () => {
   let base: string;
@@ -72,6 +76,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
   let taskImage: string;
   let claudeImage: string;
   let probe: Probe | null = null;
+  let probeInfo: unknown = null;
   const forwarded: string[] = [];
   const toolOutputs: string[] = [];
   const records: RunRecord[] = [];
@@ -117,7 +122,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       hooks: r.observations.filter((o) => o.kind === "hook").map((o) => `${(o as { hook_event: string }).hook_event}/${(o as { hook_name: string }).hook_name}${(o as { origin: boolean }).origin ? "/origin" : ""}`),
       runner_callbacks: r.observations.filter((o) => o.kind === "callback").length,
     }));
-    console.log(JSON.stringify({ s44: s44Results, isolation_probe: probe, spike_b: summary }, null, 2));
+    console.log(JSON.stringify({ s44: s44Results, isolation_probe: probe, isolation_probe_detail: probeInfo, spike_b: summary }, null, 2));
   });
 
   function newDriver(observe?: (o: DriverObservation) => void) {
@@ -179,39 +184,57 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     return { report, progress, facts, stopped, observations, requests };
   }
 
-  it("isolation inside Claude Code's container: the per-run token is the only credential, no security, no internet, only its own folders", async () => {
+  it("isolation inside Claude Code's container, proved by connecting: only the relay's 8080 answers, the token is the only credential, and its mounts are exactly the expected ones", async () => {
     const driver = await newDriver();
     const ref = `real-probe-${Date.now()}`;
     const halt = new AbortController();
     const listener = await startBrokerListener({ model: async () => ({ ok: false, refused: "run_stopped" }), signal: halt.signal, host: `${RELAY_ALIAS}:${RELAY_PORT}` });
-    const runDir = join(base, "probe");
-    await mkdir(join(runDir, "home"), { recursive: true, mode: 0o700 });
-    await mkdir(join(runDir, "config"), { recursive: true, mode: 0o700 });
+    // A task container beside it, which Claude Code's container must not reach.
+    const taskSandbox = new DockerSandbox({ docker, image: taskImage, uid, gid, home });
+    const taskRef = `real-taskprobe-${Date.now()}`;
+    const task_container = `podster-run-${taskRef.toLowerCase()}`;
     try {
-      await driver.prepare(ref, listener.port, { home: join(runDir, "home"), config: join(runDir, "config") }, 300);
-      const container = claudeNames(ref).container;
+      await taskSandbox.open(containerSpec(taskRef, { task_folder: join(base, "workspaces", "ws_real", "tsk_isolation_probe"), network: [], caps: { spend_micro_usd: 1, run_time_ms: 120_000, turns: 1, output_tokens: 1, max_tokens: 1 } }), new AbortController().signal);
+      await driver.prepare(ref, listener.port, 300);
+      const names = claudeNames(ref);
       const env = claudeEnv(listener.token, 1_024, { bare: true });
-      const exec = (argv: string[], withEnv = false) =>
-        docker(["exec", ...(withEnv ? Object.keys(env).flatMap((n) => ["--env", n]) : []), container, ...argv], { timeoutMs: 60_000, maxOutputBytes: 256 * 1024, env: withEnv ? env : undefined });
+      const exec = (container: string, argv: string[], opts: { withEnv?: boolean; input?: string } = {}) =>
+        docker(["exec", ...(opts.input !== undefined ? ["--interactive"] : []), ...(opts.withEnv ? Object.keys(env).flatMap((n) => ["--env", n]) : []), container, ...argv], { timeoutMs: 60_000, maxOutputBytes: 256 * 1024, env: opts.withEnv ? env : undefined, input: opts.input });
+      const tryConnect = async (target: string) => connected(await exec(names.container, ["socat", "-u", "OPEN:/dev/null", `TCP:${target},connect-timeout=3`]));
+      // Docker Desktop's host-gateway IP, as the relay resolves host.docker.internal; its usual value if that fails.
+      const resolved = (await exec(names.relay, ["getent", "hosts", "host.docker.internal"])).stdout.trim().split(/\s+/)[0];
+      const gateway = /^\d+\.\d+\.\d+\.\d+$/.test(resolved ?? "") ? resolved : "192.168.65.254";
       // The environment Claude Code gets, and the container's own.
-      const seen = (await exec(["/usr/bin/env"], true)).stdout + "\n" + (await exec(["cat", "/proc/1/environ"])).stdout.replaceAll("\u0000", "\n");
+      const seen = (await exec(names.container, ["/usr/bin/env"], { withEnv: true })).stdout + "\n" + (await exec(names.container, ["cat", "/proc/1/environ"])).stdout.replaceAll("\u0000", "\n");
       const credential = /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|AUTH/;
-      const named = seen.split("\n").filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)] as const);
-      const credentials = named.filter(([n]) => credential.test(n) && n !== "CLAUDE_CODE_MAX_OUTPUT_TOKENS");
-      const mounts = (await exec(["cat", "/proc/mounts"])).stdout.split("\n").map((l) => l.split(" ")[1] ?? "").filter((t) => t.startsWith("/claude") || t.startsWith("/Users") || t.startsWith("/home"));
-      probe = {
-        only_token: !seen.includes(key) && credentials.length > 0 && credentials.every(([n, v]) => n === "ANTHROPIC_API_KEY" && v === listener.token),
-        no_security: (await exec(["ls", "/usr/bin/security"])).code !== 0,
-        no_internet: (await exec(["getent", "hosts", "api.anthropic.com"])).code !== 0,
-        relay_resolves: (await exec(["getent", "hosts", RELAY_ALIAS])).code === 0,
-        only_own_folders: mounts.sort().join(",") === "/claude/config,/claude/home",
+      const credentials = seen.split("\n").filter((l) => l.includes("=")).map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)] as const).filter(([n]) => credential.test(n) && n !== "CLAUDE_CODE_MAX_OUTPUT_TOKENS");
+      const networks = Object.keys(JSON.parse((await docker(["inspect", "--format", "{{json .NetworkSettings.Networks}}", names.relay], { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 })).stdout || "{}") as object).sort();
+      const request = "POST /v1/messages HTTP/1.1\r\nHost: relay:8080\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+      const reaches = {
+        listener_direct: await tryConnect(`host.docker.internal:${listener.port}`),
+        gateway_listener_port: await tryConnect(`${gateway}:${listener.port}`),
+        gateway_other_port: await tryConnect(`${gateway}:22`),
+        internet: await tryConnect("1.1.1.1:443"),
+        relay_22: await tryConnect("relay:22"),
+        relay_80: await tryConnect("relay:80"),
+        task_container: await tryConnect(`${task_container}:80`),
       };
-      expect(probe).toEqual({ only_token: true, no_security: true, no_internet: true, relay_resolves: true, only_own_folders: true });
+      probe = {
+        reaches_nothing_else: Object.values(reaches).every((v) => v === false),
+        relay_answers_401: answeredUnauthorized(await exec(names.container, ["socat", "-t", "5", "-", "TCP:relay:8080,connect-timeout=3"], { input: request })),
+        only_token: !seen.includes(key) && credentials.length > 0 && credentials.every(([n, v]) => n === "ANTHROPIC_API_KEY" && v === listener.token),
+        mounts_exact: unexpectedMounts((await exec(names.container, ["cat", "/proc/mounts"])).stdout).length === 0,
+        relay_networks: networks.join(",") === [names.network, "bridge"].sort().join(","),
+      };
+      // Information only, not evidence: `security` is a macOS program and wouldn't be in a Linux image anyway.
+      probeInfo = { reaches, gateway, relay_networks: networks, no_security_information: (await exec(names.container, ["ls", "/usr/bin/security"])).code !== 0, unexpected_mounts: unexpectedMounts((await exec(names.container, ["cat", "/proc/mounts"])).stdout) };
+      expect(probe).toEqual({ reaches_nothing_else: true, relay_answers_401: true, only_token: true, mounts_exact: true, relay_networks: true });
     } finally {
       await driver.teardown(ref);
+      await taskSandbox.kill(taskRef);
       halt.abort();
     }
-  }, 180_000);
+  }, 240_000);
 
   /** S-44, settled on the enforcement run and the isolation probe. */
   function s44(r: { observations: DriverObservation[] }) {

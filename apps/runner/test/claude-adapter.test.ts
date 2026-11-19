@@ -477,14 +477,17 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
 
 function fakeProcesses() {
   const killed: string[] = [];
+  const children: { exitCode: number | null; signalCode: string | null }[] = [];
   const spawned: { command: string; args: string[]; cwd: string; env: Record<string, string> }[] = [];
   const processes: ProcessControl = {
     spawn(command, args, opts) {
       spawned.push({ command, args, ...opts });
-      return { pid: 4001, stdin: null, stdout: null, killed: false, exitCode: null, kill: (signal: string) => (killed.push(signal), true), on: () => undefined, once: () => undefined, off: () => undefined } as never;
+      const child = { pid: 4001, stdin: null, stdout: null, killed: false, exitCode: null as number | null, signalCode: null as string | null, kill: (signal: string) => (killed.push(signal), (child.signalCode = signal), true), on: () => undefined, once: () => undefined, off: () => undefined };
+      children.push(child);
+      return child as never;
     },
   };
-  return { processes, killed, spawned };
+  return { processes, killed, spawned, children };
 }
 
 const DOCKER_PROGRAM = "/usr/local/bin/docker";
@@ -617,11 +620,13 @@ describe("the Claude Agent SDK driver", () => {
     expect(claudeEnv("t", 9)).toMatchObject({ HOME: CONTAINER_HOME, ANTHROPIC_API_KEY: "t", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9" });
   });
 
-  it("makes the run's home and config folders empty, mode 0700, and refuses a run folder already there", async () => {
+  it("makes only an empty run folder, mode 0700, and no host folder for Claude Code's home or config (L1)", async () => {
     const t = await driverFor([]);
     const { s } = session();
     await (await t.driver.begin(s)).done;
-    for (const sub of ["", "home", "config"]) expect((await stat(join(t.home, "runs", "run-1", sub))).mode & 0o777).toBe(0o700);
+    expect((await stat(join(t.home, "runs", "run-1"))).mode & 0o777).toBe(0o700);
+    const { readdir } = await import("node:fs/promises");
+    expect(await readdir(join(t.home, "runs", "run-1"))).toEqual([]);
     await expect(t.driver.begin(s)).rejects.toThrow(UnsafePath);
   });
 
@@ -1316,12 +1321,18 @@ describe("the two-container placement", () => {
     const t = await driverFor([]);
     await (await t.driver.begin(session().s)).done;
     const names = claudeNames("run-1");
+    const flag2 = (args: string[], name: string) => args.filter((_, i) => args[i - 1] === name);
     const [net, relay, connect, cc] = t.dk.calls;
     expect(net.slice(0, 3)).toEqual(["network", "create", "--internal"]);
     expect(net.at(-1)).toBe(names.network);
     expect(relay[0]).toBe("run");
     expect(relay).toContain(names.relay);
-    expect(connect).toEqual(["network", "connect", "--alias", "relay", names.network, names.relay]);
+    // L2: the relay starts on the run's internal network as `relay`, then joins the default bridge only, which Docker
+    // Desktop needs for host.docker.internal; no other network.
+    expect(flag2(relay, "--network")).toEqual([names.network]);
+    expect(flag2(relay, "--network-alias")).toEqual(["relay"]);
+    expect(connect).toEqual(["network", "connect", "bridge", names.relay]);
+    expect(t.dk.calls.filter((c) => c[0] === "network" && c[1] === "connect")).toHaveLength(1);
     expect(cc[0]).toBe("run");
     expect(cc).toContain(names.container);
     const flag = (args: string[], name: string) => args.filter((_, i) => args[i - 1] === name);
@@ -1337,10 +1348,12 @@ describe("the two-container placement", () => {
       expect(flag(args, "--label")).toContain(`${LABEL_RUN}=run-1`);
       expect(args.join(" ")).not.toMatch(/docker\.sock|--device|--privileged|--volume|-v |--network host|--cap-add|--env /);
     }
-    // Claude Code: only the run's internal network, and only its empty home and config from the host.
+    // Claude Code: only the run's internal network, and no host mount at all (L1): its home and config are tmpfs.
     expect(flag(cc, "--network")).toEqual([names.network]);
-    const root = join(t.home, "runs", "run-1");
-    expect(flag(cc, "--mount")).toEqual([`type=bind,source=${join(root, "home")},target=${CONTAINER_HOME}`, `type=bind,source=${join(root, "config")},target=${CONTAINER_CONFIG}`]);
+    expect(flag(cc, "--mount")).toEqual([]);
+    const tmpfs = flag(cc, "--tmpfs");
+    for (const target of [CONTAINER_HOME, CONTAINER_CONFIG]) expect(tmpfs).toContain(`${target}:rw,nosuid,nodev,size=64m,uid=501,gid=20,mode=0700`);
+    expect(tmpfs.every((t) => /size=\d+m/.test(t))).toBe(true);
     expect(flag(cc, "--label")).toContain(`${LABEL_ROLE}=claude`);
     expect(cc.slice(-2)[0]).toBe("sleep");
     // The relay: no mount, a fixed forward to the host's listener port, and nothing else.
@@ -1408,7 +1421,7 @@ describe("the two-container placement", () => {
   });
 
   it("the run args are the same hardening as the task container's, from its own helpers", () => {
-    const cc = claudeRunArgs({ ref: "run-1", image: CLAUDE_IMAGE, uid: 501, gid: 20, home_dir: "/r/home", config_dir: "/r/config", home_label: "h", max_seconds: 660 });
+    const cc = claudeRunArgs({ ref: "run-1", image: CLAUDE_IMAGE, uid: 501, gid: 20, home_label: "h", max_seconds: 660 });
     const relay = relayRunArgs({ ref: "run-1", image: CLAUDE_IMAGE, uid: 501, gid: 20, port: 4321, home_label: "h", max_seconds: 660 });
     expect(cc.slice(-2)).toEqual(["sleep", "660"]);
     expect(relay.at(-1)).toBe("TCP:host.docker.internal:4321");
@@ -1432,8 +1445,8 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     expect(((await engineFor("darwin")).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, placement: "container" });
   });
 
-  it("on linux, refuses with platform_unverified until S-47's Linux run (the listener stays on 127.0.0.1, which a container can't reach there)", async () => {
-    await expect(engineFor("linux")).rejects.toThrow(/platform_unverified/);
+  it("on every platform but darwin, refuses with platform_unverified (L3; Linux until S-47's run)", async () => {
+    for (const platform of ["linux", "freebsd", "win32", "openbsd"] as const) await expect(engineFor(platform)).rejects.toThrow(/platform_unverified/);
   });
 
   it("refuses without a pinned Claude Code image", async () => {
@@ -1485,5 +1498,69 @@ describe("the real run after the ruling", () => {
     expect(real).toMatch(/\/usr\/bin\/security/);
     expect(real).toMatch(/only_token/);
     expect(real).toMatch(/claude-image/);
+  });
+});
+
+// ---- The review of the two-container design at 1335df4a: conditions before the real run ----
+
+describe("L4: confirmGone waits for the docker exec client", () => {
+  it("reads as not gone while the exec client still runs, though its containers are gone", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    await t.driver.reap("run-1");
+    t.procs.children[0].signalCode = null;
+    expect(t.dk.containers.size).toBe(0);
+    expect(await t.driver.confirmGone("run-1")).toBe(false);
+    t.procs.children[0].exitCode = 137;
+    expect(await t.driver.confirmGone("run-1")).toBe(true);
+  });
+});
+
+describe("M1: the isolation probe's checks", () => {
+  it("passes exactly the expected mounts, and fails any other, and any virtiofs, fakeowner or grpcfuse mount", async () => {
+    const { unexpectedMounts } = await import("./probe-checks.js");
+    const good = [
+      "overlay / overlay ro,relatime 0 0",
+      "proc /proc proc rw,nosuid,nodev,noexec 0 0",
+      "tmpfs /dev tmpfs rw,nosuid 0 0",
+      "devpts /dev/pts devpts rw 0 0",
+      "mqueue /dev/mqueue mqueue rw 0 0",
+      "sysfs /sys sysfs ro 0 0",
+      "cgroup /sys/fs/cgroup cgroup2 ro 0 0",
+      "tmpfs /tmp tmpfs rw 0 0",
+      "tmpfs /work tmpfs rw 0 0",
+      "tmpfs /claude/home tmpfs rw 0 0",
+      "tmpfs /claude/config tmpfs rw 0 0",
+      "/dev/vda1 /etc/resolv.conf ext4 rw 0 0",
+      "/dev/vda1 /etc/hostname ext4 rw 0 0",
+      "/dev/vda1 /etc/hosts ext4 rw 0 0",
+      "proc /proc/bus proc ro 0 0",
+      "proc /proc/sys proc ro 0 0",
+      "tmpfs /proc/acpi tmpfs ro 0 0",
+      "tmpfs /proc/kcore tmpfs rw 0 0",
+      "tmpfs /sys/firmware tmpfs ro 0 0",
+    ].join("\n");
+    expect(unexpectedMounts(good)).toEqual([]);
+    for (const extra of ["virtiofs /claude/home virtiofs rw 0 0", "fakeowner /claude/config fakeowner rw 0 0", "grpcfuse /work grpcfuse rw 0 0", "/dev/vda1 /Users/owner ext4 rw 0 0", "tmpfs /home/owner tmpfs rw 0 0", "/dev/vda1 /var/run/docker.sock ext4 rw 0 0"]) {
+      expect([extra, unexpectedMounts(`${good}\n${extra}`).length]).toEqual([extra, 1]);
+    }
+    // A missing tmpfs for Claude Code's home is unexpected too: it would mean the image's own folder is used.
+    expect(unexpectedMounts(good.replace("tmpfs /claude/home tmpfs rw 0 0\n", ""))).toEqual(["missing:/claude/home"]);
+  });
+
+  it("reads a connection as made only on socat's success, and the relay's answer as 401 only from its status line", async () => {
+    const { connected, answeredUnauthorized } = await import("./probe-checks.js");
+    expect(connected({ code: 0, stdout: "", stderr: "", cut: false })).toBe(true);
+    expect(connected({ code: 1, stdout: "", stderr: "socat[1] E connect(): Connection refused", cut: false })).toBe(false);
+    expect(answeredUnauthorized({ code: 0, stdout: "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\r\n{}", stderr: "", cut: false })).toBe(true);
+    expect(answeredUnauthorized({ code: 0, stdout: "HTTP/1.1 200 OK\r\n\r\n401", stderr: "", cut: false })).toBe(false);
+  });
+
+  it("the real run probes by connecting: listener port direct, the host-gateway IP on two ports, the internet, relay:22 and :80, the task container, and relay:8080 answering 401", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    for (const needle of ["host.docker.internal", "192.168.65.254", "1.1.1.1", "relay:22", "relay:80", "task_container", "answeredUnauthorized", "unexpectedMounts", "relay_networks"]) expect([needle, real.includes(needle)]).toEqual([needle, true]);
+    expect(real).toMatch(/no_security_information/);
+    expect(real).not.toMatch(/no_security: \(/);
+    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(148_000\)/);
   });
 });

@@ -10,9 +10,13 @@
  * task's container:
  * - on a per-run internal Docker network with no route out; its only peer is a relay container, alias `relay`, which
  *   forwards TCP to Runner's loopback listener on the host and nothing else;
- * - with no host mount but an empty, per-run home and config folder, no key (only the listener's per-run token), as a
- *   numeric non-root UID with the task container's hardening, labelled by run and home, and killed and reaped the same
- *   way;
+ * - with no host mount at all: its home and config are size-bounded tmpfs (L1 of the review at 1335df4a); no key, only
+ *   the listener's per-run token; a numeric non-root UID with the task container's hardening, labelled by run and home,
+ *   and killed and reaped the same way;
+ * - the relay starts on the run's internal network as `relay` and then joins Docker's default bridge, and no other
+ *   network: Docker won't attach a container started with `--network none` to any network, and Docker Desktop reaches
+ *   `host.docker.internal` only from a network with a route out. Accepted (L2): a container on the default bridge could
+ *   reach the relay, and through it the listener, which still takes nothing without the per-run token;
  * - started with `docker exec`, its environment handed through the exec client's own environment (`--env NAME`), never
  *   its arguments.
  * Claude Code still has `tools: []`; task commands run only in the task container, through Runner's tools.
@@ -109,8 +113,8 @@ const hardening = (uid: number, gid: number) => [
 
 const labels = (ref: string, home_label: string, role: string) => ["--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${home_label}`, "--label", `${LABEL_ROLE}=${role}`];
 
-/** `docker run` for Claude Code's own container: the run's internal network, its empty home and config, nothing else. */
-export function claudeRunArgs(o: { ref: string; image: string; uid: number; gid: number; home_dir: string; config_dir: string; home_label: string; max_seconds: number }): string[] {
+/** `docker run` for Claude Code's own container: the run's internal network, tmpfs for everything it writes, no host mount. */
+export function claudeRunArgs(o: { ref: string; image: string; uid: number; gid: number; home_label: string; max_seconds: number }): string[] {
   const names = claudeNames(o.ref);
   return [
     "run", "--detach", "--name", names.container,
@@ -118,9 +122,9 @@ export function claudeRunArgs(o: { ref: string; image: string; uid: number; gid:
     ...hardening(o.uid, o.gid),
     "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
     "--tmpfs", `${CONTAINER_WORK}:rw,nosuid,nodev,size=64m`,
+    "--tmpfs", `${CONTAINER_HOME}:rw,nosuid,nodev,size=64m,uid=${o.uid},gid=${o.gid},mode=0700`,
+    "--tmpfs", `${CONTAINER_CONFIG}:rw,nosuid,nodev,size=64m,uid=${o.uid},gid=${o.gid},mode=0700`,
     "--network", names.network,
-    "--mount", `type=bind,source=${o.home_dir},target=${CONTAINER_HOME}`,
-    "--mount", `type=bind,source=${o.config_dir},target=${CONTAINER_CONFIG}`,
     "--workdir", CONTAINER_WORK,
     "--init",
     o.image,
@@ -128,10 +132,16 @@ export function claudeRunArgs(o: { ref: string; image: string; uid: number; gid:
   ];
 }
 
-/** `docker run` for the relay: no mount, a fixed TCP forward to the host's listener port, bounded in time. */
+/**
+ * `docker run` for the relay: on the run's internal network as `relay`, no mount, a fixed TCP forward to the host's
+ * listener port, bounded in time. `prepare` then attaches the default bridge, and nothing else.
+ */
 export function relayRunArgs(o: { ref: string; image: string; uid: number; gid: number; port: number; home_label: string; max_seconds: number }): string[] {
+  const names = claudeNames(o.ref);
   return [
-    "run", "--detach", "--name", claudeNames(o.ref).relay,
+    "run", "--detach", "--name", names.relay,
+    "--network", names.network,
+    "--network-alias", RELAY_ALIAS,
     ...labels(o.ref, o.home_label, "relay"),
     ...hardening(o.uid, o.gid),
     "--add-host", "host.docker.internal:host-gateway",
@@ -338,15 +348,15 @@ export class ClaudeDriver implements AgentDriver {
   }
 
   /** The run's network, relay and Claude Code container; all removed again if any step fails. */
-  async prepare(ref: string, port: number, dirs: { home: string; config: string }, max_seconds: number): Promise<void> {
+  async prepare(ref: string, port: number, max_seconds: number): Promise<void> {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     const names = claudeNames(ref);
     const base = { ref, image: this.deps.claudeImage, uid: this.deps.uid, gid: this.deps.gid, home_label: this.homeLabel, max_seconds };
     const steps = [
       ["network", "create", "--internal", "--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${this.homeLabel}`, "--label", `${LABEL_ROLE}=network`, names.network],
       relayRunArgs({ ...base, port }),
-      ["network", "connect", "--alias", RELAY_ALIAS, names.network, names.relay],
-      claudeRunArgs({ ...base, home_dir: dirs.home, config_dir: dirs.config }),
+      ["network", "connect", "bridge", names.relay],
+      claudeRunArgs(base),
     ];
     for (const args of steps) {
       const r = await this.docker(args);
@@ -387,7 +397,6 @@ export class ClaudeDriver implements AgentDriver {
     const root = await freshFolder(join(this.runs, ref));
     const live: Live = { child: null, listener: null, abort: new AbortController(), dir: root };
     this.live.set(ref, live);
-    const dirs = { home: await freshFolder(join(root, "home")), config: await freshFolder(join(root, "config")) };
     let failure: string | null = null;
     const fail = (code: string) => {
       if (failure === null) {
@@ -424,7 +433,7 @@ export class ClaudeDriver implements AgentDriver {
       host: `${RELAY_ALIAS}:${RELAY_PORT}`,
     });
     const max_seconds = Math.ceil(session.limits.run_time_ms / 1000) + CONTAINER_MARGIN_S;
-    await this.prepare(ref, live.listener.port, dirs, max_seconds);
+    await this.prepare(ref, live.listener.port, max_seconds);
     const env = claudeEnv(live.listener.token, session.limits.max_tokens, { bare: this.deps.bare });
 
     const checked = new Set<string>();
@@ -550,9 +559,14 @@ export class ClaudeDriver implements AgentDriver {
     await this.teardown(ref);
   }
 
-  /** Nothing of the run is left: no container, relay or network of it, and no listener. A Docker failure is never "gone". */
+  /**
+   * Nothing of the run is left: no container, relay or network of it, no `docker exec` client still running (L4), and
+   * no listener. A Docker failure is never "gone".
+   */
   async confirmGone(run_ref: string): Promise<boolean> {
     if (!REF.test(run_ref)) return false;
+    const child = this.live.get(run_ref)?.child;
+    if (child && child.exitCode === null && (child.signalCode ?? null) === null) return false;
     try {
       if ((await this.list("ps", [`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}`])).length > 0) return false;
       if ((await this.list("network", [`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;

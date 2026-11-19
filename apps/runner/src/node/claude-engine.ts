@@ -10,8 +10,8 @@
  * - `docker` is installed in a fixed place;
  * - no proxy or TLS trust would be taken from the environment.
  * It runs what was ruled after #460's real run: Claude Code always in bare mode, in its own container (the
- * two-container placement). The macOS `sandbox-exec` wrapper is gone. On Linux it refuses (`platform_unverified`)
- * until S-47's Linux run: the relay reaches the host through `host-gateway`, which the listener, bound to 127.0.0.1
+ * two-container placement). The macOS `sandbox-exec` wrapper is gone. On every system but macOS it refuses
+ * (`platform_unverified`); on Linux until S-47's Linux run: the relay reaches the host through `host-gateway`, which the listener, bound to 127.0.0.1
  * (scoped exception 1, not loosened), doesn't serve there. The owed Linux path is a Unix-socket listener.
  * Then it reaps (M4 on #459): every container and network of this home a previous process left goes before the
  * lifecycle opens and confirms any stop.
@@ -80,7 +80,8 @@ export async function claudeImage(home: string): Promise<string> {
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
 export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; dockerProgram?: string; env?: NodeJS.ProcessEnv; execArgv?: readonly string[]; platform?: NodeJS.Platform }): Promise<ClaudeEngine> {
-  if ((opts.platform ?? process.platform) === "linux") throw new Error("platform_unverified: Runner doesn't run tasks on Linux until its checks have run on a Linux host (S-47).");
+  // Only macOS is verified (L3 of the review at 1335df4a); Linux waits on S-47's run, and every other system is refused.
+  if ((opts.platform ?? process.platform) !== "darwin") throw new Error("platform_unverified: Runner runs tasks only on macOS until its checks have run on this system (Linux: S-47).");
   const key = await readKeyFile(opts.key_file);
   const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key, { env: opts.env, execArgv: opts.execArgv });
   const image = await taskImage(opts.home);

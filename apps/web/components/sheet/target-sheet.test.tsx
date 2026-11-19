@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -99,6 +99,31 @@ describe("TargetSheet", () => {
       await title("Agent A");
       act(() => back());
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    });
+
+    it("opens and closes by moving the URL alone, so the page behind isn't rendered again and its reads aren't spent", async () => {
+      setUrl("/agents?view=all");
+      render(<Screen />);
+      await userEvent.click(screen.getByRole("link", { name: "Open A" }));
+      await title("Agent A");
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      await userEvent.click(screen.getByRole("link", { name: "Open B" }));
+      await title("Agent B");
+      act(() => back());
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(currentUrl()).toBe("/agents?view=all");
+      expect(routerCalls.push).toBe(0);
+      expect(routerCalls.refresh).toBe(0);
+    });
+
+    it("leaves a press for a new tab to the browser", () => {
+      render(<Screen />);
+      const event = createEvent.click(screen.getByRole("link", { name: "Open A" }), { metaKey: true });
+      fireEvent(screen.getByRole("link", { name: "Open A" }), event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(currentUrl()).toBe("/agents");
+      expect(screen.getByRole("link", { name: "Open A" })).toHaveAttribute("href", "/agents?agent=a");
     });
 
     it("closing clears only its own parameter", async () => {

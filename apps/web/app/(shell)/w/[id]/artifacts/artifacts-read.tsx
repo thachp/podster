@@ -12,9 +12,8 @@ import { ArtifactsScreen, RateLimited } from "./artifacts-screen";
  * task an output's current version came from. A task that isn't in that page shows by its ID: the output read already decided
  * whether the viewer may know it.
  *
- * No output's history is read here. Opening or closing a task's Sheet, and every refresh after a command, renders this page
- * again, so a read per Ready output here would spend the person's rate limit many times over. Each history is read when its
- * disclosure opens.
+ * No output's history is read here. Every refresh after a command renders this page again, so a read per Ready output here
+ * would spend the person's rate limit many times over. Each history is read when its disclosure opens.
  */
 export async function ArtifactsRead({ id }: { id: string }) {
   const orgs = orgRows(await getOrganizations());

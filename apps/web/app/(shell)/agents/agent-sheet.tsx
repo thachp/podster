@@ -123,7 +123,8 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
 
   useEffect(() => {
     if (agent.status !== "disconnecting") return;
-    const timer = setInterval(() => void reconcile(), DISCONNECT_CHECK_MS);
+    // A hidden tab waits: each check spends the person's gateway limit, and the next one after it's shown still lands.
+    const timer = setInterval(() => void (document.visibilityState === "hidden" ? undefined : reconcile()), DISCONNECT_CHECK_MS);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.status, agent.id]);

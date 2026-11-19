@@ -4,7 +4,7 @@ import { ArtifactsRead } from "./artifacts-read";
 
 export default async function Artifacts({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  // Keyed by room alone, so opening a task's Sheet from here keeps the screen up while it reads.
+  // Keyed by room alone, so a refresh after a command keeps the screen up while it reads. Opening a Sheet reads nothing here.
   return (
     <Suspense key={id} fallback={<ArtifactsLoading />}>
       <ArtifactsRead id={id} />

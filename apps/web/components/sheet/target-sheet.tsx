@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type AnchorHTMLAttributes, type ReactNode } from "react";
 import { cn } from "cn";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
@@ -90,27 +89,39 @@ let lastLauncher: HTMLElement | null = null;
 const pressListeners = new Set<(param: string, target: string) => void>();
 
 /**
- * Opens a Sheet from a list. It's a real link, so it can be opened in a new tab and shared, and it marks itself so focus
- * can find it again on close, even after a re-render or a reload.
+ * Opening or closing a Sheet only moves its parameter in the URL, as the Tasks screen's view switch does. No server page reads
+ * a Sheet's parameter, and a router navigation would render the whole page behind it again: on the Tasks or Attention screen
+ * that's every read the page makes, twice for each look at one task, against the person's gateway limit of 120 calls a
+ * minute. The Sheet reads its own target, and Next and vinext both let `useSearchParams` follow `history.pushState`, Back
+ * included, without asking the server for anything.
  */
-export function SheetLink({ param, target, onClick, ...props }: { param: string; target: string } & Omit<ComponentProps<typeof Link>, "href">) {
+const moveUrl = (href: string) => window.history.pushState(null, "", href);
+
+/**
+ * Opens a Sheet from a list. It's a real link, so it can be opened in a new tab and shared, and it marks itself so focus
+ * can find it again on close, even after a re-render or a reload. A plain press only moves the URL.
+ */
+export function SheetLink({ param, target, onClick, ...props }: { param: string; target: string } & Omit<AnchorHTMLAttributes<HTMLAnchorElement>, "href">) {
   if (useContext(InsideSheet)) throw new Error("A Sheet can't open another Sheet. Close it, then open the other.");
   const pathname = usePathname();
   const search = useSearchParams();
-  const router = useRouter();
   const href = hrefWith(pathname, new URLSearchParams(search.toString()), param, target);
-  return <Link {...props} onClick={(event) => {
-    lastLauncher = event.currentTarget;
-    onClick?.(event);
-    // A press for a new tab leaves this page as it is.
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    pressListeners.forEach((listener) => listener(param, target));
-    // An SVG link's `target` is an object, which vinext's Link reads as a target and leaves to the browser, reloading the page.
-    if (event.currentTarget instanceof SVGElement) {
-      event.preventDefault();
-      router.push(href, { scroll: false });
-    }
-  }} href={href} scroll={false} prefetch={false} data-sheet-launcher={launcherKey(param, target)} />;
+  return (
+    <a
+      {...props}
+      href={href}
+      data-sheet-launcher={launcherKey(param, target)}
+      onClick={(event) => {
+        lastLauncher = event.currentTarget;
+        onClick?.(event);
+        // A press for a new tab leaves this page as it is, and the browser opens the link.
+        if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        pressListeners.forEach((listener) => listener(param, target));
+        moveUrl(href);
+      }}
+    />
+  );
 }
 
 function focusLauncher(param: string, target: string) {
@@ -146,7 +157,7 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
   const [reopened, setReopened] = useState(0);
   const searchText = search.toString();
 
-  const navigate = useCallback((target: string | null) => router.push(hrefWith(pathname, new URLSearchParams(search.toString()), param, target), { scroll: false }), [router, pathname, search, param]);
+  const navigate = useCallback((target: string | null) => moveUrl(hrefWith(pathname, new URLSearchParams(search.toString()), param, target)), [pathname, search, param]);
 
   // Follows the URL, unless this Sheet still has something unfinished. Then the instance holds it and asks.
   useEffect(() => {

@@ -4,7 +4,7 @@ import { TasksRead } from "./tasks-read";
 
 export default async function Tasks({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  // Keyed by room alone, so a change to the query, such as opening a Sheet, keeps the screen up while it reads.
+  // Keyed by room alone, so a refresh after a command keeps the screen up while it reads. Opening a Sheet reads nothing here.
   return (
     <Suspense key={id} fallback={<TasksLoading />}>
       <TasksRead id={id} />

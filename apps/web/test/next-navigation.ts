@@ -11,7 +11,8 @@ const subscribe = (listener: () => void) => {
   return () => listeners.delete(listener);
 };
 
-export const routerCalls = { refresh: 0 };
+/** A router navigation renders the page again on the server, which spends the person's gateway rate limit. `push` counts them. */
+export const routerCalls = { refresh: 0, push: 0 };
 
 /** Real navigation finishes later. While true, `push` and `replace` wait until `settleNavigation`. */
 let holdNavigation = false;
@@ -36,6 +37,7 @@ export function setUrl(next: string) {
   history.length = 0;
   forward = [];
   routerCalls.refresh = 0;
+  routerCalls.push = 0;
   holdNavigation = false;
   held = [];
   notify();
@@ -55,9 +57,10 @@ export const back = () => {
   notify();
 };
 
-// vinext patches this so `useSearchParams` follows it, as Next does.
+// vinext patches this so `useSearchParams` follows it, as Next does, and it reads nothing from the server. React may apply
+// it a moment later, so a held navigation holds this too.
 window.history.pushState = (_data, _unused, next) => {
-  if (next) navigate(String(next));
+  if (next) later(() => navigate(String(next)));
 };
 
 export const currentUrl = () => url.pathname + url.search;
@@ -65,7 +68,10 @@ export const currentUrl = () => url.pathname + url.search;
 const later = (apply: () => void) => (holdNavigation ? void held.push(apply) : apply());
 
 export const useRouter = () => ({
-  push: (next: string) => later(() => navigate(next)),
+  push: (next: string) => {
+    routerCalls.push += 1;
+    later(() => navigate(next));
+  },
   replace: (next: string) =>
     later(() => {
       url = new URL(next, "http://app.test");

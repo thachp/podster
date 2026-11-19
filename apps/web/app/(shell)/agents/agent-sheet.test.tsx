@@ -251,6 +251,21 @@ describe("UI-13: disconnecting", () => {
     expect(commands()).toEqual([]);
   });
 
+  it("doesn't check on a disconnect while the tab is hidden, which would spend the person's limit for no one", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    agent = { ...AGENT, status: "disconnecting" };
+    render(<Screen />);
+    await screen.findByText("Disconnecting");
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    const before = calls.length;
+    await act(async () => void (await vi.advanceTimersByTimeAsync(DISCONNECT_CHECK_MS * 3)));
+    expect(calls.length).toBe(before);
+    hidden.mockRestore();
+    agent = { ...AGENT, status: "disconnected" };
+    await act(async () => void (await vi.advanceTimersByTimeAsync(DISCONNECT_CHECK_MS)));
+    await waitFor(() => expect(screen.getByText("Disconnected")).toBeInTheDocument());
+  });
+
   it("reconnect shows the server's state and promises no room access", async () => {
     agent = { ...AGENT, status: "disconnected" };
     special = (url, init) => {

@@ -1,8 +1,10 @@
 # Runner's test pre-release
 
-**Status, 2026-11-19, later:** `0.0.1-test.1` is on npm, published by the owner through path B. The trusted publisher is added, with staging required, and `0.0.1-test.2` is the first version for the workflow to stage. [What happened.](#2026-11-19-the-first-publish-and-staged-publishing)
+**Status, 2026-11-19, latest:** `0.0.1-test.2` was staged and approved, and its provenance was verified. `0.0.1-test.3` is next: it carries the tool-path fix (#477), nudge interop's A2A-Version check (#476) and a README with a run-policy (`policy.json`) example and the key-file recipe, after the owner's first run hit two snags (a key file must hold exactly one key, mode 600; `allowed_orgs` must not include `owner_org`). It is staged the same way: bump merged, workflow run on `main` with `dry_run` off, then approve the staged version on npmjs.com.
 
-*Earlier status, 2026-11-19:* built, not published. The workflow hadn't run.
+*Earlier status, 2026-11-19, later:* `0.0.1-test.1` is on npm, published by the owner through path B. The trusted publisher is added, with staging required, and `0.0.1-test.2` is the first version for the workflow to stage. [What happened.](#2026-11-19-the-first-publish-and-staged-publishing)
+
+*Earlier still, 2026-11-19:* built, not published. The workflow hadn't run.
 
 The owner decided on 2026-11-19 to publish a marked test pre-release of Runner to npm before M7's staging run ([step 16](m7-plan.md#build-order)), so the owner and Long can run it with `npx`. This narrows [decision 26](spec/PRODUCT.md#decisions-needed) for this pre-release only. The gated release is unchanged, and once M7's step 17 passes it supersedes this one.
 

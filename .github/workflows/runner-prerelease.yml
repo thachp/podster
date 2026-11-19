@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "The version in apps/runner/package.json, such as 0.0.1-test.2"
+        description: "The version in apps/runner/package.json, such as 0.0.1-test.3"
         required: true
         type: string
       dry_run:

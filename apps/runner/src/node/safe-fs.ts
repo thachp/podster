@@ -10,9 +10,10 @@
  *
  * Errors carry fixed words only, never a path.
  */
+import { randomBytes } from "node:crypto";
 import { closeSync, constants, openSync, writeSync } from "node:fs";
-import { lstat, mkdir, open, opendir, realpath, rm } from "node:fs/promises";
-import { isAbsolute, join, normalize, relative, sep } from "node:path";
+import { lstat, mkdir, open, opendir, realpath, rename, rm, unlink } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 
 export class UnsafePath extends Error {
   constructor(what: string) {
@@ -110,6 +111,33 @@ export async function writeNew(path: string, text: string): Promise<void> {
     await handle.writeFile(text);
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Replaces a file whole, mode 0600: the text goes to a new file beside it (made with `O_EXCL` and `O_NOFOLLOW`, set to
+ * 0600 whatever the umask, flushed to disk), which is then renamed over the target. A reader sees the old file or the
+ * new one, never part of either; a link at the target is replaced, never followed.
+ */
+export async function writeFileAtomic(path: string, text: string): Promise<void> {
+  plainAbsolute(path);
+  const temp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await handle.chmod(0o600);
+    await handle.writeFile(text);
+    await handle.sync();
+  } catch (error) {
+    await handle.close();
+    await unlink(temp).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
+  try {
+    await rename(temp, path);
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
   }
 }
 

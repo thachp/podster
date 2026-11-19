@@ -1422,6 +1422,17 @@ describe("the two-container placement", () => {
     expect(claudeExecArgs("run-1", ["A", "B"], ["--x"])).toEqual(["exec", "--interactive", "--workdir", "/work", "--env", "A", "--env", "B", claudeNames("run-1").container, CLAUDE_IN_CONTAINER, "--x"]);
   });
 
+  it("on Linux, listens on a Unix socket in the run's folder, which the relay mounts, and joins no bridge (S-47)", async () => {
+    let socket: string | undefined;
+    const t = await driverFor([], {}, { relay: "unix", listen: async (deps) => ((socket = deps.socket), startBrokerListener(deps)) });
+    await (await t.driver.begin(session().s)).done;
+    expect(socket).toBe(join(t.home, "runs", "run-1", "r.sock"));
+    const relay = t.dk.calls.find((c) => c[0] === "run" && c.includes(claudeNames("run-1").relay)) as string[];
+    expect(relay.at(-1)).toBe("UNIX-CONNECT:/relay/runner.sock");
+    expect(relay.filter((_, i) => relay[i - 1] === "--mount")).toEqual([`type=bind,source=${socket},target=/relay/runner.sock,readonly`]);
+    expect(t.dk.calls.some((c) => c[0] === "network" && c[1] === "connect")).toBe(false);
+  });
+
   it("checks the relay's Host at the listener, not the host's loopback name", async () => {
     let host: string | undefined;
     const t = await driverFor([], {}, { listen: async (deps) => ((host = deps.host), startBrokerListener(deps)) });
@@ -1492,8 +1503,14 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     expect(((await engineFor("darwin")).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: false, placement: "container" });
   });
 
-  it("on every platform but darwin, refuses with platform_unverified (L3; Linux until S-47's run)", async () => {
-    for (const platform of ["linux", "freebsd", "win32", "openbsd"] as const) await expect(engineFor(platform)).rejects.toThrow(/platform_unverified/);
+  it("on every platform but darwin and Linux, refuses with platform_unverified (L3), Windows pointing to WSL2 (S-47)", async () => {
+    for (const platform of ["freebsd", "win32", "openbsd"] as const) await expect(engineFor(platform)).rejects.toThrow(/^platform_unverified: /);
+    await expect(engineFor("win32")).rejects.toThrow(/WSL2/);
+  });
+
+  it("on Linux, refuses unless its own checks pass: a Docker that doesn't answer is never taken as one that does (S-47)", async () => {
+    // This fake answers every command with exit 0 and nothing printed, so `docker version` names no server.
+    await expect(engineFor("linux")).rejects.toThrow(/^linux_check_failed: /);
   });
 
   it("refuses without a pinned Claude Code image", async () => {

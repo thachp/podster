@@ -339,6 +339,15 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
 }
 
+/**
+ * Whether a path is on a Windows drive as WSL2 mounts it by default (`/mnt/c`, `/mnt/d/…`): the Windows file system,
+ * where Linux file modes aren't enforced and access is slow (S-47, the architect's ruling of 2026-11-19). A distro that
+ * mounts its drives elsewhere is caught on the host by the mount's file system type (`platform.ts`), not here.
+ */
+export function onWindowsDrive(path: string): boolean {
+  return /^\/mnt\/[A-Za-z](\/|$)/.test(path);
+}
+
 /** Whether two plain absolute paths are the same or one holds the other. */
 function overlaps(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
@@ -355,6 +364,7 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
     const home = copy(context);
     const runnerHome = isObj(home) && Object.hasOwn(home, "runner_home") ? home.runner_home : undefined;
     if (runnerHome !== undefined && !isRoot(runnerHome)) return fail("runner_home");
+    if (typeof runnerHome === "string" && onWindowsDrive(runnerHome)) return fail("runner_home_windows_drive");
     const raw = copy(input);
     if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"], ["max_active_tasks"])) return fail("config");
     const maxActive = Object.hasOwn(raw, "max_active_tasks") ? raw.max_active_tasks : 1;
@@ -368,6 +378,7 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
     if (typeof adapter !== "string" || !(ADAPTERS as readonly string[]).includes(adapter)) return fail("adapter");
     const root = raw.workspace_root;
     if (!isRoot(root)) return fail("workspace_root");
+    if (onWindowsDrive(root)) return fail("workspace_root_windows_drive");
     if (typeof runnerHome === "string" && overlaps(root, runnerHome)) return fail("workspace_root");
     const caps = parseCaps(raw.caps);
     if (!caps.ok) return caps;

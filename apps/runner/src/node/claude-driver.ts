@@ -16,7 +16,11 @@
  * - the relay starts on the run's internal network as `relay` and then joins Docker's default bridge, and no other
  *   network: Docker won't attach a container started with `--network none` to any network, and Docker Desktop reaches
  *   `host.docker.internal` only from a network with a route out. Accepted (L2): a container on the default bridge could
- *   reach the relay, and through it the listener, which still takes nothing without the per-run token;
+ *   reach the relay, and through it the listener, which still takes nothing without the per-run token. **On Linux
+ *   (S-47; the architect's ruling of 2026-11-19), the relay joins no other network:** the listener is a Unix socket in
+ *   the run's folder, mode 0600, which the relay mounts read-only, alone, and forwards to with `socat UNIX-CONNECT`.
+ *   So nothing on the default bridge can reach it, and no TCP port is open on the host. `checkRelay` proves the path
+ *   end to end before Linux is turned on;
  * - started with `docker exec`, its environment handed through the exec client's own environment (`--env NAME`), never
  *   its arguments.
  * Claude Code still has `tools: []`; task commands run only in the task container, through Runner's tools.
@@ -40,6 +44,7 @@
  * Logs carry IDs and codes only.
  */
 import { spawn as nodeSpawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { createSdkMcpServer, query, tool, type HookCallback, type Options, type SdkMcpToolDefinition, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -50,6 +55,7 @@ import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
 import { startBrokerListener, type BrokerListener, type ListenerDeps } from "./broker-listener.js";
 import { dockerFailure, homeLabel, IMAGE_ID, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, REMOVAL_CHECK_MS, REMOVAL_CHECKS, removeContainers, type DockerCli } from "./docker-sandbox.js";
+import type { RelayMode } from "./platform.js";
 import { ensureFolder, freshFolder, removeOwnFolder } from "./safe-fs.js";
 
 /** The SDK's functions the driver uses: the real ones, or a test's stand-in. */
@@ -86,6 +92,10 @@ export const CONTAINER_CONFIG = "/claude/config";
 export const CONTAINER_WORK = "/work";
 export const RELAY_ALIAS = "relay";
 export const RELAY_PORT = 8080;
+/** Where the relay sees the run's listener socket on Linux: the one file mounted into it. */
+export const RELAY_SOCKET_IN_CONTAINER = "/relay/runner.sock";
+/** The listener socket's name in the run's folder. Short, so the whole path fits a socket's limit. */
+export const SOCKET_NAME = "r.sock";
 export { LABEL_ROLE };
 /** How long Claude Code's containers may outlive a run's time cap, as the task container may. */
 const CONTAINER_MARGIN_S = 60;
@@ -134,11 +144,29 @@ export function claudeRunArgs(o: { ref: string; image: string; uid: number; gid:
 }
 
 /**
- * `docker run` for the relay: on the run's internal network as `relay`, no mount, a fixed TCP forward to the host's
- * listener port, bounded in time. `prepare` then attaches the default bridge, and nothing else.
+ * `docker run` for the relay: on the run's internal network as `relay`, bounded in time. On macOS (`port`): no mount, a
+ * fixed TCP forward to the host's listener port, and `prepare` then attaches the default bridge, and nothing else. On
+ * Linux (`socket`): only the run's listener socket mounted, read-only, a fixed forward to it, and no other network.
  */
-export function relayRunArgs(o: { ref: string; image: string; uid: number; gid: number; port: number; home_label: string; max_seconds: number }): string[] {
+export function relayRunArgs(o: { ref: string; image: string; uid: number; gid: number; port?: number; socket?: string; home_label: string; max_seconds: number }): string[] {
   const names = claudeNames(o.ref);
+  if (o.socket !== undefined) {
+    // A path a mount's options could read differently is refused (L4 on #459).
+    if (!/^\/[A-Za-z0-9/._-]{1,200}$/.test(o.socket) || o.socket.split("/").some((s) => s === "." || s === "..")) throw new Error("relay_socket_path");
+    return [
+      "run", "--detach", "--name", names.relay,
+      "--network", names.network,
+      "--network-alias", RELAY_ALIAS,
+      ...labels(o.ref, o.home_label, "relay"),
+      ...hardening(o.uid, o.gid),
+      "--mount", `type=bind,source=${o.socket},target=${RELAY_SOCKET_IN_CONTAINER},readonly`,
+      "--init",
+      o.image,
+      "timeout", String(o.max_seconds),
+      "socat", `TCP-LISTEN:${RELAY_PORT},fork,reuseaddr`, `UNIX-CONNECT:${RELAY_SOCKET_IN_CONTAINER}`,
+    ];
+  }
+  if (!Number.isSafeInteger(o.port) || (o.port as number) <= 0 || (o.port as number) > 65535) throw new Error("relay_port");
   return [
     "run", "--detach", "--name", names.relay,
     "--network", names.network,
@@ -318,6 +346,8 @@ export type ClaudeDriverDeps = {
   initWaitMs?: number;
   /** Waits between checks that a removal is done. */
   wait?: (ms: number) => Promise<void>;
+  /** How the relay reaches the listener: TCP through Docker Desktop on macOS (the default), a Unix socket on Linux. */
+  relay?: RelayMode;
 };
 
 export class ClaudeDriver implements AgentDriver {
@@ -358,15 +388,19 @@ export class ClaudeDriver implements AgentDriver {
     return this.deps.docker(args, { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
   }
 
-  /** The run's network, relay and Claude Code container; all removed again if any step fails. */
-  async prepare(ref: string, port: number, max_seconds: number): Promise<void> {
+  /**
+   * The run's network, relay and Claude Code container; all removed again if any step fails. `to` is the listener's
+   * port (macOS: the relay also joins the default bridge) or its Unix socket (Linux: the relay joins nothing else).
+   */
+  async prepare(ref: string, to: number | { socket: string }, max_seconds: number): Promise<void> {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     const names = claudeNames(ref);
     const base = { ref, image: this.deps.claudeImage, uid: this.deps.uid, gid: this.deps.gid, home_label: this.homeLabel, max_seconds };
     const steps: [string, string[]][] = [
       ["network_create", ["network", "create", "--internal", "--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${this.homeLabel}`, "--label", `${LABEL_ROLE}=network`, names.network]],
-      ["run_relay", relayRunArgs({ ...base, port })],
-      ["network_connect", ["network", "connect", "bridge", names.relay]],
+      ...(typeof to === "number"
+        ? ([["run_relay", relayRunArgs({ ...base, port: to })], ["network_connect", ["network", "connect", "bridge", names.relay]]] as [string, string[]][])
+        : ([["run_relay", relayRunArgs({ ...base, socket: to.socket })]] as [string, string[]][])),
       ["run_claude", claudeRunArgs(base)],
     ];
     for (const [step, args] of steps) {
@@ -376,6 +410,43 @@ export class ClaudeDriver implements AgentDriver {
         throw dockerFailure(step, r.code);
       }
     }
+  }
+
+  /**
+   * The Linux path's positive check (S-47), before `claudeEngine` turns it on: a throwaway run's network, relay and
+   * Claude Code container, with a listener on a Unix socket in its own folder, and one request sent from Claude Code's
+   * container through the relay, carrying the listener's token on standard input, never as an argument. It passes only
+   * when the listener's own answer, a random value, comes back. Everything of it is removed either way.
+   */
+  async checkRelay(): Promise<void> {
+    if (this.deps.relay !== "unix") throw new Error("relay_check_unix_only");
+    const ref = `chk-${randomBytes(4).toString("hex")}`;
+    await ensureFolder(this.deps.home, this.runs);
+    const dir = await freshFolder(join(this.runs, ref));
+    const nonce = randomBytes(16).toString("hex");
+    const halt = new AbortController();
+    let listener: BrokerListener | null = null;
+    let ok = false;
+    try {
+      listener = await (this.deps.listen ?? startBrokerListener)({
+        model: async () => ({ ok: true, status: 200, body: new TextEncoder().encode(JSON.stringify({ check: nonce })) }),
+        signal: halt.signal,
+        host: `${RELAY_ALIAS}:${RELAY_PORT}`,
+        socket: join(dir, SOCKET_NAME),
+      });
+      await this.prepare(ref, { socket: join(dir, SOCKET_NAME) }, 120);
+      const request = `POST ${CLAUDE_PROFILE.path} HTTP/1.1\r\nHost: ${RELAY_ALIAS}:${RELAY_PORT}\r\nx-api-key: ${listener.token}\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}`;
+      const r = await this.deps.docker(["exec", "--interactive", claudeNames(ref).container, "socat", "-t", "10", "-", `TCP:${RELAY_ALIAS}:${RELAY_PORT}`], { input: request, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 16 * 1024 });
+      ok = r.code === 0 && !r.cut && /^HTTP\/1\.1 200 /.test(r.stdout) && r.stdout.includes(nonce);
+    } catch {
+      ok = false;
+    } finally {
+      halt.abort();
+      await listener?.close();
+      await this.teardown(ref).catch(() => undefined);
+      await removeOwnFolder(dir).catch(() => undefined);
+    }
+    if (!ok) throw new Error("relay_check_failed");
   }
 
   /**
@@ -469,15 +540,18 @@ export class ClaudeDriver implements AgentDriver {
       return ok && failure === null;
     };
 
-    // The listener stays on the host's loopback; the relay reaches it, so the Host it sees is the relay's.
+    // The listener stays on the host's loopback (macOS), or is a Unix socket in the run's folder (Linux); the relay
+    // reaches it, so the Host it sees is the relay's.
+    const socket = this.deps.relay === "unix" ? join(root, SOCKET_NAME) : undefined;
     live.listener = await (this.deps.listen ?? startBrokerListener)({
       model: async (r) => ((await waitForInit()) ? session.model(r) : { ok: false, refused: "run_stopped" }),
       signal: session.signal,
       host: `${RELAY_ALIAS}:${RELAY_PORT}`,
+      ...(socket === undefined ? {} : { socket }),
       onRefuse: (code) => this.deps.observe?.({ kind: "listener_refused", run_ref: ref, code }),
     });
     const max_seconds = Math.ceil(session.limits.run_time_ms / 1000) + CONTAINER_MARGIN_S;
-    await this.prepare(ref, live.listener.port, max_seconds);
+    await this.prepare(ref, socket === undefined ? live.listener.port : { socket }, max_seconds);
     const env = claudeEnv(live.listener.token, session.limits.max_tokens, { bare: this.deps.bare });
 
     const checked = new Set<string>();

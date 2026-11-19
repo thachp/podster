@@ -232,6 +232,7 @@ jobs:
   runner:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -246,6 +247,18 @@ jobs:
         working-directory: apps/runner
       - run: npm run build
         working-directory: apps/runner
+      # S-47: Runner's Linux path (also Windows through WSL2) on this runner's real Docker Engine. It builds Runner's two
+      # images, starts the task container, Claude Code's container and the Unix-socket relay, and proves the provider key
+      # is in none of them, the relay refuses a request without the per-run token, and teardown leaves no container or
+      # network. No provider is called: the key is a fake and the upstream a stand-in on the host.
+      - run: docker version --format '{{.Server.Version}}'
+      - run: npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"
+        working-directory: apps/runner
+        env:
+          RUNNER_LINUX_DOCKER: "1"
+      # A run whose tests were all skipped would exit 0: this passes only when both ran and passed.
+      - run: |
+          node -e 'const r = require(process.argv[1]); const ok = r.numPassedTests === 2 && r.numFailedTests === 0 && r.numPendingTests === 0 && r.numTodoTests === 0; console.log(`linux docker proof - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/linux-docker.json"
 
   # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
   e2e:

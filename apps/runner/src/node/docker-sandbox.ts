@@ -37,6 +37,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { onWindowsDrive } from "../core/policy.js";
 import type { AllowedCall } from "../core/tool-policy.js";
 import { childEnv } from "./child-env.js";
 import { ensureFolder, folderBytes } from "./safe-fs.js";
@@ -248,6 +249,8 @@ export class DockerSandbox implements TaskSandbox {
   async open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void> {
     if (!REF.test(spec.run_ref)) throw new Error("run_ref_invalid");
     if (checkContainerSpec(spec) !== null) throw new Error("container_invalid");
+    // Never the Windows file system under WSL2, where modes aren't enforced (S-47); the run policy refuses it first.
+    if (onWindowsDrive(spec.task_folder)) throw new Error("workspace_on_windows_drive");
     // No allowlist without an egress proxy to hold it (step 9(b)'s ruling): refused, never widened to the internet.
     if (spec.network.kind !== "none") throw new Error(REFUSED_NETWORK);
     // Runner makes the task's folder itself, mode 0700, checking every segment for links (L3).

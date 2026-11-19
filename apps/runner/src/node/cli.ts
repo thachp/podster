@@ -30,7 +30,7 @@ import { RunnerStorage } from "../core/storage.js";
 import { FileRunStore, forgetRuns } from "./file-runs.js";
 import { FileStateStore } from "./file-state.js";
 import { readHidden } from "./hidden-input.js";
-import { systemKeychain } from "./keychain.js";
+import { chooseKeyStore } from "./key-store.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
 import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
@@ -121,6 +121,9 @@ async function main(argv: string[]) {
 }
 
 async function locked(command: string, args: string[], home: string, state: FileStateStore, nonce: string): Promise<number> {
+  // Which store holds the keys, said in one fixed line (S-47): macOS's keychain, the Secret Service, or files on Linux.
+  const keys = await chooseKeyStore(home);
+  say(keys.line);
   if (command === "forget") {
     // Never the SDK's disconnect: it only pretends to revoke. Disconnecting is the owner's act in Podster.
     // Refused while a run may still be going or budget is reserved; the day's spend is kept (L5 on #458).
@@ -129,7 +132,7 @@ async function locked(command: string, args: string[], home: string, state: File
       say(`Runner won't forget this agent while it has ${blocked}. Start it again with \`run\`: it keeps checking a held run until its stop is confirmed, then releases it and settles the budget. If this agent's connection has ended, pair again from Podster first, then \`run\`. Once nothing is held or reserved, \`forget\` goes through.`);
       return 1;
     }
-    await new RunnerStorage(systemKeychain(home)).deleteAll();
+    await new RunnerStorage(keys.store).deleteAll();
     await state.remove();
     say("Runner's keys and record on this machine are deleted. The agent is still connected in Podster until you disconnect it there.");
     return 0;
@@ -140,7 +143,7 @@ async function locked(command: string, args: string[], home: string, state: File
     const agent = option(args, "agent");
     if (!gateway || !agent) throw new Error("pair needs --gateway and --agent");
     const origin = gatewayOrigin(gateway);
-    const secrets = systemKeychain(home);
+    const secrets = keys.store;
     const record = await state.load();
     const resuming = record.agent_id === agent && record.stopped === null && (record.phase === "registered" || record.phase === "redeemed");
     const prompt = "Paste the code Podster showed, then press Enter: ";
@@ -158,7 +161,7 @@ async function locked(command: string, args: string[], home: string, state: File
           clock: systemClock,
           log,
           consent: async (details) => {
-            say(`Runner will make a key on this machine for ${details.origin}, keep it in this system's keychain, and use it to act as agent ${details.agentId}.`);
+            say(`Runner will make a key on this machine for ${details.origin}, keep it in the key store named above, and use it to act as agent ${details.agentId}.`);
             say("Pairing grants no workroom access, provider login or automatic runs. Disconnect the agent in Podster to end it.");
             return /^y(es)?$/i.test((await input.question("Make and keep the key? [y/N] ")).trim());
           },
@@ -191,7 +194,7 @@ async function locked(command: string, args: string[], home: string, state: File
     const poller = await Poller.open({
       origin: record.gateway,
       fetch: globalThis.fetch,
-      secrets: systemKeychain(home),
+      secrets: keys.store,
       state,
       clock: systemClock,
       log,

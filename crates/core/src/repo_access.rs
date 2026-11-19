@@ -332,3 +332,102 @@ pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
         authority_ends_at,
     })
 }
+
+/// Whether a request must read the repository's protections back before it goes on: only one that mints a new token.
+/// Returning a held token with more than [`TOKEN_RENEW_BEFORE_MS`] left asks GitHub for nothing.
+pub fn mint_needs_recheck(token: TokenPlan) -> bool {
+    matches!(token, TokenPlan::Mint { .. })
+}
+
+/// Why a mint was refused after reading the repository back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MintBlock {
+    /// The default branch's rules, its bypass list or anything else readiness checks differs definitely from what
+    /// provisioning set, for this reason. The link is degraded for it, which ends every token held on it, and the mint
+    /// is refused as [`AccessRefusal::RepoNotReady`].
+    Drifted(&'static str),
+    /// No definite answer: GitHub couldn't be reached or read, the read ran past its deadline, or a gone repository's
+    /// second look isn't due. Nothing changes, and the mint is refused for now: a token is never minted on a read that
+    /// wasn't made.
+    Unread,
+}
+
+impl MintBlock {
+    /// The reason the link is degraded for, if it is.
+    pub fn degrade_reason(self) -> Option<&'static str> {
+        match self {
+            MintBlock::Drifted(reason) => Some(reason),
+            MintBlock::Unread => None,
+        }
+    }
+
+    /// The error code the caller gets.
+    // codes: errors
+    pub fn code(self) -> &'static str {
+        match self {
+            MintBlock::Drifted(_) => "repo_not_ready",
+            MintBlock::Unread => "provider_unavailable",
+        }
+    }
+}
+
+/// Decides a new mint from a read-back of the repository made just before it, the same read and judgement as the daily
+/// readiness read, a merge and an operator's recheck. Only a read-back that is exactly right lets the mint go on, so a
+/// removed protection or an added bypass actor stops tokens at once rather than at the next scheduled read.
+pub fn decide_mint_recheck(read: crate::provisioning::RecheckRead) -> Result<(), MintBlock> {
+    use crate::provisioning::RecheckRead;
+    match read {
+        RecheckRead::ExactlyRight => Ok(()),
+        RecheckRead::Differs(reason) => Err(MintBlock::Drifted(reason)),
+        RecheckRead::CouldNotRead => Err(MintBlock::Unread),
+    }
+}
+
+/// How much of a mint's lease must be left after the read-back for the mint to go on: more than signing the App's JWT
+/// and the mint's one call, which times out in 10 seconds.
+pub const MINT_LEASE_MARGIN_MS: i64 = 15_000;
+
+/// Whether the call's lease still lets it mint, after the read-back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeaseLeft {
+    Enough,
+    /// It's still this call's, with less than [`MINT_LEASE_MARGIN_MS`] left. The call gives it up and mints nothing.
+    TooShort,
+    /// It isn't this call's any more: its time ran out and it was kept as a record, and another call may hold a new one.
+    /// Minting now could make a second live token.
+    Lost,
+}
+
+/// Decides from the call's lease row as it is now: `lease_until` is `None` when the row is no longer a lease.
+pub fn lease_left_for_mint(lease_until: Option<i64>, now: i64) -> LeaseLeft {
+    match lease_until {
+        None => LeaseLeft::Lost,
+        Some(until) if until.saturating_sub(now) >= MINT_LEASE_MARGIN_MS => LeaseLeft::Enough,
+        Some(_) => LeaseLeft::TooShort,
+    }
+}
+
+/// **Proposed:** how long a read-back that was exactly right may stand for the same repository's next mint. Every new
+/// token otherwise costs a read-back of several calls with the provisioning App, whose installation's hourly budget the
+/// whole organization shares.
+pub const READ_BACK_REUSE_MS: i64 = 60_000;
+
+/// A read-back before a mint that was exactly right: of which repository, when, and the link's stamp (its `updated_at`)
+/// then, which a degrade or a link made ready again moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadBack {
+    pub repo_id: i64,
+    pub at: i64,
+    pub link_stamp: i64,
+}
+
+/// Whether a kept read-back stands for this mint: the same repository, made within [`READ_BACK_REUSE_MS`] and not in
+/// the future, on a link unchanged since.
+pub fn read_back_reusable(kept: Option<ReadBack>, repo_id: i64, link_stamp: i64, now: i64) -> bool {
+    kept.is_some_and(|read| {
+        read.repo_id == repo_id
+            && read.link_stamp == link_stamp
+            && read.at <= now
+            && now - read.at < READ_BACK_REUSE_MS
+    })
+}

@@ -87,8 +87,10 @@ describe.runIf(ON)("S-47: the two-container placement on a real Linux Docker Eng
   /** Files holding the key, outside /proc, /sys and /dev; the key goes in on grep's standard input, never as an argument. */
   const filesWithKey = async (container: string) => {
     const r = await run(["exec", "--interactive", container, "grep", "-rlsF", "--exclude-dir=proc", "--exclude-dir=sys", "--exclude-dir=dev", "-f", "/dev/stdin", "/"], `${KEY}\n`, 300_000);
-    expect([container, r.cut]).toEqual([container, false]);
-    return r.code === 0 ? r.stdout.trim() : "";
+    // grep exits 2 when any file couldn't be read, even with matches listed, so what it lists is read whatever its exit
+    // code; only 0 (a match) or 1 (none) or 2 (some unreadable) are answers at all.
+    expect([container, r.cut, [0, 1, 2].includes(r.code)]).toEqual([container, false, true]);
+    return r.stdout.trim();
   };
   const cmdlines = async (container: string) => (await run(["exec", container, "sh", "-c", 'for f in /proc/[0-9]*/cmdline; do tr "\\0" " " < "$f" 2>/dev/null; printf "\\n"; done'])).stdout;
 

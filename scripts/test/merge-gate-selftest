@@ -2,7 +2,9 @@
 # Checks every refusal of scripts/merge-gate, with a stand-in gh and no network. Most cases give the stand-in what
 # `gh ... --jq` would print. The last section gives it gh's real JSON, captured read-only into scripts/test/fixtures
 # (from merged pull request #252, docs pull request #243 and the repository's code scanning setup), and runs the
-# script's own jq expressions over it, so it needs `jq`.
+# script's own jq expressions over it, so it needs `jq`. The two compare-*.json files are GitHub's compare answers for
+# #252's head against main as it was when #252 merged (6 commits behind) and against its merge base (up to date),
+# captured on 2026-11-19 and cut to the fields the gate reads: the commit and file lists carry authors and patches.
 #
 #   scripts/test/merge-gate-selftest
 set -euo pipefail
@@ -21,6 +23,7 @@ workflow="$scripts/../.github/workflows/ci.yml"
 sha=0123456789abcdef0123456789abcdef01234567
 other=ffffffffffffffffffffffffffffffffffffffff
 merged=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+tip=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb # main's tip
 t=$'\t'
 
 stub sleep <<'EOF'
@@ -73,6 +76,7 @@ case "$*" in
   "api repos/{owner}/{repo}/code-scanning/default-setup "*) answer languages ;;
   "api repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/"*"/head&per_page=100 "*) answer analyses ;;
   "api repos/{owner}/{repo}/contents/.github/workflows/ci.yml?ref=main -H Accept: application/vnd.github.raw") answer workflow ;;
+  "api repos/{owner}/{repo}/compare/main..."*"?per_page=1 --jq "*) next compare ;;
   "pr merge "*) answer merge-result ;;
   "run list --workflow ci.yml --branch main --event push --commit "*) next main-run ;;
   *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
@@ -105,6 +109,7 @@ docs_branch() { # docs_branch FILE...: a docs/ branch, CI skipped, modifying tho
   for path in "$@"; do list+=("modified $path"); done
   changes "${list[@]}"
 }
+compare() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" > "$fix/compare"; } # STATUS BEHIND-BY MAIN-TIP MERGE-BASE
 docs_changes() { on_branch docs/thing; skip_jobs; changes "$@"; } # the same, with each change spelled out
 # A pull request the gate passes, whose merge then goes green on main.
 healthy() {
@@ -125,6 +130,7 @@ healthy() {
   echo 0 > "$fix/alerts-head"
   cp "$workflow" "$fix/workflow"
   printf 'UNKNOWN\nUNKNOWN\nCLEAN\n' > "$fix/merge-state"
+  compare ahead 0 "$tip" "$tip" # the head contains main's tip
   : > "$fix/merge-result"
   echo "$merged" > "$fix/merged"
   printf 'OPEN\t%s\t\n' "$sha" > "$fix/after-merge" # what the pull request reads as after a merge whose answer was lost
@@ -145,6 +151,9 @@ check "a pull request that isn't a number is refused, exit 2" run 2 "$gate" feat
 check "--merge given twice is refused, exit 2" run 2 "$gate" 77 "$sha" --merge --merge
 check "--rerun-known-flake, which is gone, is refused as an unknown option, exit 2" run 2 "$gate" 77 "$sha" --rerun-known-flake
 check "an unknown option is refused, exit 2" run 2 "$gate" 77 "$sha" --squash
+for flag in --allow-behind --force --skip-up-to-date; do
+  check "$flag is refused as an unknown option: there is no way past the up-to-date rule, exit 2" run 2 "$gate" 77 "$sha" "$flag"
+done
 check "--help exits 0" run 0 "$gate" --help
 check "  and says whose alerts it reads" said "It never reads main's alerts"
 check "none of those asked gh anything" test ! -s "$fix/calls"
@@ -159,6 +168,8 @@ check "  and it read ci.yml on main" said 'ok +ci.yml on main has the jobs'
 check "  and it found an analysis for each of the four languages" test "$(grep -c '^ok      code scanning analysed this head for ' "$tmp/out")" -eq 4
 check "  and it didn't ask which files changed" never_called 'pulls/'
 check "  and it never asked about main's alerts" never_called 'alerts\?ref=refs/heads|alerts\?state|alerts --'
+check "  and it asked whether the given head contains main's tip" called "^gh api repos/\{owner\}/\{repo\}/compare/main\.\.\.$sha\?per_page=1 "
+check "  and says it does" said '^ok +its head contains main'
 
 refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both the report and --merge must refuse
   local title=$1 says=$2
@@ -456,6 +467,68 @@ check "a merge state that stays UNKNOWN is asked for ten times, then refused" ru
 check "  ten times and no more" test "$(grep -c 'json mergeStateStatus' "$fix/calls")" -eq 10
 healthy
 
+# --- up to date with main ---
+# main has no required checks and no up-to-date rule, so GitHub calls a pull request that is behind main CLEAN. Its CI
+# never ran on the combined code: #461 failed typecheck on main after #462 added a field.
+compare diverged 6 "$tip" "$other"
+refused "a head 6 commits behind main" "its head is 6 commits behind main \(main is at $tip\)"
+compare diverged 6 "$tip" "$other"
+check "  and the refusal says how to fix it" run 1 "$gate" 77 "$sha"
+check "  with gh pr update-branch and the pull request's number" said '`gh pr update-branch 77`'
+check "  and that the new head needs CI and a look at the delta before the gate runs again at it" \
+  said 'The new head then needs its CI, and a quick look at the delta, before merge-gate is run again at that new sha'
+check "  and it updated nothing itself" never_called 'update-branch|gh pr merge|-X|--method'
+check "  for this one problem alone" said 'refused, 1 problem'
+healthy
+
+compare diverged 1 "$tip" "$other"
+refused "a head one commit behind main" "its head is 1 commit behind main"
+
+compare behind 2 "$tip" "$sha"
+refused "a head that main already contains, 2 commits back" "its head is 2 commits behind main"
+
+compare identical 0 "$tip" "$tip"
+check "a head that is main's tip passes the report, exit 0" run 0 "$gate" 77 "$sha"
+healthy
+
+docs_branch docs/a.md; compare diverged 3 "$tip" "$other"
+refused "a docs/ branch, CI skipped, 3 commits behind main" "its head is 3 commits behind main"
+docs_branch docs/a.md; compare diverged 3 "$tip" "$other"
+check "  is told the same fix" run 1 "$gate" 77 "$sha"
+check "  with gh pr update-branch" said '`gh pr update-branch 77`'
+healthy
+
+echo gh-fails > "$fix/compare"
+refused "a compare gh can't read" 'could not read whether its head contains main'
+
+compare ahead 3 "$tip" "$tip"
+refused "an answer that says ahead, yet behind by 3" 'could not read whether its head contains main'
+
+compare ahead 0 "$tip" "$other"
+refused "an answer behind by none, whose merge base isn't main's tip" 'could not read whether its head contains main'
+
+compare diverged 0 "$tip" "$other"
+refused "an answer that says diverged, yet behind by none" 'could not read whether its head contains main'
+
+compare ahead '' "$tip" "$tip"
+refused "an answer with no count" 'could not read whether its head contains main'
+
+compare ahead 0 main main
+refused "an answer whose tip isn't a full sha" 'could not read whether its head contains main'
+
+: > "$fix/compare"
+refused "an empty answer" 'could not read whether its head contains main'
+
+# Read fresh: after the merge state's wait, and with --merge, as the last thing before the merge.
+printf 'ahead\t0\t%s\t%s\ndiverged\t1\t%s\t%s\n' "$tip" "$tip" "$other" "$tip" > "$fix/compare"
+check "main's tip is read once, and last" run 0 "$gate" 77 "$sha"
+check "  once" test "$(grep -c '/compare/' "$fix/calls")" -eq 1
+check "  after the merge state" test "$(grep -E 'mergeStateStatus|/compare/' "$fix/calls" | tail -1 | grep -c '/compare/')" -eq 1
+healthy
+check "--merge reads main's tip just before it merges, exit 0" run 0 "$gate" 77 "$sha" --merge
+check "  the call before the merge is the compare" test "$(grep -B1 '^gh pr merge' "$fix/calls" | head -1 | grep -c '/compare/main\.\.\.')" -eq 1
+healthy
+
 # --- --merge ---
 check "--merge on a clean pull request merges and reports main's CI, exit 0" run 0 "$gate" 77 "$sha" --merge
 check "  with a merge commit, pinned to the given sha" called "^gh pr merge 77 --merge --match-head-commit $sha\$"
@@ -596,6 +669,7 @@ real() { # the captured answers, as they were
   cp "$captured/default-setup.json" "$fix/languages.json"
   cp "$captured/docs-files.json" "$fix/files.json"
   cp "$captured/docs-pull.json" "$fix/changed.json"
+  rm -f "$fix/compare"; cp "$captured/compare-current.json" "$fix/compare.json"
 }
 edit() { jq "$2" "$fix/$1.json" > "$fix/$1.new" && mv "$fix/$1.new" "$fix/$1.json"; } # edit KEY JQ
 still_open() { real; edit pull '.state = "OPEN"'; edit merge-state '.mergeStateStatus = "CLEAN"'; }
@@ -616,6 +690,15 @@ check "  javascript-typescript among them, as one" said '^ok      code scanning 
 still_open
 check "  and it merges, then reads main's run from the JSON: exit 0" run 0 "$gate" 252 "$real_head" --merge
 check "  for the captured merge commit" said "ci.yml on main for $real_merge: success"
+
+still_open; cp "$captured/compare-behind.json" "$fix/compare.json"
+check "the same pull request against main as it was when it merged, 6 commits back, is refused: exit 1" run 1 "$gate" 252 "$real_head" --merge
+check "  and says how far behind, from the JSON" said "REFUSE +its head is 6 commits behind main \(main is at 3de630f86ee64dbb22d960d3f572fcee668dd431\)"
+check "  for that alone" said 'refused, 1 problem'
+check "  and nothing is merged" never_called 'gh pr merge'
+
+still_open; edit compare '.status = "identical" | .ahead_by = 0 | .base_commit.sha = .merge_base_commit.sha'
+check "the JSON with its head at main's tip passes: exit 0" run 0 "$gate" 252 "$real_head"
 
 still_open; edit pull '.isCrossRepository = true'
 check "the same pull request from a fork is refused at once: exit 1" run 1 "$gate" 252 "$real_head" --merge
@@ -710,8 +793,13 @@ check "  and the alarm helpers its note names exist" test -f "$scripts/../apps/a
 check "  and no API spec runs an alarm with the pool's own call" test "$(grep -l 'runDurableObjectAlarm(' "$scripts"/../apps/api/test/*.spec.ts | wc -l | tr -d ' ')" -eq 0
 check "it never accepts an analysis of the merge ref" test "$(grep -c 'analyses?ref=refs/pull/$pr/merge' "$gate")" -eq 0
 check "it names no language itself" test "$(grep -c -E 'Analyze \((actions|python|rust|javascript)' "$gate")" -eq 0
-check "the script has no squash, rebase, admin or auto merge, branch update or alert change" \
-  test "$(grep -c -E -- '--(squash|rebase|admin|auto)\b|update-branch|-X +(PATCH|POST|PUT|DELETE)|--method|-f state=' "$gate")" -eq 0
+check "the script has no squash, rebase, admin or auto merge, or alert change" \
+  test "$(grep -c -E -- '--(squash|rebase|admin|auto)\b|-X +(PATCH|POST|PUT|DELETE)|--method|-f state=' "$gate")" -eq 0
+# It names `gh pr update-branch` as the fix, in text, and never runs it.
+check "it names update-branch only as text in backquotes, and never runs it" \
+  test "$(grep -c 'update-branch' "$gate")" -ge 2 -a "$(grep 'update-branch' "$gate" | grep -c -v '`gh pr update-branch ')" -eq 0 \
+  -a "$(grep -c -E '^[^#`"]*gh +pr +update-branch' "$gate")" -eq 0
+check "it has no flag past the up-to-date rule" test "$(grep -c -E -- '--(allow|skip|force|ignore)' "$gate")" -eq 0
 check "it merges in one place and reruns nowhere" \
   test "$(grep -c -E '^ *gh pr merge ' "$gate")$(grep -c 'gh run rerun' "$gate")" = 10
 

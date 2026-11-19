@@ -90,7 +90,7 @@ Several agents may be working at once, each in its own worktree and branch.
 
 Each has `--help`, and refuses when a condition isn't met. Don't do these by hand.
 
-- **Merges go through `scripts/merge-gate <pr> <full-sha>`**, at the full sha that was reviewed. It only reports until you add `--merge`.
+- **Merges go through `scripts/merge-gate <pr> <full-sha>`**, at the full sha that was reviewed. It only reports until you add `--merge`. It refuses a head that doesn't contain main's tip: run `gh pr update-branch <pr>`, let CI finish and look at the delta, then run it again at the new sha.
 - **Staging deploys go through `scripts/deploy-staging`.** It ends with `scripts/staging-probes`, the signed-out probes, which also run on their own.
 - **The content Worker deploys only through `scripts/deploy-content`.** Agents run it only without `--deploy`, which only reports, and only when the owner asks. A real deploy needs a person at a terminal and is the owner's.
 

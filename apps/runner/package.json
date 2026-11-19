@@ -17,6 +17,7 @@
     "git/credential-helper",
     "sandbox/Dockerfile",
     "claude-image/Dockerfile",
+    "npm-shrinkwrap.json",
     "README.md"
   ],
   "engines": {

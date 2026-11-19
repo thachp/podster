@@ -2,7 +2,7 @@
 
 **Test pre-release for Podster's staging only. Not supported. Not security-reviewed (M7 step 17 pending).**
 
-Don't use it with anything you can't lose. It talks to Podster's staging deployment, which can be reset at any time. Versions are `0.0.x-test.N` on npm's `test` tag, never `latest`, and the real release, once M7's gate and security review pass, replaces it.
+Don't use it with anything you can't lose. It talks to Podster's staging deployment, which can be reset at any time. Versions are `0.0.x-test.N`, published only under npm's `test` tag; npm may also point `latest` at the first version. The real release, once M7's gate and security review pass, replaces it.
 
 Runner pairs your machine with one of your Podster agents, then polls that agent's inbox from your machine, outbound only. With your provider key it runs the tasks its run policy allows, in Docker containers. Unattended runs are off by default: you approve each run at your terminal unless you switch them on for a workroom in Runner's own run policy, `policy.json` in Runner's home. Nothing Podster sends can switch them on.
 
@@ -14,10 +14,12 @@ Runner pairs your machine with one of your Podster agents, then polls that agent
 
 ## Commands
 
+Run it with install scripts off, as below: no dependency Runner uses needs one. Or set `npm_config_ignore_scripts=true` in your environment. The package ships `npm-shrinkwrap.json`, so `npx` installs exactly the dependencies Runner was tested with.
+
 Pair this machine with the agent a pairing in Podster started. Paste the code when asked: it's never an argument.
 
 ```bash
-npx podster@test pair --agent <agt_…>
+npx --ignore-scripts podster@test pair --agent <agt_…>
 ```
 
 The gateway is staging's, `https://gateway-staging.podster.dev`, unless you name another with `--gateway <https://…>`.
@@ -25,19 +27,21 @@ The gateway is staging's, `https://gateway-staging.podster.dev`, unless you name
 Poll the inbox until you stop it with Ctrl-C:
 
 ```bash
-npx podster@test run
-npx podster@test run --provider-key-file <path>
+npx --ignore-scripts podster@test run
+npx --ignore-scripts podster@test run --provider-key-file <path>
 ```
 
 Then:
 
 ```bash
-npx podster@test status   # what this Runner's record says, by IDs
-npx podster@test stop     # stop the Runner running from this home, and any run, at once
-npx podster@test forget   # delete this Runner's keys and record; disconnect the agent in Podster yourself
+npx --ignore-scripts podster@test status   # what this Runner's record says, by IDs
+npx --ignore-scripts podster@test stop     # stop the Runner running from this home, and any run, at once
+npx --ignore-scripts podster@test forget   # delete this Runner's keys and record; disconnect the agent in Podster yourself
 ```
 
 Every command takes `--home <folder>`, Runner's own folder. The default is `~/.podster-runner`.
+
+Running tasks needs plain paths: letters, digits, `.`, `_`, `-` and `/` only. If your home folder's path has a space or any other character, Runner refuses to run tasks (`helper_unavailable`, or `path_unsafe` for its home), since both npm's cache, where `npx` puts Runner (`<cache>/_npx`), and `~/.podster-runner` sit under it. Then point npm's cache and Runner's home at plain folders only you can write, for example `npm_config_cache=/Users/Shared/podster-npm npx --ignore-scripts podster@test run --home /Users/Shared/podster-runner …`, and use the same two on every command.
 
 ## Your provider key
 

@@ -24,18 +24,49 @@ describe("the default gateway", () => {
 });
 
 describe("the package", () => {
-  it("is the marked test pre-release, tagged test, never latest", () => {
+  it("is the marked test pre-release, published under the test tag", () => {
     expect(pkg.name).toBe("podster");
     expect(pkg.private).toBeUndefined();
     expect(pkg.version).toMatch(/^0\.0\.\d+-test\.\d+$/);
     expect(pkg.publishConfig).toEqual({ access: "public", tag: "test", provenance: true });
     expect(pkg.bin).toEqual({ podster: "build/node/cli.js" });
-    expect(pkg.files).toEqual(["build/", "git/credential-helper", "sandbox/Dockerfile", "claude-image/Dockerfile", "README.md"]);
+    expect(pkg.files).toEqual(["build/", "git/credential-helper", "sandbox/Dockerfile", "claude-image/Dockerfile", "npm-shrinkwrap.json", "README.md"]);
     expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/thachp/podster.git", directory: "apps/runner" });
   });
 
   it("starts its command line with a shebang", () => {
     expect(readFileSync(new URL("../src/node/cli.ts", import.meta.url), "utf8").startsWith("#!/usr/bin/env node\n")).toBe(true);
+  });
+});
+
+describe("the shipped lockfile", () => {
+  // npm-shrinkwrap.json is committed beside package-lock.json and checked here (security review M2 on #470), so an
+  // install of the package resolves exactly what CI tested.
+  type Entry = { version?: string; resolved?: string; integrity?: string; dev?: boolean; hasInstallScript?: boolean };
+  const read = (file: string) => JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")) as { name: string; version: string; lockfileVersion: number; packages: Record<string, Entry> };
+  const lock = read("package-lock.json");
+  const shrinkwrap = read("npm-shrinkwrap.json");
+  const production = (l: typeof lock) => Object.entries(l.packages).filter(([path, entry]) => path !== "" && !entry.dev);
+
+  it("names the package and version the lock does", () => {
+    expect([shrinkwrap.name, shrinkwrap.version, shrinkwrap.lockfileVersion]).toEqual([lock.name, lock.version, lock.lockfileVersion]);
+    expect(shrinkwrap.version).toBe(pkg.version);
+  });
+
+  it("resolves every production package to the lock's version, source and integrity, and no other", () => {
+    const want = production(lock);
+    expect(want.length).toBeGreaterThan(50);
+    for (const [path, entry] of want) {
+      expect([path, entry.integrity]).toEqual([path, expect.stringMatching(/^sha512-/)]);
+      expect([path, shrinkwrap.packages[path]?.version, shrinkwrap.packages[path]?.resolved, shrinkwrap.packages[path]?.integrity]).toEqual([path, entry.version, entry.resolved, entry.integrity]);
+    }
+    expect(production(shrinkwrap).map(([path]) => path).sort()).toEqual(want.map(([path]) => path).sort());
+    // And the whole tree is the lock's, dev entries included, so the two can't drift.
+    expect(shrinkwrap.packages).toEqual(lock.packages);
+  });
+
+  it("has no production package with an install script, so Runner installs with scripts off", () => {
+    expect(production(lock).filter(([, entry]) => entry.hasInstallScript).map(([path]) => path)).toEqual([]);
   });
 });
 

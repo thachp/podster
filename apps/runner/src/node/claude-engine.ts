@@ -100,12 +100,21 @@ export const BUILD_FAILED: Record<ImageName, string> = {
   "claude-image": "Runner couldn't build its Claude Code image, so nothing ran. Check that Docker Desktop is running, then start `run` again.",
 };
 
+/** The fixed message when Docker can't say whether a pinned image exists. Nothing is built or re-pinned. */
+export const INSPECT_FAILED: Record<ImageName, string> = {
+  "task-image": "Runner couldn't check its task image with Docker, so nothing ran. Check that Docker Desktop is running, then start `run` again.",
+  "claude-image": "Runner couldn't check its Claude Code image with Docker, so nothing ran. Check that Docker Desktop is running, then start `run` again.",
+};
+
+/** Docker's own answer for an image it doesn't have, from `docker image inspect`. */
+const NO_SUCH_IMAGE = /^(Error: |Error response from daemon: )?No such image: /m;
+
 /** A build's bound: Claude Code's image fetches its packages, so it can take minutes. */
 const BUILD_TIMEOUT_MS = 30 * 60_000;
 
 /**
  * The image `name` pins, built when missing (the ruling on #470). A pin naming an image Docker has is used as it is. A
- * missing pin, or one naming an image Docker no longer has, is built from the package's own Dockerfile with
+ * missing pin, or one naming an image Docker says it doesn't have ("No such image"), is built from the package's own Dockerfile with
  * `docker build --quiet --pull=false <folder>`, the form the real runs used, through `docker`'s structured arguments and
  * allow-listed environment, then pinned by the ID the build printed. A pin that isn't an image ID, or is a link, is
  * refused, not replaced.
@@ -117,6 +126,8 @@ export async function ensureImage(name: ImageName, opts: { home: string; docker:
     const pinnedId = name === "task-image" ? await taskImage(opts.home) : await claudeImage(opts.home);
     const present = await opts.docker(["image", "inspect", "--format", "{{.Id}}", pinnedId], { timeoutMs: 60_000, maxOutputBytes: 4096 });
     if (present.code === 0) return pinnedId;
+    // Rebuilt only when Docker says it hasn't the image (security review L4 on #470). Any other failure stops.
+    if (present.code !== 1 || present.cut || !NO_SUCH_IMAGE.test(present.stderr)) throw new Error(INSPECT_FAILED[name]);
   }
   opts.notify(BUILDING[name]);
   const built = await opts.docker(["build", "--quiet", "--pull=false", IMAGE_SOURCES[name]], { timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });

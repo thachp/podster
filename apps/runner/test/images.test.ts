@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { BUILD_FAILED, BUILDING, ensureImage, IMAGE_SOURCES } from "../src/node/claude-engine.js";
+import { BUILD_FAILED, BUILDING, ensureImage, IMAGE_SOURCES, INSPECT_FAILED } from "../src/node/claude-engine.js";
 import type { DockerCli } from "../src/node/docker-sandbox.js";
 
 const OLD = `sha256:${"a".repeat(64)}`;
@@ -79,11 +79,33 @@ describe("ensureImage", () => {
     const home = await temp();
     await writeFile(join(home, "task-image"), `${OLD}\n`);
     const said: string[] = [];
-    const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? { code: 1, stderr: "No such image" } : args[0] === "build" ? { stdout: NEW } : {}));
+    const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? { code: 1, stderr: `Error: No such image: ${OLD}` } : args[0] === "build" ? { stdout: NEW } : {}));
     expect(await ensureImage("task-image", { home, docker, notify: (l) => said.push(l) })).toBe(NEW);
     expect(calls.map((c) => c.args[0])).toEqual(["image", "build"]);
     expect(said).toEqual([BUILDING["task-image"]]);
     expect((await readFile(join(home, "task-image"), "utf8")).trim()).toBe(NEW);
+  });
+
+  it("rebuilds only on Docker's own \"No such image\": any other failure to check stops, with nothing built or re-pinned", async () => {
+    for (const stderr of ["Error: No such image: sha256:aaaa", "Error response from daemon: No such image: sha256:aaaa"]) {
+      const home = await temp();
+      await writeFile(join(home, "claude-image"), `${OLD}\n`);
+      const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? { code: 1, stderr } : { stdout: NEW }));
+      expect(await ensureImage("claude-image", { home, docker, notify: () => undefined })).toBe(NEW);
+      expect(calls.map((c) => c.args[0])).toEqual(["image", "build"]);
+    }
+    for (const answer of [{ code: 1, stderr: "Cannot connect to the Docker daemon at unix:///x. Is the docker daemon running?" }, { code: 1, stderr: "" }, { code: 125, stderr: "permission denied" }, { code: -1, stderr: "" }, { code: 1, stderr: "No such image", cut: true }] as Answer[]) {
+      const home = await temp();
+      await writeFile(join(home, "task-image"), `${OLD}\n`);
+      const said: string[] = [];
+      const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? answer : { stdout: NEW }));
+      const error = await ensureImage("task-image", { home, docker, notify: (l) => said.push(l) }).catch((e: Error) => e);
+      expect((error as Error).message).toBe(INSPECT_FAILED["task-image"]);
+      expect((error as Error).message).not.toMatch(/daemon|permission/);
+      expect(calls.map((c) => c.args[0])).toEqual(["image"]);
+      expect(said).toEqual([]);
+      expect((await readFile(join(home, "task-image"), "utf8")).trim()).toBe(OLD);
+    }
   });
 
   it("stops with a fixed message when a build fails, says nothing of Docker's output, and pins nothing", async () => {

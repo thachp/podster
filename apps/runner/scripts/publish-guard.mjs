@@ -1,7 +1,9 @@
 // Runner's publish guard, npm's `prepublishOnly`. A publish of this folder goes through only from the test pre-release
 // workflow on main in thachp/podster, and only for a `0.0.x-test.N` version (the owner's decision of 2026-11-19, narrowing
-// decision 26). A plain `npm publish` on anyone's machine is refused. npm's trusted publisher, set to that workflow, is
-// the lock that holds on npm's side; this only stops a publish by mistake. It isn't packed.
+// decision 26). A plain `npm publish` on anyone's machine is refused. The workflow itself publishes the .tgz its build job
+// packed, and npm runs no script for a .tgz, so this guard never runs there. What holds is server-side: the
+// `npm-test-prerelease` environment's branch rule and reviewer, and npm's trusted publisher and package settings. This
+// only stops a publish by mistake. It isn't packed.
 import { readFileSync } from "node:fs";
 
 const WORKFLOW_REF = "thachp/podster/.github/workflows/runner-prerelease.yml@refs/heads/main";

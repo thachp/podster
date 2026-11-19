@@ -3,8 +3,8 @@
  * the only file in Runner's source that may open a listening socket (the scoped source test in `test/machine.test.ts`).
  *
  * - **Loopback only:** bound to the literal `"127.0.0.1"`, port 0, so the system picks a free port.
- * - **A per-run token:** 32 random bytes, which Claude Code sends as its API key. It is compared in constant time (both
- *   sides hashed to the same length first). It is not the provider key, which never leaves the transport.
+ * - **A per-run token:** 32 random bytes, which Claude Code sends as its API key. It is compared byte for byte in
+ *   constant time, after a length check that reveals only the token's fixed length. It is not the provider key, which never leaves the transport.
  * - **`Origin` refused:** any request carrying one is a browser's, and is refused, so no web page can reach it.
  * - **`Host` checked:** exactly `127.0.0.1:<port>`, or the one name its caller fixes (the relay's `relay:8080`, when
  *   Claude Code runs in its own container and reaches this listener only through the relay), so a DNS-rebound name is
@@ -16,7 +16,7 @@
  *
  * Logs carry codes only, never a body, a header or the token.
  */
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { MAX_BODY_BYTES, type BrokerRequest } from "../core/broker.js";
 import type { ModelAnswer } from "../core/run-interface.js";
@@ -36,12 +36,17 @@ export type ListenerDeps = {
   checkIntervalMs?: number;
 };
 
-const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
-
-/** Whether `given` is the token, in time that doesn't depend on where they differ. */
+/**
+ * Whether `given` is the token: its raw bytes compared in constant time. A different length is refused before the
+ * comparison, which reveals only the length, and the token's length is fixed (64 hex characters, 32 random bytes), so
+ * that tells an attacker nothing. No hash in between: CodeQL alert #34 read one as a password hash.
+ */
 export function tokenMatches(given: unknown, token: string): boolean {
   if (typeof given !== "string") return false;
-  return timingSafeEqual(digest(given), digest(token));
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(token, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 function respondRefused(res: ServerResponse, status: number, code: string) {

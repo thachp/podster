@@ -966,14 +966,14 @@ describe("review item 2 (M2): the disk bound", () => {
     const root = join(await temp(), "w");
     const d = docker28();
     const t = timers();
-    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: t.every, limits: { folder_bytes: 1_000 }, wait: async () => undefined });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: t.every, limits: { folder_bytes: 64 * 1024 }, wait: async () => undefined });
     const spec = containerSpec("run-1", facts(root));
     await sandbox.open(spec, new AbortController().signal);
     expect(t.ticks).toHaveLength(1);
     await t.ticks[0]();
     expect(d.live()).toHaveLength(1);
     // A process left running in the container writes, with no tool call in flight.
-    await writeFile(join(spec.task_folder, "big"), "x".repeat(2_000));
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(128 * 1024));
     await t.ticks[0]();
     expect(d.live()).toHaveLength(0);
     expect(t.stopped).toEqual([0]);
@@ -998,9 +998,9 @@ describe("review item 2 (M2): the disk bound", () => {
     const root = join(await temp(), "w");
     const spec = containerSpec("run-1", facts(root));
     const d = docker28();
-    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, limits: { folder_bytes: 10 }, wait: async () => undefined });
+    const sandbox = new DockerSandbox({ docker: d.docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, limits: { folder_bytes: 64 * 1024 }, wait: async () => undefined });
     await sandbox.open(spec, new AbortController().signal);
-    await writeFile(join(spec.task_folder, "big"), "x".repeat(100));
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(128 * 1024));
     const out = await sandbox.exec("run-1", { call_id: "c", tool: "write", path: "a", content: "x" }, new AbortController().signal);
     expect(out).toEqual({ ok: false, text: "Runner stopped the task's container: its folder passed its size bound." });
     expect(d.live()).toEqual([]);
@@ -1294,11 +1294,14 @@ describe("re-review item 5 (M2 lows)", () => {
     const root = join(await temp(), "w");
     const ticks: (() => Promise<void> | void)[] = [];
     const { docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: (_ms, fn) => (ticks.push(fn), () => undefined), limits: { folder_bytes: 10 } });
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: (_ms, fn) => (ticks.push(fn), () => undefined), limits: { folder_bytes: 64 * 1024 } });
     const breaches: string[] = [];
     const spec = containerSpec("run-1", facts(root));
     await sandbox.open(spec, new AbortController().signal, { breach: (code) => void breaches.push(code) });
-    await writeFile(join(spec.task_folder, "big"), "x".repeat(100));
+    // Under the bound, on any file system: no breach.
+    await ticks[0]();
+    expect(breaches).toEqual([]);
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(128 * 1024));
     await ticks[0]();
     expect(breaches).toEqual(["disk_bound"]);
   });
@@ -2297,5 +2300,38 @@ describe("the real run's summary (the final real run of #460)", () => {
     expect(real).toMatch(/writeFileSync\(SUMMARY_PATH, /);
     expect(real).toMatch(/process\.stdout\.write\(/);
     expect(real).not.toMatch(/console\.log\(/);
+  });
+});
+
+// ---- merge-gate on #460 at a4e9cc81 ----
+
+describe("the listener's token comparison (CodeQL alert #34)", () => {
+  it("compares the raw bytes in constant time, never through a hash, and refuses a token of another length", async () => {
+    const token = "a".repeat(64);
+    expect(tokenMatches(token, token)).toBe(true);
+    expect(tokenMatches("b".repeat(64), token)).toBe(false);
+    expect(tokenMatches("a".repeat(63), token)).toBe(false);
+    expect(tokenMatches("a".repeat(65), token)).toBe(false);
+    expect(tokenMatches("", token)).toBe(false);
+    expect(tokenMatches(undefined, token)).toBe(false);
+    // A multi-byte string the same length in characters but not in bytes is refused, not thrown on.
+    expect(tokenMatches("é".repeat(64), token)).toBe(false);
+    const source = await readFile(new URL("../src/node/broker-listener.ts", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("export function tokenMatches"), source.indexOf("function respondRefused"));
+    expect(body).not.toMatch(/createHash|sha256|digest/);
+    expect(body).toMatch(/timingSafeEqual\(/);
+  });
+});
+
+describe("the disk bound's tests hold on any file system (the CI runner's ext4)", () => {
+  it("an empty task folder is well under the bound the timer test uses, on this file system too", async () => {
+    const root = join(await temp(), "w");
+    const spec = containerSpec("run-1", facts(root));
+    await ensureFolder(root, spec.task_folder, { makeRoot: true });
+    // ext4 reports a folder's own size as 4,096 bytes, APFS as about a hundred: the bound must sit far above both.
+    expect(await folderBytes(spec.task_folder, Number.MAX_SAFE_INTEGER)).toBeLessThan(64 * 1024);
+    const source = await readFile(new URL("claude-adapter.test.ts", import.meta.url), "utf8");
+    const timerTest = source.slice(source.indexOf('it("checks the folder on a timer for the whole run'), source.indexOf('it("refuses to open when it can\'t tell'));
+    expect(timerTest).toMatch(/folder_bytes: 64 \* 1024/);
   });
 });

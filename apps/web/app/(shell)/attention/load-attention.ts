@@ -7,15 +7,17 @@ type Query = <T>(path: string) => Promise<GatewayResult<T>>;
 
 /**
  * There's no query across rooms for "reviews assigned to me", so this asks each room, against the person's limit of 120
- * calls a minute. A render costs 3 for the shell, 3 for the inbox, listing and agent names, 1 per shared organization
- * named (`MAX_NAMED_ORGS`), 1 per room asked, and up to `MAX_TITLE_READS`, plus 1 for each room the listing hasn't caught up
- * with. That's 36 at these limits, and a decision adds the Sheet's own 2, so about 3 decisions a minute use it all up. With
- * 3 rooms and one shared organization it's about 13. It stops here and says so.
+ * calls a minute. A render costs 2 for the shell (the session read isn't counted), 3 for the inbox, listing and agent
+ * names, 1 per shared organization named (`MAX_NAMED_ORGS`), 1 per room asked, and up to `MAX_TITLE_READS`, plus 1 for each
+ * room the listing hasn't caught up with. That's 35 at these limits. Opening and closing a task's Sheet doesn't render this
+ * page again, but a decision does, and adds the Sheet's own reads, so about 3 decisions a minute use it all up. With 3 rooms,
+ * one unread and one shared organization it's 11, the release read below included (`call-budget.test.tsx` pins it). It
+ * stops here and says so.
  *
  * Release approvals (M6 step 10(b)) add 1 read while release is off for the deployment, which is everywhere today, when
  * the first room the person owns or administers answers: it answers as a route that doesn't exist, and that says it for
  * every room. If that room can't be read (the person left it, say), the rest are asked too, so it is at most
- * `MAX_APPROVAL_ROOMS`, off or on: at most 46 a render at these limits.
+ * `MAX_APPROVAL_ROOMS`, off or on: at most 45 a render at these limits.
  */
 export const MAX_ROOMS = 20;
 

@@ -10,7 +10,8 @@
  * - **The worst case is reserved before a request goes.** Each body byte counts as an input token at the dearest input
  *   price, plus a fixed margin for the provider's hidden tool prompt, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
- * - **Only a known body** (M1 on #459): known top-level keys, `output_config` among them only in its reviewed shape; tools only the driver's own (`custom`), never the
+ * - **Only a known body** (M1 on #459): known top-level keys, `output_config` and adaptive `thinking` only in their
+ *   reviewed shapes; tools only the driver's own (`custom`), never the
  *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
  *   and thinking, with documents in plain text only (a PDF bills beyond the body's bytes); no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
  *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
@@ -223,6 +224,31 @@ function blockRefusal(v: unknown, inResult = false): string | null {
   return `block_shape:${v.type}`;
 }
 
+/** `thinking.display` for adaptive thinking, exactly the enum SDK 0.3.327 declares (its `ThinkingConfigAdaptive`). */
+const THINKING_DISPLAYS = ["summarized", "omitted"];
+
+/**
+ * `thinking`, as the allowlist takes it. The second reviewed widening (the architect's ruling of 2026-11-18, after
+ * #460's fourth real run, where Claude Code sent adaptive thinking on every request) adds `{ type: "adaptive" }`, with
+ * an optional `display` from the SDK's enum; `enabled` and `disabled`, with an optional `budget_tokens`, are taken as
+ * before. Any other type or inner key is refused by name. Thinking bills as output within `max_tokens`, which the
+ * broker rewrites and reserves in full, so the worst case covers it unchanged.
+ */
+function thinkingRefusal(t: unknown): string | null {
+  if (!isObj(t)) return "thinking";
+  if (t.type === "adaptive") {
+    const extra = Object.keys(t).find((k) => k !== "type" && k !== "display");
+    if (extra !== undefined) return `thinking_key:${nameCode(extra)}`;
+    if (t.display !== undefined && !(typeof t.display === "string" && THINKING_DISPLAYS.includes(t.display))) return "thinking:display";
+    return null;
+  }
+  if (t.type === "enabled" || t.type === "disabled") {
+    const extra = Object.keys(t).find((k) => k !== "type" && k !== "budget_tokens");
+    return extra === undefined ? null : `thinking_key:${nameCode(extra)}`;
+  }
+  return `thinking:${nameCode(t.type)}`;
+}
+
 /** The request body, by the allowlist: the first part refused, as a code, or null when the body is allowed. */
 function bodyRefusal(b: Obj): string | null {
   const extra = Object.keys(b).find((k) => !TOP_KEYS.includes(k));
@@ -254,10 +280,8 @@ function bodyRefusal(b: Obj): string | null {
   }
   if (!optional(b.tool_choice, (v) => isObj(v) && only(v, ["type", "name", "disable_parallel_tool_use"]) && ["auto", "any", "tool", "none"].includes(v.type as string))) return "tool_choice";
   if (b.thinking !== undefined) {
-    const t = b.thinking;
-    if (!isObj(t)) return "thinking";
-    if (t.type !== "enabled" && t.type !== "disabled") return `thinking:${nameCode(t.type)}`;
-    if (!only(t, ["type", "budget_tokens"])) return "thinking_shape";
+    const refused = thinkingRefusal(b.thinking);
+    if (refused !== null) return refused;
   }
   if (!optional(b.metadata, (v) => isObj(v) && only(v, ["user_id"]))) return "metadata";
   if (!optional(b.stop_sequences, (v) => Array.isArray(v) && v.every(isText))) return "stop_sequences";

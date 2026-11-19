@@ -1641,7 +1641,7 @@ describe("the exact reason a run failed, as fixed codes", () => {
     expect(ask({ output_config: { effort: "low", verbosity: "x" } })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "output_config_key:verbosity" });
     expect(ask({ context_management: {} })).toMatchObject({ detail: "top_key:context_management" });
     expect(ask({ "Weird Key!": 1 })).toMatchObject({ detail: "top_key:other" });
-    expect(ask({ thinking: { type: "adaptive" } })).toMatchObject({ detail: "thinking:adaptive" });
+    expect(ask({ thinking: { type: "between_tools" } })).toMatchObject({ detail: "thinking:between_tools" });
     expect(ask({ tools: [{ name: "t", input_schema: {}, eager_input_streaming: true }] })).toMatchObject({ detail: "tool_key:eager_input_streaming" });
     expect(ask({ messages: [{ role: "user", content: [{ type: "server_tool_use" }] }] })).toMatchObject({ detail: "block:server_tool_use" });
     expect(ask({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] })).toMatchObject({ detail: "system" });
@@ -1745,5 +1745,39 @@ describe("output_config, allowed only in its reviewed shape (the architect's rul
     expect(withConfig.forward.max_tokens).toBe(plain.forward.max_tokens);
     expect(withConfig.forward.max_tokens).toBe(CAPS.max_tokens);
     expect(withConfig.forward.worst_micro_usd).toBe(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], withConfig.forward.body.byteLength, CAPS.max_tokens));
+  });
+});
+
+// ---- After the fourth real run of #460 at 7ccf537: the second reviewed widening ----
+
+describe("thinking, widened only to adaptive and disabled (the architect's ruling of 2026-11-18)", () => {
+  const ask = (thinking: unknown) =>
+    new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS).admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128_000, messages: [{ role: "user", content: "x" }], thinking })) });
+
+  it("takes adaptive, with display from SDK 0.3.327's enum, and disabled; the forms taken before are unchanged", () => {
+    for (const t of [{ type: "adaptive" }, { type: "adaptive", display: "summarized" }, { type: "adaptive", display: "omitted" }, { type: "disabled" }, { type: "enabled", budget_tokens: 1024 }, { type: "enabled" }, { type: "disabled", budget_tokens: 0 }])
+      expect([t, ask(t).ok]).toEqual([t, true]);
+  });
+
+  it("refuses any other type, display or inner key, with a detail code", () => {
+    expect(ask({ type: "between_tools" })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "thinking:between_tools" });
+    for (const display of ["updates", null, "SUMMARIZED", 1]) expect([display, ask({ type: "adaptive", display })]).toMatchObject([display, { ok: false, detail: "thinking:display" }]);
+    expect(ask({ type: "adaptive", budget_tokens: 1 })).toMatchObject({ ok: false, detail: "thinking_key:budget_tokens" });
+    expect(ask({ type: "adaptive", "Odd Key": 1 })).toMatchObject({ ok: false, detail: "thinking_key:other" });
+    expect(ask({ type: "disabled", display: "omitted" })).toMatchObject({ ok: false, detail: "thinking_key:display" });
+    expect(ask({ type: "enabled", budget_tokens: 1, display: "omitted" })).toMatchObject({ ok: false, detail: "thinking_key:display" });
+    expect(ask("adaptive")).toMatchObject({ ok: false, detail: "thinking" });
+  });
+
+  it("leaves the worst case exactly as it is without thinking, since thinking bills as output within max_tokens", () => {
+    const plain = new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS).admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128_000, messages: [{ role: "user", content: "x" }] })) });
+    const adaptive = ask({ type: "adaptive", display: "omitted" });
+    if (!plain.ok || !adaptive.ok) throw new Error("both should be admitted");
+    expect(adaptive.forward.max_tokens).toBe(plain.forward.max_tokens);
+    const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
+    // The same body size gives the same worst case, with or without thinking: nothing is added for it.
+    expect(adaptive.forward.worst_micro_usd).toBe(worstCaseOf(price, adaptive.forward.body.byteLength, CAPS.max_tokens));
+    expect(plain.forward.worst_micro_usd).toBe(worstCaseOf(price, plain.forward.body.byteLength, CAPS.max_tokens));
+    expect(adaptive.forward.worst_micro_usd - plain.forward.worst_micro_usd).toBe(worstCaseOf(price, adaptive.forward.body.byteLength, 0) - worstCaseOf(price, plain.forward.body.byteLength, 0));
   });
 });

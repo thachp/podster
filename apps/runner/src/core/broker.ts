@@ -10,8 +10,9 @@
  * - **The worst case is reserved before a request goes.** Each body byte counts as an input token at the dearest input
  *   price, plus a fixed margin for the provider's hidden tool prompt, and all of `max_tokens` as output. A request whose worst case would pass what's left of the spend cap, after
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
- * - **Only a known body** (M1 on #459): known top-level keys, `output_config` and adaptive `thinking` only in their
- *   reviewed shapes; tools only the driver's own (`custom`), never the
+ * - **Only a known body** (M1 on #459): known top-level keys, `output_config`, adaptive `thinking`, top-level
+ *   `cache_control` and a tool's `eager_input_streaming` only in their reviewed shapes (three reviewed widenings, all
+ *   2026-11-18); every beta-only key and every other declared key not ruled in stays refused by name; tools only the driver's own (`custom`), never the
  *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
  *   and thinking, with documents in plain text only (a PDF bills beyond the body's bytes); no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
  *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
@@ -150,7 +151,7 @@ const only = (o: Obj, keys: readonly string[]) => Object.keys(o).every((k) => ke
 const optional = (v: unknown, check: (v: unknown) => boolean) => v === undefined || check(v);
 const isText = (v: unknown) => typeof v === "string";
 
-const TOP_KEYS = ["model", "messages", "max_tokens", "system", "metadata", "stop_sequences", "stream", "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking", "output_config"];
+const TOP_KEYS = ["model", "messages", "max_tokens", "system", "metadata", "stop_sequences", "stream", "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking", "output_config", "cache_control"];
 
 /** `output_config.effort`, exactly the enum the pinned SDK 0.3.327 declares (its Messages `OutputConfig` type). */
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -206,9 +207,12 @@ function blockOk(v: unknown, inResult = false): boolean {
 
 const contentOk = (v: unknown) => isText(v) || (Array.isArray(v) && v.every((b) => blockOk(b)));
 
+/** A tool's keys. `eager_input_streaming`, a boolean, is the third reviewed widening's (2026-11-18). */
+const TOOL_KEYS = ["type", "name", "description", "input_schema", "cache_control", "eager_input_streaming"];
+
 function toolOk(v: unknown): boolean {
-  if (!isObj(v) || !only(v, ["type", "name", "description", "input_schema", "cache_control"])) return false;
-  return (v.type === undefined || v.type === "custom") && isText(v.name) && optional(v.description, isText) && isObj(v.input_schema) && cacheOk(v.cache_control);
+  if (!isObj(v) || !only(v, TOOL_KEYS)) return false;
+  return (v.type === undefined || v.type === "custom") && isText(v.name) && optional(v.description, isText) && isObj(v.input_schema) && cacheOk(v.cache_control) && optional(v.eager_input_streaming, (e) => typeof e === "boolean");
 }
 
 /** A name from the request as a code: itself if it's a plain identifier, else `other`. */
@@ -253,6 +257,9 @@ function thinkingRefusal(t: unknown): string | null {
 function bodyRefusal(b: Obj): string | null {
   const extra = Object.keys(b).find((k) => !TOP_KEYS.includes(k));
   if (extra !== undefined) return `top_key:${nameCode(extra)}`;
+  // Top-level automatic caching, exactly `{ type: "ephemeral" }`, no lifetime (the third reviewed widening). The worst
+  // case already prices every input byte at the dearest input-side rate, a cache write's included.
+  if (b.cache_control !== undefined && !(isObj(b.cache_control) && only(b.cache_control, ["type"]) && b.cache_control.type === "ephemeral")) return "cache_control";
   if (b.output_config !== undefined) {
     const refused = outputConfigRefusal(b.output_config);
     if (refused !== null) return refused;
@@ -272,9 +279,10 @@ function bodyRefusal(b: Obj): string | null {
     if (!Array.isArray(b.tools)) return "tools";
     for (const t of b.tools) {
       if (!isObj(t)) return "tools";
-      const key = Object.keys(t).find((k) => !["type", "name", "description", "input_schema", "cache_control"].includes(k));
+      const key = Object.keys(t).find((k) => !TOOL_KEYS.includes(k));
       if (key !== undefined) return `tool_key:${nameCode(key)}`;
       if (t.type !== undefined && t.type !== "custom") return `tool_type:${nameCode(t.type)}`;
+      if (!optional(t.eager_input_streaming, (e) => typeof e === "boolean")) return "tool:eager_input_streaming";
       if (!toolOk(t)) return "tool_shape";
     }
   }

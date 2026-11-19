@@ -7,7 +7,7 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RunBroker, upstreamUrl, worstCaseOf, type BrokerRequest, type Forward } from "../src/core/broker.js";
+import { costOf as costOfUsage, RunBroker, upstreamUrl, worstCaseOf, type BrokerRequest, type Forward } from "../src/core/broker.js";
 import { CLAUDE_MODEL, CLAUDE_MODELS, CLAUDE_PROFILE, PINNED_CLAUDE_CODE_VERSION, PINNED_SDK_VERSION, versionRefusal } from "../src/core/claude-profile.js";
 import type { RunFacts } from "../src/core/policy.js";
 import { containerSpec, PLACEHOLDER_KEY, RESULT_SCHEMA, UNTRUSTED_FRAME, type DriverSession, type ModelAnswer } from "../src/core/run-interface.js";
@@ -1642,7 +1642,7 @@ describe("the exact reason a run failed, as fixed codes", () => {
     expect(ask({ context_management: {} })).toMatchObject({ detail: "top_key:context_management" });
     expect(ask({ "Weird Key!": 1 })).toMatchObject({ detail: "top_key:other" });
     expect(ask({ thinking: { type: "between_tools" } })).toMatchObject({ detail: "thinking:between_tools" });
-    expect(ask({ tools: [{ name: "t", input_schema: {}, eager_input_streaming: true }] })).toMatchObject({ detail: "tool_key:eager_input_streaming" });
+    expect(ask({ tools: [{ name: "t", input_schema: {}, defer_loading: true }] })).toMatchObject({ detail: "tool_key:defer_loading" });
     expect(ask({ messages: [{ role: "user", content: [{ type: "server_tool_use" }] }] })).toMatchObject({ detail: "block:server_tool_use" });
     expect(ask({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] })).toMatchObject({ detail: "system" });
   });
@@ -1779,5 +1779,52 @@ describe("thinking, widened only to adaptive and disabled (the architect's rulin
     expect(adaptive.forward.worst_micro_usd).toBe(worstCaseOf(price, adaptive.forward.body.byteLength, CAPS.max_tokens));
     expect(plain.forward.worst_micro_usd).toBe(worstCaseOf(price, plain.forward.body.byteLength, CAPS.max_tokens));
     expect(adaptive.forward.worst_micro_usd - plain.forward.worst_micro_usd).toBe(worstCaseOf(price, adaptive.forward.body.byteLength, 0) - worstCaseOf(price, plain.forward.body.byteLength, 0));
+  });
+});
+
+// ---- The third reviewed widening, ruled up front (the architect's rulings of 2026-11-18) ----
+
+describe("the up-front rulings on the remaining body keys", () => {
+  const ask = (extra: Record<string, unknown>) =>
+    new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS).admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 128_000, messages: [{ role: "user", content: "x" }], ...extra })) });
+  const tool = (extra: Record<string, unknown>) => ({ tools: [{ name: "t", description: "d", input_schema: { type: "object" }, ...extra }] });
+
+  it("(a) takes top-level cache_control exactly as {type: ephemeral}, and nothing else", () => {
+    expect(ask({ cache_control: { type: "ephemeral" } }).ok).toBe(true);
+    for (const cc of [{ type: "ephemeral", ttl: "1h" }, { type: "ephemeral", ttl: "5m" }, { type: "persistent" }, { type: "ephemeral", scope: "x" }, null, "ephemeral", {}])
+      expect([cc, ask({ cache_control: cc })]).toMatchObject([cc, { ok: false, reason: "body_not_allowed", detail: "cache_control" }]);
+  });
+
+  it("(a) the worst case already prices every input byte at the dearest input-side price, a cache write's included", () => {
+    const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
+    expect(Math.max(price.input, price.cache_write, price.cache_read)).toBe(price.cache_write);
+    const cached = ask({ cache_control: { type: "ephemeral" } });
+    if (!cached.ok) throw new Error("should be admitted");
+    const bound = cached.forward.body.byteLength + 4_096;
+    expect(cached.forward.worst_micro_usd).toBe(Math.ceil((bound * price.cache_write) / 1_000_000) + Math.ceil((CAPS.max_tokens * price.output) / 1_000_000));
+    // And what a cached request is billed never passes that: every input token at the dearest rate.
+    expect(costOfUsage(price, { input_tokens: 0, output_tokens: CAPS.max_tokens, cache_creation_input_tokens: bound, cache_read_input_tokens: 0 })).toBeLessThanOrEqual(cached.forward.worst_micro_usd);
+  });
+
+  it("(b) takes the tool field eager_input_streaming only as a boolean", () => {
+    expect(ask(tool({ eager_input_streaming: true })).ok).toBe(true);
+    expect(ask(tool({ eager_input_streaming: false })).ok).toBe(true);
+    for (const v of ["true", 1, null, {}]) expect([v, ask(tool({ eager_input_streaming: v }))]).toMatchObject([v, { ok: false, detail: "tool:eager_input_streaming" }]);
+  });
+
+  it("refuses each beta-only key by name: the broker never sends a beta header", () => {
+    for (const [key, value] of [["betas", ["x"]], ["compaction", {}], ["context_management", { edits: [] }], ["fallbacks", "default"], ["fallback_credit_token", "t"], ["billing_policy", {}], ["thread", { id: "t" }], ["output_format", { type: "json_schema", schema: {} }]] as const)
+      expect([key, ask({ [key]: value })]).toMatchObject([key, { ok: false, reason: "body_not_allowed", detail: `top_key:${key}` }]);
+  });
+
+  it("refuses each of the other declared keys by name", () => {
+    for (const [key, value] of [["inference_geo", "us"], ["speed", "fast"], ["service_tier", "auto"], ["container", "c"], ["user_profile_id", "u"], ["workspace_id", "w"], ["diagnostics", {}], ["mcp_servers", []]] as const)
+      expect([key, ask({ [key]: value })]).toMatchObject([key, { ok: false, reason: "body_not_allowed", detail: `top_key:${key}` }]);
+  });
+
+  it("refuses the tool field defer_loading by name, and any unknown key as before", () => {
+    expect(ask(tool({ defer_loading: true }))).toMatchObject({ ok: false, detail: "tool_key:defer_loading" });
+    expect(ask({ some_new_key: 1 })).toMatchObject({ ok: false, detail: "top_key:some_new_key" });
+    expect(ask(tool({ strict: true }))).toMatchObject({ ok: false, detail: "tool_key:strict" });
   });
 });

@@ -26,11 +26,12 @@ function plainAbsolute(path: string): string {
   return path;
 }
 
-/** A real folder, not a link, owned by this user, or a refusal. */
+/** A real folder, not a link, owned by this user, and writable by no one else, or a refusal (L5 on #460). */
 async function realFolder(path: string, uid: number | null) {
   const info = await lstat(path);
   if (info.isSymbolicLink() || !info.isDirectory()) throw new UnsafePath("not a real folder");
   if (uid !== null && info.uid !== uid) throw new UnsafePath("not the owner's");
+  if ((info.mode & 0o022) !== 0) throw new UnsafePath("writable by others");
 }
 
 const ownUid = () => (typeof process.getuid === "function" ? process.getuid() : null);
@@ -46,7 +47,8 @@ export async function ensureFolder(root: string, folder: string, opts: { makeRoo
   const rel = relative(root, folder);
   if (rel.startsWith("..") || isAbsolute(rel)) throw new UnsafePath("outside its root");
   const uid = ownUid();
-  // The root's own parents may be anything the owner chose; the root itself must resolve to where it says.
+  // The root's own parents may be anything the owner chose; the root itself must resolve to where it says, and be
+  // writable by no one else.
   try {
     await realFolder(root, null);
   } catch (error) {
@@ -111,19 +113,32 @@ export async function writeNew(path: string, text: string): Promise<void> {
   }
 }
 
+/** The most entries `folderBytes` walks; more counts as over any bound (M2 on #460). **Proposed** figure. */
+export const MAX_FOLDER_ENTRIES = 200_000;
+
 /**
  * The bytes under `folder`, counted with `lstat` and never following a link, stopping once past `limit`. A link counts
- * as its own small size; whatever it points to is never read.
+ * as its own small size; whatever it points to is never read. A folder with more than `maxEntries` entries reads as
+ * over the bound, so a flood of small files can't make the walk endless or hide its size. An entry that disappears
+ * mid-walk is skipped.
  */
-export async function folderBytes(folder: string, limit: number): Promise<number> {
+export async function folderBytes(folder: string, limit: number, maxEntries = MAX_FOLDER_ENTRIES): Promise<number> {
   plainAbsolute(folder);
   let total = 0;
+  let entries = 0;
   const stack = [folder];
   while (stack.length > 0 && total <= limit) {
+    if (++entries > maxEntries) return limit + 1;
     const at = stack.pop() as string;
-    const info = await lstat(at);
+    let info;
+    try {
+      info = await lstat(at);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && at !== folder) continue;
+      throw error;
+    }
     total += info.size;
-    if (info.isDirectory() && !info.isSymbolicLink()) for (const name of await readdir(at)) stack.push(join(at, name));
+    if (info.isDirectory() && !info.isSymbolicLink()) for (const name of await readdir(at).catch(() => [] as string[])) stack.push(join(at, name));
   }
   return total;
 }

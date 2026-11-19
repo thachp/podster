@@ -98,10 +98,15 @@ export type ContainerSpec = {
   read_only_root: true;
   drop_capabilities: "all";
   user: "unprivileged";
+  /** How long the container may live at most: the run-time cap plus a margin, never forever (L2 on #460). */
+  max_seconds: number;
 };
 
+/** What a container may outlive its run's time cap by, so Runner's own stop always comes first. */
+export const CONTAINER_MARGIN_S = 60;
+
 /** The container for a run, from its facts alone. */
-export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network">): ContainerSpec {
+export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network" | "caps">): ContainerSpec {
   return {
     run_ref,
     task_folder: facts.task_folder,
@@ -111,6 +116,7 @@ export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folde
     read_only_root: true,
     drop_capabilities: "all",
     user: "unprivileged",
+    max_seconds: Math.ceil(facts.caps.run_time_ms / 1000) + CONTAINER_MARGIN_S,
   };
 }
 
@@ -123,6 +129,7 @@ export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mo
   if (names.length !== Object.keys(CONTAINER_ENV).length || names.some((n) => !Object.hasOwn(CONTAINER_ENV, n) || spec.env[n] !== CONTAINER_ENV[n])) return "env_not_allowed";
   if (spec.mounts.length !== 1 || spec.mounts[0].source !== spec.task_folder || spec.mounts[0].target !== CONTAINER_WORKDIR) return "mount_not_allowed";
   if (spec.read_only_root !== true || spec.drop_capabilities !== "all" || spec.user !== "unprivileged") return "spec_invalid";
+  if (!Number.isSafeInteger(spec.max_seconds) || spec.max_seconds <= CONTAINER_MARGIN_S) return "spec_invalid";
   return null;
 }
 

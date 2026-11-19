@@ -8,6 +8,10 @@
  * - **`redirect: "error"`,** so the key never follows a redirect anywhere.
  * - **No proxy from the environment.** Node's `fetch` reads no proxy variable unless Node is told to; Runner refuses to
  *   make a transport when it has been (`NODE_USE_ENV_PROXY`, or `--use-env-proxy` in Node's options).
+ * - **No TLS trust from the environment** (M3 on #460): Runner refuses to make a transport when certificate checks are
+ *   off (`NODE_TLS_REJECT_UNAUTHORIZED=0`) or extra or system trust is added (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+ *   `--use-openssl-ca`, `--use-system-ca`), in the environment or in `NODE_OPTIONS`, since any of them lets someone
+ *   else's certificate stand in for the provider's and read the key.
  * - **Streamed usage settles only on `message_stop`.** A stream cut before it, an error event, an answer that isn't 2xx,
  *   or one too large to hold returns no usage, so the broker counts the request's whole worst case.
  *
@@ -25,6 +29,16 @@ const KEY = /^[A-Za-z0-9_-]{20,256}$/;
 export function envProxyRequested(env: NodeJS.ProcessEnv, execArgv: readonly string[]): boolean {
   const on = (v: string | undefined) => v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
   return on(env.NODE_USE_ENV_PROXY) || execArgv.some((a) => a.startsWith("--use-env-proxy")) || /--use-env-proxy/.test(env.NODE_OPTIONS ?? "");
+}
+
+/** Why the environment would change where the key goes or whom it trusts, or null (M3 on #460). */
+export function transportEnvRefusal(env: NodeJS.ProcessEnv, execArgv: readonly string[]): string | null {
+  if (envProxyRequested(env, execArgv)) return "env_proxy";
+  if (env.NODE_TLS_REJECT_UNAUTHORIZED === "0") return "tls_unchecked";
+  for (const name of ["NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"]) if (env[name] !== undefined && env[name] !== "") return "tls_trust_added";
+  const flags = [...execArgv, ...(env.NODE_OPTIONS ?? "").split(/\s+/)];
+  if (flags.some((f) => /^--(use-openssl-ca|use-system-ca|use-bundled-ca=false)\b/.test(f) || f.startsWith("--openssl-config"))) return "tls_trust_added";
+  return null;
 }
 
 type Obj = Record<string, unknown>;
@@ -80,7 +94,9 @@ export class ProviderKeyTransport implements ProviderTransport {
 
   constructor(profile: ProviderProfile, key: string, opts: { fetch?: typeof globalThis.fetch; env?: NodeJS.ProcessEnv; execArgv?: readonly string[] } = {}) {
     if (!KEY.test(key)) throw new Error("The provider key isn't one Runner can use.");
-    if (envProxyRequested(opts.env ?? process.env, opts.execArgv ?? process.execArgv)) throw new Error("Runner won't send the provider key through a proxy taken from the environment. Unset NODE_USE_ENV_PROXY and --use-env-proxy.");
+    const refused = transportEnvRefusal(opts.env ?? process.env, opts.execArgv ?? process.execArgv);
+    if (refused === "env_proxy") throw new Error("Runner won't send the provider key through a proxy taken from the environment. Unset NODE_USE_ENV_PROXY and --use-env-proxy.");
+    if (refused !== null) throw new Error("Runner won't send the provider key with TLS trust taken from the environment. Unset NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, --use-openssl-ca and --use-system-ca.");
     this.profile = profile;
     this.url = upstreamUrl(profile);
     this.key = key;

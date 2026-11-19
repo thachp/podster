@@ -26,16 +26,23 @@ export const CLAUDE_MODEL = "claude-haiku-5-5";
  * Micro-USD per million tokens. Input and output are Anthropic's list prices for Claude Haiku 5.5 (0.10 and 0.50 USD per
  * million, read 2026-11-18 from the claude-api reference cached 2026-11-03, for prompts up to 100K tokens). Cache writes
  * and reads are taken at 1.25 and 0.1 times input, as spike B assumed and the SDK's figures matched. Above 100K input
- * tokens the list price rises; the broker's worst case and caps bound a run long before that matters, and S-49 rechecks it.
+ * tokens the list price rises to 0.50 and 2.50 USD; that tier is priced too, and the broker's worst case takes it.
  */
-const HAIKU_5_5: Price = { input: 100_000, output: 500_000, cache_write: 125_000, cache_read: 10_000 };
+const HAIKU_5_5: Price = {
+  input: 100_000,
+  output: 500_000,
+  cache_write: 125_000,
+  cache_read: 10_000,
+  // Above 100K input tokens: 0.50 and 2.50 USD per million, cache at the same 1.25 and 0.1 times (L6 on #460).
+  long_context: { above_input_tokens: 100_000, input: 500_000, output: 2_500_000, cache_write: 625_000, cache_read: 50_000 },
+};
 
 export const CLAUDE_PROFILE: ProviderProfile = Object.freeze({
   provider: "anthropic",
   host: "api.anthropic.com",
   path: "/v1/messages",
   headers: Object.freeze({ "anthropic-version": "2023-06-01", "content-type": "application/json" }) as Record<string, string>,
-  prices: Object.freeze({ [CLAUDE_MODEL]: Object.freeze({ ...HAIKU_5_5 }) }) as Record<string, Price>,
+  prices: Object.freeze({ [CLAUDE_MODEL]: Object.freeze({ ...HAIKU_5_5, long_context: Object.freeze({ ...(HAIKU_5_5.long_context as NonNullable<Price["long_context"]>) }) }) }) as Record<string, Price>,
 });
 
 export const CLAUDE_MODELS: readonly string[] = Object.freeze([CLAUDE_MODEL]);

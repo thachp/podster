@@ -20,7 +20,15 @@ import { MAX_BODY_BYTES, type BrokerRequest } from "../core/broker.js";
 import type { ModelAnswer } from "../core/run-interface.js";
 
 export type BrokerListener = { url: string; port: number; token: string; close(): Promise<void> };
-export type ListenerDeps = { model: (request: BrokerRequest) => Promise<ModelAnswer>; signal: AbortSignal; token?: string };
+export type ListenerDeps = {
+  model: (request: BrokerRequest) => Promise<ModelAnswer>;
+  signal: AbortSignal;
+  token?: string;
+  /** For tests; the defaults bound a stalled client. */
+  headersTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  checkIntervalMs?: number;
+};
 
 const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
 
@@ -60,7 +68,7 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
   const token = deps.token ?? randomBytes(32).toString("hex");
   let port = 0;
   let closed = false;
-  const server = createServer(async (req, res) => {
+  const server = createServer({ connectionsCheckingInterval: deps.checkIntervalMs ?? 5_000, headersTimeout: deps.headersTimeoutMs ?? 30_000, requestTimeout: deps.requestTimeoutMs ?? 120_000 }, async (req, res) => {
     if (closed || deps.signal.aborted) return refuse(res, 503, "run_stopped");
     if (req.headers.origin !== undefined) return refuse(res, 403, "origin_refused");
     if (req.headers.host !== `127.0.0.1:${port}`) return refuse(res, 403, "host_refused");
@@ -84,8 +92,6 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
     res.writeHead(answer.status, { "content-type": wantsStream(body) ? "text/event-stream" : "application/json" });
     res.end(Buffer.from(answer.body));
   });
-  server.headersTimeout = 30_000;
-  server.requestTimeout = 120_000;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => resolve());

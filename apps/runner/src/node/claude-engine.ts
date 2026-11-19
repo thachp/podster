@@ -13,7 +13,8 @@
  *
  * The key is read once into the transport and never logged, written, put in an error or passed to another program.
  */
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { CLAUDE_PROFILE } from "../core/claude-profile.js";
@@ -33,21 +34,28 @@ export async function installedClaudeVersions(): Promise<{ sdk: unknown; claude_
   return { sdk: manifest.version, claude_code: manifest.claudeCodeVersion };
 }
 
-/** The owner's provider key, from a file only they can read. */
-export async function readKeyFile(path: string): Promise<string> {
+/**
+ * The owner's provider key, from a file only they can read. The file is opened first, never through a link, and its
+ * owner, mode and size are checked on the open handle, so nothing can swap the file between check and read (L5 on #460).
+ */
+export async function readKeyFile(path: string, opts: { uid?: number } = {}): Promise<string> {
   const refuse = () => new Error("The provider key file must be a regular file you own, readable only by you (mode 600), holding one key.");
-  let info;
+  const uid = opts.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
+  let handle;
   try {
-    info = await lstat(path);
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch {
     throw refuse();
   }
-  const uid = typeof process.getuid === "function" ? process.getuid() : -1;
-  if (info.isSymbolicLink() || !info.isFile() || info.uid !== uid || (info.mode & 0o077) !== 0 || info.size > 1024) throw refuse();
-  const text = await readNoFollow(path, 1024).catch(() => null);
-  const key = text?.trim() ?? "";
-  if (!/^[A-Za-z0-9_-]{20,256}$/.test(key)) throw refuse();
-  return key;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.uid !== uid || (info.mode & 0o077) !== 0 || info.size > 1024) throw refuse();
+    const key = (await handle.readFile("utf8")).trim();
+    if (!/^[A-Za-z0-9_-]{20,256}$/.test(key)) throw refuse();
+    return key;
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Runner's pinned task image, from `task-image` in its home. */
@@ -59,10 +67,10 @@ export async function taskImage(home: string): Promise<string> {
 
 export type ClaudeEngine = RunEngine & { reap(): Promise<void> };
 
-export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli }): Promise<ClaudeEngine> {
+export async function claudeEngine(opts: { home: string; key_file: string; log: Logger; docker?: DockerCli; env?: NodeJS.ProcessEnv; execArgv?: readonly string[] }): Promise<ClaudeEngine> {
   const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log });
   const key = await readKeyFile(opts.key_file);
-  const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key);
+  const transport = new ProviderKeyTransport(CLAUDE_PROFILE, key, { env: opts.env, execArgv: opts.execArgv });
   const image = await taskImage(opts.home);
   let docker = opts.docker;
   if (!docker) {

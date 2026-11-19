@@ -27,7 +27,12 @@
  */
 
 /** Micro-USD per million tokens, as integers. */
-export type Price = { input: number; output: number; cache_write: number; cache_read: number };
+export type Rates = { input: number; output: number; cache_write: number; cache_read: number };
+/**
+ * A model's prices. `long_context`, when the provider has one, applies to the whole request once its input (counting
+ * cache writes and reads) is above `above_input_tokens`; the worst case always takes the dearest tier (L6 on #460).
+ */
+export type Price = Rates & { long_context?: Rates & { above_input_tokens: number } };
 
 /** A provider, as an adapter's code fixes it. Never read from configuration, the task or Podster. */
 export type ProviderProfile = {
@@ -90,6 +95,8 @@ function checkProfile(profile: ProviderProfile) {
   for (const [model, price] of Object.entries(profile.prices)) {
     if (!MODEL.test(model)) throw new Error("the provider profile names a model Runner can't take");
     if (![price.input, price.output, price.cache_write, price.cache_read].every(isCount)) throw new Error("the provider profile has a price that isn't a whole number of micro-USD");
+    const long = price.long_context;
+    if (long !== undefined && ![long.input, long.output, long.cache_write, long.cache_read, long.above_input_tokens].every(isCount)) throw new Error("the provider profile has a price that isn't a whole number of micro-USD");
   }
 }
 
@@ -101,14 +108,22 @@ export function upstreamUrl(profile: ProviderProfile): string {
 
 const priced = (tokens: number, perMillion: number) => Math.ceil((tokens * perMillion) / 1_000_000);
 
-/** What usage costs, rounded up. */
+/** What usage costs, rounded up, at the tier its input falls in. */
 export function costOf(price: Price, usage: Usage): number {
-  return priced(usage.input_tokens, price.input) + priced(usage.output_tokens, price.output) + priced(usage.cache_creation_input_tokens, price.cache_write) + priced(usage.cache_read_input_tokens, price.cache_read);
+  const input = usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+  const r: Rates = price.long_context !== undefined && input > price.long_context.above_input_tokens ? price.long_context : price;
+  return priced(usage.input_tokens, r.input) + priced(usage.output_tokens, r.output) + priced(usage.cache_creation_input_tokens, r.cache_write) + priced(usage.cache_read_input_tokens, r.cache_read);
 }
 
-/** The most a request can cost: each body byte as an input token at the dearest input price, and all of `max_tokens`. */
+/**
+ * The most a request can cost: each body byte as an input token at the dearest input price of any tier, and all of
+ * `max_tokens` at the dearest output price.
+ */
 export function worstCaseOf(price: Price, bodyBytes: number, maxTokens: number): number {
-  return priced(bodyBytes + INPUT_MARGIN_TOKENS, Math.max(price.input, price.cache_write, price.cache_read)) + priced(maxTokens, price.output);
+  const tiers: Rates[] = price.long_context === undefined ? [price] : [price, price.long_context];
+  const input = Math.max(...tiers.flatMap((t) => [t.input, t.cache_write, t.cache_read]));
+  const output = Math.max(...tiers.map((t) => t.output));
+  return priced(bodyBytes + INPUT_MARGIN_TOKENS, input) + priced(maxTokens, output);
 }
 
 function usageOf(v: unknown): Usage | null {

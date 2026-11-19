@@ -35,9 +35,26 @@
  *
  * **Process tree:** Claude Code starts in its own process group, recorded in the run's folder, so a cancel, and a reap
  * after a restart (M4 on #459), kill the whole group. Logs carry IDs and codes only.
+ *
+ * **The deep review of #460 (the architect's rulings of 2026-11-18):**
+ * - (M1a) no tool call and no model request is let through until a valid `init` has been read; a request held for it
+ *   waits at most `INIT_WAIT_MS`, then the run fails `init_missing`; an `init` of the wrong shape fails `init_invalid`;
+ * - (M1b) a hook event passes only if both its event is `PreToolUse` and its name is one of `RUNNER_HOOK_NAMES`;
+ * - (M1c) any plugin not on `PLUGIN_ALLOWLIST`, which is empty, fails the run;
+ * - (M1d) built-in agents and bundled skills are switched off by environment, always;
+ * - (M1e) bare mode (`CLAUDE_CODE_SIMPLE=1`) is an option, off until the real run shows Runner's hook still fires under it;
+ * - (M1f) on macOS, opt-in, Claude Code starts under `sandbox-exec` with a profile denying every `process-exec` but its
+ *   own binary and every read of the login keychain files;
+ * - (L1) a reap kills only a group it can prove is Runner's: `ps` failing is never "no such process", a leaderless
+ *   group is judged by a member's command, and a record from before the last boot is never acted on;
+ * - (L3) a tool-use ID the hook never saw ends the run, with no fallback;
+ * - (L4) the SDK's environment names pass only from `SDK_ENV_NAMES`, exactly;
+ * - (L8) `GIT_CEILING_DIRECTORIES` stops Git at the run's folder.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createSdkMcpServer, query, tool, type HookCallback, type Options, type SdkMcpToolDefinition, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -53,13 +70,52 @@ import { ensureFolder, freshFolder, readNoFollow, removeOwnFolder, writeNewSync 
 export type ClaudeSdk = { query: typeof query; createSdkMcpServer: typeof createSdkMcpServer; tool: typeof tool };
 export const CLAUDE_SDK: ClaudeSdk = { query, createSdkMcpServer, tool };
 
+/** A process as `ps` shows it. */
+export type ProcessInfo = { command: string; started_at: number };
+/** What `ps` said of one process: found, no such process, or `ps` itself failed (never read as either). */
+export type Described = ({ kind: "found" } & ProcessInfo) | { kind: "none" } | { kind: "failed" };
+
 /** Starting and ending Claude Code's process group: the real one, or a test's stand-in. */
 export interface ProcessControl {
   spawn(command: string, args: string[], opts: { cwd: string; env: Record<string, string> }): SpawnedProcess & { readonly pid?: number };
   /** Sends `signal` to the whole group; 0 only asks whether any of it is left. True if the group exists. */
   signalGroup(pid: number, signal: "SIGKILL" | 0): boolean;
-  /** The process `pid`'s command and start time, or null if there is none. */
-  describe(pid: number): Promise<{ command: string; started_at: number } | null>;
+  /** The process `pid`'s command and start time. */
+  describe(pid: number): Promise<Described>;
+  /** Every member of process group `pgid`; null if `ps` failed. */
+  group(pgid: number): Promise<(ProcessInfo & { pid: number })[] | null>;
+  /** When this machine last booted, in milliseconds; null if it can't be read. */
+  bootTime(): Promise<number | null>;
+}
+
+/** How long a tool call or model request waits for a valid init before the run fails (M1a). */
+export const INIT_WAIT_MS = 15_000;
+/** The names Claude Code gives Runner's own PreToolUse callback in its hook events (M1b). Confirmed only by the real run. */
+export const RUNNER_HOOK_NAMES: readonly string[] = Object.freeze(["PreToolUse", "PreToolUse:callback"]);
+/** Plugins reviewed and allowed to load: none (M1c). */
+export const PLUGIN_ALLOWLIST: readonly string[] = Object.freeze([]);
+/** The SDK's own environment names that may reach Claude Code, exactly (L4). */
+export const SDK_ENV_NAMES: readonly string[] = Object.freeze(["CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_AGENT_SDK_CLIENT_APP"]);
+/** macOS's sandbox tool. */
+export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+const sbplString = (path: string) => {
+  if (!/^\/[^"\\\u0000-\u001f]*$/.test(path)) throw new Error("sandbox_path_invalid");
+  return `"${path}"`;
+};
+
+/**
+ * The sandbox profile Claude Code runs under on macOS, opt-in (M1f): everything as usual, except that no program may be
+ * started but Claude Code's own binary, and the login keychain files can't be read or written. Later rules win.
+ */
+export function sandboxProfile(command: string, ownerHome: string): string {
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny process-exec)",
+    `(allow process-exec (literal ${sbplString(command)}))`,
+    `(deny file-read* file-write* (subpath ${sbplString(join(ownerHome, "Library", "Keychains"))}))`,
+  ].join("\n");
 }
 
 export const MCP_SERVER = "runner";
@@ -85,18 +141,24 @@ export const QUIET: Readonly<Record<string, string>> = Object.freeze({
   DISABLE_BUG_COMMAND: "1",
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+  // No built-in agents and no bundled skills (M1d).
+  CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
+  CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
 });
 
 export type RunDirs = { root: string; work: string; home: string; config: string; tmp: string };
 
 /** Claude Code's whole environment. Nothing else from Runner's reaches it. */
-export function claudeEnv(dirs: RunDirs, listener: Pick<BrokerListener, "url" | "token">, maxTokens: number, from: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function claudeEnv(dirs: RunDirs, listener: Pick<BrokerListener, "url" | "token">, maxTokens: number, from: NodeJS.ProcessEnv = process.env, opts: { bare?: boolean } = {}): Record<string, string> {
   const base = childEnv({}, { PATH: from.PATH, LANG: from.LANG });
   return {
     ...base,
     HOME: dirs.home,
     CLAUDE_CONFIG_DIR: dirs.config,
     TMPDIR: dirs.tmp,
+    // Git never looks above the run's own folder (L8).
+    GIT_CEILING_DIRECTORIES: dirs.root,
+    ...(opts.bare === true ? { CLAUDE_CODE_SIMPLE: "1" } : {}),
     ...QUIET,
     ANTHROPIC_BASE_URL: listener.url,
     // The listener's per-run token, as the API key Claude Code sends to it. Never the provider key.
@@ -107,12 +169,12 @@ export function claudeEnv(dirs: RunDirs, listener: Pick<BrokerListener, "url" | 
   };
 }
 
-/** The spawn's environment: Runner's, plus the SDK's own settings that aren't Runner's and aren't shaped like a secret. */
+/** The spawn's environment: Runner's, plus only the SDK's own names in `SDK_ENV_NAMES`, never over Runner's (L4). */
 export function spawnEnv(own: Record<string, string>, fromSdk: Record<string, string | undefined>): Record<string, string> {
   const env = { ...own };
-  for (const [name, value] of Object.entries(fromSdk)) {
-    if (value === undefined || Object.hasOwn(own, name)) continue;
-    if (/^(CLAUDE_CODE_|CLAUDE_AGENT_SDK_)[A-Z0-9_]*$/.test(name) && !forbidden(name)) env[name] = value;
+  for (const name of SDK_ENV_NAMES) {
+    const value = fromSdk[name];
+    if (value !== undefined && !Object.hasOwn(own, name) && !forbidden(name)) env[name] = value;
   }
   return env;
 }
@@ -191,7 +253,8 @@ function canonical(v: unknown): string {
 export type DriverObservation =
   | { kind: "spawned"; run_ref: string; pid: number }
   | { kind: "init"; run_ref: string; claude_code_version: unknown; permission_mode: unknown; tools: string[]; mcp_servers: string[]; plugins: string[] }
-  | { kind: "hook"; run_ref: string; subtype: string; hook_event: string };
+  | { kind: "hook"; run_ref: string; subtype: string; hook_event: string; hook_name: string }
+  | { kind: "callback"; run_ref: string; tool: string };
 
 type Live = { pid: number | null; listener: BrokerListener | null; abort: AbortController; dir: string };
 type ProcessRecord = { pid: number; command: string; started_at: number };
@@ -206,6 +269,16 @@ export type ClaudeDriverDeps = {
   clock?: () => number;
   log?: Logger;
   observe?: (event: DriverObservation) => void;
+  /** Bare mode (M1e): off until the real run shows Runner's own hook still fires under it. */
+  bare?: boolean;
+  /** Start Claude Code under `sandbox-exec` (M1f). macOS only, opt-in. */
+  macSandbox?: boolean;
+  platform?: NodeJS.Platform;
+  /** The owner's own home, for the sandbox profile's keychain rule. */
+  ownerHome?: string;
+  /** The real path of Claude Code's binary, for the sandbox profile. */
+  resolveCommand?: (command: string) => string;
+  initWaitMs?: number;
 };
 
 export class ClaudeDriver implements AgentDriver {
@@ -221,6 +294,7 @@ export class ClaudeDriver implements AgentDriver {
   constructor(deps: ClaudeDriverDeps) {
     const refused = versionRefusal(deps.installed);
     if (refused) throw new Error(`Runner won't run this Claude Agent SDK: ${refused === "sdk_version" ? "the SDK" : "its bundled Claude Code"} isn't the pinned version.`);
+    if (deps.macSandbox === true && (deps.platform ?? process.platform) !== "darwin") throw new Error("Runner's sandbox-exec wrapper is for macOS only.");
     this.deps = deps;
     this.sdk = deps.sdk ?? CLAUDE_SDK;
     this.processes = deps.processes ?? nodeProcesses;
@@ -239,9 +313,6 @@ export class ClaudeDriver implements AgentDriver {
     const live: Live = { pid: null, listener: null, abort: new AbortController(), dir: root };
     this.live.set(ref, live);
     const dirs: RunDirs = { root, work: await freshFolder(join(root, "work")), home: await freshFolder(join(root, "home")), config: await freshFolder(join(root, "config")), tmp: await freshFolder(join(root, "tmp")) };
-    live.listener = await (this.deps.listen ?? startBrokerListener)({ model: (r) => session.model(r), signal: session.signal });
-    const env = claudeEnv(dirs, live.listener, session.limits.max_tokens, this.deps.env);
-
     let failure: string | null = null;
     const fail = (code: string) => {
       if (failure === null) {
@@ -252,21 +323,49 @@ export class ClaudeDriver implements AgentDriver {
     };
     session.signal.addEventListener("abort", () => live.abort.abort(), { once: true });
 
+    // Nothing goes through until a valid init has been read (M1a): a call waits for it, bounded, and a run whose init
+    // never comes, or comes malformed, fails.
+    let initOk = false;
+    let markInit: (ok: boolean) => void = () => undefined;
+    const initSeen = new Promise<boolean>((resolve) => (markInit = resolve));
+    live.abort.signal.addEventListener("abort", () => markInit(false), { once: true });
+    const waitForInit = async (): Promise<boolean> => {
+      if (initOk) return true;
+      const timer = new AbortController();
+      const late = new Promise<boolean>((resolve) => {
+        const t = setTimeout(() => resolve(false), this.deps.initWaitMs ?? INIT_WAIT_MS);
+        timer.signal.addEventListener("abort", () => clearTimeout(t), { once: true });
+      });
+      const ok = await Promise.race([initSeen, late]);
+      timer.abort();
+      if (!ok && failure === null) fail("init_missing");
+      return ok && failure === null;
+    };
+
+    live.listener = await (this.deps.listen ?? startBrokerListener)({
+      model: async (r) => ((await waitForInit()) ? session.model(r) : { ok: false, refused: "run_stopped" }),
+      signal: session.signal,
+    });
+    const env = claudeEnv(dirs, live.listener, session.limits.max_tokens, this.deps.env, { bare: this.deps.bare });
+
     // Calls the hook has seen, by ID, and by their input for a handler that isn't told the ID.
     const checked = new Set<string>();
     const pending = new Map<string, string[]>();
     const keyOf = (name: string, input: unknown) => `${name}\u0000${canonical(input)}`;
 
+    const deny = { hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Runner refused this call." } };
     const hook: HookCallback = async (input, toolUseID) => {
       if (input.hook_event_name !== "PreToolUse") return {};
+      if (!(await waitForInit())) return deny;
       const name = runnerToolName(input.tool_name);
       const call_id = typeof input.tool_use_id === "string" ? input.tool_use_id : (toolUseID ?? "");
+      this.deps.observe?.({ kind: "callback", run_ref: ref, tool: name });
       const decision = session.check({ call_id, tool: name, input: input.tool_input });
       checked.add(call_id);
       const key = keyOf(name, input.tool_input);
       pending.set(key, [...(pending.get(key) ?? []), call_id]);
       if (decision.allow) return {};
-      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "Runner refused this call." } };
+      return deny;
     };
 
     const handler = (name: string) => async (args: Record<string, unknown>, extra: unknown) => {
@@ -274,13 +373,15 @@ export class ClaudeDriver implements AgentDriver {
       const key = keyOf(name, args);
       const queue = pending.get(key) ?? [];
       let call_id: string | undefined;
-      if (typeof meta === "string" && checked.has(meta)) {
-        call_id = meta;
+      if (typeof meta === "string") {
+        // A named call the hook never saw ends the run, with no fallback to matching by input (L3 on #460).
+        call_id = checked.has(meta) ? meta : undefined;
         const at = queue.indexOf(meta);
         if (at >= 0) queue.splice(at, 1);
       } else {
         call_id = queue.shift();
       }
+      if (!initOk) call_id = undefined;
       if (call_id === undefined) {
         // A call the hook never saw: the decision point was passed by, so the run ends.
         fail("hook_bypassed");
@@ -299,10 +400,18 @@ export class ClaudeDriver implements AgentDriver {
 
     const spawn = (s: SpawnOptions): SpawnedProcess => {
       if (live.abort.signal.aborted) throw new Error("halted");
-      const child = this.processes.spawn(s.command, s.args, { cwd: dirs.work, env: spawnEnv(env, s.env) });
+      let command = s.command;
+      let args = s.args;
+      if (this.deps.macSandbox === true) {
+        const real = (this.deps.resolveCommand ?? realpathSync)(s.command);
+        args = ["-p", sandboxProfile(real, this.deps.ownerHome ?? homedir()), real, ...s.args];
+        command = SANDBOX_EXEC;
+      }
+      const child = this.processes.spawn(command, args, { cwd: dirs.work, env: spawnEnv(env, s.env) });
       if (typeof child.pid === "number") {
         live.pid = child.pid;
-        const record: ProcessRecord = { pid: child.pid, command: s.command, started_at: (this.deps.clock ?? Date.now)() };
+        // sandbox-exec replaces itself with Claude Code, so the group's command is Claude Code's either way.
+        const record: ProcessRecord = { pid: child.pid, command: this.deps.macSandbox === true ? (this.deps.resolveCommand ?? realpathSync)(s.command) : s.command, started_at: (this.deps.clock ?? Date.now)() };
         try {
           // Written before Claude Code is handed back, so a restart always finds the group to reap.
           writeNewSync(join(root, "process.json"), JSON.stringify(record));
@@ -327,26 +436,36 @@ export class ClaudeDriver implements AgentDriver {
           if (failure !== null) break;
           const m = message as Record<string, unknown>;
           if (m.type === "system" && m.subtype === "init") {
-            const tools = Array.isArray(m.tools) ? m.tools.map(String) : [];
-            const servers = Array.isArray(m.mcp_servers) ? m.mcp_servers.map((s) => String((s as { name?: unknown }).name)) : [];
-            const plugins = Array.isArray(m.plugins) ? m.plugins.map((p) => String((p as { name?: unknown }).name ?? p)) : [];
-            this.deps.observe?.({ kind: "init", run_ref: ref, claude_code_version: m.claude_code_version, permission_mode: m.permissionMode, tools, mcp_servers: servers, plugins });
-            if (m.claude_code_version !== PINNED_CLAUDE_CODE_VERSION) fail("claude_code_version");
-            else if (m.permissionMode !== "dontAsk") fail("permission_mode");
-            else if (tools.some((t) => !allowedNames.has(t))) fail("tools_unexpected");
-            else if (servers.some((s) => s !== MCP_SERVER)) fail("mcp_unexpected");
+            const init = readInit(m);
+            if (init === null) {
+              fail("init_invalid");
+              break;
+            }
+            this.deps.observe?.({ kind: "init", run_ref: ref, ...init });
+            if (init.claude_code_version !== PINNED_CLAUDE_CODE_VERSION) fail("claude_code_version");
+            else if (init.permission_mode !== "dontAsk") fail("permission_mode");
+            else if (init.tools.some((t) => !allowedNames.has(t))) fail("tools_unexpected");
+            else if (init.mcp_servers.some((s) => s !== MCP_SERVER)) fail("mcp_unexpected");
+            else if (init.plugins.some((p) => !PLUGIN_ALLOWLIST.includes(p))) fail("plugins_unexpected");
+            else {
+              initOk = true;
+              markInit(true);
+            }
           } else if (m.type === "system" && typeof m.subtype === "string" && m.subtype.startsWith("hook_")) {
             const event = String(m.hook_event ?? "");
-            this.deps.observe?.({ kind: "hook", run_ref: ref, subtype: m.subtype, hook_event: event });
-            // Only Runner's own PreToolUse callback may run; any other hook ends the run (S-44, failing closed).
-            if (event !== "PreToolUse") fail("hook_unexpected");
+            const hookName = String(m.hook_name ?? "");
+            this.deps.observe?.({ kind: "hook", run_ref: ref, subtype: m.subtype, hook_event: event, hook_name: hookName });
+            // Only Runner's own PreToolUse callback may run, by its event and its name (S-44, M1b, failing closed).
+            if (event !== "PreToolUse" || !RUNNER_HOOK_NAMES.includes(hookName)) fail("hook_unexpected");
           } else if (m.type === "result") {
+            if (!initOk) fail("init_missing");
             result = m.subtype === "success" ? (m.structured_output ?? null) : null;
           }
         }
       } catch (error) {
         if (failure === null) throw error;
       }
+      if (failure === null && !initOk) fail("init_missing");
       if (failure !== null) throw new Error(failure);
       return { result };
     })();
@@ -377,7 +496,7 @@ export class ClaudeDriver implements AgentDriver {
     }
     const record = await this.record(run_ref);
     if (record === "unreadable") return false;
-    if (record !== null && (await this.ours(record))) return false;
+    if (record !== null && (await this.ours(record)) !== "no") return false;
     await removeOwnFolder(join(this.runs, run_ref));
     return true;
   }
@@ -394,7 +513,8 @@ export class ClaudeDriver implements AgentDriver {
     }
     const record = await this.record(run_ref);
     if (record === "unreadable") throw new Error("process_record_unreadable");
-    if (record !== null && (await this.ours(record))) this.processes.signalGroup(record.pid, "SIGKILL");
+    // Killed only when proven Runner's; unknown never kills (L1).
+    if (record !== null && (await this.ours(record)) === "yes") this.processes.signalGroup(record.pid, "SIGKILL");
   }
 
   /** At startup: every run folder a previous process left. */
@@ -421,13 +541,23 @@ export class ClaudeDriver implements AgentDriver {
     }
   }
 
-  /** Whether the recorded group is still there and still Runner's: its leader the same program started then, or gone with members left. */
-  private async ours(record: ProcessRecord): Promise<boolean> {
-    if (!this.processes.signalGroup(record.pid, 0)) return false;
-    const now = await this.processes.describe(record.pid);
-    // A group with its leader gone keeps its ID while any member lives, so it can't be another's.
-    if (now === null) return true;
-    return now.command.startsWith(record.command) && Math.abs(now.started_at - record.started_at) <= START_SLACK_MS;
+  /**
+   * Whether the recorded group is still there and still Runner's (L1 on #460): "yes", "no", or "unknown" when `ps` or
+   * the boot time can't be read. Never "yes" for a record from before the last boot; a leaderless group is judged by
+   * its members' commands.
+   */
+  private async ours(record: ProcessRecord): Promise<"yes" | "no" | "unknown"> {
+    if (!this.processes.signalGroup(record.pid, 0)) return "no";
+    const boot = await this.processes.bootTime();
+    if (boot === null) return "unknown";
+    if (boot > record.started_at) return "no";
+    const leader = await this.processes.describe(record.pid);
+    if (leader.kind === "failed") return "unknown";
+    if (leader.kind === "found") return leader.command.startsWith(record.command) && Math.abs(leader.started_at - record.started_at) <= START_SLACK_MS ? "yes" : "no";
+    const members = await this.processes.group(record.pid);
+    if (members === null) return "unknown";
+    if (members.length === 0) return "no";
+    return members.some((m) => m.command.startsWith(record.command) && m.started_at >= record.started_at - START_SLACK_MS) ? "yes" : "no";
   }
 }
 
@@ -447,20 +577,67 @@ export const nodeProcesses: ProcessControl = {
       return (error as NodeJS.ErrnoException).code === "EPERM";
     }
   },
-  describe(pid) {
-    return new Promise((resolve) => {
-      const ps = nodeSpawn("/bin/ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)], { env: childEnv({ LC_ALL: "C" }), stdio: ["ignore", "pipe", "ignore"], shell: false });
-      let out = "";
-      ps.stdout.on("data", (d: Buffer) => {
-        if (out.length < 65_536) out += d.toString("utf8");
-      });
-      ps.on("error", () => resolve(null));
-      ps.on("close", () => {
-        const line = out.split("\n")[0] ?? "";
-        if (line.trim() === "") return resolve(null);
-        const started = Date.parse(line.slice(0, 24));
-        resolve(Number.isNaN(started) ? null : { command: line.slice(24).trim(), started_at: started });
-      });
-    });
+  async describe(pid) {
+    const r = await psRows(["-o", "lstart=", "-o", "command=", "-p", String(pid)]);
+    if (r === null) return { kind: "failed" };
+    // ps answers 1 with nothing for no such process; anything else unreadable is a failure.
+    if (r.code === 1 && r.out.trim() === "") return { kind: "none" };
+    if (r.code !== 0) return { kind: "failed" };
+    const line = r.out.split("\n")[0] ?? "";
+    const started = Date.parse(line.slice(0, 24));
+    return Number.isNaN(started) ? { kind: "failed" } : { kind: "found", command: line.slice(24).trim(), started_at: started };
+  },
+  async group(pgid) {
+    const r = await psRows(["-A", "-o", "pid=", "-o", "pgid=", "-o", "lstart=", "-o", "command="]);
+    if (r === null || r.code !== 0) return null;
+    const members: (ProcessInfo & { pid: number })[] = [];
+    for (const line of r.out.split("\n")) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d+)\s+(.*)$/.exec(line);
+      if (!m || Number(m[2]) !== pgid) continue;
+      const started = Date.parse(m[3]);
+      if (Number.isNaN(started)) return null;
+      members.push({ pid: Number(m[1]), command: m[4], started_at: started });
+    }
+    return members;
+  },
+  async bootTime() {
+    if (process.platform === "linux") {
+      const stat = await readFile("/proc/stat", "utf8").catch(() => null);
+      const btime = stat ? /^btime (\d+)$/m.exec(stat)?.[1] : undefined;
+      return btime ? Number(btime) * 1000 : null;
+    }
+    const r = await run("/usr/sbin/sysctl", ["-n", "kern.boottime"]);
+    const sec = r && r.code === 0 ? /sec = (\d+)/.exec(r.out)?.[1] : undefined;
+    return sec ? Number(sec) * 1000 : null;
   },
 };
+
+/** A fixed program's output, from an argument array with the allow-listed environment; null if it couldn't start. */
+function run(program: string, args: string[]): Promise<{ code: number; out: string } | null> {
+  return new Promise((resolve) => {
+    const child = nodeSpawn(program, args, { env: childEnv({ LC_ALL: "C" }), stdio: ["ignore", "pipe", "ignore"], shell: false });
+    let out = "";
+    child.stdout.on("data", (d: Buffer) => {
+      if (out.length < 4 * 1024 * 1024) out += d.toString("utf8");
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => resolve({ code: code ?? -1, out }));
+  });
+}
+
+const psRows = (args: string[]) => run("/bin/ps", args);
+
+type InitFacts = { claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[] };
+/** The init message's facts in exactly their shape, or null (M1a). */
+function readInit(m: Record<string, unknown>): InitFacts | null {
+  const strings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "string");
+  const named = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "object" && x !== null && typeof (x as { name?: unknown }).name === "string");
+  if (typeof m.claude_code_version !== "string" || typeof m.permissionMode !== "string" || !strings(m.tools) || !named(m.mcp_servers) || !named(m.plugins)) return null;
+  return {
+    claude_code_version: m.claude_code_version,
+    permission_mode: m.permissionMode,
+    tools: m.tools as string[],
+    mcp_servers: (m.mcp_servers as { name: string }[]).map((x) => x.name),
+    plugins: (m.plugins as { name: string }[]).map((x) => x.name),
+  };
+}

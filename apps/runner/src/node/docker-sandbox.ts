@@ -9,6 +9,11 @@
  *   `--network none`; no Docker socket, no device and no other mount than the task's folder; a fixed environment; and
  *   labels naming the run and this Runner's home, so a stop or a restart finds it.
  * - **Network:** none. A policy that lists hosts is refused until an egress proxy exists.
+ * - **The disk bound for the whole run** (M2 on #460): the folder's size is checked on a timer, every
+ *   `LIMITS.watch_ms`, independent of tool calls, so a process left running can't fill the disk between them; and after
+ *   each shell call every process in the container but its init and its `sleep` is killed, so nothing a command left
+ *   behind keeps running. A folder with too many entries counts as over the bound.
+ * - **Its lifetime** is the run-time cap plus a margin: the container's `sleep` ends then, never runs forever (L2).
  * - **Tools from argument arrays, never a shell:** read is `cat -- ./path`; search is `rg` with fixed flags,
  *   `-e PATTERN -- ./path`; write is `mkdir -p -- ./dir` and `tee -- ./path` with the content on standard input; edit
  *   reads, replaces one exact match in Runner, and writes the same way. Only the `shell` tool, when the policy names it,
@@ -51,7 +56,25 @@ export const LIMITS = Object.freeze({
   tool_ms: 120_000,
   docker_ms: 60_000,
   read_bytes: 1024 * 1024,
+  watch_ms: 2_000,
+  folder_entries: 200_000,
 });
+type Limits = { folder_bytes: number; folder_entries: number };
+/** Runs `fn` every `ms` until the returned stop is called. */
+export type Every = (ms: number, fn: () => Promise<void> | void) => () => void;
+const realEvery: Every = (ms, fn) => {
+  let busy = false;
+  const timer = setInterval(() => {
+    if (busy) return;
+    busy = true;
+    void Promise.resolve()
+      .then(fn)
+      .catch(() => undefined)
+      .finally(() => (busy = false));
+  }, ms);
+  timer.unref?.();
+  return () => clearInterval(timer);
+};
 
 /** The `rg` flags, fixed: no config file, no links followed, bounded output. */
 export const RG_FLAGS = ["--no-config", "--no-follow", "--no-heading", "--line-number", "--color", "never", "--max-count", "100", "--max-columns", "400", "--max-filesize", "1M"] as const;
@@ -109,7 +132,7 @@ export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number;
     "--init",
     opts.image,
     "sleep",
-    "infinity",
+    String(spec.max_seconds),
   ];
 }
 
@@ -129,7 +152,7 @@ export function toolArgv(call: AllowedCall): string[] | null {
 
 const REFUSED_NETWORK = "network_allowlist_unsupported";
 
-type Opened = { name: string; spec: ContainerSpec };
+type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void };
 
 export class DockerSandbox implements TaskSandbox {
   private readonly docker: DockerCli;
@@ -139,8 +162,10 @@ export class DockerSandbox implements TaskSandbox {
   private readonly homeLabel: string;
   private readonly workspaceRoot: (spec: ContainerSpec) => string;
   private readonly opened = new Map<string, Opened>();
+  private readonly every: Every;
+  private readonly limits: Limits;
 
-  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string }) {
+  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits> }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
     if (!Number.isSafeInteger(opts.uid) || !Number.isSafeInteger(opts.gid) || opts.uid <= 0 || opts.gid < 0) throw new Error("Runner won't run a task container as root");
     this.docker = opts.docker;
@@ -149,6 +174,12 @@ export class DockerSandbox implements TaskSandbox {
     this.gid = opts.gid;
     this.homeLabel = homeLabel(opts.home);
     this.workspaceRoot = opts.workspaceRoot ?? ((spec) => dirname(dirname(spec.task_folder)));
+    this.every = opts.every ?? realEvery;
+    this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
+  }
+
+  private async overBound(opened: Opened): Promise<boolean> {
+    return (await folderBytes(opened.spec.task_folder, this.limits.folder_bytes, this.limits.folder_entries).catch(() => this.limits.folder_bytes + 1)) > this.limits.folder_bytes;
   }
 
   async open(spec: ContainerSpec, signal: AbortSignal): Promise<void> {
@@ -161,17 +192,60 @@ export class DockerSandbox implements TaskSandbox {
     if (signal.aborted) throw new Error("halted");
     const run = await this.docker(runArgs(spec, { image: this.image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
-    this.opened.set(spec.run_ref, { name: containerName(spec.run_ref), spec });
+    const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined };
+    this.opened.set(spec.run_ref, opened);
     if (run.code !== 0) throw new Error("container_failed");
+    // The disk bound, for the whole run, whatever runs in the container (M2).
+    opened.unwatch = this.every(LIMITS.watch_ms, async () => {
+      if (this.opened.get(spec.run_ref) === opened && (await this.overBound(opened))) await this.kill(spec.run_ref);
+    });
+    // The container's own `sleep`, init's only child before any task command runs: kept by every reap after a shell call.
+    const children = await this.docker(["exec", opened.name, "cat", "/proc/1/task/1/children"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 1024 });
+    const pids = children.stdout.trim().split(/\s+/).filter((p) => p !== "");
+    if (children.code !== 0 || pids.length !== 1 || !/^\d+$/.test(pids[0])) {
+      await this.kill(spec.run_ref).catch(() => undefined);
+      throw new Error("container_failed");
+    }
+    opened.sleep_pid = pids[0];
+  }
+
+  /**
+   * Kills every process in the container but init (1) and its `sleep`, after a shell call (M2). Each round lists
+   * `/proc` twice and kills what both listings hold, so the listing's own `ls` is never a target; anything still there
+   * after three rounds ends the container.
+   */
+  private async reapStrays(opened: Opened, signal: AbortSignal): Promise<void> {
+    const keep = new Set(["1", opened.sleep_pid ?? ""]);
+    const list = async () => {
+      const r = await this.docker(["exec", opened.name, "ls", "--", "/proc"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 256 * 1024 });
+      if (r.code !== 0 || r.cut) throw new Error("docker_failed");
+      return new Set(r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^\d+$/.test(l) && !keep.has(l)));
+    };
+    for (let round = 0; round < 3; round++) {
+      const first = await list();
+      const second = await list();
+      const strays = [...first].filter((p) => second.has(p));
+      if (strays.length === 0) return;
+      await this.docker(["exec", opened.name, "kill", "-KILL", "--", ...strays], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
+    }
+    await this.kill(opened.spec.run_ref);
   }
 
   async exec(run_ref: string, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput> {
     const opened = this.opened.get(run_ref);
     if (!opened) return { ok: false, text: "The task's container isn't open." };
     const output = await this.runTool(opened, call, signal);
+    if (call.tool === "shell") {
+      try {
+        await this.reapStrays(opened, signal);
+      } catch {
+        await this.kill(run_ref);
+        return { ok: false, text: "Runner stopped the task's container: what the command left running couldn't be ended." };
+      }
+    }
     if (call.tool === "write" || call.tool === "edit" || call.tool === "shell") {
       // The disk bound: a folder grown past it ends the container, so nothing more is written.
-      if ((await folderBytes(opened.spec.task_folder, LIMITS.folder_bytes)) > LIMITS.folder_bytes) {
+      if (await this.overBound(opened)) {
         await this.kill(run_ref);
         return { ok: false, text: "Runner stopped the task's container: its folder passed its size bound." };
       }
@@ -223,6 +297,7 @@ export class DockerSandbox implements TaskSandbox {
   /** Removes every container carrying the run's label, and its name, whatever this process remembers. */
   async kill(run_ref: string): Promise<void> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
+    this.opened.get(run_ref)?.unwatch();
     const ids = await this.list([`label=${LABEL_RUN}=${run_ref}`]);
     const r = await this.docker(["rm", "--force", ...ids, containerName(run_ref)], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
     // `rm` answers 1 when a name it was given is already gone; whether anything is left is `gone`'s to say.
@@ -232,7 +307,10 @@ export class DockerSandbox implements TaskSandbox {
   async gone(run_ref: string): Promise<boolean> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
     const left = (await this.list([`label=${LABEL_RUN}=${run_ref}`])).length === 0 && (await this.list([`name=^${containerName(run_ref)}$`])).length === 0;
-    if (left) this.opened.delete(run_ref);
+    if (left) {
+      this.opened.get(run_ref)?.unwatch();
+      this.opened.delete(run_ref);
+    }
     return left;
   }
 

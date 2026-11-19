@@ -71,9 +71,9 @@ describe("the Anthropic profile and prices", () => {
   });
 
   it("prices Haiku 5.5 at its list price, in micro-USD per million tokens", () => {
-    expect(CLAUDE_PROFILE.prices[CLAUDE_MODEL]).toEqual({ input: 100_000, output: 500_000, cache_write: 125_000, cache_read: 10_000 });
-    // Claude Code's own 128,000-token request, unclamped, would be about 0.064 USD of output (spike B result 2).
-    expect(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], 0, 128_000)).toBe(64_000 + 512);
+    expect(CLAUDE_PROFILE.prices[CLAUDE_MODEL]).toMatchObject({ input: 100_000, output: 500_000, cache_write: 125_000, cache_read: 10_000 });
+    // Claude Code's own 128,000-token request, unclamped, at the dearest (long-context) tier: 0.32 USD of output.
+    expect(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], 0, 128_000)).toBe(320_000 + 2_560);
     expect(Object.isFrozen(CLAUDE_PROFILE) && Object.isFrozen(CLAUDE_PROFILE.prices) && Object.isFrozen(CLAUDE_PROFILE.headers)).toBe(true);
   });
 
@@ -137,7 +137,9 @@ function fakeDocker(answer: (args: string[]) => Partial<{ code: number; stdout: 
   const calls: DockerCall[] = [];
   const docker: DockerCli = async (args, { input }) => {
     calls.push({ args, input });
-    return { code: 0, stdout: "", stderr: "", cut: false, ...answer(args) };
+    // By default the container's init has one child, its sleep, as a fresh container does.
+    const fresh = args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "7\n" } : {};
+    return { code: 0, stdout: "", stderr: "", cut: false, ...fresh, ...answer(args) };
   };
   return { calls, docker };
 }
@@ -165,7 +167,7 @@ describe("the Docker task container", () => {
     expect(flag("--env").sort()).toEqual(["HOME=/work", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"]);
     // No socket, device, privilege, host namespace or other mount.
     expect(args.join(" ")).not.toMatch(/docker\.sock|--device|--privileged|--volume|-v |--pid host|--network host|--cap-add/);
-    expect(args.slice(-3)).toEqual([IMAGE, "sleep", "infinity"]);
+    expect(args.slice(-3)).toEqual([IMAGE, "sleep", "660"]);
   });
 
   it("refuses a network allowlist until an egress proxy exists, an unpinned image, and root", async () => {
@@ -196,7 +198,7 @@ describe("the Docker task container", () => {
     expect(RG_FLAGS).toContain("--no-config");
     expect(RG_FLAGS).toContain("--no-follow");
     const root = join(await temp(), "w");
-    const { calls, docker } = fakeDocker((args) => (args.includes("cat") ? { stdout: "one two one" } : args.includes("rg") ? { code: 1 } : {}));
+    const { calls, docker } = fakeDocker((args) => (args.includes("cat") && !args.join(" ").includes("/proc/1/") ? { stdout: "one two one" } : args.includes("rg") ? { code: 1 } : {}));
     const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
     await sandbox.open(containerSpec("run-1", facts(root)), new AbortController().signal);
     const signal = new AbortController().signal;
@@ -404,7 +406,7 @@ type ToolDef = { name: string; handler: (args: Record<string, unknown>, extra: u
 type Step = { kind: "tool"; id: string; name: string; input: Record<string, unknown>; meta?: boolean } | { kind: "model" } | { kind: "message"; message: Record<string, unknown> } | { kind: "handler_only"; name: string; input: Record<string, unknown> };
 
 /** A stand-in for the SDK: it spawns through the driver's seam, sends init, then plays its steps as Claude Code would. */
-function fakeSdk(steps: Step[], init: Record<string, unknown> = {}) {
+function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts: { modelFirst?: boolean } = {}) {
   const seen: { options: Record<string, unknown>; prompt: string; denied: string[]; outputs: string[]; spawned: { command: string; env: Record<string, string> } | null; model: { status: number }[] } = { options: {}, prompt: "", denied: [], outputs: [], spawned: null, model: [] };
   const sdk: ClaudeSdk = {
     tool: ((name: string, _d: string, _s: unknown, handler: ToolDef["handler"]) => ({ name, handler })) as never,
@@ -416,7 +418,17 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> = {}) {
         const spawnFn = options.spawnClaudeCodeProcess as (s: unknown) => unknown;
         const env = { ...(options.env as Record<string, string>), CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_CODE_OAUTH_TOKEN: "leak", DBUS_SESSION_BUS_ADDRESS: "unix:path=/bus", ANTHROPIC_API_KEY: "sdk-override" };
         spawnFn({ command: "/sdk/claude", args: ["--output-format", "stream-json"], env, cwd: "/elsewhere", signal: new AbortController().signal });
-        yield { type: "system", subtype: "init", claude_code_version: PINNED_CLAUDE_CODE_VERSION, permissionMode: "dontAsk", tools: ["StructuredOutput", "mcp__runner__read", "mcp__runner__write"], mcp_servers: [{ name: "runner", status: "connected" }], plugins: [{ name: "cc-plugin-privacy" }], ...init };
+        // A request sent before init, answered (or refused) whenever the listener lets it go.
+        let early: Promise<void> | null = null;
+        if (opts.modelFirst) {
+          const e = options.env as Record<string, string>;
+          early = globalThis
+            .fetch(`${e.ANTHROPIC_BASE_URL}/v1/messages`, { method: "POST", headers: { "x-api-key": e.ANTHROPIC_API_KEY }, body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1, messages: [{ role: "user", content: "x" }] }) })
+            .then((r) => void seen.model.push({ status: r.status }), () => void seen.model.push({ status: 0 }));
+          await new Promise((r) => setImmediate(r));
+        }
+        if (init !== null) yield { type: "system", subtype: "init", claude_code_version: PINNED_CLAUDE_CODE_VERSION, permissionMode: "dontAsk", tools: ["StructuredOutput", "mcp__runner__read", "mcp__runner__write"], mcp_servers: [{ name: "runner", status: "connected" }], plugins: [], ...init };
+        if (early) await early;
         const servers = options.mcpServers as Record<string, { tools: ToolDef[] }>;
         const hooks = (options.hooks as { PreToolUse: { hooks: ((i: unknown, id: string, o: unknown) => Promise<Record<string, unknown>>)[] }[] }).PreToolUse[0].hooks;
         const abort = (options.abortController as AbortController).signal;
@@ -469,7 +481,9 @@ function fakeProcesses() {
       }
       return true;
     },
-    describe: async (pid) => (groups.get(pid) ? { command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_000 } : null),
+    describe: async (pid) => (groups.get(pid) ? { kind: "found", command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_000 } : { kind: "none" }),
+    group: async (pgid) => (groups.get(pgid) ? [{ pid: pgid, command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_000 }] : []),
+    bootTime: async () => 1_700_000_000_000,
   };
   return { processes, groups, killed, spawned };
 }
@@ -506,12 +520,12 @@ function session(over: Partial<DriverSession> & { root?: string } = {}) {
   return { s, halt, checks, tools, models };
 }
 
-async function driverFor(steps: Step[], init: Record<string, unknown> = {}) {
+async function driverFor(steps: Step[], init: Record<string, unknown> | null = {}, extra: Partial<import("../src/node/claude-driver.js").ClaudeDriverDeps> = {}, opts: { modelFirst?: boolean } = {}) {
   const home = await temp("runner-home-");
-  const { sdk, seen } = fakeSdk(steps, init);
+  const { sdk, seen } = fakeSdk(steps, init, opts);
   const procs = fakeProcesses();
   const observed: DriverObservation[] = [];
-  const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: procs.processes, env: { PATH: "/usr/bin:/bin", LANG: "C", HOME: "/Users/owner", DBUS_SESSION_BUS_ADDRESS: "unix:path=/bus", SSH_AUTH_SOCK: "/agent", ANTHROPIC_API_KEY: KEY, GITHUB_TOKEN: "ghp_x" }, clock: () => 1_800_000_000_000, observe: (e) => void observed.push(e) });
+  const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: procs.processes, env: { PATH: "/usr/bin:/bin", LANG: "C", HOME: "/Users/owner", DBUS_SESSION_BUS_ADDRESS: "unix:path=/bus", SSH_AUTH_SOCK: "/agent", ANTHROPIC_API_KEY: KEY, GITHUB_TOKEN: "ghp_x" }, clock: () => 1_800_000_000_000, observe: (e) => void observed.push(e), ...extra });
   return { home, driver, seen, procs, observed };
 }
 
@@ -569,7 +583,7 @@ describe("the Claude Agent SDK driver", () => {
     expect(env.CLAUDE_CODE_ENTRYPOINT).toBe("sdk-ts");
     expect(JSON.stringify(env)).not.toContain(KEY);
     for (const name of ["DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]) expect(env).not.toHaveProperty(name);
-    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CONFIG_DIR", "HOME", "LANG", "PATH", "TMPDIR", ...Object.keys(QUIET)].sort());
+    expect(Object.keys(env).sort()).toEqual(["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CONFIG_DIR", "GIT_CEILING_DIRECTORIES", "HOME", "LANG", "PATH", "TMPDIR", ...Object.keys(QUIET)].sort());
     // The SDK's own value for one of Runner's names never wins.
     expect(spawnEnv({ ANTHROPIC_API_KEY: "t" }, { ANTHROPIC_API_KEY: "x", CLAUDE_AGENT_SDK_VERSION: "1", CLAUDE_CODE_SECRET: "s", OTHER: "o" })).toEqual({ ANTHROPIC_API_KEY: "t", CLAUDE_AGENT_SDK_VERSION: "1" });
     expect(claudeEnv({ root: "/r", work: "/r/w", home: "/r/h", config: "/r/c", tmp: "/r/t" }, { url: "http://127.0.0.1:1", token: "t" }, 9, { HOME: "/Users/o", DBUS_SESSION_BUS_ADDRESS: "x" })).toMatchObject({ HOME: "/r/h", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "9" });
@@ -635,7 +649,7 @@ describe("the Claude Agent SDK driver", () => {
 
   it("ends the run when any hook but Runner's own starts (S-44, failing closed), and reports what loaded", async () => {
     const t = await driverFor([
-      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "runner" } },
+      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "PreToolUse" } },
       { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "SessionStart", hook_name: "plugin" } },
       { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
     ]);
@@ -643,7 +657,7 @@ describe("the Claude Agent SDK driver", () => {
     await expect((await t.driver.begin(s)).done).rejects.toThrow(/hook_unexpected/);
     expect(tools).toEqual([]);
     expect(t.observed.filter((o) => o.kind === "hook").map((o) => (o as { hook_event: string }).hook_event)).toEqual(["PreToolUse", "SessionStart"]);
-    expect(t.observed.find((o) => o.kind === "init")).toMatchObject({ plugins: ["cc-plugin-privacy"] });
+    expect(t.observed.find((o) => o.kind === "init")).toMatchObject({ plugins: [] });
   });
 
   it("sends model requests only through the run's listener, with its token, to the run's broker", async () => {
@@ -681,7 +695,7 @@ describe("the Claude Agent SDK driver", () => {
     // A PID now another program's is never killed, and reads as gone.
     const u = await driverFor([]);
     await (await u.driver.begin(session().s)).done;
-    u.procs.processes.describe = async () => ({ command: "/usr/bin/vim", started_at: 1_800_000_000_000 });
+    u.procs.processes.describe = async () => ({ kind: "found", command: "/usr/bin/vim", started_at: 1_800_000_000_000 });
     const other = new ClaudeDriver({ home: u.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: u.procs.processes, sdk: fakeSdk([]).sdk });
     await other.reap("run-1");
     expect(u.procs.killed).toEqual([]);
@@ -782,7 +796,7 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
   async function wired(steps: Step[], caps = CAPS) {
     const t = await driverFor(steps);
     const root = join(await temp(), "w");
-    const docker = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : args.includes("cat") ? { stdout: "file text" } : {}));
+    const docker = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : args.includes("cat") && !args.join(" ").includes("/proc/1/") ? { stdout: "file text" } : {}));
     const sandbox = new DockerSandbox({ docker: docker.docker, image: IMAGE, uid: 501, gid: 20, home: t.home });
     const sent: { url: string; headers: Record<string, string>; body: Record<string, unknown> }[] = [];
     const fetch = (async (url: string, init: RequestInit) => {
@@ -815,7 +829,8 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
     // Priced from the provider's usage, settled on message_stop: 100 input tokens and 40 output tokens.
     expect(report.spent_micro_usd).toBe(10 + 20);
     // Only the allowed read ran in the container; the refused write and Claude Code's Bash never reached Docker.
-    const execs = w.docker.calls.filter((c) => c.args[0] === "exec");
+    // Besides Runner's own look at the fresh container's init, only that read ran.
+    const execs = w.docker.calls.filter((c) => c.args[0] === "exec" && !c.args.join(" ").includes("/proc/1/task/1/children"));
     expect(execs.map((c) => c.args.slice(-3))).toEqual([["cat", "--", "./src/a.ts"]]);
     expect(JSON.stringify(w.t.procs.spawned)).not.toContain(KEY);
     expect(w.t.seen.prompt).toBe("Fix it. @/Users/owner/.ssh/id_rsa");
@@ -832,5 +847,469 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
     expect(w.docker.calls.some((c) => c.args[0] === "rm")).toBe(true);
     expect(w.t.procs.killed).toEqual([4001]);
     expect(await w.adapter.confirmStopped("run-1")).toBe(true);
+  });
+});
+
+// ---- The deep review of #460: the architect's rulings of 2026-11-18, items 1 to 12 ----
+
+describe("review item 1 (M1, S-44): prevent, don't only detect", () => {
+  it("(a) holds tool and model calls until a valid init, and fails a run whose init is missing", async () => {
+    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }, { kind: "model" }], null, { initWaitMs: 20 });
+    const { s, tools, models } = session();
+    await expect((await t.driver.begin(s)).done).rejects.toThrow(/init_missing/);
+    expect(tools).toEqual([]);
+    expect(models).toEqual([]);
+  });
+
+  it("(a) refuses a model request that comes before init, and fails the run, if init never comes in time", async () => {
+    const t = await driverFor([], null, { initWaitMs: 20 }, { modelFirst: true });
+    const { s, models } = session();
+    await expect((await t.driver.begin(s)).done).rejects.toThrow(/init_missing/);
+    expect(models).toEqual([]);
+    expect(t.seen.model.every((m) => m.status !== 200)).toBe(true);
+  });
+
+  it("(a) a model request held before init goes through once a valid init arrives", async () => {
+    const t = await driverFor([], {}, { initWaitMs: 5_000 }, { modelFirst: true });
+    const { s, models } = session();
+    expect(await (await t.driver.begin(s)).done).toEqual({ result: RESULT });
+    expect(models).toHaveLength(1);
+    expect(t.seen.model).toEqual([{ status: 200 }]);
+  });
+
+  it("(a) fails a malformed init", async () => {
+    for (const init of [{ claude_code_version: 2 }, { tools: "StructuredOutput" }, { mcp_servers: "runner" }, { plugins: null }, { permissionMode: undefined }]) {
+      const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], init);
+      const { s, tools } = session();
+      await expect((await t.driver.begin(s)).done).rejects.toThrow(/init_invalid|claude_code_version|permission_mode/);
+      expect(tools).toEqual([]);
+    }
+  });
+
+  it("(b) checks the hook's name as well as its event: only Runner's own callback passes", async () => {
+    const t = await driverFor([
+      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "PreToolUse:cc-plugin-privacy" } },
+      { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
+    ]);
+    const { s, tools } = session();
+    await expect((await t.driver.begin(s)).done).rejects.toThrow(/hook_unexpected/);
+    expect(tools).toEqual([]);
+  });
+
+  it("(c) fails on any plugin, since the reviewed allowlist is empty", async () => {
+    const { PLUGIN_ALLOWLIST } = await import("../src/node/claude-driver.js");
+    expect(PLUGIN_ALLOWLIST).toEqual([]);
+    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], { plugins: [{ name: "cc-plugin-privacy", path: "/x" }] });
+    const { s, tools } = session();
+    await expect((await t.driver.begin(s)).done).rejects.toThrow(/plugins_unexpected/);
+    expect(tools).toEqual([]);
+  });
+
+  it("(d, e) turns off built-in agents and bundled skills always, and bare mode only when asked", async () => {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const env = t.procs.spawned[0].env;
+    expect(env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS).toBe("1");
+    expect(env.CLAUDE_CODE_DISABLE_BUNDLED_SKILLS).toBe("1");
+    expect(env).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
+    const bare = await driverFor([], {}, { bare: true });
+    await (await bare.driver.begin(session().s)).done;
+    expect(bare.procs.spawned[0].env.CLAUDE_CODE_SIMPLE).toBe("1");
+  });
+
+  it("(f) on macOS, opt-in, starts Claude Code under sandbox-exec: no exec but its own binary, no login keychain files", async () => {
+    const { sandboxProfile, SANDBOX_EXEC } = await import("../src/node/claude-driver.js");
+    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
+    expect(profile).toMatch(/\(deny process-exec\)/);
+    expect(profile).toContain('(allow process-exec (literal "/sdk/claude"))');
+    expect(profile).toContain('(deny file-read* file-write* (subpath "/Users/owner/Library/Keychains"))');
+    expect(profile.indexOf("(deny process-exec)")).toBeLessThan(profile.indexOf("(allow process-exec"));
+    expect(() => sandboxProfile('/sdk/cl"aude', "/Users/owner")).toThrow();
+    expect(() => sandboxProfile("/sdk/claude", "/Users/o\\wner")).toThrow();
+    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c });
+    await (await t.driver.begin(session().s)).done;
+    const spawned = t.procs.spawned[0];
+    expect(spawned.command).toBe(SANDBOX_EXEC);
+    expect(spawned.args.slice(0, 3)).toEqual(["-p", sandboxProfile("/sdk/claude", "/Users/owner"), "/sdk/claude"]);
+    expect(spawned.args.slice(3)).toEqual(["--output-format", "stream-json"]);
+    // Off by default, and refused off macOS.
+    const plain = await driverFor([]);
+    await (await plain.driver.begin(session().s)).done;
+    expect(plain.procs.spawned[0].command).toBe("/sdk/claude");
+    const home = await temp();
+    expect(() => new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, macSandbox: true, platform: "linux" })).toThrow(/macOS/);
+  });
+
+  it("(g) reports Runner's own callback as it runs, for the real run's positive control", async () => {
+    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }]);
+    await (await t.driver.begin(session().s)).done;
+    expect(t.observed.filter((o) => o.kind === "callback")).toEqual([{ kind: "callback", run_ref: "run-1", tool: "read" }]);
+  });
+});
+
+describe("review item 2 (M2): the disk bound", () => {
+  function timers() {
+    const ticks: (() => Promise<void> | void)[] = [];
+    const stopped: number[] = [];
+    const every = (_ms: number, fn: () => Promise<void> | void) => {
+      ticks.push(fn);
+      const i = ticks.length - 1;
+      return () => void stopped.push(i);
+    };
+    return { every, ticks, stopped };
+  }
+
+  it("checks the folder on a timer for the whole run, so a background writer is caught between tool calls", async () => {
+    const root = join(await temp(), "w");
+    const { calls, docker } = fakeDocker((args) => (args.includes("children") || args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "7\n" } : args[0] === "ps" ? { stdout: "" } : {}));
+    const t = timers();
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: t.every, limits: { folder_bytes: 1_000 } });
+    const spec = containerSpec("run-1", facts(root));
+    await sandbox.open(spec, new AbortController().signal);
+    expect(t.ticks).toHaveLength(1);
+    await t.ticks[0]();
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(false);
+    // A process left running in the container writes, with no tool call in flight.
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(2_000));
+    await t.ticks[0]();
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+    expect(t.stopped).toEqual([0]);
+  });
+
+  it("after each shell call, kills every process in the container but init and the sleep", async () => {
+    const root = join(await temp(), "w");
+    let listing = 0;
+    const { calls, docker } = fakeDocker((args) => {
+      const line = args.join(" ");
+      if (line.includes("/proc/1/task/1/children")) return { stdout: "7\n" };
+      // Two listings: 41 and 42 persist (a background job); 50 and 51 are each listing's own `ls`.
+      if (line.endsWith("ls -- /proc")) return { stdout: `1\n7\n41\n42\n${50 + listing++}\nself\nthread-self\n` };
+      return {};
+    });
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every });
+    await sandbox.open(containerSpec("run-1", facts(root, { tools: ["read", "write", "shell"], shell: true })), new AbortController().signal);
+    await sandbox.exec("run-1", { call_id: "c", tool: "shell", command: "nohup yes > f &" }, new AbortController().signal);
+    const kills = calls.filter((c) => c.args.includes("kill"));
+    expect(kills[0].args.slice(-5)).toEqual(["kill", "-KILL", "--", "41", "42"]);
+    for (const k of kills) expect(k.args).not.toContain("1");
+    for (const k of kills) expect(k.args).not.toContain("7");
+  });
+
+  it("refuses to open when it can't tell the sleep's process apart", async () => {
+    const root = join(await temp(), "w");
+    const { calls, docker } = fakeDocker((args) => (args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "" } : {}));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every });
+    await expect(sandbox.open(containerSpec("run-1", facts(root)), new AbortController().signal)).rejects.toThrow(/container_failed/);
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+  });
+
+  it("counts a folder with too many entries as over the bound", async () => {
+    const dir = await temp();
+    for (let i = 0; i < 20; i++) await writeFile(join(dir, `f${i}`), "");
+    expect(await folderBytes(dir, 1_000_000, 10)).toBeGreaterThan(1_000_000);
+    expect(await folderBytes(dir, 1_000_000, 100)).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it("kills the container from a tool call when the folder is over the bound (the disk-kill branch)", async () => {
+    const root = join(await temp(), "w");
+    const spec = containerSpec("run-1", facts(root));
+    const { calls, docker } = fakeDocker((args) => (args.join(" ").includes("/proc/1/task/1/children") ? { stdout: "7\n" } : {}));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every, limits: { folder_bytes: 10 } });
+    await sandbox.open(spec, new AbortController().signal);
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(100));
+    const out = await sandbox.exec("run-1", { call_id: "c", tool: "write", path: "a", content: "x" }, new AbortController().signal);
+    expect(out).toEqual({ ok: false, text: "Runner stopped the task's container: its folder passed its size bound." });
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+  });
+});
+
+describe("review item 3 (M3): no TLS trust taken from the environment", () => {
+  it("refuses to build the transport when Node's TLS trust is changed by the environment or NODE_OPTIONS", async () => {
+    const { transportEnvRefusal } = await import("../src/node/provider-transport.js");
+    const bad: [NodeJS.ProcessEnv, string[]][] = [
+      [{ NODE_TLS_REJECT_UNAUTHORIZED: "0" }, []],
+      [{ NODE_EXTRA_CA_CERTS: "/tmp/ca.pem" }, []],
+      [{ SSL_CERT_FILE: "/tmp/ca.pem" }, []],
+      [{}, ["--use-openssl-ca"]],
+      [{}, ["--use-system-ca"]],
+      [{ NODE_OPTIONS: "--use-openssl-ca" }, []],
+      [{ NODE_OPTIONS: "--max-old-space-size=100 --use-system-ca" }, []],
+      [{ NODE_USE_ENV_PROXY: "1" }, []],
+    ];
+    for (const [env, argv] of bad) {
+      expect([env, argv, transportEnvRefusal(env, argv)]).not.toEqual([env, argv, null]);
+      expect(() => new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { env, execArgv: argv })).toThrow();
+    }
+    expect(transportEnvRefusal({ NODE_TLS_REJECT_UNAUTHORIZED: "1", HTTPS_PROXY: "http://p" }, [])).toBeNull();
+  });
+});
+
+describe("review item 4 (L1): a reap kills only what it can prove is Runner's", () => {
+  async function recorded() {
+    const t = await driverFor([]);
+    await (await t.driver.begin(session().s)).done;
+    const again = () => new ClaudeDriver({ home: t.home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, processes: t.procs.processes, sdk: fakeSdk([]).sdk });
+    return { t, again };
+  }
+
+  it("never kills when ps fails, and never reads that as gone", async () => {
+    const { t, again } = await recorded();
+    t.procs.processes.describe = async () => ({ kind: "failed" });
+    await again().reap("run-1");
+    expect(t.procs.killed).toEqual([]);
+    expect(await again().confirmGone("run-1")).toBe(false);
+  });
+
+  it("for a group with no leader, checks a member's command before killing", async () => {
+    const { t, again } = await recorded();
+    t.procs.processes.describe = async () => ({ kind: "none" });
+    t.procs.processes.group = async () => [{ pid: 4100, command: "/usr/bin/vim", started_at: 1 }];
+    await again().reap("run-1");
+    expect(t.procs.killed).toEqual([]);
+    t.procs.processes.group = async () => [{ pid: 4100, command: "/sdk/claude --output-format stream-json", started_at: 1_800_000_000_500 }];
+    await again().reap("run-1");
+    expect(t.procs.killed).toEqual([4001]);
+    // A failed group listing never kills.
+    const u = await recorded();
+    u.t.procs.processes.describe = async () => ({ kind: "none" });
+    u.t.procs.processes.group = async () => null;
+    await u.again().reap("run-1");
+    expect(u.t.procs.killed).toEqual([]);
+  });
+
+  it("never kills a group recorded before the machine's last boot, or when the boot time can't be read", async () => {
+    const { t, again } = await recorded();
+    t.procs.processes.bootTime = async () => 1_900_000_000_000;
+    await again().reap("run-1");
+    expect(t.procs.killed).toEqual([]);
+    expect(await again().confirmGone("run-1")).toBe(true);
+    const u = await recorded();
+    u.t.procs.processes.bootTime = async () => null;
+    await u.again().reap("run-1");
+    expect(u.t.procs.killed).toEqual([]);
+    expect(await u.again().confirmGone("run-1")).toBe(false);
+  });
+
+  it("reapAll stops on an unreadable record", async () => {
+    const { t, again } = await recorded();
+    await rm(join(t.home, "runs", "run-1", "process.json"));
+    await writeFile(join(t.home, "runs", "run-1", "process.json"), "{not json");
+    await expect(again().reapAll()).rejects.toThrow(/process_record_unreadable/);
+  });
+});
+
+describe("review item 5 (L2): the container's sleep is bounded by the run time", () => {
+  it("sleeps for the run-time cap plus a margin, not forever", () => {
+    const spec = containerSpec("run-1", facts("/w", { caps: { ...CAPS, run_time_ms: 600_000 } }));
+    expect(spec.max_seconds).toBe(660);
+    const args = runArgs(spec, { image: IMAGE, uid: 501, gid: 20, home_label: "h" });
+    expect(args.slice(-3)).toEqual([IMAGE, "sleep", "660"]);
+    expect(args).not.toContain("infinity");
+  });
+});
+
+describe("review item 6 (L3): a tool-use ID the hook never saw ends the run", () => {
+  it("calls fail(hook_bypassed), with no fallback to matching by input", async () => {
+    const t = await driverFor([
+      { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
+    ]);
+    // The handler is told an ID the hook never saw, though the same input was checked under another.
+    const steps: Step[] = [{ kind: "tool", id: "toolu_seen", name: "mcp__runner__read", input: { path: "a" } }];
+    void steps;
+    const custom = fakeSdk([]);
+    const sdk: ClaudeSdk = {
+      ...custom.sdk,
+      query: ((args: { prompt: string; options: Record<string, unknown> }) => {
+        const inner = (custom.sdk.query as unknown as (a: unknown) => AsyncGenerator<Record<string, unknown>>)(args);
+        return (async function* () {
+          for await (const m of inner) {
+            if (m.type === "result") {
+              const hooks = (args.options.hooks as { PreToolUse: { hooks: ((i: unknown, id: string, o: unknown) => Promise<unknown>)[] }[] }).PreToolUse[0].hooks;
+              await hooks[0]({ hook_event_name: "PreToolUse", tool_name: "mcp__runner__read", tool_input: { path: "a" }, tool_use_id: "toolu_seen" }, "toolu_seen", { signal: new AbortController().signal });
+              const tool = (args.options.mcpServers as Record<string, { tools: ToolDef[] }>).runner.tools[0];
+              await tool.handler({ path: "a" }, { _meta: { "claudecode/toolUseId": "toolu_never_seen" } });
+            }
+            yield m;
+          }
+        })();
+      }) as never,
+    };
+    const home = await temp();
+    const driver = new ClaudeDriver({ home, installed: { sdk: PINNED_SDK_VERSION, claude_code: PINNED_CLAUDE_CODE_VERSION }, sdk, processes: fakeProcesses().processes });
+    const { s, tools } = session();
+    await expect((await driver.begin(s)).done).rejects.toThrow(/hook_bypassed/);
+    expect(tools).toEqual([]);
+    void t;
+  });
+});
+
+describe("review item 7 (L4): the SDK's environment names pass only from an exact list", () => {
+  it("drops CLAUDE_CODE_PLUGIN_DIRS, CLAUDE_CODE_EXTRA_BODY and any other name not listed", async () => {
+    const { SDK_ENV_NAMES } = await import("../src/node/claude-driver.js");
+    expect([...SDK_ENV_NAMES].sort()).toEqual(["CLAUDE_AGENT_SDK_CLIENT_APP", "CLAUDE_AGENT_SDK_VERSION", "CLAUDE_CODE_ENTRYPOINT"]);
+    const env = spawnEnv({ HOME: "/h" }, { CLAUDE_CODE_PLUGIN_DIRS: "/evil", CLAUDE_CODE_EXTRA_BODY: '{"x":1}', CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.327", CLAUDE_CODE_USE_BEDROCK: "1" });
+    expect(env).toEqual({ HOME: "/h", CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.327" });
+  });
+});
+
+describe("review item 8 (L5): ownership and modes checked on what is opened", () => {
+  it("refuses an existing folder segment that is group- or world-writable", async () => {
+    const root = join(await temp(), "root");
+    await mkdir(root, { mode: 0o700 });
+    await mkdir(join(root, "ws_room"), { mode: 0o700 });
+    await chmod(join(root, "ws_room"), 0o770);
+    await expect(ensureFolder(root, join(root, "ws_room", "tsk_one"))).rejects.toThrow(UnsafePath);
+    await chmod(join(root, "ws_room"), 0o700);
+    await chmod(root, 0o757);
+    await expect(ensureFolder(root, join(root, "ws_room", "tsk_one"))).rejects.toThrow(UnsafePath);
+  });
+
+  it("checks the key file's owner and mode on the opened handle, and refuses another owner", async () => {
+    const dir = await temp();
+    const file = join(dir, "key");
+    await writeFile(file, KEY, { mode: 0o600 });
+    const uid = process.getuid?.() ?? 0;
+    expect(await readKeyFile(file, { uid })).toBe(KEY);
+    await expect(readKeyFile(file, { uid: uid + 1 })).rejects.toThrow(/mode 600/);
+    const source = await readFile(new URL("../src/node/claude-engine.ts", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("export async function readKeyFile"), source.indexOf("export async function taskImage"));
+    expect(body).toMatch(/O_NOFOLLOW/);
+    expect(body).toMatch(/handle\.stat\(\)/);
+    expect(body).not.toMatch(/\blstat\(/);
+  });
+});
+
+describe("review item 9 (L6): Haiku 5.5's long-context tier", () => {
+  it("prices the long-context tier and takes the dearest tier for the worst case", async () => {
+    const { costOf } = await import("../src/core/broker.js");
+    const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
+    expect(price.long_context).toEqual({ above_input_tokens: 100_000, input: 500_000, output: 2_500_000, cache_write: 625_000, cache_read: 50_000 });
+    expect(worstCaseOf(price, 0, 128_000)).toBe(320_000 + 2_560);
+    const usage = (input: number) => ({ input_tokens: input, output_tokens: 1_000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+    expect(costOf(price, usage(100_000))).toBe(10_000 + 500);
+    expect(costOf(price, usage(100_001))).toBe(Math.ceil(100_001 * 0.5) + 2_500);
+  });
+});
+
+describe("review item 10 (L7): the real run is opt-in twice and outside the default config", () => {
+  it("needs RUNNER_REAL_RUN=1 as well as a key file, and the default vitest config excludes it", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/process\.env\.RUNNER_REAL_RUN === "1"/);
+    const config = await readFile(new URL("../vitest.config.ts", import.meta.url), "utf8");
+    expect(config).toMatch(/exclude: \[[^\]]*"test\/claude-real\.test\.ts"/);
+    const realConfig = await readFile(new URL("../vitest.real.config.ts", import.meta.url), "utf8");
+    expect(realConfig).toMatch(/include: \["test\/claude-real\.test\.ts"\]/);
+  });
+});
+
+describe("review item 11 (L8): Git never looks above the run's folder", () => {
+  it("sets GIT_CEILING_DIRECTORIES to the run's folder", () => {
+    const env = claudeEnv({ root: "/r", work: "/r/w", home: "/r/h", config: "/r/c", tmp: "/r/t" }, { url: "http://127.0.0.1:1", token: "t" }, 9, {});
+    expect(env.GIT_CEILING_DIRECTORIES).toBe("/r");
+  });
+});
+
+describe("review item 12: ripgrep pinned through snapshot.debian.org", () => {
+  it("installs exact versions from a fixed snapshot timestamp", async () => {
+    const dockerfile = await readFile(new URL("../sandbox/Dockerfile", import.meta.url), "utf8");
+    expect(dockerfile).toMatch(/snapshot\.debian\.org\/archive\/debian\/\d{8}T\d{6}Z bookworm main/);
+    expect(dockerfile).toMatch(/ripgrep=13\.0\.0-4\+b2/);
+    expect(dockerfile).toMatch(/procps=2:4\.0\.2-3/);
+    expect(dockerfile).toMatch(/libproc2-0=2:4\.0\.2-3/);
+    expect(dockerfile).toMatch(/FROM debian:bookworm-slim@sha256:[0-9a-f]{64}/);
+    expect(dockerfile).not.toMatch(/deb\.debian\.org/);
+  });
+});
+
+describe("the reviewer's untested paths", () => {
+  it("the listener answers 413 to a body over the bound", async () => {
+    const halt = new AbortController();
+    const listener = await startBrokerListener({ model: async () => ({ ok: true, status: 200, body: enc.encode("{}") }), signal: halt.signal });
+    const r = await send(listener.port, { headers: { host: `127.0.0.1:${listener.port}`, "x-api-key": listener.token }, body: "x".repeat(8 * 1024 * 1024 + 1) }).catch(() => ({ status: 413 }));
+    expect(r.status).toBe(413);
+    halt.abort();
+  });
+
+  it("the listener times out a client that stalls mid-request", async () => {
+    const halt = new AbortController();
+    const listener = await startBrokerListener({ model: async () => ({ ok: true, status: 200, body: enc.encode("{}") }), signal: halt.signal, requestTimeoutMs: 100, headersTimeoutMs: 100, checkIntervalMs: 20 });
+    const closed = await new Promise<string>((resolve) => {
+      const req = request({ host: "127.0.0.1", port: listener.port, method: "POST", path: "/v1/messages", headers: { host: `127.0.0.1:${listener.port}`, "x-api-key": listener.token, "content-length": "100" } }, (res) => resolve(String(res.statusCode)));
+      req.on("error", () => resolve("closed"));
+      req.write("x");
+    });
+    expect(["408", "closed"]).toContain(closed);
+    halt.abort();
+  });
+
+  it("the listener serves concurrent requests, each to the broker", async () => {
+    const halt = new AbortController();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    let waiting = 0;
+    const listener = await startBrokerListener({
+      model: async () => {
+        if (++waiting === 2) release();
+        await gate;
+        return { ok: true, status: 200, body: enc.encode("{}") };
+      },
+      signal: halt.signal,
+    });
+    const headers = { host: `127.0.0.1:${listener.port}`, "x-api-key": listener.token };
+    const [a, b] = await Promise.all([send(listener.port, { headers, body: "{}" }), send(listener.port, { headers, body: "{}" })]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    halt.abort();
+  });
+
+  it("the transport cuts an answer at 32 MB and counts no usage", async () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(97);
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 33) return controller.close();
+        sent++;
+        controller.enqueue(chunk);
+      },
+    });
+    const fetch = (async () => new Response(body, { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof globalThis.fetch;
+    const transport = new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch, env: {}, execArgv: [] });
+    const answer = await transport.send({ request_id: "r", url: "https://api.anthropic.com/v1/messages", headers: { ...CLAUDE_PROFILE.headers }, body: enc.encode("{}"), max_tokens: 1, worst_micro_usd: 1 }, new AbortController().signal);
+    expect(answer.usage).toBeNull();
+    expect(answer.body.byteLength).toBeLessThanOrEqual(32 * 1024 * 1024);
+  });
+
+  it("the transport fails, never settles, when a stream is aborted mid-way", async () => {
+    const halt = new AbortController();
+    const fetch = (async (_url: string, init: RequestInit) =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(enc.encode(sse([START])));
+            init.signal?.addEventListener("abort", () => controller.error(new Error("aborted")));
+          },
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      )) as unknown as typeof globalThis.fetch;
+    const transport = new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch, env: {}, execArgv: [] });
+    const pending = transport.send({ request_id: "r", url: "https://api.anthropic.com/v1/messages", headers: { ...CLAUDE_PROFILE.headers }, body: enc.encode("{}"), max_tokens: 1, worst_micro_usd: 1 }, halt.signal);
+    halt.abort();
+    await expect(pending).rejects.toThrow();
+  });
+
+  it("claudeEngine builds the engine and reaps, end to end on a fake docker", async () => {
+    const { claudeEngine } = await import("../src/node/claude-engine.js");
+    const home = await temp();
+    await chmod(home, 0o700);
+    const keyFile = join(home, "fake.key");
+    await writeFile(keyFile, KEY, { mode: 0o600 });
+    await writeFile(join(home, "task-image"), IMAGE);
+    const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "c".repeat(64) } : {}));
+    const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: {}, execArgv: [] });
+    expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
+    expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
+    await engine.reap();
+    expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
+    expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
+    await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [] })).rejects.toThrow();
   });
 });

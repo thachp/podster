@@ -122,6 +122,7 @@ export function askScreen(view: AskView, width = 80): { screen: string; cut: boo
     `  requester: ${view.requester}`,
     ...view.authors.map((a) => `  ${a.input} written by: ${a.authors.join(", ")}`),
     `  tools: ${view.tools.join(", ") || "none"}; network: ${view.network.join(", ") || "none"}`,
+    `  repository: ${view.repository ? `${view.repository.full_name} (GitHub ID ${view.repository.provider_repo_id}), pushed to ${view.repository.branch} with a pull request` : "none"}`,
     `  caps: ${money(view.caps.spend_micro_usd)}, ${Math.round(view.caps.run_time_ms / 60_000)} min, ${view.caps.turns} turns, ${view.caps.output_tokens} output tokens`,
     "",
   ];

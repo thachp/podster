@@ -234,6 +234,7 @@ describe("the ask screen", () => {
     authors: [{ input: "title", authors: ["per_A@org_one"] }],
     tools: ["read", "search"],
     network: [],
+    repository: null,
     caps: { spend_micro_usd: 2_000_000, run_time_ms: 1_800_000, turns: 40, output_tokens: 50_000, max_tokens: 4_096 },
     inputs: [{ input: "title", text: "Hello\u001b[2J\u001b]0;owned\u0007 world‮\r\nsecond line" }],
   };

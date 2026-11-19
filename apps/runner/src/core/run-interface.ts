@@ -136,8 +136,10 @@ export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mo
 export type ToolOutput = { ok: boolean; text: string };
 
 /** The task's container (step 9(b): Docker, no network, only the task's folder). Runner's own tools run in it. */
+/** What the container tells the run while it lives: a bound it passed on its own, such as the disk bound's timer. */
+export type SandboxEvents = { breach(code: "disk_bound"): void };
 export interface TaskSandbox {
-  open(spec: ContainerSpec, signal: AbortSignal): Promise<void>;
+  open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void>;
   exec(run_ref: string, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput>;
   /** Kills the whole container, so every process in it ends. */
   kill(run_ref: string): Promise<void>;
@@ -214,7 +216,7 @@ export type ProgressEvent = {
   elapsed_ms: number;
 };
 
-export type StopReason = HardStop | "run_time" | "refusal_ignored" | "tool_refused_unchecked" | "stopped" | "start_failed";
+export type StopReason = HardStop | "run_time" | "refusal_ignored" | "tool_refused_unchecked" | "stopped" | "start_failed" | "disk_bound";
 const STATUS_OF: Record<StopReason, RunStatus> = {
   spend_cap: "budget_stopped",
   turns_exhausted: "budget_stopped",
@@ -224,6 +226,7 @@ const STATUS_OF: Record<StopReason, RunStatus> = {
   tool_refused_unchecked: "failed",
   stopped: "failed",
   start_failed: "failed",
+  disk_bound: "failed",
 };
 
 export type SupervisedDeps = {
@@ -359,7 +362,8 @@ class LiveRun {
   }
 
   async begin() {
-    await this.deps.sandbox.open(this.spec, this.abort.signal);
+    // A bound the container passes on its own, between tool calls, halts the run at once (re-review item 5 on #460).
+    await this.deps.sandbox.open(this.spec, this.abort.signal, { breach: (code) => void this.halt(code) });
     if (!this.active) {
       // Halted while the container was opening, which then made it after all: kill it now, whatever an earlier stop
       // confirmed (P8 on #459).

@@ -10,9 +10,15 @@
  *   labels naming the run and this Runner's home, so a stop or a restart finds it.
  * - **Network:** none. A policy that lists hosts is refused until an egress proxy exists.
  * - **The disk bound for the whole run** (M2 on #460): the folder's size is checked on a timer, every
- *   `LIMITS.watch_ms`, independent of tool calls, so a process left running can't fill the disk between them; and after
- *   each shell call every process in the container but its init and its `sleep` is killed, so nothing a command left
- *   behind keeps running. A folder with too many entries counts as over the bound.
+ *   `LIMITS.watch_ms`, independent of tool calls, so a process left running can't fill the disk between them, and a
+ *   breach the timer finds halts the run too (re-review item 5); and after each shell call every process in the
+ *   container but its init and its `sleep` is killed, so nothing a command left behind keeps running. A folder with
+ *   too many entries counts as over the bound.
+ * - **Why no `docker pause` around that kill:** Docker can't `exec` into a paused container, and from the host Runner
+ *   can't signal the container's processes one by one (on a Mac they are inside Docker Desktop's VM). So each round
+ *   lists `/proc` from inside, leaving out the listing's own process (`/proc/self`), init and the `sleep`, and kills
+ *   what it found; it stops once two listings in a row find nothing. A command that keeps forking past
+ *   `STRAY_LISTINGS` listings ends the container.
  * - **Its lifetime** is the run-time cap plus a margin: the container's `sleep` ends then, never runs forever (L2).
  * - **Tools from argument arrays, never a shell:** read is `cat -- ./path`; search is `rg` with fixed flags,
  *   `-e PATTERN -- ./path`; write is `mkdir -p -- ./dir` and `tee -- ./path` with the content on standard input; edit
@@ -30,7 +36,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
 import type { AllowedCall } from "../core/tool-policy.js";
 import { childEnv } from "./child-env.js";
 import { ensureFolder, folderBytes } from "./safe-fs.js";
@@ -152,7 +158,18 @@ export function toolArgv(call: AllowedCall): string[] | null {
 
 const REFUSED_NETWORK = "network_allowlist_unsupported";
 
-type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void };
+type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void; events: SandboxEvents | null };
+
+/** The most `/proc` listings one stray-reap may take before it ends the container instead. **Proposed** figure. */
+export const STRAY_LISTINGS = 6;
+
+/** The PIDs an `ls -l -- /proc` shows, leaving out the listing's own (the target of `/proc/self`). */
+export function procListing(text: string): string[] {
+  // Entries only: `ls -l` starts with a "total" line, which is no process.
+  const lines = text.split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length >= 9);
+  const self = new Set(lines.filter((f) => f.length >= 3 && f.at(-3) === "self" && f.at(-2) === "->").map((f) => f.at(-1) as string));
+  return lines.map((f) => f.at(-1) ?? "").filter((name) => /^\d+$/.test(name) && !self.has(name));
+}
 
 export class DockerSandbox implements TaskSandbox {
   private readonly docker: DockerCli;
@@ -182,7 +199,7 @@ export class DockerSandbox implements TaskSandbox {
     return (await folderBytes(opened.spec.task_folder, this.limits.folder_bytes, this.limits.folder_entries).catch(() => this.limits.folder_bytes + 1)) > this.limits.folder_bytes;
   }
 
-  async open(spec: ContainerSpec, signal: AbortSignal): Promise<void> {
+  async open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void> {
     if (!REF.test(spec.run_ref)) throw new Error("run_ref_invalid");
     if (checkContainerSpec(spec) !== null) throw new Error("container_invalid");
     // No allowlist without an egress proxy to hold it (step 9(b)'s ruling): refused, never widened to the internet.
@@ -192,12 +209,12 @@ export class DockerSandbox implements TaskSandbox {
     if (signal.aborted) throw new Error("halted");
     const run = await this.docker(runArgs(spec, { image: this.image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
-    const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined };
+    const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
     this.opened.set(spec.run_ref, opened);
     if (run.code !== 0) throw new Error("container_failed");
     // The disk bound, for the whole run, whatever runs in the container (M2).
     opened.unwatch = this.every(LIMITS.watch_ms, async () => {
-      if (this.opened.get(spec.run_ref) === opened && (await this.overBound(opened))) await this.kill(spec.run_ref);
+      if (this.opened.get(spec.run_ref) === opened && (await this.overBound(opened))) await this.breach(opened);
     });
     // The container's own `sleep`, init's only child before any task command runs: kept by every reap after a shell call.
     const children = await this.docker(["exec", opened.name, "cat", "/proc/1/task/1/children"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 1024 });
@@ -209,26 +226,32 @@ export class DockerSandbox implements TaskSandbox {
     opened.sleep_pid = pids[0];
   }
 
+  /** A bound passed: the container goes, and the run is told, so it halts too. */
+  private async breach(opened: Opened) {
+    await this.kill(opened.spec.run_ref).catch(() => undefined);
+    opened.events?.breach("disk_bound");
+  }
+
   /**
-   * Kills every process in the container but init (1) and its `sleep`, after a shell call (M2). Each round lists
-   * `/proc` twice and kills what both listings hold, so the listing's own `ls` is never a target; anything still there
-   * after three rounds ends the container.
+   * Kills every process in the container but init (1) and its `sleep`, after a shell call (M2; re-review item 5). It
+   * lists `/proc` and kills what it finds until two listings in a row find nothing; past `STRAY_LISTINGS` listings it
+   * throws, and the caller ends the container.
    */
   private async reapStrays(opened: Opened, signal: AbortSignal): Promise<void> {
     const keep = new Set(["1", opened.sleep_pid ?? ""]);
-    const list = async () => {
-      const r = await this.docker(["exec", opened.name, "ls", "--", "/proc"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 256 * 1024 });
+    let empty = 0;
+    for (let listing = 0; listing < STRAY_LISTINGS; listing++) {
+      const r = await this.docker(["exec", opened.name, "ls", "-l", "--", "/proc"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 512 * 1024 });
       if (r.code !== 0 || r.cut) throw new Error("docker_failed");
-      return new Set(r.stdout.split("\n").map((l) => l.trim()).filter((l) => /^\d+$/.test(l) && !keep.has(l)));
-    };
-    for (let round = 0; round < 3; round++) {
-      const first = await list();
-      const second = await list();
-      const strays = [...first].filter((p) => second.has(p));
-      if (strays.length === 0) return;
+      const strays = procListing(r.stdout).filter((p) => !keep.has(p));
+      if (strays.length === 0) {
+        if (++empty === 2) return;
+        continue;
+      }
+      empty = 0;
       await this.docker(["exec", opened.name, "kill", "-KILL", "--", ...strays], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     }
-    await this.kill(opened.spec.run_ref);
+    throw new Error("strays_remain");
   }
 
   async exec(run_ref: string, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput> {
@@ -246,7 +269,7 @@ export class DockerSandbox implements TaskSandbox {
     if (call.tool === "write" || call.tool === "edit" || call.tool === "shell") {
       // The disk bound: a folder grown past it ends the container, so nothing more is written.
       if (await this.overBound(opened)) {
-        await this.kill(run_ref);
+        await this.breach(opened);
         return { ok: false, text: "Runner stopped the task's container: its folder passed its size bound." };
       }
     }

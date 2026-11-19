@@ -39,12 +39,16 @@
  * **The deep review of #460 (the architect's rulings of 2026-11-18):**
  * - (M1a) no tool call and no model request is let through until a valid `init` has been read; a request held for it
  *   waits at most `INIT_WAIT_MS`, then the run fails `init_missing`; an `init` of the wrong shape fails `init_invalid`;
- * - (M1b) a hook event passes only if both its event is `PreToolUse` and its name is one of `RUNNER_HOOK_NAMES`;
+ * - (M1b; re-review item 1) a hook event passes only if its event is `PreToolUse`, its name is `PreToolUse:Callback`
+ *   (how Claude Code names an SDK callback; a plugin hook with no matcher is named the bare event), and it carries no
+ *   `origin` field, which only settings and plugin hooks have. Anything Runner can't attribute to itself fails the run;
  * - (M1c) any plugin not on `PLUGIN_ALLOWLIST`, which is empty, fails the run;
  * - (M1d) built-in agents and bundled skills are switched off by environment, always;
  * - (M1e) bare mode (`CLAUDE_CODE_SIMPLE=1`) is an option, off until the real run shows Runner's hook still fires under it;
- * - (M1f) on macOS, opt-in, Claude Code starts under `sandbox-exec` with a profile denying every `process-exec` but its
- *   own binary and every read of the login keychain files;
+ * - (M1f; re-review item 3) on macOS, opt-in, Claude Code starts under `sandbox-exec` with a profile denying every
+ *   `process-exec` but its own binary, the login keychain files and the Security and keychain Mach services; the
+ *   owner's home is the user database's, not `$HOME`; and a preflight under the same profile must show `/bin/sh` and
+ *   `security` refused and Claude Code's `--version` working, or the run fails `sandbox_preflight_failed`;
  * - (L1) a reap kills only a group it can prove is Runner's: `ps` failing is never "no such process", a leaderless
  *   group is judged by a member's command, and a record from before the last boot is never acted on;
  * - (L3) a tool-use ID the hook never saw ends the run, with no fallback;
@@ -54,7 +58,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { createRequire } from "node:module";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { createSdkMcpServer, query, tool, type HookCallback, type Options, type SdkMcpToolDefinition, type SpawnedProcess, type SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
@@ -91,7 +96,7 @@ export interface ProcessControl {
 /** How long a tool call or model request waits for a valid init before the run fails (M1a). */
 export const INIT_WAIT_MS = 15_000;
 /** The names Claude Code gives Runner's own PreToolUse callback in its hook events (M1b). Confirmed only by the real run. */
-export const RUNNER_HOOK_NAMES: readonly string[] = Object.freeze(["PreToolUse", "PreToolUse:callback"]);
+export const RUNNER_HOOK_NAMES: readonly string[] = Object.freeze(["PreToolUse:Callback"]);
 /** Plugins reviewed and allowed to load: none (M1c). */
 export const PLUGIN_ALLOWLIST: readonly string[] = Object.freeze([]);
 /** The SDK's own environment names that may reach Claude Code, exactly (L4). */
@@ -105,8 +110,25 @@ const sbplString = (path: string) => {
 };
 
 /**
+ * The Mach services through which a process reaches the keychain or Security's daemons (re-review item 3a): securityd
+ * (both names), secd (the data-protection keychain), the Security agent and auth host that answer keychain prompts,
+ * and the system-keychain daemon.
+ */
+export const KEYCHAIN_MACH_SERVICES: readonly string[] = Object.freeze([
+  "com.apple.SecurityServer",
+  "com.apple.securityd",
+  "com.apple.securityd.xpc",
+  "com.apple.securityd.system",
+  "com.apple.secd",
+  "com.apple.security.agent",
+  "com.apple.security.authhost",
+  "com.apple.security.keychainsyncingoverIDSproxy",
+]);
+
+/**
  * The sandbox profile Claude Code runs under on macOS, opt-in (M1f): everything as usual, except that no program may be
- * started but Claude Code's own binary, and the login keychain files can't be read or written. Later rules win.
+ * started but Claude Code's own binary, the login keychain files can't be read or written, and the keychain's Mach
+ * services can't be looked up. Later rules win.
  */
 export function sandboxProfile(command: string, ownerHome: string): string {
   return [
@@ -115,7 +137,34 @@ export function sandboxProfile(command: string, ownerHome: string): string {
     "(deny process-exec)",
     `(allow process-exec (literal ${sbplString(command)}))`,
     `(deny file-read* file-write* (subpath ${sbplString(join(ownerHome, "Library", "Keychains"))}))`,
+    `(deny mach-lookup ${KEYCHAIN_MACH_SERVICES.map((n) => `(global-name "${n}")`).join(" ")})`,
   ].join("\n");
+}
+
+/** Runs a fixed program; its exit code only. */
+export type PreflightRun = (program: string, args: string[]) => Promise<{ code: number }>;
+export type Preflight = { ok: boolean; shell_denied: boolean; security_denied: boolean; claude_ran: boolean };
+
+/**
+ * The sandbox's own preflight (re-review item 3c), under exactly the profile the run uses: a shell must fail to start,
+ * the `security` tool must fail to list keychains, and Claude Code's `--version` must work. Otherwise the sandbox's
+ * result is invalid.
+ */
+export async function sandboxPreflight(command: string, ownerHome: string, run: PreflightRun): Promise<Preflight> {
+  const profile = sandboxProfile(command, ownerHome);
+  const under = (target: string, ...args: string[]) => run(SANDBOX_EXEC, ["-p", profile, target, ...args]).then((r) => r.code, () => -1);
+  const shell = await under("/bin/sh", "-c", "true");
+  const security = await under("/usr/bin/security", "list-keychains");
+  const claude = await under(command, "--version");
+  const result = { shell_denied: shell !== 0, security_denied: security !== 0, claude_ran: claude === 0 };
+  return { ok: result.shell_denied && result.security_denied && result.claude_ran, ...result };
+}
+
+/** The pinned SDK's bundled Claude Code for this machine. */
+export function bundledClaudeBinary(): string {
+  const require = createRequire(import.meta.url);
+  const pkg = require.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/package.json`);
+  return join(pkg, "..", "claude");
 }
 
 export const MCP_SERVER = "runner";
@@ -253,7 +302,8 @@ function canonical(v: unknown): string {
 export type DriverObservation =
   | { kind: "spawned"; run_ref: string; pid: number }
   | { kind: "init"; run_ref: string; claude_code_version: unknown; permission_mode: unknown; tools: string[]; mcp_servers: string[]; plugins: string[] }
-  | { kind: "hook"; run_ref: string; subtype: string; hook_event: string; hook_name: string }
+  | { kind: "hook"; run_ref: string; subtype: string; hook_event: string; hook_name: string; origin: boolean }
+  | ({ kind: "preflight"; run_ref: string } & Preflight)
   | { kind: "callback"; run_ref: string; tool: string };
 
 type Live = { pid: number | null; listener: BrokerListener | null; abort: AbortController; dir: string };
@@ -278,6 +328,10 @@ export type ClaudeDriverDeps = {
   ownerHome?: string;
   /** The real path of Claude Code's binary, for the sandbox profile. */
   resolveCommand?: (command: string) => string;
+  /** Claude Code's binary, checked by the sandbox preflight; the SDK must start this one. */
+  claudeBinary?: string;
+  /** Runs the sandbox preflight's programs. */
+  preflightRun?: PreflightRun;
   initWaitMs?: number;
 };
 
@@ -290,6 +344,15 @@ export class ClaudeDriver implements AgentDriver {
   private readonly processes: ProcessControl;
   private readonly runs: string;
   private readonly live = new Map<string, Live>();
+  private preflight: Promise<Preflight> | null = null;
+
+  private ownerHome() {
+    return this.deps.ownerHome ?? userInfo().homedir;
+  }
+
+  private sandboxBinary() {
+    return (this.deps.resolveCommand ?? realpathSync)(this.deps.claudeBinary ?? bundledClaudeBinary());
+  }
 
   constructor(deps: ClaudeDriverDeps) {
     const refused = versionRefusal(deps.installed);
@@ -404,7 +467,9 @@ export class ClaudeDriver implements AgentDriver {
       let args = s.args;
       if (this.deps.macSandbox === true) {
         const real = (this.deps.resolveCommand ?? realpathSync)(s.command);
-        args = ["-p", sandboxProfile(real, this.deps.ownerHome ?? homedir()), real, ...s.args];
+        // Only the binary the preflight checked may start under the sandbox.
+        if (real !== this.sandboxBinary()) throw new Error("claude_binary_unexpected");
+        args = ["-p", sandboxProfile(real, this.ownerHome()), real, ...s.args];
         command = SANDBOX_EXEC;
       }
       const child = this.processes.spawn(command, args, { cwd: dirs.work, env: spawnEnv(env, s.env) });
@@ -431,6 +496,12 @@ export class ClaudeDriver implements AgentDriver {
 
     const done = (async (): Promise<DriverOutcome> => {
       let result: unknown = null;
+      if (this.deps.macSandbox === true) {
+        this.preflight ??= sandboxPreflight(this.sandboxBinary(), this.ownerHome(), this.deps.preflightRun ?? runForCode);
+        const pf = await this.preflight;
+        this.deps.observe?.({ kind: "preflight", run_ref: ref, ...pf });
+        if (!pf.ok) throw new Error("sandbox_preflight_failed");
+      }
       try {
         for await (const message of this.sdk.query({ prompt: session.prompt.text, options })) {
           if (failure !== null) break;
@@ -454,9 +525,11 @@ export class ClaudeDriver implements AgentDriver {
           } else if (m.type === "system" && typeof m.subtype === "string" && m.subtype.startsWith("hook_")) {
             const event = String(m.hook_event ?? "");
             const hookName = String(m.hook_name ?? "");
-            this.deps.observe?.({ kind: "hook", run_ref: ref, subtype: m.subtype, hook_event: event, hook_name: hookName });
-            // Only Runner's own PreToolUse callback may run, by its event and its name (S-44, M1b, failing closed).
-            if (event !== "PreToolUse" || !RUNNER_HOOK_NAMES.includes(hookName)) fail("hook_unexpected");
+            const origin = Object.hasOwn(m, "origin");
+            this.deps.observe?.({ kind: "hook", run_ref: ref, subtype: m.subtype, hook_event: event, hook_name: hookName, origin });
+            // Only Runner's own PreToolUse callback may run: by its event, its name, and no origin, which only settings
+            // and plugin hooks carry (S-44, M1b, re-review item 1; failing closed).
+            if (event !== "PreToolUse" || !RUNNER_HOOK_NAMES.includes(hookName) || origin) fail("hook_unexpected");
           } else if (m.type === "result") {
             if (!initOk) fail("init_missing");
             result = m.subtype === "success" ? (m.structured_output ?? null) : null;
@@ -626,6 +699,18 @@ function run(program: string, args: string[]): Promise<{ code: number; out: stri
 }
 
 const psRows = (args: string[]) => run("/bin/ps", args);
+
+/** The sandbox preflight's runner: a fixed program from an argument array, its exit code, bounded to 30 seconds. */
+const runForCode: PreflightRun = (program, args) =>
+  new Promise((resolve) => {
+    const child = nodeSpawn(program, args, { env: childEnv({ LC_ALL: "C" }), stdio: ["ignore", "ignore", "ignore"], shell: false });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+    child.on("error", () => resolve({ code: -1 }));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1 });
+    });
+  });
 
 type InitFacts = { claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[] };
 /** The init message's facts in exactly their shape, or null (M1a). */

@@ -116,14 +116,14 @@ export function costOf(price: Price, usage: Usage): number {
 }
 
 /**
- * The most a request can cost: each body byte as an input token at the dearest input price of any tier, and all of
- * `max_tokens` at the dearest output price.
+ * The most a request can cost: each body byte, plus the margin, as an input token at the dearest input price, and all
+ * of `max_tokens` as output. The tier is the one that bound on input falls in: the long-context tier only when it is
+ * above that tier's threshold (re-review item 4 on #460), since a request's input tokens can't pass its bound.
  */
 export function worstCaseOf(price: Price, bodyBytes: number, maxTokens: number): number {
-  const tiers: Rates[] = price.long_context === undefined ? [price] : [price, price.long_context];
-  const input = Math.max(...tiers.flatMap((t) => [t.input, t.cache_write, t.cache_read]));
-  const output = Math.max(...tiers.map((t) => t.output));
-  return priced(bodyBytes + INPUT_MARGIN_TOKENS, input) + priced(maxTokens, output);
+  const bound = bodyBytes + INPUT_MARGIN_TOKENS;
+  const r: Rates = price.long_context !== undefined && bound > price.long_context.above_input_tokens ? price.long_context : price;
+  return priced(bound, Math.max(r.input, r.cache_write, r.cache_read)) + priced(maxTokens, r.output);
 }
 
 function usageOf(v: unknown): Usage | null {

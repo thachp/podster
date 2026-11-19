@@ -72,8 +72,8 @@ describe("the Anthropic profile and prices", () => {
 
   it("prices Haiku 5.5 at its list price, in micro-USD per million tokens", () => {
     expect(CLAUDE_PROFILE.prices[CLAUDE_MODEL]).toMatchObject({ input: 100_000, output: 500_000, cache_write: 125_000, cache_read: 10_000 });
-    // Claude Code's own 128,000-token request, unclamped, at the dearest (long-context) tier: 0.32 USD of output.
-    expect(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], 0, 128_000)).toBe(320_000 + 2_560);
+    // Claude Code's own 128,000-token request, unclamped, would be about 0.064 USD of output (spike B result 2).
+    expect(worstCaseOf(CLAUDE_PROFILE.prices[CLAUDE_MODEL], 0, 128_000)).toBe(64_000 + 512);
     expect(Object.isFrozen(CLAUDE_PROFILE) && Object.isFrozen(CLAUDE_PROFILE.prices) && Object.isFrozen(CLAUDE_PROFILE.headers)).toBe(true);
   });
 
@@ -649,7 +649,7 @@ describe("the Claude Agent SDK driver", () => {
 
   it("ends the run when any hook but Runner's own starts (S-44, failing closed), and reports what loaded", async () => {
     const t = await driverFor([
-      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "PreToolUse" } },
+      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "PreToolUse:Callback" } },
       { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "SessionStart", hook_name: "plugin" } },
       { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
     ]);
@@ -763,7 +763,9 @@ describe("the step 9(b) sources", () => {
 
   it("never reach the keychain, D-Bus or the security tool from the driver, the container, the listener or the transport", async () => {
     for (const file of ["src/node/claude-driver.ts", "src/node/docker-sandbox.ts", "src/node/broker-listener.ts", "src/node/provider-transport.ts", "src/node/claude-engine.ts", "src/node/safe-fs.ts"]) {
-      expect([file, /keychain\.js|\/usr\/bin\/security|secret-tool|RunnerStorage|DBUS_SESSION_BUS_ADDRESS\s*[:=]/i.test(await code(file))]).toEqual([file, false]);
+      // The sandbox preflight names `security` once, as a program that must FAIL to run under the profile (re-review 3c).
+      const text = (await code(file)).replace('under("/usr/bin/security", "list-keychains")', "");
+      expect([file, /keychain\.js|\/usr\/bin\/security|secret-tool|RunnerStorage|DBUS_SESSION_BUS_ADDRESS\s*[:=]/i.test(text)]).toEqual([file, false]);
     }
   });
 
@@ -926,7 +928,7 @@ describe("review item 1 (M1, S-44): prevent, don't only detect", () => {
     expect(profile.indexOf("(deny process-exec)")).toBeLessThan(profile.indexOf("(allow process-exec"));
     expect(() => sandboxProfile('/sdk/cl"aude', "/Users/owner")).toThrow();
     expect(() => sandboxProfile("/sdk/claude", "/Users/o\\wner")).toThrow();
-    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c });
+    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async (_p: string, args: string[]) => ({ code: args.includes("--version") ? 0 : 1 }) });
     await (await t.driver.begin(session().s)).done;
     const spawned = t.procs.spawned[0];
     expect(spawned.command).toBe(SANDBOX_EXEC);
@@ -974,25 +976,6 @@ describe("review item 2 (M2): the disk bound", () => {
     await t.ticks[0]();
     expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
     expect(t.stopped).toEqual([0]);
-  });
-
-  it("after each shell call, kills every process in the container but init and the sleep", async () => {
-    const root = join(await temp(), "w");
-    let listing = 0;
-    const { calls, docker } = fakeDocker((args) => {
-      const line = args.join(" ");
-      if (line.includes("/proc/1/task/1/children")) return { stdout: "7\n" };
-      // Two listings: 41 and 42 persist (a background job); 50 and 51 are each listing's own `ls`.
-      if (line.endsWith("ls -- /proc")) return { stdout: `1\n7\n41\n42\n${50 + listing++}\nself\nthread-self\n` };
-      return {};
-    });
-    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: timers().every });
-    await sandbox.open(containerSpec("run-1", facts(root, { tools: ["read", "write", "shell"], shell: true })), new AbortController().signal);
-    await sandbox.exec("run-1", { call_id: "c", tool: "shell", command: "nohup yes > f &" }, new AbortController().signal);
-    const kills = calls.filter((c) => c.args.includes("kill"));
-    expect(kills[0].args.slice(-5)).toEqual(["kill", "-KILL", "--", "41", "42"]);
-    for (const k of kills) expect(k.args).not.toContain("1");
-    for (const k of kills) expect(k.args).not.toContain("7");
   });
 
   it("refuses to open when it can't tell the sleep's process apart", async () => {
@@ -1184,7 +1167,10 @@ describe("review item 9 (L6): Haiku 5.5's long-context tier", () => {
     const { costOf } = await import("../src/core/broker.js");
     const price = CLAUDE_PROFILE.prices[CLAUDE_MODEL];
     expect(price.long_context).toEqual({ above_input_tokens: 100_000, input: 500_000, output: 2_500_000, cache_write: 625_000, cache_read: 50_000 });
-    expect(worstCaseOf(price, 0, 128_000)).toBe(320_000 + 2_560);
+    // Re-review item 4: the long tier only when the request's bound on input passes its threshold.
+    expect(worstCaseOf(price, 0, 128_000)).toBe(64_000 + 512);
+    expect(worstCaseOf(price, 95_000, 1_000)).toBe(Math.ceil(99_096 * 0.125) + 500);
+    expect(worstCaseOf(price, 100_000, 1_000)).toBe(Math.ceil(104_096 * 0.625) + 2_500);
     const usage = (input: number) => ({ input_tokens: input, output_tokens: 1_000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
     expect(costOf(price, usage(100_000))).toBe(10_000 + 500);
     expect(costOf(price, usage(100_001))).toBe(Math.ceil(100_001 * 0.5) + 2_500);
@@ -1311,5 +1297,161 @@ describe("the reviewer's untested paths", () => {
     expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
     await expect(claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, env: { NODE_EXTRA_CA_CERTS: "/x" }, execArgv: [] })).rejects.toThrow();
+  });
+});
+
+// ---- The re-review of #460 at fe9e84d3: the architect's fixes before any spend ----
+
+describe("re-review item 1: hook identity", () => {
+  it("knows Runner's callback only as PreToolUse:Callback", async () => {
+    const { RUNNER_HOOK_NAMES } = await import("../src/node/claude-driver.js");
+    expect(RUNNER_HOOK_NAMES).toEqual(["PreToolUse:Callback"]);
+  });
+
+  it("fails on a hook named with the bare event, a plugin's hook with no matcher", async () => {
+    const t = await driverFor([
+      { kind: "message", message: { type: "system", subtype: "hook_started", hook_event: "PreToolUse", hook_name: "PreToolUse" } },
+      { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
+    ]);
+    const { s, tools } = session();
+    await expect((await t.driver.begin(s)).done).rejects.toThrow(/hook_unexpected/);
+    expect(tools).toEqual([]);
+  });
+
+  it("fails on any hook event that carries an origin, whatever its name", async () => {
+    for (const origin of ["plugin", "settings", null, ""]) {
+      const t = await driverFor([
+        { kind: "message", message: { type: "system", subtype: "hook_response", hook_event: "PreToolUse", hook_name: "PreToolUse:Callback", origin } },
+        { kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } },
+      ]);
+      const { s, tools } = session();
+      await expect((await t.driver.begin(s)).done).rejects.toThrow(/hook_unexpected/);
+      expect(tools).toEqual([]);
+    }
+  });
+});
+
+describe("re-review item 3: the macOS sandbox", () => {
+  it("(a) denies the Security and keychain Mach services as well as the keychain files", async () => {
+    const { sandboxProfile, KEYCHAIN_MACH_SERVICES } = await import("../src/node/claude-driver.js");
+    for (const name of ["com.apple.SecurityServer", "com.apple.securityd.xpc", "com.apple.secd"]) expect(KEYCHAIN_MACH_SERVICES).toContain(name);
+    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
+    expect(profile).toContain(`(deny mach-lookup ${KEYCHAIN_MACH_SERVICES.map((n: string) => `(global-name "${n}")`).join(" ")})`);
+    expect(profile).toContain('(deny file-read* file-write* (subpath "/Users/owner/Library/Keychains"))');
+  });
+
+  it("(b) takes the owner's home from the user database, not $HOME", async () => {
+    const { userInfo } = await import("node:os");
+    const { sandboxProfile } = await import("../src/node/claude-driver.js");
+    const before = process.env.HOME;
+    process.env.HOME = "/tmp/not-the-owners-home";
+    try {
+      const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async (_p: string, args: string[]) => ({ code: args.includes("--version") ? 0 : 1 }) });
+      await (await t.driver.begin(session().s)).done;
+      expect(t.procs.spawned[0].args[1]).toBe(sandboxProfile("/sdk/claude", userInfo().homedir));
+      expect(t.procs.spawned[0].args[1]).not.toContain("/tmp/not-the-owners-home");
+    } finally {
+      process.env.HOME = before;
+    }
+  });
+
+  it("(c) runs a preflight under the same profile: sh and security must fail, Claude Code's --version must work", async () => {
+    const { sandboxPreflight, sandboxProfile, SANDBOX_EXEC } = await import("../src/node/claude-driver.js");
+    const calls: { program: string; args: string[] }[] = [];
+    const run = (codes: { sh: number; security: number; claude: number }) => async (program: string, args: string[]) => {
+      calls.push({ program, args });
+      const target = args[2];
+      return { code: target === "/bin/sh" ? codes.sh : target === "/usr/bin/security" ? codes.security : codes.claude };
+    };
+    expect(await sandboxPreflight("/sdk/claude", "/Users/owner", run({ sh: 1, security: 1, claude: 0 }))).toEqual({ ok: true, shell_denied: true, security_denied: true, claude_ran: true });
+    const profile = sandboxProfile("/sdk/claude", "/Users/owner");
+    expect(calls.map((c) => [c.program, ...c.args])).toEqual([
+      [SANDBOX_EXEC, "-p", profile, "/bin/sh", "-c", "true"],
+      [SANDBOX_EXEC, "-p", profile, "/usr/bin/security", "list-keychains"],
+      [SANDBOX_EXEC, "-p", profile, "/sdk/claude", "--version"],
+    ]);
+    for (const codes of [{ sh: 0, security: 1, claude: 0 }, { sh: 1, security: 0, claude: 0 }, { sh: 1, security: 1, claude: 1 }]) expect((await sandboxPreflight("/sdk/claude", "/Users/owner", run(codes))).ok).toBe(false);
+  });
+
+  it("(c) the driver refuses to start Claude Code under a sandbox whose preflight fails", async () => {
+    const t = await driverFor([], {}, { macSandbox: true, platform: "darwin", ownerHome: "/Users/owner", resolveCommand: (c: string) => c, claudeBinary: "/sdk/claude", preflightRun: async () => ({ code: 0 }) });
+    const run = await t.driver.begin(session().s);
+    await expect(run.done).rejects.toThrow(/sandbox_preflight_failed/);
+    expect(t.procs.spawned).toEqual([]);
+  });
+
+  it("(d) the real run's sandbox scenario is in bare mode", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/bare: mode === "bare" \|\| mode === "sandbox"/);
+  });
+});
+
+describe("re-review item 5 (M2 lows)", () => {
+  it("a disk-bound breach the timer finds halts the run, not only the container", async () => {
+    const root = join(await temp(), "w");
+    const ticks: (() => Promise<void> | void)[] = [];
+    const { docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: (_ms, fn) => (ticks.push(fn), () => undefined), limits: { folder_bytes: 10 } });
+    const breaches: string[] = [];
+    const spec = containerSpec("run-1", facts(root));
+    await sandbox.open(spec, new AbortController().signal, { breach: (code) => void breaches.push(code) });
+    await writeFile(join(spec.task_folder, "big"), "x".repeat(100));
+    await ticks[0]();
+    expect(breaches).toEqual(["disk_bound"]);
+  });
+
+  it("walks folders as a stream, so the entry cap applies while reading", async () => {
+    const source = await readFile(new URL("../src/node/safe-fs.ts", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("export async function folderBytes"), source.indexOf("/** Removes a folder Runner made"));
+    expect(body).toMatch(/opendir\(/);
+    expect(body).not.toMatch(/readdir\(/);
+    const dir = await temp();
+    for (let i = 0; i < 300; i++) await writeFile(join(dir, `f${i}`), "");
+    expect(await folderBytes(dir, 1_000_000, 50)).toBeGreaterThan(1_000_000);
+  });
+
+  it("after a shell call, kills strays until two listings in a row are empty, never its own lister", async () => {
+    const root = join(await temp(), "w");
+    const listings = [["41", "42"], ["43"], [], []];
+    let n = 0;
+    const { calls, docker } = fakeDocker((args) => {
+      if (args.join(" ").endsWith("ls -l -- /proc")) {
+        const pids = listings[Math.min(n, listings.length - 1)];
+        const self = 900 + n++;
+        return { stdout: ["total 0", "dr-xr-xr-x 9 0 0 0 Nov 18 10:00 1", "dr-xr-xr-x 9 501 20 0 Nov 18 10:00 7", ...pids.map((p) => `dr-xr-xr-x 9 501 20 0 Nov 18 10:00 ${p}`), `dr-xr-xr-x 9 501 20 0 Nov 18 10:00 ${self}`, `lrwxrwxrwx 1 0 0 0 Nov 18 10:00 self -> ${self}`, `lrwxrwxrwx 1 0 0 0 Nov 18 10:00 thread-self -> ${self}/task/${self}`].join("\n") };
+      }
+      return {};
+    });
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined });
+    await sandbox.open(containerSpec("run-1", facts(root, { tools: ["read", "write", "shell"], shell: true })), new AbortController().signal);
+    await sandbox.exec("run-1", { call_id: "c", tool: "shell", command: "true" }, new AbortController().signal);
+    const kills = calls.filter((c) => c.args.includes("kill")).map((c) => c.args.slice(c.args.indexOf("kill")));
+    expect(kills).toEqual([["kill", "-KILL", "--", "41", "42"], ["kill", "-KILL", "--", "43"]]);
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(false);
+  });
+
+  it("ends the container when strays keep coming (fork and exit) past the round limit", async () => {
+    const root = join(await temp(), "w");
+    let n = 0;
+    const { calls, docker } = fakeDocker((args) => (args.join(" ").endsWith("ls -l -- /proc") ? { stdout: `dr-xr-xr-x 9 501 20 0 Nov 18 10:00 ${1000 + n++}\nlrwxrwxrwx 1 0 0 0 Nov 18 10:00 self -> 5\n` } : args[0] === "ps" ? { stdout: "" } : {}));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined });
+    await sandbox.open(containerSpec("run-1", facts(root, { tools: ["read", "write", "shell"], shell: true })), new AbortController().signal);
+    const out = await sandbox.exec("run-1", { call_id: "c", tool: "shell", command: "true" }, new AbortController().signal);
+    expect(out.ok).toBe(false);
+    expect(calls.some((c) => c.args[0] === "rm")).toBe(true);
+  });
+});
+
+describe("re-review items 2, 4 and 6: the real run as redesigned", () => {
+  it("settles S-44 on four conditions, spends in its spend scenario, and has a ceiling of 0.35 USD", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(350_000\)/);
+    expect(real).toMatch(/spend: 20_000/);
+    expect(real).toMatch(/plugins_empty/);
+    expect(real).toMatch(/no_hook_events/);
+    expect(real).toMatch(/callback_ran/);
+    expect(real).toMatch(/no_child_process/);
+    expect(real).toMatch(/exec_denied/);
+    expect(real).toMatch(/spent_micro_usd \?\? 0\)\.toBeGreaterThan\(0\)/);
   });
 });

@@ -11,7 +11,7 @@
  * Errors carry fixed words only, never a path.
  */
 import { closeSync, constants, openSync, writeSync } from "node:fs";
-import { lstat, mkdir, open, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, open, opendir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, sep } from "node:path";
 
 export class UnsafePath extends Error {
@@ -138,7 +138,22 @@ export async function folderBytes(folder: string, limit: number, maxEntries = MA
       throw error;
     }
     total += info.size;
-    if (info.isDirectory() && !info.isSymbolicLink()) for (const name of await readdir(at).catch(() => [] as string[])) stack.push(join(at, name));
+    if (!info.isDirectory() || info.isSymbolicLink()) continue;
+    // Read as a stream, so the entry cap applies while reading, not after a whole huge listing is in memory.
+    let dir;
+    try {
+      dir = await opendir(at);
+    } catch {
+      continue;
+    }
+    try {
+      for await (const entry of dir) {
+        if (entries + stack.length >= maxEntries) return limit + 1;
+        stack.push(join(at, entry.name));
+      }
+    } catch {
+      // A folder removed while read is skipped.
+    }
   }
   return total;
 }

@@ -106,7 +106,9 @@ class FakeSandbox implements TaskSandbox {
   /** When set, open waits for this, then makes the container: a slow `docker run` that finishes after all. */
   openGate: Promise<void> | null = null;
   output = "ran";
-  async open(spec: ContainerSpec, signal: AbortSignal) {
+  breach: ((code: string) => void) | null = null;
+  async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
+    this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
     if (this.openGate) await this.openGate;
     this.alive.add(spec.run_ref);
@@ -683,6 +685,18 @@ describe("stopping", () => {
     await expect(t.start()).rejects.toThrow();
     expect(t.sandbox.killed).toEqual(["run_1"]);
     expect(await t.adapter.confirmStopped("run_1")).toBe(true);
+  });
+});
+
+describe("a breach the container reports (re-review item 5)", () => {
+  it("halts the run at once, killing the container and the driver, with its own stop reason", async () => {
+    const t = setup(() => never());
+    const handle = await t.start();
+    expect(t.sandbox.breach).not.toBeNull();
+    t.sandbox.breach?.("disk_bound");
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "disk_bound" });
+    expect(t.sandbox.killed).toContain("run_1");
+    expect(t.driver.cancels).toBeGreaterThan(0);
   });
 });
 

@@ -121,16 +121,25 @@ const eventually = async (id: string, check: () => Promise<void>) => {
 
 /**
  * The owner leaves the organization, and room `id` has heard by the time this returns. The person's own alarm takes a
- * departure to their rooms: one whole run of it, after any the runtime had under way.
+ * departure to their rooms, at most 100 room calls a run, with the rest in the next run: every run it takes, each whole,
+ * after any the runtime had under way. The owner is in every room this file makes, so this departure alone can need
+ * more than one run as the file grows. Only this departure is made due: an earlier one's next sweep isn't brought
+ * forward to spend the same runs' calls.
  */
 const ownerLeaves = async (id: string) => {
   // The departure finds the room through the listing the room's alarm writes. Written here, so it doesn't wait on that.
   await BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Engineering', 0, 1)").bind(id, OWNER.id, ORG).run();
-  await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
+  const leftAt = Date.now();
+  await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: leftAt } }, "POST", "/v1/org-departures", {});
   const person = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(OWNER.id));
   const heard = () => inRoom(id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t as number | null);
-  await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
+  await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0 WHERE left_at = ?", leftAt));
+  // Whether this departure's sweep has applied it in room `id` yet.
+  const applied = () => runInDurableObject(person, (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM org_departure_room WHERE left_at = ? AND workspace_id = ? AND applied = 1", leftAt, id).one().n === 1);
   await alarmPass(person);
+  // A run that left rooms unasked keeps the departure due, so the next run carries on where it stopped. Bounded: five
+  // runs reach 500 rooms, far more than the file makes.
+  for (let runs = 1; runs < 5 && !(await applied()); runs++) await alarmPass(person);
   expect(await heard()).not.toBeNull();
 };
 

@@ -563,13 +563,16 @@ class LiveRun {
     let answer: ProviderAnswer;
     try {
       answer = await this.transport.send(admitted.forward, this.abort.signal);
-    } catch {
+    } catch (error) {
       this.broker.fail(id);
-      this.emit("model_refused", "upstream_failed");
+      // The transport's own fixed code, when it is one; never an error's text.
+      const message = error instanceof Error ? error.message : "";
+      this.emit("model_refused", "upstream_failed", `transport:${/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "other"}`);
       return { ok: false, refused: "upstream_failed" };
     }
     const { cap_reached } = this.broker.settle(id, answer.usage);
-    this.emit("model_request");
+    // The upstream's HTTP status, the number only: a 4xx names a request the provider refused, never with its body.
+    this.emit("model_request", null, Number.isSafeInteger(answer.status) ? `status:${answer.status}` : null);
     if (cap_reached) void this.halt(cap_reached);
     return { ok: true, status: answer.status, body: answer.body };
   }

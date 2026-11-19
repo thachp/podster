@@ -33,8 +33,9 @@
  * `PLUGIN_ALLOWLIST`, and any hook event Runner can't attribute to its own callback (event `PreToolUse`, name
  * `PreToolUse:Callback`, no `origin` field).
  *
- * **Bare mode** (`CLAUDE_CODE_SIMPLE=1`) is what `claudeEngine` always uses. Built-in agents and bundled skills are
- * switched off by environment. The SDK's own environment names pass only from `SDK_ENV_NAMES`, exactly.
+ * **Bare mode** (`CLAUDE_CODE_SIMPLE=1`) stays an option but `claudeEngine` never uses it: #460's fifth real run showed
+ * the SDK's PreToolUse callback never fires under it, so every tool call ended the run as `hook_bypassed`. Built-in
+ * agents and bundled skills are switched off by environment. The SDK's own environment names pass only from `SDK_ENV_NAMES`, exactly.
  *
  * Logs carry IDs and codes only.
  */
@@ -313,7 +314,7 @@ export type ClaudeDriverDeps = {
   listen?: (deps: ListenerDeps) => Promise<BrokerListener>;
   log?: Logger;
   observe?: (event: DriverObservation) => void;
-  /** Bare mode; `claudeEngine` always sets it. */
+  /** Bare mode, off in `claudeEngine`: it turns off the SDK's PreToolUse callback. */
   bare?: boolean;
   initWaitMs?: number;
 };

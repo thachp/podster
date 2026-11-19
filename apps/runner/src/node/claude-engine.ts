@@ -9,8 +9,8 @@
  *   (`sha256:…`), built from `apps/runner/sandbox` and `apps/runner/claude-image`;
  * - `docker` is installed in a fixed place;
  * - no proxy or TLS trust would be taken from the environment.
- * It runs what was ruled after #460's real run: Claude Code always in bare mode, in its own container (the
- * two-container placement). The macOS `sandbox-exec` wrapper is gone. On every system but macOS it refuses
+ * It runs what was ruled after #460's real runs: Claude Code in default mode, never bare (bare mode turns off the SDK's
+ * PreToolUse callback, Runner's decision point), in its own container (the two-container placement). The macOS `sandbox-exec` wrapper is gone. On every system but macOS it refuses
  * (`platform_unverified`); on Linux until S-47's Linux run: the relay reaches the host through `host-gateway`, which the listener, bound to 127.0.0.1
  * (scoped exception 1, not loosened), doesn't serve there. The owed Linux path is a Unix-socket listener.
  * Then it reaps (M4 on #459): every container and network of this home a previous process left goes before the
@@ -94,7 +94,9 @@ export async function claudeEngine(opts: { home: string; key_file: string; log: 
   if (!docker) docker = dockerCli(program, { config_dir: await ensureFolder(opts.home, config), host });
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const gid = typeof process.getgid === "function" ? process.getgid() : 0;
-  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: true, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid });
+  // Never bare: under bare mode the SDK's PreToolUse callback, Runner's decision point, never fires (the fifth real run
+  // of #460), and the container now does what bare mode was for.
+  const driver = new ClaudeDriver({ home: opts.home, installed: await installedClaudeVersions(), log: opts.log, bare: false, docker, dockerProgram: program, dockerEnv: { DOCKER_CONFIG: config, DOCKER_HOST: host }, claudeImage: ccImage, uid, gid });
   const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home });
   return {
     drivers: { claude_agent_sdk: driver },

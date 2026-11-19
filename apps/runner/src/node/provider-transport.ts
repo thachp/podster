@@ -86,6 +86,19 @@ export function answerUsage(status: number, contentType: string, text: string): 
   }
 }
 
+/**
+ * Why a request to the upstream failed, as a fixed code (the fifth real run of #460): `aborted` when Runner stopped
+ * it, `redirect` when the upstream redirected, else `fetch_<cause code>` from Node's own error code, or `fetch_failed`.
+ * Never the error's text, which can carry anything.
+ */
+export function failureCode(error: unknown, signal: AbortSignal): string {
+  if (signal.aborted || (error instanceof Error && error.name === "AbortError")) return "aborted";
+  const cause = (error as { cause?: { code?: unknown; message?: unknown } } | null)?.cause;
+  if (cause && typeof cause.message === "string" && /redirect/i.test(cause.message)) return "redirect";
+  const code = cause?.code ?? (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{0,39}$/.test(code) ? `fetch_${code.toLowerCase()}` : "fetch_failed";
+}
+
 export class ProviderKeyTransport implements ProviderTransport {
   private readonly key: string;
   private readonly url: string;
@@ -108,20 +121,31 @@ export class ProviderKeyTransport implements ProviderTransport {
     const names = Object.keys(forward.headers).map((n) => n.toLowerCase());
     const fixed = Object.keys(this.profile.headers).map((n) => n.toLowerCase());
     if (names.length !== fixed.length || names.some((n) => !fixed.includes(n))) throw new Error("headers_not_allowed");
-    const response = await this.fetch(this.url, {
-      method: "POST",
-      headers: { ...this.profile.headers, "x-api-key": this.key },
-      body: forward.body as Uint8Array<ArrayBuffer>,
-      redirect: "error",
-      signal,
-    });
+    let response: Response;
+    try {
+      response = await this.fetch(this.url, {
+        method: "POST",
+        headers: { ...this.profile.headers, "x-api-key": this.key },
+        body: forward.body as Uint8Array<ArrayBuffer>,
+        redirect: "error",
+        signal,
+      });
+    } catch (error) {
+      throw new Error(failureCode(error, signal));
+    }
     const reader = response.body?.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
     let cut = false;
     if (reader) {
       for (;;) {
-        const { done, value } = await reader.read();
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await reader.read();
+        } catch (error) {
+          throw new Error(signal.aborted ? "aborted" : `body_${failureCode(error, signal)}`);
+        }
+        const { done, value } = chunk;
         if (done) break;
         if (size + value.byteLength > MAX_ANSWER_BYTES) {
           cut = true;

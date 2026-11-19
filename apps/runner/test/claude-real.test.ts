@@ -13,7 +13,8 @@
 // apps/runner/claude-image) from the debian base already pulled by digest, so no registry credentials are needed; the
 // builds fetch pinned Debian packages from snapshot.debian.org and the Linux Claude Code from npm's public registry.
 //
-// Every scenario runs in bare mode, the only mode production uses, with the two-container placement: Claude Code's
+// Every scenario runs in default mode, never bare (the fifth real run showed the SDK's PreToolUse callback never fires
+// under bare mode), as production runs, with the two-container placement: Claude Code's
 // Linux binary in its own container on a per-run internal network, reaching Runner's listener only through a relay.
 //
 // S-44 is answered when, in the enforcement run: init shows only plugins on PLUGIN_ALLOWLIST (plugins_allowed); no hook
@@ -60,10 +61,10 @@ const DOCKER = OPTED_IN ? findDocker() : null;
 // The spend scenario's cap lets several requests go before the broker's worst-case refusal stops it, and is low
 // enough to trip well within its 60 turns; its a.txt exists first, so each read succeeds and the model keeps going.
 const CAPS = { enforcement: 30_000, isolation: 30_000, expansion: 20_000, spend: 8_000, turns: 30_000, run_time: 30_000 };
-/** The six scenarios, once each, in bare mode: 0.148 USD. */
+/** The six scenarios, once each, in default mode: 0.148 USD. */
 export const REAL_SPEND_CEILING_MICRO_USD = Object.values(CAPS).reduce((a, b) => a + b, 0);
 
-type RunRecord = { scenario: string; status: string; stop_reason: string | null; stop_detail: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; refusals: string[] };
+type RunRecord = { scenario: string; status: string; stop_reason: string | null; stop_detail: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; refusals: string[]; statuses: string[] };
 /** A name Claude Code reports, kept only if it's a plain identifier. */
 const plain = (v: string) => (/^[A-Za-z0-9_:.-]{1,80}$/.test(v) ? v : "other");
 type S44 = { plugins_allowed: boolean; no_hook_events: boolean; callback_ran: boolean; isolated: boolean; answered: boolean };
@@ -131,6 +132,8 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       sdk_results: r.observations.filter((o) => o.kind === "result").map((o) => (o as { subtype: string }).subtype),
       // The broker's refusals, by code and the body part refused (`body_not_allowed/top_key:output_config`).
       model_refusals: r.refusals,
+      // The upstream's HTTP status for each answer, the number only (`status:200`, `status:400`).
+      model_statuses: r.statuses,
       hooks: r.observations.filter((o) => o.kind === "hook").map((o) => `${(o as { hook_event: string }).hook_event}/${(o as { hook_name: string }).hook_name}${(o as { origin: boolean }).origin ? "/origin" : ""}`),
       runner_callbacks: r.observations.filter((o) => o.kind === "callback").length,
     }));
@@ -138,7 +141,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
   });
 
   function newDriver(observe?: (o: DriverObservation) => void) {
-    return installedClaudeVersions().then((installed) => new ClaudeDriver({ home, installed, docker, dockerProgram: DOCKER as string, dockerEnv, claudeImage, uid, gid, bare: true, observe }));
+    return installedClaudeVersions().then((installed) => new ClaudeDriver({ home, installed, docker, dockerProgram: DOCKER as string, dockerEnv, claudeImage, uid, gid, bare: false, observe }));
   }
 
   async function run(name: keyof typeof CAPS, prompt: string, over: { tools?: Tool[]; turns?: number; run_time_ms?: number; setup?: (folder: string) => Promise<void> } = {}) {
@@ -188,7 +191,8 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     const report = await handle.done;
     const stopped = await handle.stop();
     const refusals = progress.filter((e) => e.kind === "model_refused").map((e) => `${e.code}${e.detail ? `/${e.detail}` : ""}`);
-    records.push({ scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, stop_detail: report.stop_detail ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations, refusals });
+    const statuses = progress.filter((e) => e.kind === "model_request").map((e) => e.detail ?? "status:unknown");
+    records.push({ scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, stop_detail: report.stop_detail ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations, refusals, statuses });
     expect(await adapter.confirmStopped(ref)).toBe(true);
     expect(await inner.gone(ref)).toBe(true);
     expect(await driver.confirmGone(ref)).toBe(true);
@@ -210,7 +214,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       await taskSandbox.open(containerSpec(taskRef, { task_folder: join(base, "workspaces", "ws_real", "tsk_isolation_probe"), network: [], caps: { spend_micro_usd: 1, run_time_ms: 120_000, turns: 1, output_tokens: 1, max_tokens: 1 } }), new AbortController().signal);
       await driver.prepare(ref, listener.port, 300);
       const names = claudeNames(ref);
-      const env = claudeEnv(listener.token, 1_024, { bare: true });
+      const env = claudeEnv(listener.token, 1_024, { bare: false });
       const exec = (container: string, argv: string[], opts: { withEnv?: boolean; input?: string } = {}) =>
         docker(["exec", ...(opts.input !== undefined ? ["--interactive"] : []), ...(opts.withEnv ? Object.keys(env).flatMap((n) => ["--env", n]) : []), container, ...argv], { timeoutMs: 60_000, maxOutputBytes: 256 * 1024, env: opts.withEnv ? env : undefined, input: opts.input });
       const tryConnect = async (target: string) => connected(await exec(names.container, ["socat", "-u", "OPEN:/dev/null", `TCP:${target},connect-timeout=3`]));

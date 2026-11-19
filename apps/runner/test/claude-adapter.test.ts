@@ -1470,8 +1470,8 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform });
   }
 
-  it("on darwin, builds the engine: bare mode, Claude Code in its container", async () => {
-    expect(((await engineFor("darwin")).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: true, placement: "container" });
+  it("on darwin, builds the engine: default mode, never bare, Claude Code in its container (the fifth real run's ruling)", async () => {
+    expect(((await engineFor("darwin")).drivers.claude_agent_sdk as ClaudeDriver).settings).toEqual({ bare: false, placement: "container" });
   });
 
   it("on every platform but darwin, refuses with platform_unverified (L3; Linux until S-47's run)", async () => {
@@ -1826,5 +1826,51 @@ describe("the up-front rulings on the remaining body keys", () => {
     expect(ask(tool({ defer_loading: true }))).toMatchObject({ ok: false, detail: "tool_key:defer_loading" });
     expect(ask({ some_new_key: 1 })).toMatchObject({ ok: false, detail: "top_key:some_new_key" });
     expect(ask(tool({ strict: true }))).toMatchObject({ ok: false, detail: "tool_key:strict" });
+  });
+});
+
+// ---- After the fifth real run of #460 at 2097210: bare mode off, and upstream failures by code ----
+
+describe("the transport's failures, as fixed codes", () => {
+  const forward = (): Forward => ({ request_id: "r", url: "https://api.anthropic.com/v1/messages", headers: { ...CLAUDE_PROFILE.headers }, body: enc.encode("{}"), max_tokens: 1, worst_micro_usd: 1 });
+  const failing = (error: unknown) => (async () => { throw error; }) as unknown as typeof globalThis.fetch;
+
+  it("names a network failure by its cause's code, a redirect as redirect, and an aborted request as aborted", async () => {
+    const reset = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    await expect(new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: failing(reset), env: {}, execArgv: [] }).send(forward(), new AbortController().signal)).rejects.toThrow(/^fetch_econnreset$/);
+    const redirect = Object.assign(new TypeError("fetch failed"), { cause: new Error("unexpected redirect") });
+    await expect(new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: failing(redirect), env: {}, execArgv: [] }).send(forward(), new AbortController().signal)).rejects.toThrow(/^redirect$/);
+    const halt = new AbortController();
+    halt.abort();
+    await expect(new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: failing(new DOMException("aborted", "AbortError")), env: {}, execArgv: [] }).send(forward(), halt.signal)).rejects.toThrow(/^aborted$/);
+    const odd = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("x"), { code: "weird code with spaces" }) });
+    await expect(new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: failing(odd), env: {}, execArgv: [] }).send(forward(), new AbortController().signal)).rejects.toThrow(/^fetch_failed$/);
+  });
+
+  it("the run's progress carries the transport's code on a failure, and the upstream's HTTP status on every answer", async () => {
+    const { SupervisedAdapter } = await import("../src/core/run-interface.js");
+    const { systemClock } = await import("../src/core/runtime.js");
+    let calls = 0;
+    const transport = { send: async () => (++calls === 1 ? Promise.reject(new Error("fetch_econnreset")) : calls === 2 ? Promise.reject(new Error("text with spaces from somewhere")) : { status: 400, body: enc.encode('{"type":"error"}'), usage: null }) };
+    const progress: { kind: string; code: string | null; detail?: string | null }[] = [];
+    const t = await driverFor([{ kind: "model" }, { kind: "model" }, { kind: "model" }]);
+    const root = join(await temp(), "w");
+    const adapter = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: new DockerSandbox({ docker: fakeDocker((a) => (a[0] === "ps" ? { stdout: "" } : {})).docker, image: IMAGE, uid: 501, gid: 20, home: t.home }), transports: { anthropic: transport }, clock: systemClock, log: () => undefined, progress: (e) => void progress.push(e) });
+    const handle = await adapter.start({ run_ref: "run-1", workspace_id: "ws_room", task_id: "tsk_one", prompt: enc.encode("x"), facts: facts(root) });
+    await handle.done;
+    expect(progress.filter((e) => e.kind === "model_refused" || e.kind === "model_request").map((e) => [e.kind, e.code, e.detail])).toEqual([
+      ["model_refused", "upstream_failed", "transport:fetch_econnreset"],
+      ["model_refused", "upstream_failed", "transport:other"],
+      ["model_request", null, "status:400"],
+    ]);
+  });
+});
+
+describe("the real run in default mode", () => {
+  it("runs inside the container in default mode, never bare, and reports the upstream's statuses", async () => {
+    const real = await readFile(new URL("claude-real.test.ts", import.meta.url), "utf8");
+    expect(real).toMatch(/bare: false/);
+    expect(real).not.toMatch(/bare: true/);
+    expect(real).toMatch(/model_statuses/);
   });
 });

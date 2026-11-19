@@ -75,7 +75,8 @@ function harness(registration: NudgeRegistration | null = REG) {
   const endpoint = new NudgeEndpoint({ registration: () => registration, path: PATH, clock, log: (at, outcome, fields) => void lines.push(JSON.stringify({ at, outcome, ...fields })), bell });
   const now = () => Math.floor(clock.now() / 1000);
   const post = (body: string | ReadableStream<Uint8Array>, opts: { signature?: string | null; headers?: Record<string, string>; path?: string; method?: string } = {}) => {
-    const headers: Record<string, string> = { "content-type": "application/json", ...(opts.headers ?? {}) };
+    // Podster sends A2A-Version 1.0 on every request to the endpoint (`a2a_out::rpc`).
+    const headers: Record<string, string> = { "content-type": "application/json", "a2a-version": "1.0", ...(opts.headers ?? {}) };
     const signature = opts.signature === undefined ? (typeof body === "string" ? sign(SECRET, now(), body) : null) : opts.signature;
     if (signature !== null) headers["x-podster-signature"] = signature;
     return endpoint.handle(new Request(`http://127.0.0.1:9999${opts.path ?? PATH}`, { method: opts.method ?? "POST", headers, body, ...(typeof body === "string" ? {} : { duplex: "half" }) } as RequestInit));
@@ -404,7 +405,7 @@ describe("a nudge in the poll loop", () => {
         // While Runner waits after its first poll, a nudge naming a task the inbox doesn't hold yet.
         gateway.offer(ROOM, "tsk_one");
         const body = nudgeBody("att_x", { task_id: "tsk_not_offered" });
-        await new NudgeEndpoint({ registration: () => REG, path: PATH, clock, log: () => undefined, bell }).handle(new Request(`http://127.0.0.1${PATH}`, { method: "POST", headers: { "x-podster-signature": sign(SECRET, Math.floor(clock.now() / 1000), body) }, body }));
+        await new NudgeEndpoint({ registration: () => REG, path: PATH, clock, log: () => undefined, bell }).handle(new Request(`http://127.0.0.1${PATH}`, { method: "POST", headers: { "a2a-version": "1.0", "x-podster-signature": sign(SECRET, Math.floor(clock.now() / 1000), body) }, body }));
       }
       if (polls >= 2) stop.abort();
     };
@@ -539,7 +540,7 @@ describe("the listener", () => {
     expect(listener.port).toBeGreaterThan(0);
     const at = `http://127.0.0.1:${listener.port}${PATH}`;
     const body = nudgeBody();
-    const ok = await fetch(at, { method: "POST", headers: { "content-type": "application/json", "x-podster-signature": sign(SECRET, h.now(), body) }, body });
+    const ok = await fetch(at, { method: "POST", headers: { "content-type": "application/json", "a2a-version": "1.0", "x-podster-signature": sign(SECRET, h.now(), body) }, body });
     expect(ok.status).toBe(200);
     expect(h.rings()).toBe(1);
     const big = await fetch(at, { method: "POST", headers: { "x-podster-signature": sign(SECRET, h.now(), "x") }, body: "x".repeat(MAX_NUDGE_BODY_BYTES * 4) }).catch(() => null);
@@ -590,8 +591,9 @@ describe("registration and verify, against the stand-in gateway", () => {
     // A good nudge now rings.
     const body = nudgeBody();
     const t = Math.floor(s.clock.now() / 1000);
-    const answered = await s.gateway.deliver!(new Request(URL_, { method: "POST", headers: { "x-podster-signature": sign(secret, t, body) }, body }));
+    const answered = await s.gateway.deliver!(new Request(URL_, { method: "POST", headers: { "a2a-version": "1.0", "x-podster-signature": sign(secret, t, body) }, body }));
     expect(answered.status).toBe(200);
+    expect(((await answered.json()) as { result?: unknown }).result).toBeDefined();
     await nudge!.close();
   });
 

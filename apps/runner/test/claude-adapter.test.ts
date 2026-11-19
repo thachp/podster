@@ -2282,3 +2282,10 @@ describe("cleanup as Docker 28.5.1 really behaves", () => {
     expect(real).toMatch(/await Promise\.allSettled\(\[driver\.teardown\(ref\), taskSandbox\.kill\(taskRef\)\]\)/);
   });
 });
+
+describe("the SDK's max-turns end (the tenth real run of #460)", () => {
+  it("ends the driver's run with its own code, max_turns", async () => {
+    const t = await driverFor([{ kind: "message", message: { type: "result", subtype: "error_max_turns", is_error: true } }]);
+    await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/^max_turns$/);
+  });
+});

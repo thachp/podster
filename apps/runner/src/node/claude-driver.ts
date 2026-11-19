@@ -587,6 +587,9 @@ export class ClaudeDriver implements AgentDriver {
           } else if (m.type === "result") {
             this.deps.observe?.({ kind: "result", run_ref: ref, subtype: typeof m.subtype === "string" && /^[a-z_]{1,40}$/.test(m.subtype) ? m.subtype : "other", is_error: m.is_error === true });
             if (!initOk) fail("init_missing");
+            // The SDK's own turn limit (set to Runner's cap) ended the run: said by its own code, so the run interface can
+            // read it against Runner's turn count (the tenth real run of #460).
+            if (m.subtype === "error_max_turns") fail("max_turns");
             result = m.subtype === "success" ? (m.structured_output ?? null) : null;
           }
         }

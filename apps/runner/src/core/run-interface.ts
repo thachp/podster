@@ -470,6 +470,10 @@ class LiveRun {
     // The driver's own code, when it is one: a fixed lower-case identifier; anything else is the SDK's, never kept as text.
     const message = error instanceof Error ? error.message : "";
     this.detail = threw ? (/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "sdk_error") : null;
+    // The SDK's own end, its turn limit or any error of its, once Runner's broker has let the run's whole turn cap go: the
+    // cap reached is the cause (the tenth real run of #460). Only then: below the cap, or for a failure Runner names
+    // itself (`hook_bypassed`, `plugins_unexpected` and the rest), the driver's failure stands.
+    if (threw && (this.detail === "max_turns" || this.detail === "sdk_error") && this.broker.totals.turns >= this.run.facts.caps.turns) this.reason = "turns_exhausted";
     this.end(outcome, threw);
   }
 

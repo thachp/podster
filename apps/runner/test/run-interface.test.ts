@@ -727,3 +727,37 @@ describe("Runner's run interface source", () => {
     for (const file of files.slice(0, 3)) expect([file, /\bfetch\s*\(/.test(await readFile(new URL(file, root), "utf8"))]).toEqual([file, false]);
   });
 });
+
+describe("a run that ends on its turn cap (the tenth real run of #460)", () => {
+  const atCap = (error: string, calls = CAPS.turns) =>
+    setup(async (s) => {
+      for (let i = 0; i < calls; i++) await s.model(modelRequest());
+      throw new Error(error);
+    });
+
+  it("reads the SDK's max-turns end, at Runner's turn cap, as a turns stop", async () => {
+    const t = atCap("max_turns");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "budget_stopped", stop_reason: "turns_exhausted", stop_detail: "max_turns" });
+  });
+
+  it("reads any SDK error after Runner's turn cap was reached as a turns stop: the cap reached is the cause", async () => {
+    const t = atCap("sdk_error");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "budget_stopped", stop_reason: "turns_exhausted", stop_detail: "sdk_error" });
+  });
+
+  it("never hides a real driver failure below the cap, max_turns included", async () => {
+    for (const error of ["max_turns", "sdk_error", "hook_bypassed"]) {
+      const t = atCap(error, CAPS.turns - 1);
+      const handle = await t.start();
+      expect([error, await handle.done]).toMatchObject([error, { status: "failed", stop_reason: "driver_failed", stop_detail: error }]);
+    }
+  });
+
+  it("never reads a driver failure Runner can name, such as hook_bypassed, as a turns stop even at the cap", async () => {
+    const t = atCap("hook_bypassed");
+    const handle = await t.start();
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "driver_failed", stop_detail: "hook_bypassed" });
+  });
+});

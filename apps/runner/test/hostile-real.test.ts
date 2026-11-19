@@ -165,6 +165,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 12's real half (opt-in: runs D
         change_request_event_id: null,
         requester: "per_Guest@org_guest",
         authors: [{ input: "title", authors: ["per_Guest@org_guest"] }],
+        repository: null,
       };
       const driver = new ClaudeDriver({ home, installed: await installedClaudeVersions(), docker, dockerProgram: DOCKER as string, dockerEnv, claudeImage, uid, gid, bare: false });
       const inner = new DockerSandbox({ docker, image: taskImage, uid, gid, home });

@@ -51,6 +51,7 @@ const facts = (root: string, over: Partial<RunFacts> = {}): RunFacts => ({
   change_request_event_id: null,
   requester: "per_A@org_one",
   authors: [{ input: "title", authors: ["per_A@org_one"] }],
+  repository: null,
   ...over,
 });
 

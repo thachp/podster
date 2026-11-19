@@ -31,6 +31,11 @@
  *   name (condition 2). The adapter's result tool is always named.
  * - **Run decisions** are bound to every run fact, by a canonical form of the whole `RunFacts` (M1 on #455's review), and
  *   to the task's version, input hash, repository and base. They are single-use and expire.
+ * - **The repository** (M7 step 10; L4 on #455's review): a room has one only when the owner named it here, by full name
+ *   and GitHub's numeric ID. It is a run fact, with the task's branch, so the decision binds it; the binding's
+ *   `repository_id` must be that ID. The base can't be known before the task is accepted (`get_repo_access` answers only
+ *   then), so a decision for such a room is issued with its base unpinned, `pinRunBase` pins it exactly once to the
+ *   commit Runner's checkout was verified at, and `consumeRunDecision` refuses one still unpinned.
  *
  * **The caller serialises.** Runner must run evaluate-then-issue, and evaluate-then-consume, as one step each per Runner,
  * with nothing else evaluating or reserving between them; the day's reservations it passes in are only right if so. At
@@ -65,6 +70,12 @@ export const MIN_RUN_TIME_MS = 60_000;
 export const DAY_SPEND_CEILING_MICRO_USD = 250_000_000;
 /** How long a run decision may wait before it is used. */
 export const DECISION_TTL_MS = 10 * 60 * 1000;
+/**
+ * How many tasks Runner holds at once: the run under way and every finished run whose publication is held for a retry
+ * (the ruling on #462's held publications). Runner runs one task at a time, so above one this lets new tasks run while a
+ * publication waits. One unless the owner sets `max_active_tasks`; the ceiling is **Proposed**.
+ */
+export const MAX_ACTIVE_TASKS_CEILING = 4;
 
 const MAX_ROOMS = 200;
 const MAX_ORGS = 50;
@@ -93,6 +104,8 @@ const INPUTS = ["title", "instructions", "acceptance_criteria", "change_request"
 type InputName = (typeof INPUTS)[number];
 
 export type Caps = { spend_micro_usd: number; run_time_ms: number; turns: number; output_tokens: number; max_tokens: number };
+/** The repository the owner allowed for one room (L4 on #455's review): GitHub's full name and its numeric ID. */
+export type RepoScope = { full_name: string; provider_repo_id: number };
 export type RoomPolicy = {
   room_id: string;
   mode: "ask" | "unattended";
@@ -101,6 +114,8 @@ export type RoomPolicy = {
   network: string[];
   outputs: "hold" | "share";
   acknowledged: { trust_statement: boolean; public_room_warning: boolean };
+  /** Null: the room has no repository, and a run starts in an empty folder. */
+  repository: RepoScope | null;
 };
 export type PolicyConfig = {
   version: 1;
@@ -111,6 +126,7 @@ export type PolicyConfig = {
   caps: Caps;
   day_caps: { spend_micro_usd: number };
   rooms: RoomPolicy[];
+  max_active_tasks: number;
 };
 
 export type RefuseReason =
@@ -157,6 +173,8 @@ export type RunFacts = {
   /** Who wrote each input and the requester, as `id@org`, `?` for unknown. */
   requester: string;
   authors: { input: InputName; authors: string[] }[];
+  /** The owner's repository for the room and the task's one branch in it, or null for a room without one. */
+  repository: { full_name: string; provider_repo_id: number; branch: string } | null;
 };
 
 export type Decision =
@@ -173,6 +191,8 @@ export type EvaluateInput = {
   prompt: unknown;
   /** The task, by its IDs. Anything else on it, its text included, is ignored. */
   task: unknown;
+  /** Runner's home, so a configuration whose workspace root overlaps it is refused (ruling 4 on #462). */
+  runner_home?: unknown;
   /** `Poller.authorityFresh()`. Only `true` passes. */
   authority_fresh: unknown;
   /**
@@ -250,6 +270,25 @@ function isHost(v: unknown): v is string {
 }
 const isTool = (v: unknown): v is Tool => typeof v === "string" && (TOOLS as readonly string[]).includes(v);
 
+const GH_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+const GH_REPO = /^[A-Za-z0-9._-]{1,100}$/;
+/** `owner/name` as GitHub writes it, with nothing that could be a path trick, a URL or an option. */
+export function isFullName(v: unknown): v is string {
+  if (typeof v !== "string" || v.length > 140) return false;
+  const parts = v.split("/");
+  if (parts.length !== 2 || !GH_OWNER.test(parts[0]) || !GH_REPO.test(parts[1])) return false;
+  const name = parts[1];
+  return name !== "." && name !== ".." && !name.toLowerCase().endsWith(".git") && !name.startsWith("-") && !name.startsWith(".");
+}
+
+/** The owner's repository setting for a room, checked whole: exactly `full_name` and a positive `provider_repo_id`. */
+export function parseRepoScope(v: unknown): RepoScope | null {
+  if (!isObj(v) || !keysAre(v, ["full_name", "provider_repo_id"])) return null;
+  const { full_name, provider_repo_id } = v;
+  if (!isFullName(full_name) || !isCount(provider_repo_id) || provider_repo_id < 1) return null;
+  return { full_name, provider_repo_id };
+}
+
 function isRoot(v: unknown): v is string {
   if (typeof v !== "string" || v.length < 2 || v.length > MAX_ROOT || !v.startsWith("/") || v.endsWith("/")) return false;
   // A comma, colon or equals sign would be read as a container mount's options (L4 on #459).
@@ -276,7 +315,7 @@ function parseCaps(v: unknown): Parsed<Caps> {
 }
 
 function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
-  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "outputs"])) return fail("rooms[]");
+  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "outputs", "repository"])) return fail("rooms[]");
   const roomId = own(v, "room_id");
   if (!isId(roomId)) return fail("rooms[].room_id");
   const mode = Object.hasOwn(v, "mode") ? v.mode : "ask";
@@ -294,14 +333,32 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const trust = own(ack, "trust_statement");
   const warning = own(ack, "public_room_warning");
   if (typeof trust !== "boolean" || typeof warning !== "boolean") return fail("rooms[].acknowledged");
-  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning } } };
+  const given = Object.hasOwn(v, "repository") ? v.repository : null;
+  const repository = given === null ? null : parseRepoScope(given);
+  if (given !== null && repository === null) return fail("rooms[].repository");
+  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
 }
 
-/** Checks the owner's configuration whole. Anything missing, unknown or out of range refuses it: fail closed. */
-export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
+/** Whether two plain absolute paths are the same or one holds the other. */
+function overlaps(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * Checks the owner's configuration whole. Anything missing, unknown or out of range refuses it: fail closed.
+ * `runner_home`, when given, is Runner's own home: a workspace root that holds it, or sits inside it, refuses the whole
+ * configuration, so no task folder is ever Runner's home, its Git folders or its keys' neighbours, and Runner's home is
+ * never inside a folder a container mounts (ruling 4 on #462). Runner's command line always gives it.
+ */
+export function parsePolicyConfig(input: unknown, context: { runner_home?: unknown } = {}): Parsed<PolicyConfig> {
   try {
+    const home = copy(context);
+    const runnerHome = isObj(home) && Object.hasOwn(home, "runner_home") ? home.runner_home : undefined;
+    if (runnerHome !== undefined && !isRoot(runnerHome)) return fail("runner_home");
     const raw = copy(input);
-    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"])) return fail("config");
+    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"], ["max_active_tasks"])) return fail("config");
+    const maxActive = Object.hasOwn(raw, "max_active_tasks") ? raw.max_active_tasks : 1;
+    if (!inRange(maxActive, 1, MAX_ACTIVE_TASKS_CEILING)) return fail("max_active_tasks");
     if (raw.version !== POLICY_VERSION) return fail("version");
     const revision = raw.revision;
     if (!inRange(revision, 1, Number.MAX_SAFE_INTEGER)) return fail("revision");
@@ -311,6 +368,7 @@ export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
     if (typeof adapter !== "string" || !(ADAPTERS as readonly string[]).includes(adapter)) return fail("adapter");
     const root = raw.workspace_root;
     if (!isRoot(root)) return fail("workspace_root");
+    if (typeof runnerHome === "string" && overlaps(root, runnerHome)) return fail("workspace_root");
     const caps = parseCaps(raw.caps);
     if (!caps.ok) return caps;
     const day = raw.day_caps;
@@ -325,7 +383,7 @@ export function parsePolicyConfig(input: unknown): Parsed<PolicyConfig> {
       if (rooms.some((x) => x.room_id === room.value.room_id)) return fail("rooms[].room_id");
       rooms.push(room.value);
     }
-    return { ok: true, value: { version: 1, revision, owner_org: ownerOrg, adapter: adapter as Adapter, workspace_root: root, caps: caps.value, day_caps: { spend_micro_usd: daySpend }, rooms } };
+    return { ok: true, value: { version: 1, revision, owner_org: ownerOrg, adapter: adapter as Adapter, workspace_root: root, caps: caps.value, day_caps: { spend_micro_usd: daySpend }, rooms, max_active_tasks: maxActive } };
   } catch {
     return fail("config");
   }
@@ -409,7 +467,7 @@ export function evaluate(input: EvaluateInput): Decision {
 function decide(input: EvaluateInput): Decision {
   const given = copy(input);
   if (!isObj(given)) return { outcome: "refuse", reason: "config_invalid" };
-  const parsed = parsePolicyConfig(own(given, "config"));
+  const parsed = parsePolicyConfig(own(given, "config"), Object.hasOwn(given, "runner_home") ? { runner_home: given.runner_home } : {});
   if (!parsed.ok) return { outcome: "refuse", reason: "config_invalid" };
   const config = parsed.value;
   const now = own(given, "now");
@@ -460,6 +518,7 @@ function decide(input: EvaluateInput): Decision {
     change_request_event_id: prompt.event,
     requester: label(prov.requester),
     authors: prov.inputs.map((i) => ({ input: i.input, authors: i.authors.map(label) })),
+    repository: room.repository === null ? null : { ...room.repository, branch: `podster/${ids.task_id}` },
   };
   // The reservation left out of the day's count, so consume can hold it to the decision's own (L5, bound 2026-11-18).
   const excluded = { excluded_reservation_micro_usd: ownReservation };
@@ -510,7 +569,9 @@ export type RunBinding = {
   task_version: number;
   /** SHA-256 of the exact prompt bytes the policy evaluated, in lower-case hex, computed by the caller. */
   input_hash: string;
+  /** GitHub's numeric ID of the room's repository, as a string, or null for a room without one. */
   repository_id: string | null;
+  /** The commit the run's checkout starts from. Null at issue for a room with a repository, until `pinRunBase`. */
   base_commit: string | null;
 };
 export type RunDecisionRecord = RunBinding & {
@@ -525,18 +586,24 @@ export type RunDecisionRecord = RunBinding & {
   consumed: boolean;
 };
 export type IssueRefusal = "refused" | "owner_approval_needed" | "reservation_excluded" | "binding_invalid" | "clock_invalid";
-export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "reservation_mismatch" | "binding_changed" | "facts_changed";
+export type ConsumeRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "refused" | "no_longer_eligible" | "reservation_mismatch" | "binding_changed" | "facts_changed" | "base_unpinned";
+export type PinRefusal = "record_invalid" | "clock_invalid" | "consumed" | "expired" | "no_repository" | "already_pinned" | "base_invalid";
 
 const BINDING_KEYS = ["task_id", "workspace_id", "task_version", "input_hash", "repository_id", "base_commit"] as const;
 
-function bindingOf(v: unknown, extra: readonly string[] = []): RunBinding | null {
+/** A repository's ID in a binding: GitHub's numeric ID, as a string. */
+const REPO_ID = /^[1-9][0-9]{0,15}$/;
+
+/** `unpinned`: a binding with a repository may still lack its base, as at issue; everywhere else it must have one. */
+function bindingOf(v: unknown, extra: readonly string[] = [], unpinned = false): RunBinding | null {
   if (!isObj(v) || !keysAre(v, [...BINDING_KEYS, ...extra])) return null;
   const { task_id, workspace_id, task_version, input_hash, repository_id, base_commit } = v;
   if (!isId(task_id) || !isId(workspace_id) || !isCount(task_version)) return null;
   if (typeof input_hash !== "string" || !HEX64.test(input_hash)) return null;
   if (repository_id === null) {
     if (base_commit !== null) return null;
-  } else if (!isId(repository_id) || typeof base_commit !== "string" || !COMMIT.test(base_commit)) return null;
+  } else if (typeof repository_id !== "string" || !REPO_ID.test(repository_id)) return null;
+  else if (!(base_commit === null && unpinned) && (typeof base_commit !== "string" || !COMMIT.test(base_commit))) return null;
   return { task_id, workspace_id, task_version, input_hash, repository_id: repository_id as string | null, base_commit: base_commit as string | null };
 }
 
@@ -545,7 +612,8 @@ const RECORD_KEYS = ["mode", "prompt_inputs", "change_request_event_id", "facts_
 /** A stored record, checked whole before anything compares it (L2 on #455's review). */
 function parseRecord(raw: unknown): RunDecisionRecord | null {
   const v = copy(raw);
-  const binding = bindingOf(v, RECORD_KEYS);
+  // A stored record may hold a repository whose base isn't pinned yet; consume refuses it until it is.
+  const binding = bindingOf(v, RECORD_KEYS, true);
   if (!binding || !isObj(v)) return null;
   const { mode, prompt_inputs, change_request_event_id, facts_key, reserved_micro_usd, issued_at, expires_at, consumed } = v;
   if (mode !== "unattended" && mode !== "approved") return null;
@@ -576,9 +644,14 @@ export function issueRunDecision(decision: Decision, binding: RunBinding, now: n
     // No own reservation exists before issue, so an evaluation that left one out skipped counting other runs.
     if (d.excluded_reservation_micro_usd !== 0) return { ok: false, reason: "reservation_excluded" };
     if (!isCount(now)) return { ok: false, reason: "clock_invalid" };
-    const b = bindingOf(copy(binding));
+    const b = bindingOf(copy(binding), [], true);
     if (!b || b.task_id !== d.task_id || b.workspace_id !== d.workspace_id) return { ok: false, reason: "binding_invalid" };
     const f = d.facts;
+    // The binding names the owner's repository for the room, or none when the room has none; and its base is pinned
+    // only later, against the verified checkout.
+    const repo = isObj(f.repository) ? f.repository : null;
+    if (b.repository_id !== (repo === null ? null : String(repo.provider_repo_id))) return { ok: false, reason: "binding_invalid" };
+    if (b.base_commit !== null) return { ok: false, reason: "binding_invalid" };
     return {
       ok: true,
       record: {
@@ -613,6 +686,7 @@ export function consumeRunDecision(stored: RunDecisionRecord, fresh: Decision, b
     if (!isCount(now) || now < record.issued_at) return { ok: false, reason: "clock_invalid" };
     if (record.consumed) return { ok: false, reason: "consumed" };
     if (now > record.expires_at) return { ok: false, reason: "expired" };
+    if (record.repository_id !== null && record.base_commit === null) return { ok: false, reason: "base_unpinned" };
     const d = copy(fresh);
     if (!isDecision(d)) return { ok: false, reason: "refused" };
     if (record.mode === "unattended" && d.outcome !== "run") return { ok: false, reason: "no_longer_eligible" };
@@ -627,5 +701,49 @@ export function consumeRunDecision(stored: RunDecisionRecord, fresh: Decision, b
     return { ok: true, record: { ...record, consumed: true } };
   } catch {
     return { ok: false, reason: "record_invalid" };
+  }
+}
+
+/**
+ * Pins the base of an issued, unspent decision for a room with a repository, exactly once: the commit Runner's fresh
+ * checkout was verified at, before the decision is consumed against that same checkout (M7 step 10). A decision with no
+ * repository, one pinned to another base, spent or expired, or a base that isn't a commit ID, is refused, so nothing can
+ * move a pinned base afterwards. The same base again answers the record as it is, for a restart between pin and consume.
+ */
+export function pinRunBase(stored: RunDecisionRecord, base_commit: string, now: number): { ok: true; record: RunDecisionRecord } | { ok: false; reason: PinRefusal } {
+  try {
+    const record = parseRecord(stored);
+    if (!record) return { ok: false, reason: "record_invalid" };
+    if (!isCount(now) || now < record.issued_at) return { ok: false, reason: "clock_invalid" };
+    if (record.consumed) return { ok: false, reason: "consumed" };
+    if (now > record.expires_at) return { ok: false, reason: "expired" };
+    if (record.repository_id === null) return { ok: false, reason: "no_repository" };
+    if (typeof base_commit !== "string" || !COMMIT.test(base_commit)) return { ok: false, reason: "base_invalid" };
+    // A restart between the pin and the consume checks out again: the same commit is the pin already made (ruling 6).
+    if (record.base_commit === base_commit) return { ok: true, record };
+    if (record.base_commit !== null) return { ok: false, reason: "already_pinned" };
+    return { ok: true, record: { ...record, base_commit } };
+  } catch {
+    return { ok: false, reason: "record_invalid" };
+  }
+}
+
+/**
+ * The repository facts a decision was made on, and the task's folder, read back from its canonical facts: what the run's
+ * publication must use, and nothing else. Null for a decision with no repository, or a record that doesn't hold valid ones.
+ */
+export function repositoryOf(stored: RunDecisionRecord): { repository: NonNullable<RunFacts["repository"]>; task_folder: string } | null {
+  try {
+    const record = parseRecord(stored);
+    if (!record || record.repository_id === null) return null;
+    const facts = copy(JSON.parse(record.facts_key));
+    if (!isObj(facts) || !isObj(facts.repository) || !isRoot(facts.task_folder)) return null;
+    const r = facts.repository;
+    if (!keysAre(r, ["full_name", "provider_repo_id", "branch"]) || !isFullName(r.full_name) || !isCount(r.provider_repo_id)) return null;
+    if (String(r.provider_repo_id) !== record.repository_id || r.branch !== `podster/${record.task_id}`) return null;
+    if (facts.task_folder !== `${facts.workspace_root}/${record.workspace_id}/${record.task_id}`) return null;
+    return { repository: { full_name: r.full_name, provider_repo_id: r.provider_repo_id, branch: r.branch }, task_folder: facts.task_folder };
+  } catch {
+    return null;
   }
 }

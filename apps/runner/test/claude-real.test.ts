@@ -200,6 +200,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       change_request_event_id: null,
       requester: "per_Owner@org_real",
       authors: [{ input: "title", authors: ["per_Owner@org_real"] }],
+      repository: null,
     };
     if (over.setup) {
       await ensureFolder(root, facts.task_folder, { makeRoot: true });

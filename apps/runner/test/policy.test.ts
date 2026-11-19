@@ -500,7 +500,8 @@ describe("the facts handed to step 9's adapter", () => {
 });
 
 describe("run decisions: bound, single-use and expiring", () => {
-  const binding: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 4, input_hash: "a".repeat(64), repository_id: "repo_1", base_commit: "b".repeat(40) };
+  // A room with no repository: the binding names none (M7 step 10 binds the owner's repository; see below).
+  const binding: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 4, input_hash: "a".repeat(64), repository_id: null, base_commit: null };
 
   it("issues one for a run, for an ask only with the owner's approval, and never for a refusal", () => {
     const run = issueRunDecision(decide(), binding, NOW);
@@ -535,7 +536,7 @@ describe("run decisions: bound, single-use and expiring", () => {
     const changed: [string, Decision, RunBinding][] = [
       ["version", decide(), { ...binding, task_version: 5 }],
       ["input hash", decide(), { ...binding, input_hash: "c".repeat(64) }],
-      ["repository", decide(), { ...binding, repository_id: "repo_2" }],
+      ["repository", decide(), { ...binding, repository_id: "202", base_commit: "d".repeat(40) }],
       ["base", decide(), { ...binding, base_commit: "d".repeat(40) }],
       ["task", decide(), { ...binding, task_id: "task_2" }],
       ["authors", decide({ provenance: provenance({ inputs: [input("title", [author("internal"), author("internal", 5)]), input("instructions", [author("internal")])] }) }), binding],
@@ -558,7 +559,8 @@ describe("run decisions: bound, single-use and expiring", () => {
 });
 
 describe("the deep review of #455, ruled 2026-11-18", () => {
-  const binding: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 4, input_hash: "a".repeat(64), repository_id: "repo_1", base_commit: "b".repeat(40) };
+  // A room with no repository: the binding names none (M7 step 10 binds the owner's repository; see below).
+  const binding: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 4, input_hash: "a".repeat(64), repository_id: null, base_commit: null };
   const issue = (d: Decision, opts?: { approved_by_owner?: boolean }) => {
     const issued = issueRunDecision(d, binding, NOW, opts);
     if (!issued.ok) throw new Error(`not issued: ${issued.reason}`);

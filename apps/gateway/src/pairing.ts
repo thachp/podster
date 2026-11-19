@@ -43,14 +43,18 @@ import { callApi, clientKey, createAgent, createAuth, denied, json, linkOnce, pe
 
 /**
  * The plugin host's default capabilities for Runner's agent (decision 230): what it uses, and never `merge_task`,
- * `deploy_release` or anything that makes or assigns work. `get_repo_access` is withheld until step 10's repository path
- * brings it back under its own rules (ruled 2026-11-18, L1): a contents-write token can commit straight to the default
- * branch where rulesets aren't available, which amounts to merging. These are a budget, not a ceiling: anything more goes
- * through the person's claim. A capability this deployment doesn't list is left out.
+ * `deploy_release` or anything that makes or assigns work. `get_repo_access` was withheld until M7 step 10's repository
+ * path (ruled 2026-11-18, L1), since a contents-write token can commit straight to the default branch where rulesets
+ * aren't available; it is back under that path's own rules, which Runner enforces on the owner's machine (only the
+ * repository the owner scoped, only where GitHub shows the default branch under ADR 0009's rules, one task branch, no
+ * merge call, the token never in a container). The API's own checks (a ready link, a live push grant, an accepted
+ * task) are unchanged. These are a budget, not a ceiling: anything more goes through the person's claim. A capability
+ * this deployment doesn't list is left out, so `get_repo_access` only where managed repositories are switched on.
  */
 export const RUNNER_CAPABILITIES = [
   "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "read_inbox", "ack_inbox", "list_tasks", "get_task",
   "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link", "list_assets",
+  "get_repo_access",
 ] as const;
 
 /** Redemptions one network may make, per minute and per day, counted exactly. */

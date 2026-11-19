@@ -4,9 +4,10 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, runWithLifecycle, type AskView, type OwnerAnswer, type PolicyCalls } from "../src/core/lifecycle.js";
+import { CHECK_IN_MS, Lifecycle, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
-import { consumeRunDecision, evaluate, issueRunDecision, type RunDecisionRecord } from "../src/core/policy.js";
+import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
 import { Poller, type PollerDeps } from "../src/core/poller.js";
 import { sha256Hex } from "../src/core/prompt.js";
 import { budgetOf, DAY_MS, MemoryRunStore, reserve, rolled, settle, emptyRuns } from "../src/core/runs.js";
@@ -105,7 +106,7 @@ class FakePrompter {
   }
 }
 
-async function setup(config: unknown | (() => unknown) = policyConfig()) {
+async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath } = {}) {
   const clock = new TestClock();
   const gateway = new FakeGateway(clock);
   const secrets = new MemorySecretStore();
@@ -125,6 +126,8 @@ async function setup(config: unknown | (() => unknown) = policyConfig()) {
   const adapter = new FakeAdapter(timeline);
   const prompter = new FakePrompter();
   const runs = new MemoryRunStore();
+  /** What a test runs at points inside the policy calls. */
+  const hooks: { beforeConsume: (() => void) | null } = { beforeConsume: null };
   const policyCalls: { fn: string; budget?: Record<string, number>; opts?: unknown; returned?: unknown }[] = [];
   const policy: PolicyCalls = {
     evaluate: (input) => {
@@ -137,13 +140,14 @@ async function setup(config: unknown | (() => unknown) = policyConfig()) {
       return returned;
     },
     consumeRunDecision: (stored, fresh, binding, now) => {
+      hooks.beforeConsume?.();
       const returned = consumeRunDecision(stored, fresh, binding, now);
       policyCalls.push({ fn: "consume", returned: structuredClone(returned) });
       return returned;
     },
   };
   let ids = 0;
-  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS };
+  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
   const lifecycle = await Lifecycle.open(lifecycleDeps);
   const stop = new AbortController();
   /** Offers a task: its record in the gateway and its inbox event. */
@@ -158,7 +162,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig()) {
   };
   const entry = (task: string) => lifecycle.record.entries[`${ROOM}/${task}`];
   const commands = (name: string) => gateway.calls.filter((c) => c.capability === name);
-  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline };
+  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, hooks, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline };
 }
 
 /** The next `n` accepts each answer 503, with nothing applied. */
@@ -896,5 +900,232 @@ describe("the rulings on #458's review", () => {
     expect(u.policyCalls.filter((c) => c.fn === "evaluate")).toHaveLength(2);
     expect(u.entry("tsk_one")).toMatchObject({ phase: "finished", consumed: finished.consumed, ran_hash: finished.ran_hash });
     expect(u.adapter.starts).toHaveLength(1);
+  });
+});
+
+describe("step 10: the repository path in the lifecycle", () => {
+  const SCOPE = { full_name: "podsterdev/todo-app", provider_repo_id: 9001 };
+  const BASE = "b".repeat(40);
+  const repoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE }] });
+
+  class FakeRepository implements RepositoryPath {
+    prepared: (RepoTask & { continue_from: string | null })[] = [];
+    published: (RepoTask & { base_commit: string })[] = [];
+    forgotten = 0;
+    prepareError: RepoPathError | null = null;
+    publishError: RepoPathError | null = null;
+    /** Runs inside `prepare`, as the owner editing the policy mid-checkout would. */
+    onPrepare: (() => void) | null = null;
+    commit = "c".repeat(40);
+    timeline: string[] = [];
+    async prepare(task: RepoTask & { continue_from: string | null }) {
+      this.timeline.push("repo:prepare");
+      this.prepared.push(task);
+      if (this.prepareError) throw this.prepareError;
+      this.onPrepare?.();
+      return { repository_id: "9001", base_commit: task.continue_from ?? BASE };
+    }
+    async publish(task: RepoTask & { base_commit: string }): Promise<Publication> {
+      this.timeline.push("repo:publish");
+      this.published.push(task);
+      if (this.publishError) throw this.publishError;
+      return { kind: "published", branch: task.repository.branch, commit: this.commit, pr_number: 12 };
+    }
+    forget() {
+      this.forgotten++;
+    }
+  }
+
+  async function repoSetup(config: unknown | (() => unknown) = repoConfig()) {
+    const repo = new FakeRepository();
+    const t = await setup(config, { repository: repo });
+    repo.timeline = t.timeline;
+    return { ...t, repo };
+  }
+
+  it("issues with the repository and no base, checks out after the accept, pins the base before the consume, and publishes only after a confirmed stop", async () => {
+    const t = await repoSetup();
+    t.offer(detail("tsk_repo"));
+    expect(await t.pass()).toBe("idle");
+    const order = t.timeline.filter((x) => /^(call:(accept_task|get_task)|repo:|adapter:)/.test(x));
+    expect(order).toEqual(["call:get_task", "call:accept_task", "call:get_task", "repo:prepare", "adapter:start", "adapter:stop", "repo:publish"]);
+    const issued = (t.policyCalls.find((c) => c.fn === "issue")?.returned as { record: RunDecisionRecord }).record;
+    expect([issued.repository_id, issued.base_commit]).toEqual(["9001", null]);
+    const consumed = (t.policyCalls.find((c) => c.fn === "consume")?.returned as { record: RunDecisionRecord }).record;
+    expect([consumed.repository_id, consumed.base_commit]).toEqual(["9001", BASE]);
+    expect(t.repo.prepared[0]).toMatchObject({ workspace_id: ROOM, task_id: "tsk_repo", task_folder: `/work/podster/${ROOM}/tsk_repo`, repository: { ...SCOPE, branch: "podster/tsk_repo" }, continue_from: null });
+    expect(t.repo.published[0]).toMatchObject({ base_commit: BASE, repository: { ...SCOPE, branch: "podster/tsk_repo" } });
+    expect(t.adapter.starts[0].facts.repository).toEqual({ ...SCOPE, branch: "podster/tsk_repo" });
+    expect(t.entry("tsk_repo")).toMatchObject({ phase: "finished", outcome: "published", published: { repository_id: "9001", branch: "podster/tsk_repo", commit: t.repo.commit, pr_number: 12 } });
+    expect(t.repo.forgotten).toBeGreaterThan(0);
+  });
+
+  it("starts a rerun from what Runner pushed", async () => {
+    const t = await repoSetup();
+    t.offer(detail("tsk_repo"));
+    await t.pass();
+    const d = detail("tsk_repo", { changeRequest: { event_id: "evt_cr", text: "Tighten it" } });
+    d.task.status = "accepted";
+    d.task.version = 3;
+    t.offer(d, "task.changes_requested");
+    await t.pass();
+    expect(t.repo.prepared[1]?.continue_from).toBe(t.repo.commit);
+  });
+
+  it("releases with the code a refusal names, and leaves a passing failure to be evaluated afresh", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("repository_unprotected");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(0);
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_a", reason: "repo_repository_unprotected" });
+    t.repo.prepareError = new RepoPathError("base_moved", true);
+    t.offer(detail("tsk_b"));
+    await t.pass();
+    expect(t.entry("tsk_b")).toMatchObject({ phase: "waiting", outcome: "repo_base_moved", decision: null, reservation: null });
+    expect(t.commands("release_task").filter((c) => c.arguments.task_id === "tsk_b")).toHaveLength(0);
+    expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
+  });
+
+  it("ruling 6: a crash between the pin and the consume is picked up after a restart, on the same base", async () => {
+    const t = await repoSetup();
+    t.hooks.beforeConsume = () => {
+      t.hooks.beforeConsume = null;
+      throw new Error("the process died here");
+    };
+    t.offer(detail("tsk_crash"));
+    await t.pass();
+    // The pin was stored before the crash, and nothing ran.
+    expect(t.entry("tsk_crash")).toMatchObject({ phase: "ready", decision: { base_commit: BASE, consumed: false } });
+    expect(t.adapter.starts).toHaveLength(0);
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    expect(await restarted.tick(t.stop.signal)).toBe("idle");
+    expect(t.repo.prepared).toHaveLength(2);
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(restarted.record.entries[`${ROOM}/tsk_crash`]).toMatchObject({ phase: "finished", consumed: { base_commit: BASE } });
+  });
+
+  it("ruling 7: a policy changed while the checkout ran refuses the consume with facts_changed", async () => {
+    let cfg = repoConfig();
+    const t = await repoSetup(() => cfg);
+    t.repo.onPrepare = () => {
+      cfg = { ...cfg, rooms: [{ ...(cfg.rooms as unknown as Record<string, unknown>[])[0], tools: ["read", "search", "write", "edit", "shell"] }] as unknown as typeof cfg.rooms };
+    };
+    t.offer(detail("tsk_stale"));
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(0);
+    const consumed = t.policyCalls.filter((c) => c.fn === "consume").at(-1)?.returned;
+    expect(consumed).toEqual({ ok: false, reason: "facts_changed" });
+  });
+
+  it("ruling 5: a passing publication failure holds the finished work and publishes it later; it is never released", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("github_unreachable", true);
+    t.offer(detail("tsk_later"));
+    await t.pass();
+    expect(t.entry("tsk_later")).toMatchObject({ phase: "held", outcome: "repo_github_unreachable", after_stop: { kind: "finish" } });
+    expect(t.commands("release_task")).toHaveLength(0);
+    t.repo.publishError = null;
+    // Tried again only once its wait is over.
+    await t.pass();
+    expect(t.entry("tsk_later").phase).toBe("held");
+    t.clock.at += WAIT_MS;
+    await t.pass();
+    expect(t.entry("tsk_later")).toMatchObject({ phase: "finished", outcome: "published", published: { pr_number: 12 } });
+    expect(t.repo.published).toHaveLength(2);
+    expect(t.commands("release_task")).toHaveLength(0);
+  });
+
+  it("the ruling on held publications: retried for at most an hour from the first failure, then released as `repo_publish_failed`", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("github_unreachable", true);
+    t.offer(detail("tsk_cap"));
+    await t.pass();
+    const first = t.clock.now();
+    expect(t.entry("tsk_cap")).toMatchObject({ phase: "held", publish_since: first, after_stop: { kind: "finish" } });
+    // Retried at later passes, no sooner than the wait, never released inside the hour.
+    t.clock.at = first + 30 * 60_000;
+    await t.pass();
+    expect(t.entry("tsk_cap")).toMatchObject({ phase: "held", publish_since: first });
+    expect(t.repo.published.length).toBeGreaterThan(1);
+    expect(t.commands("release_task")).toHaveLength(0);
+    t.clock.at = first + PUBLISH_RETRY_MS;
+    await t.pass();
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_cap", reason: "repo_publish_failed" });
+    expect(t.entry("tsk_cap").outcome).toBe("repo_publish_failed");
+    // Logged by ID and code only.
+    const line = t.logged.find((l) => l.includes("repo_publish_failed")) as string;
+    expect(Object.keys(JSON.parse(line)).sort()).toEqual(["agent", "at", "code", "outcome", "task", "workspace"]);
+  });
+
+  it("the ruling on held publications: other tasks start while one is held, within the owner's limit, which counts it", async () => {
+    const limited = (max: number) => ({ ...repoConfig(), max_active_tasks: max });
+    // The default limit is one: a held publication is the one, so nothing new is accepted or started.
+    const one = await repoSetup(limited(1));
+    one.repo.publishError = new RepoPathError("github_unreachable", true);
+    one.offer(detail("tsk_held"));
+    await one.pass();
+    one.offer(detail("tsk_next"));
+    await one.pass();
+    expect(one.adapter.starts).toHaveLength(1);
+    expect(one.commands("accept_task").map((c) => c.arguments.task_id)).toEqual(["tsk_held"]);
+    // With two, the next task runs beside the held one; a third waits.
+    const two = await repoSetup(limited(2));
+    two.repo.publishError = new RepoPathError("github_unreachable", true);
+    two.offer(detail("tsk_held"));
+    await two.pass();
+    two.offer(detail("tsk_next"));
+    await two.pass();
+    expect(two.adapter.starts.map((s) => s.task_id)).toEqual(["tsk_held", "tsk_next"]);
+    expect(two.entry("tsk_next")).toMatchObject({ phase: "held" });
+    two.offer(detail("tsk_third"));
+    await two.pass();
+    expect(two.adapter.starts).toHaveLength(2);
+    expect(two.commands("accept_task").map((c) => c.arguments.task_id)).not.toContain("tsk_third");
+    // Once the held ones publish, the third goes ahead.
+    two.repo.publishError = null;
+    two.clock.at += WAIT_MS;
+    await two.pass();
+    await two.pass();
+    expect(two.adapter.starts.map((s) => s.task_id)).toContain("tsk_third");
+  });
+
+  it("refuses an owner's concurrency limit out of range", () => {
+    for (const bad of [0, 5, 1.5, "2"]) expect([bad, parsePolicyConfig({ ...repoConfig(), max_active_tasks: bad }).ok]).toEqual([bad, false]);
+    expect(parsePolicyConfig({ ...repoConfig(), max_active_tasks: 4 }).ok).toBe(true);
+  });
+
+  it("tells Podster only `runner_unavailable` when the owner's scope or Runner's setup is the reason", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("repository_out_of_scope");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments.reason).toBe("runner_unavailable");
+    expect(t.entry("tsk_a").outcome).toBe("repo_repository_out_of_scope");
+  });
+
+  it("releases a run whose publication is refused, and never runs a room with a repository without the path", async () => {
+    const t = await repoSetup();
+    t.repo.publishError = new RepoPathError("push_rejected");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    // The release is owed at once and sent on the next pass.
+    expect(t.entry("tsk_a").phase).toBe("giving_up");
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_a", reason: "repo_push_rejected" });
+    const bare = await setup(repoConfig());
+    bare.offer(detail("tsk_b"));
+    await bare.pass();
+    await bare.pass();
+    expect(bare.adapter.starts).toHaveLength(0);
+    expect(bare.commands("release_task")[0]?.arguments.reason).toBe("runner_unavailable");
+    expect(bare.entry("tsk_b").outcome).toBe("repository_unavailable");
   });
 });

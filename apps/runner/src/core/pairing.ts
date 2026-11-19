@@ -20,7 +20,7 @@
  * 3 on spike A). Nothing here logs a code, a key or a proof.
  */
 import { AgentAuthClient, generateKeypair, signHostJWT, type Keypair } from "@auth/agent";
-import { RUNNER_CAPABILITIES } from "./capabilities.js";
+import { RUNNER_CAPABILITIES, SWITCHED } from "./capabilities.js";
 import { Connection } from "./connection.js";
 import { errorFrom, GatewayError, meaningOf } from "./errors.js";
 import { gatewayFetch } from "./gateway.js";
@@ -253,7 +253,16 @@ async function register(deps: PairingDeps, storage: RunnerStorage): Promise<Regi
   });
   try {
     await client.init();
-    const connected = await client.connectAgent({ provider: deps.origin, capabilities: [...RUNNER_CAPABILITIES], mode: "delegated", preferredMethod: "device_authorization", name: RUNNER_NAME, signal: stop.signal });
+    const connect = (capabilities: string[]) => client.connectAgent({ provider: deps.origin, capabilities, mode: "delegated", preferredMethod: "device_authorization", name: RUNNER_NAME, signal: stop.signal });
+    let connected;
+    try {
+      connected = await connect([...RUNNER_CAPABILITIES]);
+    } catch (error) {
+      // A deployment with managed repositories off doesn't list `get_repo_access` (M7 step 10): the same list without it.
+      if ((error as { code?: unknown })?.code !== "invalid_capabilities" || stop.signal.aborted) throw error;
+      deps.log("pairing.register", "without_switched", { code: "invalid_capabilities" });
+      connected = await connect(RUNNER_CAPABILITIES.filter((c) => !(SWITCHED as readonly string[]).includes(c)));
+    }
     if (connected.status !== "active" || !isId(connected.agentId)) return { kind: "ended" };
     return { kind: "registered", pluginAgentId: connected.agentId };
   } catch (error) {

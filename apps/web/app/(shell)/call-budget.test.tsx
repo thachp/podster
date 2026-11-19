@@ -22,6 +22,9 @@ const once = (path: string) => {
 };
 
 vi.mock("@/lib/gateway/server", () => ({
+  // The gateway doesn't count the session read against the person, so it isn't counted here.
+  requireSession: async () => ({ user: { id: "per_me", name: "Me", email: "me@example.test" } }),
+  currentOrgCookie: async () => null,
   gatewayQuery: async (path: string) => {
     calls.push(path);
     return replies.get(path.split("?")[0]) ?? { ok: false, status: 404, code: "not_found" };
@@ -46,6 +49,8 @@ vi.mock("@/lib/workroom", () => ({
   isArchived: (r: { status: string }) => r.status === "archived",
 }));
 
+const { default: ShellLayout } = await import("./layout");
+const { default: WorkroomLayout } = await import("./w/[id]/layout");
 const { TasksRead } = await import("./w/[id]/tasks/tasks-read");
 const { ArtifactsRead } = await import("./w/[id]/artifacts/artifacts-read");
 const { default: Overview } = await import("./w/[id]/overview/page");
@@ -53,6 +58,7 @@ const { default: Activity } = await import("./w/[id]/activity/page");
 const { default: Attention } = await import("./attention/page");
 
 const params = Promise.resolve({ id: "ws_1" });
+
 const task = { id: "tsk_1", title: "Say hello", status: "submitted", requester: "per_me", reviewer: "per_me", assignee: "agt_1", version: 2, submission_no: 1 };
 
 beforeEach(() => {
@@ -66,28 +72,44 @@ beforeEach(() => {
   replies.set("/api/orgs/org_a/members", { ok: true, data: { members: [{ person_id: "per_long", name: "Long" }] } });
 });
 
-/** Every read a page made, the ones the render shares counted once. */
+/** Every read a render made, the ones it shares counted once. */
 const spent = () => calls.length;
 
+/** The layouts above a page render with it, so a read added to either counts against every page below. */
+const withShell = async (page: () => Promise<unknown>) => {
+  await ShellLayout({ children: null });
+  await page();
+};
+const inRoom = (page: () => Promise<unknown>) =>
+  withShell(async () => {
+    await WorkroomLayout({ params, children: null });
+    await page();
+  });
+
 describe("gateway calls per page render", () => {
+  it("the layouts alone: the shell's identity and organizations, and the room", async () => {
+    await inRoom(async () => undefined);
+    expect(calls.toSorted()).toEqual(["/api/orgs", "/api/v1/me", "/api/v1/workspaces/ws_1"]);
+  });
+
   it("Tasks: shell 2, room 1, one page of tasks, the plan, agent names and one organization's people", async () => {
-    await TasksRead({ id: "ws_1" });
+    await inRoom(() => TasksRead({ id: "ws_1" }));
     expect(calls.toSorted()).toEqual(["/api/agents", "/api/orgs", "/api/orgs/org_a/members", "/api/v1/me", "/api/v1/workspaces/ws_1", "/api/v1/workspaces/ws_1/plan", "/api/v1/workspaces/ws_1/tasks?cursor=&order=newest"].toSorted());
     expect(spent()).toBe(7);
   });
 
   it("Artifacts: the same as Tasks, with the outputs in place of the plan", async () => {
-    await ArtifactsRead({ id: "ws_1" });
+    await inRoom(() => ArtifactsRead({ id: "ws_1" }));
     expect(spent()).toBe(7);
   });
 
   it("Overview, for an owner who can attach files: brief names, roles, files and one page of tasks", async () => {
-    await Overview({ params });
+    await inRoom(() => Overview({ params }));
     expect(spent()).toBe(8);
   });
 
   it("Activity: the events, one page of tasks for the filter, and names", async () => {
-    await Activity({ params, searchParams: Promise.resolve({}) });
+    await inRoom(() => Activity({ params, searchParams: Promise.resolve({}) }));
     expect(spent()).toBe(7);
   });
 
@@ -99,13 +121,13 @@ describe("gateway calls per page render", () => {
         workspaces: ["ws_1", "ws_2", "ws_3"].map((id) => ({ workspace_id: id, workspace_name: id, role: "owner", status: "active" })),
       },
     });
-    await Attention();
+    await withShell(() => Attention());
     expect(spent()).toBe(11);
   });
 
   it("names ask one read per shared organization, never one per row", async () => {
     replies.set("/api/v1/workspaces/ws_1/tasks", { ok: true, data: { tasks: Array.from({ length: 50 }, (_, index) => ({ ...task, id: `tsk_${index}`, requester: `per_${index}`, assignee: `agt_${index}` })), next_cursor: null } });
-    await TasksRead({ id: "ws_1" });
+    await inRoom(() => TasksRead({ id: "ws_1" }));
     expect(spent()).toBe(7);
   });
 });

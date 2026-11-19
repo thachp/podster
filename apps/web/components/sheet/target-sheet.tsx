@@ -157,6 +157,19 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
   const [reopened, setReopened] = useState(0);
   const searchText = search.toString();
 
+  // A command here asked the list behind to refresh. Closing moves the URL, and vinext's `pushState` discards a refresh still
+  // on its way, so a close after a command asks again once the URL has moved.
+  const listChanged = useRef(false);
+  const refreshList = useCallback(() => {
+    listChanged.current = true;
+    router.refresh();
+  }, [router]);
+  const refreshAfterMove = useCallback(() => {
+    if (!listChanged.current) return;
+    listChanged.current = false;
+    router.refresh();
+  }, [router]);
+
   const navigate = useCallback((target: string | null) => moveUrl(hrefWith(pathname, new URLSearchParams(search.toString()), param, target)), [pathname, search, param]);
 
   // Follows the URL, unless this Sheet still has something unfinished. Then the instance holds it and asks.
@@ -200,7 +213,8 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
     setGoneNotice(true);
     setBound(null);
     navigate(null);
-  }, [navigate, bound, searchText]);
+    refreshAfterMove();
+  }, [navigate, bound, searchText, refreshAfterMove]);
 
   return (
     <>
@@ -220,9 +234,10 @@ export function TargetSheet<T>(props: TargetSheetProps<T>) {
           onClose={() => {
             closed.current = { target: bound, search: searchText };
             navigate(null);
+            refreshAfterMove();
           }}
           onStay={() => navigate(bound)}
-          onRefreshList={() => router.refresh()}
+          onRefreshList={refreshList}
         />
       )}
     </>

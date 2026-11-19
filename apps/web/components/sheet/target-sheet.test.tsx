@@ -60,11 +60,20 @@ function Screen({
         </SheetLink>
       </main>
       <TargetSheet<Item> param="agent" noun="agent" load={load} title={(item) => item.title} description={() => "Workroom: Developer Platform"} version={(item) => item.version}>
-        {({ data, setDirty, run, saving }) => (
+        {({ data, setDirty, run, saving, close }) => (
           <>
             <Editor key={data.id} data={data} setDirty={setDirty} />
             <Button disabled={saving} onClick={() => void run(command)}>
               Save changes
+            </Button>
+            <Button
+              disabled={saving}
+              onClick={async () => {
+                const result = await run(command);
+                if (result?.ok) close();
+              }}
+            >
+              Save and close
             </Button>
           </>
         )}
@@ -124,6 +133,37 @@ describe("TargetSheet", () => {
       expect(event.defaultPrevented).toBe(false);
       expect(currentUrl()).toBe("/agents");
       expect(screen.getByRole("link", { name: "Open A" })).toHaveAttribute("href", "/agents?agent=a");
+    });
+
+    it("still refreshes the list once when a command is followed at once by closing, whose URL move discards a pending refresh", async () => {
+      setUrl("/agents?agent=a");
+      render(<Screen />);
+      await title("Agent A");
+      await userEvent.click(screen.getByRole("button", { name: "Save and close" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(currentUrl()).toBe("/agents");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(routerCalls.refreshed).toBe(1);
+    });
+
+    it("still refreshes the list once when a command ends access and the Sheet closes as gone", async () => {
+      setUrl("/agents?agent=a");
+      let allowed = true;
+      render(<Screen load={async (id) => (allowed ? ITEMS[id] : null)} command={async () => ((allowed = false), { ok: true, data: {} })} />);
+      await title("Agent A");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(routerCalls.refreshed).toBe(1);
+    });
+
+    it("doesn't refresh the list on a close with no command", async () => {
+      setUrl("/agents?agent=a");
+      render(<Screen />);
+      await title("Agent A");
+      await userEvent.keyboard("{Escape}");
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(routerCalls.refresh).toBe(0);
     });
 
     it("closing clears only its own parameter", async () => {

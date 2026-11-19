@@ -266,6 +266,22 @@ describe("UI-13: disconnecting", () => {
     await waitFor(() => expect(screen.getByText("Disconnected")).toBeInTheDocument());
   });
 
+  it("checks on a disconnect as soon as the tab is shown again, without waiting for the next tick", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    agent = { ...AGENT, status: "disconnecting" };
+    render(<Screen />);
+    await screen.findByText("Disconnecting");
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    const before = calls.length;
+    agent = { ...AGENT, status: "disconnected" };
+    hidden.mockReturnValue("visible");
+    act(() => void document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(screen.getByText("Disconnected")).toBeInTheDocument());
+    expect(calls.length).toBeGreaterThan(before);
+    hidden.mockRestore();
+  });
+
   it("reconnect shows the server's state and promises no room access", async () => {
     agent = { ...AGENT, status: "disconnected" };
     special = (url, init) => {

@@ -20,7 +20,8 @@ export type RunStatus = "succeeded" | "failed" | "budget_stopped" | "timed_out";
  * `result` is the run's structured result, bounded, present only on a success; step 11 submits it. It is the agent's
  * content: data, never logged. `stop_reason` is Runner's own code for why the run ended, when Runner ended it.
  */
-export type RunReport = { status: RunStatus; spent_micro_usd: number | null; result?: RunResult | null; stop_reason?: string | null };
+/** `stop_detail`: when the driver failed, its own fixed code (`plugins_unexpected`, `exec_exited`, `sdk_error`…), never text. */
+export type RunReport = { status: RunStatus; spent_micro_usd: number | null; result?: RunResult | null; stop_reason?: string | null; stop_detail?: string | null };
 export type StopResult = "stopped" | "unknown";
 
 export interface RunHandle {

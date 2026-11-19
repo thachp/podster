@@ -210,6 +210,8 @@ export type ProgressEvent = {
   task_id: string;
   kind: ProgressKind;
   code: string | null;
+  /** A model refusal's part of the body, as a fixed code (`top_key:output_config`); null otherwise. */
+  detail?: string | null;
   turns: number;
   spent_micro_usd: number;
   output_tokens: number;
@@ -321,6 +323,7 @@ export class SupervisedAdapter implements RunAdapter {
 /** One run under supervision. */
 class LiveRun {
   private reason: StopReason | null = null;
+  private detail: string | null = null;
   private ended = false;
   private stopping: Promise<StopResult> | null = null;
   private confirmed = false;
@@ -392,7 +395,7 @@ class LiveRun {
     // Always handled, whatever happened meanwhile, so a rejection is never left unhandled (M3 on #459).
     driverRun.done.then(
       (outcome) => this.finish(outcome, false),
-      () => this.finish(null, true),
+      (error: unknown) => this.finish(null, true, error),
     );
     if (!this.active) {
       // Halted while the driver was beginning, before its run could be cancelled: cancel it and kill the container
@@ -462,8 +465,11 @@ class LiveRun {
   }
 
   /** The driver ended by itself. Ignored once Runner has stopped the run: Runner's reason is the outcome. */
-  private finish(outcome: DriverOutcome | null, threw: boolean) {
+  private finish(outcome: DriverOutcome | null, threw: boolean, error?: unknown) {
     if (!this.active) return;
+    // The driver's own code, when it is one: a fixed lower-case identifier; anything else is the SDK's, never kept as text.
+    const message = error instanceof Error ? error.message : "";
+    this.detail = threw ? (/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "sdk_error") : null;
     this.end(outcome, threw);
   }
 
@@ -491,7 +497,7 @@ class LiveRun {
       result = parsed.ok ? parsed.value : null;
     }
     this.emit("ended", code ?? status);
-    this.resolveDone({ status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code });
+    this.resolveDone({ status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code, stop_detail: this.detail });
   }
 
   private check(call: ToolCall): ToolDecision {
@@ -549,7 +555,7 @@ class LiveRun {
     const admitted = this.broker.admit(request);
     if (!admitted.ok) {
       this.log("adapter.broker", "refused", admitted.reason);
-      this.emit("model_refused", admitted.reason);
+      this.emit("model_refused", admitted.reason, admitted.detail ?? null);
       if (admitted.hard_stop) void this.halt(admitted.reason as HardStop);
       return { ok: false, refused: admitted.reason };
     }
@@ -568,7 +574,7 @@ class LiveRun {
     return { ok: true, status: answer.status, body: answer.body };
   }
 
-  private emit(kind: ProgressKind, code: string | null = null) {
+  private emit(kind: ProgressKind, code: string | null = null, detail: string | null = null) {
     const totals = this.broker.totals;
     this.deps.progress?.({
       run_ref: this.run.run_ref,
@@ -576,6 +582,7 @@ class LiveRun {
       task_id: this.run.task_id,
       kind,
       code,
+      detail,
       turns: totals.turns,
       spent_micro_usd: totals.spent_micro_usd,
       output_tokens: totals.output_tokens,

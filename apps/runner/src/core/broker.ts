@@ -71,7 +71,11 @@ export type BrokerRefusal =
 export type HardStop = "turns_exhausted" | "output_tokens_exhausted" | "spend_cap";
 const HARD: ReadonlySet<BrokerRefusal> = new Set<BrokerRefusal>(["turns_exhausted", "output_tokens_exhausted", "spend_cap"]);
 
-export type Admission = { ok: true; forward: Forward } | { ok: false; reason: BrokerRefusal; hard_stop: boolean };
+/**
+ * `detail`, on a refused body only: which part was refused, as a fixed code naming a key or a type, never a value
+ * (`top_key:output_config`, `thinking:adaptive`, `block:server_tool_use`), so a refusal can be reviewed by name.
+ */
+export type Admission = { ok: true; forward: Forward } | { ok: false; reason: BrokerRefusal; hard_stop: boolean; detail?: string };
 
 export type Usage = { input_tokens: number; output_tokens: number; cache_creation_input_tokens: number; cache_read_input_tokens: number };
 
@@ -185,19 +189,56 @@ function toolOk(v: unknown): boolean {
   return (v.type === undefined || v.type === "custom") && isText(v.name) && optional(v.description, isText) && isObj(v.input_schema) && cacheOk(v.cache_control);
 }
 
-/** The request body, by the allowlist: anything not named here is refused. */
-function bodyAllowed(b: Obj): boolean {
-  if (!only(b, TOP_KEYS)) return false;
-  if (!Array.isArray(b.messages) || !b.messages.every((m) => isObj(m) && only(m, ["role", "content"]) && (m.role === "user" || m.role === "assistant") && contentOk(m.content))) return false;
-  if (!optional(b.system, (v) => isText(v) || (Array.isArray(v) && v.every((x) => isObj(x) && x.type === "text" && blockOk(x))))) return false;
-  if (!optional(b.tools, (v) => Array.isArray(v) && v.every(toolOk))) return false;
-  if (!optional(b.tool_choice, (v) => isObj(v) && only(v, ["type", "name", "disable_parallel_tool_use"]) && ["auto", "any", "tool", "none"].includes(v.type as string))) return false;
-  if (!optional(b.thinking, (v) => isObj(v) && only(v, ["type", "budget_tokens"]) && (v.type === "enabled" || v.type === "disabled"))) return false;
-  if (!optional(b.metadata, (v) => isObj(v) && only(v, ["user_id"]))) return false;
-  if (!optional(b.stop_sequences, (v) => Array.isArray(v) && v.every(isText))) return false;
-  if (!optional(b.stream, (v) => typeof v === "boolean")) return false;
-  for (const k of ["temperature", "top_k", "top_p"]) if (!optional(b[k], (v) => typeof v === "number" && Number.isFinite(v))) return false;
-  return true;
+/** A name from the request as a code: itself if it's a plain identifier, else `other`. */
+const nameCode = (v: unknown) => (typeof v === "string" && /^[a-z][a-z0-9_]{0,39}$/.test(v) ? v : "other");
+
+/** The first part of a content block outside the allowlist, as a code; null when the block is allowed. */
+function blockRefusal(v: unknown, inResult = false): string | null {
+  if (blockOk(v, inResult)) return null;
+  if (!isObj(v)) return "block:other";
+  const known = ["text", "image", "document", "tool_use", "tool_result", "thinking", "redacted_thinking"];
+  if (typeof v.type !== "string" || !known.includes(v.type)) return `block:${nameCode(v.type)}`;
+  if (!cacheOk(v.cache_control)) return "cache_control";
+  return `block_shape:${v.type}`;
+}
+
+/** The request body, by the allowlist: the first part refused, as a code, or null when the body is allowed. */
+function bodyRefusal(b: Obj): string | null {
+  const extra = Object.keys(b).find((k) => !TOP_KEYS.includes(k));
+  if (extra !== undefined) return `top_key:${nameCode(extra)}`;
+  if (!Array.isArray(b.messages)) return "messages";
+  for (const m of b.messages) {
+    if (!isObj(m) || !only(m, ["role", "content"]) || (m.role !== "user" && m.role !== "assistant")) return "message_shape";
+    if (isText(m.content)) continue;
+    if (!Array.isArray(m.content)) return "message_shape";
+    for (const block of m.content) {
+      const refused = blockRefusal(block);
+      if (refused) return refused;
+    }
+  }
+  if (!optional(b.system, (v) => isText(v) || (Array.isArray(v) && v.every((x) => isObj(x) && x.type === "text" && blockOk(x))))) return "system";
+  if (b.tools !== undefined) {
+    if (!Array.isArray(b.tools)) return "tools";
+    for (const t of b.tools) {
+      if (!isObj(t)) return "tools";
+      const key = Object.keys(t).find((k) => !["type", "name", "description", "input_schema", "cache_control"].includes(k));
+      if (key !== undefined) return `tool_key:${nameCode(key)}`;
+      if (t.type !== undefined && t.type !== "custom") return `tool_type:${nameCode(t.type)}`;
+      if (!toolOk(t)) return "tool_shape";
+    }
+  }
+  if (!optional(b.tool_choice, (v) => isObj(v) && only(v, ["type", "name", "disable_parallel_tool_use"]) && ["auto", "any", "tool", "none"].includes(v.type as string))) return "tool_choice";
+  if (b.thinking !== undefined) {
+    const t = b.thinking;
+    if (!isObj(t)) return "thinking";
+    if (t.type !== "enabled" && t.type !== "disabled") return `thinking:${nameCode(t.type)}`;
+    if (!only(t, ["type", "budget_tokens"])) return "thinking_shape";
+  }
+  if (!optional(b.metadata, (v) => isObj(v) && only(v, ["user_id"]))) return "metadata";
+  if (!optional(b.stop_sequences, (v) => Array.isArray(v) && v.every(isText))) return "stop_sequences";
+  if (!optional(b.stream, (v) => typeof v === "boolean")) return "stream";
+  for (const k of ["temperature", "top_k", "top_p"]) if (!optional(b[k], (v) => typeof v === "number" && Number.isFinite(v))) return k;
+  return null;
 }
 
 type InFlight = { worst: number; max_tokens: number; price: Price };
@@ -255,7 +296,8 @@ export class RunBroker {
     if (typeof model !== "string") return refuse("body_invalid");
     if (!Object.hasOwn(this.profile.prices, model)) return refuse("model_unpriced");
     if (!this.models.has(model)) return refuse("model_not_allowed");
-    if (!bodyAllowed(fields)) return refuse("body_not_allowed");
+    const refusedPart = bodyRefusal(fields);
+    if (refusedPart !== null) return { ok: false, reason: "body_not_allowed", hard_stop: false, detail: refusedPart };
 
     if (this.turns >= this.caps.turns) return refuse("turns_exhausted");
     let heldOutput = 0;

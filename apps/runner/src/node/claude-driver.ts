@@ -56,8 +56,9 @@ export type ClaudeSdk = { query: typeof query; createSdkMcpServer: typeof create
 export const CLAUDE_SDK: ClaudeSdk = { query, createSdkMcpServer, tool };
 
 /** Starting the `docker exec` client that carries Claude Code's standard input and output: the real one, or a stand-in. */
+export type ExecClient = SpawnedProcess & { readonly pid?: number; readonly signalCode?: NodeJS.Signals | string | null; stderrBytes?(): number };
 export interface ProcessControl {
-  spawn(command: string, args: string[], opts: { cwd: string; env: Record<string, string> }): SpawnedProcess & { readonly pid?: number };
+  spawn(command: string, args: string[], opts: { cwd: string; env: Record<string, string> }): ExecClient;
 }
 
 export const MCP_SERVER = "runner";
@@ -282,11 +283,17 @@ function canonical(v: unknown): string {
 
 export type DriverObservation =
   | { kind: "spawned"; run_ref: string }
-  | { kind: "init"; run_ref: string; claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[] }
+  | { kind: "init"; run_ref: string; claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[]; api_key_source: string; cwd_ok: boolean }
+  | { kind: "exec_exit"; run_ref: string; code: number | null; signal: string | null; stderr_bytes: number }
+  | { kind: "listener_refused"; run_ref: string; code: string }
+  | { kind: "result"; run_ref: string; subtype: string; is_error: boolean }
   | { kind: "hook"; run_ref: string; subtype: string; hook_event: string; hook_name: string; origin: boolean }
   | { kind: "callback"; run_ref: string; tool: string };
 
-type Live = { child: (SpawnedProcess & { readonly pid?: number }) | null; listener: BrokerListener | null; abort: AbortController; dir: string };
+type Live = { child: ExecClient | null; exited: Promise<void> | null; listener: BrokerListener | null; abort: AbortController; dir: string };
+/** How long a stop waits for the `docker exec` client to exit after it is killed. */
+const EXEC_EXIT_WAIT_MS = 5_000;
+const exitedOf = (child: ExecClient) => child.exitCode !== null || (child.signalCode ?? null) !== null;
 
 export type ClaudeDriverDeps = {
   home: string;
@@ -395,7 +402,7 @@ export class ClaudeDriver implements AgentDriver {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     await ensureFolder(this.deps.home, this.runs);
     const root = await freshFolder(join(this.runs, ref));
-    const live: Live = { child: null, listener: null, abort: new AbortController(), dir: root };
+    const live: Live = { child: null, exited: null, listener: null, abort: new AbortController(), dir: root };
     this.live.set(ref, live);
     let failure: string | null = null;
     const fail = (code: string) => {
@@ -431,6 +438,7 @@ export class ClaudeDriver implements AgentDriver {
       model: async (r) => ((await waitForInit()) ? session.model(r) : { ok: false, refused: "run_stopped" }),
       signal: session.signal,
       host: `${RELAY_ALIAS}:${RELAY_PORT}`,
+      onRefuse: (code) => this.deps.observe?.({ kind: "listener_refused", run_ref: ref, code }),
     });
     const max_seconds = Math.ceil(session.limits.run_time_ms / 1000) + CONTAINER_MARGIN_S;
     await this.prepare(ref, live.listener.port, max_seconds);
@@ -493,6 +501,15 @@ export class ClaudeDriver implements AgentDriver {
       }
       const child = this.processes.spawn(this.deps.dockerProgram, claudeExecArgs(ref, Object.keys(inner), s.args), { cwd: root, env: client });
       live.child = child;
+      live.exited = new Promise<void>((resolve) => {
+        if (exitedOf(child)) return resolve();
+        child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+          // Its exit code and how much it wrote to standard error, never what it wrote.
+          this.deps.observe?.({ kind: "exec_exit", run_ref: ref, code, signal: signal ?? null, stderr_bytes: child.stderrBytes?.() ?? 0 });
+          if (!initOk && failure === null) fail("exec_exited");
+          resolve();
+        });
+      });
       this.deps.observe?.({ kind: "spawned", run_ref: ref });
       return child;
     };
@@ -514,7 +531,7 @@ export class ClaudeDriver implements AgentDriver {
               fail("init_invalid");
               break;
             }
-            this.deps.observe?.({ kind: "init", run_ref: ref, ...init });
+            this.deps.observe?.({ kind: "init", run_ref: ref, ...init, api_key_source: typeof m.apiKeySource === "string" && /^[A-Za-z_ /]{1,40}$/.test(m.apiKeySource) ? m.apiKeySource : "other", cwd_ok: m.cwd === CONTAINER_WORK });
             if (init.claude_code_version !== PINNED_CLAUDE_CODE_VERSION) fail("claude_code_version");
             else if (init.permission_mode !== "dontAsk") fail("permission_mode");
             else if (init.tools.some((t) => !allowedNames.has(t))) fail("tools_unexpected");
@@ -532,12 +549,18 @@ export class ClaudeDriver implements AgentDriver {
             // Only Runner's own PreToolUse callback may run: by its event, its name, and no origin (failing closed).
             if (event !== "PreToolUse" || !RUNNER_HOOK_NAMES.includes(hookName) || origin) fail("hook_unexpected");
           } else if (m.type === "result") {
+            this.deps.observe?.({ kind: "result", run_ref: ref, subtype: typeof m.subtype === "string" && /^[a-z_]{1,40}$/.test(m.subtype) ? m.subtype : "other", is_error: m.is_error === true });
             if (!initOk) fail("init_missing");
             result = m.subtype === "success" ? (m.structured_output ?? null) : null;
           }
         }
-      } catch (error) {
-        if (failure === null) throw error;
+      } catch {
+        // The SDK's own error carries text from Claude Code: never kept, only that it happened.
+        if (failure === null) {
+          // An exec client that exited first is the reason; give its exit a moment to be seen.
+          if (live.child && !initOk) await Promise.race([live.exited, new Promise((r) => setTimeout(r, 50))]);
+          if (failure === null) fail("sdk_error");
+        }
       }
       if (failure === null && !initOk) fail("init_missing");
       if (failure !== null) throw new Error(failure);
@@ -548,15 +571,16 @@ export class ClaudeDriver implements AgentDriver {
     return { done, cancel: () => this.stop(ref) };
   }
 
-  /** Ends the exec client, the listener and the run's containers and network, at once. */
+  /** Ends the exec client, the listener and the run's containers and network, at once, and waits for the client to exit. */
   private async stop(ref: string) {
     const live = this.live.get(ref);
     if (live) {
       live.abort.abort();
-      live.child?.kill("SIGKILL");
+      if (live.child && !exitedOf(live.child)) live.child.kill("SIGKILL");
       await live.listener?.close();
     }
     await this.teardown(ref);
+    if (live?.exited) await Promise.race([live.exited, new Promise((r) => setTimeout(r, EXEC_EXIT_WAIT_MS))]);
   }
 
   /**
@@ -566,7 +590,7 @@ export class ClaudeDriver implements AgentDriver {
   async confirmGone(run_ref: string): Promise<boolean> {
     if (!REF.test(run_ref)) return false;
     const child = this.live.get(run_ref)?.child;
-    if (child && child.exitCode === null && (child.signalCode ?? null) === null) return false;
+    if (child && !exitedOf(child)) return false;
     try {
       if ((await this.list("ps", [`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}`])).length > 0) return false;
       if ((await this.list("network", [`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;
@@ -598,9 +622,11 @@ export class ClaudeDriver implements AgentDriver {
 export const nodeProcesses: ProcessControl = {
   spawn(command, args, opts) {
     const child = nodeSpawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"], shell: false });
-    child.stderr?.resume();
+    // Standard error is counted, never kept.
+    let stderr = 0;
+    child.stderr?.on("data", (d: Buffer) => void (stderr += d.length));
     child.on("error", () => undefined);
-    return child as unknown as SpawnedProcess & { pid?: number };
+    return Object.assign(child, { stderrBytes: () => stderr }) as unknown as ExecClient;
   },
 };
 

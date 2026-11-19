@@ -8,6 +8,8 @@ const EXPECTED = new Set(["/", "/proc", "/dev", "/dev/pts", "/dev/mqueue", "/sys
 const REQUIRED_TMPFS = ["/tmp", "/work", "/claude/home", "/claude/config"];
 /** Docker's own masked and read-only paths under /proc and /sys. */
 const MASKED = /^\/(proc\/(acpi|asound|bus|fs|irq|kcore|keys|latency_stats|timer_list|timer_stats|sched_debug|scsi|sys|sysrq-trigger|interrupts)|sys\/(firmware|devices\/virtual\/powercap))$/;
+/** Docker's init binary, which `--init` mounts read-only. */
+const DOCKER_INIT = "/usr/sbin/docker-init";
 /** File systems that carry a host folder into Docker Desktop's VM: never allowed. */
 const HOST_FS = /^(virtiofs|fakeowner|grpcfuse|osxfs|9p|fuse(\..*)?|nfs\d?|cifs|smb\d?)$/;
 
@@ -16,10 +18,16 @@ export function unexpectedMounts(procMounts: string): string[] {
   const out: string[] = [];
   const types = new Map<string, string>();
   for (const line of procMounts.split("\n").map((l) => l.trim()).filter((l) => l !== "")) {
-    const [, rawTarget = "", fstype = ""] = line.split(/\s+/);
+    const [, rawTarget = "", fstype = "", options = ""] = line.split(/\s+/);
     const target = rawTarget.replace(/\\040/g, " ");
     if (HOST_FS.test(fstype)) {
       out.push(`${fstype}:${target}`);
+      continue;
+    }
+    // Docker's own init, from `--init`: allowed only at exactly this path, and only read-only.
+    if (target === DOCKER_INIT) {
+      if (!options.split(",").includes("ro")) out.push(target);
+      types.set(target, fstype);
       continue;
     }
     if (!EXPECTED.has(target) && !MASKED.test(target)) out.push(target);

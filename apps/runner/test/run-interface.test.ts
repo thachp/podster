@@ -323,7 +323,7 @@ describe("a run that keeps to its policy", () => {
     });
     const handle = await t.start();
     const report = await handle.done;
-    expect(report).toEqual({ status: "succeeded", spent_micro_usd: expect.any(Number), result: RESULT, stop_reason: null });
+    expect(report).toEqual({ status: "succeeded", spent_micro_usd: expect.any(Number), result: RESULT, stop_reason: null, stop_detail: null });
     expect(report.spent_micro_usd).toBeGreaterThan(0);
     expect(t.sandbox.execs).toEqual([{ call_id: "c1", tool: "read", path: "src/build.ts" }]);
     expect(t.transport.sent).toHaveLength(1);
@@ -354,7 +354,7 @@ describe("a run that keeps to its policy", () => {
     });
     await (await t.start()).done;
     expect(t.progress.map((p) => p.kind)).toEqual(["started", "tool_refused", "model_request", "ended"]);
-    for (const event of t.progress) expect(Object.keys(event).sort()).toEqual(["code", "elapsed_ms", "kind", "output_tokens", "run_ref", "spent_micro_usd", "task_id", "turns", "workspace_id"]);
+    for (const event of t.progress) expect(Object.keys(event).sort()).toEqual(["code", "detail", "elapsed_ms", "kind", "output_tokens", "run_ref", "spent_micro_usd", "task_id", "turns", "workspace_id"]);
     expect(t.progress.at(-1)).toMatchObject({ kind: "ended", code: "succeeded", turns: 1 });
     const text = exposed(t);
     for (const secret of [WORDS, "id_rsa", KEY]) expect(text.includes(secret) ? secret : null).toBeNull();

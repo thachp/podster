@@ -403,7 +403,7 @@ describe("the loopback broker listener (scoped exception 1's runtime test)", () 
 
 const RESULT = { status: "completed", summary: "Done.", files: [] };
 type ToolDef = { name: string; handler: (args: Record<string, unknown>, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }> };
-type Step = { kind: "tool"; id: string; name: string; input: Record<string, unknown>; meta?: boolean } | { kind: "model" } | { kind: "message"; message: Record<string, unknown> } | { kind: "handler_only"; name: string; input: Record<string, unknown> };
+type Step = { kind: "tool"; id: string; name: string; input: Record<string, unknown>; meta?: boolean } | { kind: "model" } | { kind: "message"; message: Record<string, unknown> } | { kind: "handler_only"; name: string; input: Record<string, unknown> } | { kind: "client_exits"; code: number } | { kind: "throws" };
 
 /**
  * Claude Code's request as the relay delivers it: to the listener's loopback port, with the relay's Host. In tests the
@@ -434,7 +434,15 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
       return (async function* () {
         const spawnFn = options.spawnClaudeCodeProcess as (s: unknown) => unknown;
         const env = { ...(options.env as Record<string, string>), CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_CODE_OAUTH_TOKEN: "leak", DBUS_SESSION_BUS_ADDRESS: "unix:path=/bus", ANTHROPIC_API_KEY: "sdk-override" };
-        spawnFn({ command: "/sdk/claude", args: ["--output-format", "stream-json"], env, cwd: "/elsewhere", signal: new AbortController().signal });
+        const client = spawnFn({ command: "/sdk/claude", args: ["--output-format", "stream-json"], env, cwd: "/elsewhere", signal: new AbortController().signal }) as { exit?: (c: number | null, s: string | null) => void };
+        for (const step of steps) {
+          if (step.kind === "client_exits") {
+            client.exit?.(step.code, null);
+            await new Promise((r) => setImmediate(r));
+            throw new Error("Claude Code process exited with code 1: some text from Claude Code's stderr");
+          }
+          if (step.kind === "throws") throw new Error("An error with spaces and text from Claude Code");
+        }
         // A request sent before init, answered (or refused) whenever the listener lets it go.
         let early: Promise<void> | null = null;
         if (opts.modelFirst) {
@@ -449,6 +457,7 @@ function fakeSdk(steps: Step[], init: Record<string, unknown> | null = {}, opts:
         const abort = (options.abortController as AbortController).signal;
         for (const step of steps) {
           if (abort.aborted) throw new Error("aborted");
+          if (step.kind === "client_exits" || step.kind === "throws") continue;
           if (step.kind === "message") yield step.message;
           else if (step.kind === "model") {
             const e = options.env as Record<string, string>;
@@ -482,7 +491,27 @@ function fakeProcesses() {
   const processes: ProcessControl = {
     spawn(command, args, opts) {
       spawned.push({ command, args, ...opts });
-      const child = { pid: 4001, stdin: null, stdout: null, killed: false, exitCode: null as number | null, signalCode: null as string | null, kill: (signal: string) => (killed.push(signal), (child.signalCode = signal), true), on: () => undefined, once: () => undefined, off: () => undefined };
+      const listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
+      const child = {
+        pid: 4001,
+        stdin: null,
+        stdout: null,
+        killed: false,
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        stderrBytes: () => 120,
+        // A kill ends the client a moment later, as a real one does.
+        kill: (signal: string) => (killed.push(signal), setImmediate(() => child.exit(null, signal)), true),
+        exit: (code: number | null, signal: string | null) => {
+          if (child.exitCode !== null || child.signalCode !== null) return;
+          child.exitCode = code;
+          child.signalCode = signal;
+          for (const f of listeners.exit ?? []) f(code, signal);
+        },
+        on: (event: string, f: (...a: unknown[]) => void) => void (listeners[event] ??= []).push(f),
+        once: (event: string, f: (...a: unknown[]) => void) => void (listeners[event] ??= []).push(f),
+        off: () => undefined,
+      };
       children.push(child);
       return child as never;
     },
@@ -1562,5 +1591,127 @@ describe("M1: the isolation probe's checks", () => {
     expect(real).toMatch(/no_security_information/);
     expect(real).not.toMatch(/no_security: \(/);
     expect(real).toMatch(/expect\(REAL_SPEND_CEILING_MICRO_USD\)\.toBe\(148_000\)/);
+  });
+});
+
+// ---- After the second real run of #460 at bbe39cae: the exact refusal reason ----
+
+describe("the exact reason a run failed, as fixed codes", () => {
+  it("a driver failure carries its own code to the run's report, and anything else reads as sdk_error", async () => {
+    const t = await driverFor([], { plugins: [{ name: "cc-plugin-new", path: "/p" }] });
+    await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/^plugins_unexpected$/);
+    const u = await driverFor([{ kind: "throws" }]);
+    await expect((await u.driver.begin(session().s)).done).rejects.toThrow(/^sdk_error$/);
+  });
+
+  it("an exec client that exits before init fails the run as exec_exited, with its exit code and stderr length observed, never its text", async () => {
+    const t = await driverFor([{ kind: "client_exits", code: 1 }], null);
+    await expect((await t.driver.begin(session().s)).done).rejects.toThrow(/^exec_exited$/);
+    expect(t.observed.filter((o) => o.kind === "exec_exit")).toEqual([{ kind: "exec_exit", run_ref: "run-1", code: 1, signal: null, stderr_bytes: 120 }]);
+  });
+
+  it("observes the listener's refusals by code, and the SDK's result by its fixed subtype", async () => {
+    let refuse: ((code: string) => void) | undefined;
+    const t = await driverFor([{ kind: "message", message: { type: "result", subtype: "error_during_execution", is_error: true } }], {}, {
+      listen: async (deps) => {
+        refuse = deps.onRefuse;
+        return startBrokerListener(deps);
+      },
+    });
+    const run = await t.driver.begin(session().s);
+    refuse?.("host_refused");
+    await run.done.catch(() => undefined);
+    expect(t.observed.filter((o) => o.kind === "listener_refused")).toEqual([{ kind: "listener_refused", run_ref: "run-1", code: "host_refused" }]);
+    expect(t.observed.filter((o) => o.kind === "result")[0]).toEqual({ kind: "result", run_ref: "run-1", subtype: "error_during_execution", is_error: true });
+  });
+
+  it("the listener reports each refusal by its fixed code", async () => {
+    const codes: string[] = [];
+    const halt = new AbortController();
+    const listener = await startBrokerListener({ model: async () => ({ ok: true, status: 200, body: enc.encode("{}") }), signal: halt.signal, onRefuse: (c) => void codes.push(c) });
+    await send(listener.port, { headers: { host: "evil.test", "x-api-key": listener.token }, body: "{}" });
+    await send(listener.port, { headers: { host: `127.0.0.1:${listener.port}` }, body: "{}" });
+    expect(codes).toEqual(["host_refused", "token_refused"]);
+    halt.abort();
+  });
+
+  it("the broker says which part of a body it refused, by a fixed code naming the key, never its value", async () => {
+    const broker = new RunBroker(CLAUDE_PROFILE, CAPS, CLAUDE_MODELS);
+    const ask = (extra: Record<string, unknown>) => broker.admit({ method: "POST", path: "/v1/messages", query: "", body: enc.encode(JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 10, messages: [{ role: "user", content: "x" }], ...extra })) });
+    expect(ask({ output_config: { effort: "low" } })).toMatchObject({ ok: false, reason: "body_not_allowed", detail: "top_key:output_config" });
+    expect(ask({ context_management: {} })).toMatchObject({ detail: "top_key:context_management" });
+    expect(ask({ "Weird Key!": 1 })).toMatchObject({ detail: "top_key:other" });
+    expect(ask({ thinking: { type: "adaptive" } })).toMatchObject({ detail: "thinking:adaptive" });
+    expect(ask({ tools: [{ name: "t", input_schema: {}, eager_input_streaming: true }] })).toMatchObject({ detail: "tool_key:eager_input_streaming" });
+    expect(ask({ messages: [{ role: "user", content: [{ type: "server_tool_use" }] }] })).toMatchObject({ detail: "block:server_tool_use" });
+    expect(ask({ system: [{ type: "text", text: "s", cache_control: { type: "ephemeral", ttl: "1h" } }] })).toMatchObject({ detail: "system" });
+  });
+
+  it("the run's report carries the driver's code as stop_detail, and a model refusal's detail reaches progress", async () => {
+    const { SupervisedAdapter } = await import("../src/core/run-interface.js");
+    const { systemClock } = await import("../src/core/runtime.js");
+    const t = await driverFor([{ kind: "model" }], { plugins: [{ name: "cc-plugin-new", path: "/p" }] });
+    const root = join(await temp(), "w");
+    const progress: { kind: string; code: string | null; detail?: string | null }[] = [];
+    const adapter = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: new DockerSandbox({ docker: fakeDocker((a) => (a[0] === "ps" ? { stdout: "" } : {})).docker, image: IMAGE, uid: 501, gid: 20, home: t.home }), transports: { anthropic: new ProviderKeyTransport(CLAUDE_PROFILE, KEY, { fetch: (async () => new Response("{}")) as never, env: {}, execArgv: [] }) }, clock: systemClock, log: () => undefined, progress: (e) => void progress.push(e) });
+    const handle = await adapter.start({ run_ref: "run-1", workspace_id: "ws_room", task_id: "tsk_one", prompt: enc.encode("x"), facts: facts(root) });
+    expect(await handle.done).toMatchObject({ status: "failed", stop_reason: "driver_failed", stop_detail: "plugins_unexpected" });
+  });
+});
+
+describe("readInit takes init in the shape SDK 0.3.327 declares", () => {
+  it("accepts plugins as {name, path, version?}, MCP servers as {name, status, source?}, tools as names, and the permission mode as a string", async () => {
+    const real = {
+      type: "system",
+      subtype: "init",
+      apiKeySource: "ANTHROPIC_API_KEY",
+      claude_code_version: PINNED_CLAUDE_CODE_VERSION,
+      cwd: "/work",
+      tools: ["StructuredOutput", "mcp__runner__read", "mcp__runner__write"],
+      mcp_servers: [{ name: "runner", status: "connected", source: "sdk" }],
+      model: CLAUDE_MODEL,
+      permissionMode: "dontAsk",
+      slash_commands: ["compact"],
+      output_style: "default",
+      skills: [],
+      plugins: [
+        { name: "cc-plugin-agents-md", path: "/$bunfs/root/plugins/agents-md", version: "1.0.0" },
+        { name: "cc-plugin-privacy", path: "/$bunfs/root/plugins/privacy" },
+        { name: "cc-plugin-plugin-authoring", path: "/$bunfs/root/plugins/plugin-authoring", version: "0.2.0" },
+      ],
+      session_id: "s",
+      uuid: "u",
+    };
+    const t = await driverFor([{ kind: "tool", id: "toolu_1", name: "mcp__runner__read", input: { path: "a" } }], real);
+    expect(await (await t.driver.begin(session().s)).done).toEqual({ result: RESULT });
+    expect(t.observed.find((o) => o.kind === "init")).toMatchObject({ plugins: ["cc-plugin-agents-md", "cc-plugin-privacy", "cc-plugin-plugin-authoring"], mcp_servers: ["runner"], api_key_source: "ANTHROPIC_API_KEY", cwd_ok: true });
+  });
+
+  it("fails an MCP server from a plugin, or a tool not Runner's, by its own code", async () => {
+    const plugin = await driverFor([], { mcp_servers: [{ name: "runner", status: "connected", source: "sdk" }, { name: "plugin:privacy:scan", status: "connected", source: "plugin" }] });
+    await expect((await plugin.driver.begin(session().s)).done).rejects.toThrow(/^mcp_unexpected$/);
+    const tools = await driverFor([], { tools: ["StructuredOutput", "mcp__runner__read", "mcp__plugin_privacy__scan"] });
+    await expect((await tools.driver.begin(session().s)).done).rejects.toThrow(/^tools_unexpected$/);
+  });
+});
+
+describe("stopping waits for the exec client", () => {
+  it("cancel returns once the docker exec client has exited, so confirmGone right after reads it gone", async () => {
+    const t = await driverFor([]);
+    const run = await t.driver.begin(session().s);
+    await run.done;
+    await run.cancel();
+    expect(t.procs.children[0].signalCode).toBe("SIGKILL");
+    expect(await t.driver.confirmGone("run-1")).toBe(true);
+  });
+});
+
+describe("mounts: Docker's init", () => {
+  it("allows /usr/sbin/docker-init only at that exact path and only read-only", async () => {
+    const { unexpectedMounts } = await import("./probe-checks.js");
+    const base = ["overlay / overlay ro 0 0", "tmpfs /tmp tmpfs rw 0 0", "tmpfs /work tmpfs rw 0 0", "tmpfs /claude/home tmpfs rw 0 0", "tmpfs /claude/config tmpfs rw 0 0"];
+    expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/docker-init ext4 ro,relatime 0 0"].join("\n"))).toEqual([]);
+    expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/docker-init ext4 rw,relatime 0 0"].join("\n"))).toEqual(["/usr/sbin/docker-init"]);
+    expect(unexpectedMounts([...base, "/dev/vda1 /usr/sbin/other ext4 ro 0 0"].join("\n"))).toEqual(["/usr/sbin/other"]);
   });
 });

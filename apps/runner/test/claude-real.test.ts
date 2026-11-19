@@ -63,7 +63,9 @@ const CAPS = { enforcement: 30_000, isolation: 30_000, expansion: 20_000, spend:
 /** The six scenarios, once each, in bare mode: 0.148 USD. */
 export const REAL_SPEND_CEILING_MICRO_USD = Object.values(CAPS).reduce((a, b) => a + b, 0);
 
-type RunRecord = { scenario: string; status: string; stop_reason: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[] };
+type RunRecord = { scenario: string; status: string; stop_reason: string | null; stop_detail: string | null; spent_micro_usd: number | null; cap_micro_usd: number; requests: number; observations: DriverObservation[]; refusals: string[] };
+/** A name Claude Code reports, kept only if it's a plain identifier. */
+const plain = (v: string) => (/^[A-Za-z0-9_:.-]{1,80}$/.test(v) ? v : "other");
 type S44 = { plugins_allowed: boolean; no_hook_events: boolean; callback_ran: boolean; isolated: boolean; answered: boolean };
 type Probe = { reaches_nothing_else: boolean; relay_answers_401: boolean; only_token: boolean; mounts_exact: boolean; relay_networks: boolean };
 
@@ -113,12 +115,22 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       scenario: r.scenario,
       status: r.status,
       stop_reason: r.stop_reason,
+      // The driver's own fixed code when it failed (the second real run showed only `driver_failed`).
+      stop_detail: r.stop_detail,
       spent_micro_usd: r.spent_micro_usd,
       cap_micro_usd: r.cap_micro_usd,
       // Under zero means the broker stopped before the cap, which is the guarantee's price; never above.
       overshoot_micro_usd: (r.spent_micro_usd ?? 0) - r.cap_micro_usd,
       provider_requests: r.requests,
-      plugins: r.observations.filter((o) => o.kind === "init").map((o) => (o as { plugins: string[] }).plugins),
+      init: r.observations.filter((o) => o.kind === "init").map((o) => {
+        const i = o as { claude_code_version: string; permission_mode: string; tools: string[]; mcp_servers: string[]; plugins: string[]; api_key_source: string; cwd_ok: boolean };
+        return { version: plain(i.claude_code_version), permission_mode: plain(i.permission_mode), tools: i.tools.map(plain), mcp_servers: i.mcp_servers.map(plain), plugins: i.plugins.map(plain), api_key_source: i.api_key_source, cwd_ok: i.cwd_ok };
+      }),
+      exec_exits: r.observations.filter((o) => o.kind === "exec_exit"),
+      listener_refusals: r.observations.filter((o) => o.kind === "listener_refused").map((o) => (o as { code: string }).code),
+      sdk_results: r.observations.filter((o) => o.kind === "result").map((o) => (o as { subtype: string }).subtype),
+      // The broker's refusals, by code and the body part refused (`body_not_allowed/top_key:output_config`).
+      model_refusals: r.refusals,
       hooks: r.observations.filter((o) => o.kind === "hook").map((o) => `${(o as { hook_event: string }).hook_event}/${(o as { hook_name: string }).hook_name}${(o as { origin: boolean }).origin ? "/origin" : ""}`),
       runner_callbacks: r.observations.filter((o) => o.kind === "callback").length,
     }));
@@ -175,7 +187,8 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
     const handle = await adapter.start({ run_ref: ref, workspace_id: "ws_real", task_id: `tsk_${name}`, prompt: new TextEncoder().encode(prompt), facts });
     const report = await handle.done;
     const stopped = await handle.stop();
-    records.push({ scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations });
+    const refusals = progress.filter((e) => e.kind === "model_refused").map((e) => `${e.code}${e.detail ? `/${e.detail}` : ""}`);
+    records.push({ scenario: name, status: report.status, stop_reason: report.stop_reason ?? null, stop_detail: report.stop_detail ?? null, spent_micro_usd: report.spent_micro_usd, cap_micro_usd: CAPS[name], requests, observations, refusals });
     expect(await adapter.confirmStopped(ref)).toBe(true);
     expect(await inner.gone(ref)).toBe(true);
     expect(await driver.confirmGone(ref)).toBe(true);

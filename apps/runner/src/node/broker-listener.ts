@@ -26,6 +26,8 @@ export type ListenerDeps = {
   model: (request: BrokerRequest) => Promise<ModelAnswer>;
   signal: AbortSignal;
   token?: string;
+  /** Told each refusal's fixed code, so a run's report can say why its requests were refused. */
+  onRefuse?: (code: string) => void;
   /** The one `Host` taken, when not `127.0.0.1:<port>`: the relay's name, fixed in the driver's code. */
   host?: string;
   /** For tests; the defaults bound a stalled client. */
@@ -42,7 +44,7 @@ export function tokenMatches(given: unknown, token: string): boolean {
   return timingSafeEqual(digest(given), digest(token));
 }
 
-function refuse(res: ServerResponse, status: number, code: string) {
+function respondRefused(res: ServerResponse, status: number, code: string) {
   if (res.headersSent) return void res.destroy();
   res.writeHead(status, { "content-type": "application/json", connection: "close" });
   res.end(JSON.stringify({ type: "error", error: { type: status === 401 ? "authentication_error" : "permission_error", message: `Runner refused this request (${code}).` } }));
@@ -72,6 +74,14 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
   const token = deps.token ?? randomBytes(32).toString("hex");
   let port = 0;
   let closed = false;
+  const refuse = (res: ServerResponse, status: number, code: string) => {
+    try {
+      deps.onRefuse?.(code);
+    } catch {
+      // A report only.
+    }
+    respondRefused(res, status, code);
+  };
   const server = createServer({ connectionsCheckingInterval: deps.checkIntervalMs ?? 5_000, headersTimeout: deps.headersTimeoutMs ?? 30_000, requestTimeout: deps.requestTimeoutMs ?? 120_000 }, async (req, res) => {
     if (closed || deps.signal.aborted) return refuse(res, 503, "run_stopped");
     if (req.headers.origin !== undefined) return refuse(res, 403, "origin_refused");

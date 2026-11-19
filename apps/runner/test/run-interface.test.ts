@@ -103,9 +103,12 @@ class FakeSandbox implements TaskSandbox {
   goneHangs = false;
   /** Open holds until the run's signal aborts, then fails, as a stuck `docker run` would once cancelled. */
   openHangs = false;
+  /** When set, open waits for this, then makes the container: a slow `docker run` that finishes after all. */
+  openGate: Promise<void> | null = null;
   output = "ran";
   async open(spec: ContainerSpec, signal: AbortSignal) {
     this.specs.push(structuredClone(spec));
+    if (this.openGate) await this.openGate;
     this.alive.add(spec.run_ref);
     if (this.openHangs) await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   }
@@ -579,6 +582,28 @@ describe("the run-time timer starts with the run (L4 on #459)", () => {
     expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "halted", fields: { workspace: "ws_room_one", task: "tsk_one", code: "run_time" } });
     expect(t.sandbox.killed).toContain("run_1");
     expect(t.driver.sessions).toEqual([]);
+  });
+});
+
+describe("a container that opens after the run was halted (P8 on #459)", () => {
+  it("is killed once it exists, and nothing begins", async () => {
+    const t = setup(async () => RESULT);
+    let open: () => void = () => undefined;
+    t.sandbox.openGate = new Promise<void>((resolve) => (open = resolve));
+    const started = t.start();
+    started.catch(() => undefined);
+    await settled();
+    // The timer fires while open hangs: nothing is there to kill yet.
+    await t.clock.advance(CAPS.run_time_ms);
+    expect(t.sandbox.alive.size).toBe(0);
+    const killsBefore = t.sandbox.killed.length;
+    // Then open makes the container after all.
+    open();
+    await expect(started).rejects.toThrow(/start_failed/);
+    expect(t.sandbox.killed.length).toBeGreaterThan(killsBefore);
+    expect(t.sandbox.alive.size).toBe(0);
+    expect(t.driver.sessions).toEqual([]);
+    expect(await t.adapter.confirmStopped("run_1")).toBe(true);
   });
 });
 

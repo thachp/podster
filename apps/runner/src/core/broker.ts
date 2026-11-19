@@ -12,7 +12,7 @@
  *   every request still in flight, is refused. So spend never passes the cap on the provider's own usage.
  * - **Only a known body** (M1 on #459): known top-level keys; tools only the driver's own (`custom`), never the
  *   provider's server tools; content blocks only text, image or document (base64 or text sources), tool use, tool results
- *   and thinking; no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
+ *   and thinking, with documents in plain text only (a PDF bills beyond the body's bytes); no MCP servers, container, speed or service tier, and no cache lifetime. Anything else could act or
  *   spend outside Runner's tools and its worst case. A profile's fixed headers may not turn on a beta.
  * - **A model with no price is refused,** never counted as free. A run's model list is checked against the price table
  *   when the broker is made.
@@ -149,7 +149,7 @@ function blockOk(v: unknown, inResult = false): boolean {
     case "image":
       return only(v, ["type", "source", "cache_control"]) && sourceOk(v.source, ["base64"]);
     case "document":
-      return only(v, ["type", "source", "cache_control", "title", "context"]) && sourceOk(v.source, ["base64", "text"]) && optional(v.title, isText) && optional(v.context, isText);
+      return only(v, ["type", "source", "cache_control", "title", "context"]) && sourceOk(v.source, ["base64", "text"]) && (v.source as Obj).media_type === "text/plain" && optional(v.title, isText) && optional(v.context, isText);
     case "tool_use":
       return !inResult && only(v, ["type", "id", "name", "input", "cache_control"]) && isText(v.id) && isText(v.name) && isObj(v.input);
     case "tool_result":

@@ -338,7 +338,14 @@ class LiveRun {
 
   async begin() {
     await this.deps.sandbox.open(this.spec, this.abort.signal);
-    if (!this.active) throw new Error("halted");
+    if (!this.active) {
+      // Halted while the container was opening, which then made it after all: kill it now, whatever an earlier stop
+      // confirmed (P8 on #459).
+      await this.stopping;
+      this.confirmed = false;
+      await this.stop();
+      throw new Error("halted");
+    }
     const facts = this.run.facts;
     const session: DriverSession = {
       run_ref: this.run.run_ref,

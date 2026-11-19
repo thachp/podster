@@ -222,4 +222,14 @@ describe("the command line", () => {
     // The rejection's reason is never written: it could carry agent content or a token.
     expect(body).not.toMatch(/reason|String\(|message|stack/);
   });
+
+  it("fails closed the same way on an exception nothing caught", async () => {
+    const cli = await readFile(new URL("../src/node/cli.ts", import.meta.url), "utf8");
+    const at = cli.indexOf('process.on("uncaughtException", () => {');
+    expect(at).toBeGreaterThan(-1);
+    const body = cli.slice(at, cli.indexOf("});", at) + 3);
+    expect(body).toMatch(/logLine\("runner", "uncaught_exception"\)/);
+    expect(body).toMatch(/process\.exit\(70\)/);
+    expect(body).not.toMatch(/error|String\(|message|stack/);
+  });
 });

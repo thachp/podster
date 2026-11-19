@@ -213,10 +213,15 @@ async function locked(command: string, args: string[], home: string, state: File
   return 2;
 }
 
-// A rejection nothing handled fails closed: a fixed line, never its reason (which could carry agent content or a token),
+// A rejection or exception nothing handled fails closed: a fixed line, never its reason (which could carry agent content or a token),
 // and the process ends. A run left going is held on the next start, until its stop is confirmed (M3 on #459).
 process.on("unhandledRejection", () => {
   process.stderr.write(`${logLine("runner", "unhandled_rejection")}\n`);
+  process.exit(70);
+});
+// The same for an exception nothing caught.
+process.on("uncaughtException", () => {
+  process.stderr.write(`${logLine("runner", "uncaught_exception")}\n`);
   process.exit(70);
 });
 

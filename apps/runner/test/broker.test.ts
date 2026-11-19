@@ -133,6 +133,9 @@ describe("the body allowlist (M1 on #459)", () => {
       { type: "image", source: { type: "url", url: "https://evil.test/a.png" } },
       { type: "document", source: { type: "file", file_id: "file_1" } },
       { type: "document", source: { type: "url", url: "https://evil.test/a.pdf" } },
+      // Documents are plain text only: a PDF's pages bill as images and text, beyond the body-bytes worst case.
+      { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" } },
+      { type: "document", source: { type: "text", media_type: "text/html", data: "<p>x</p>" } },
       { type: "tool_result", tool_use_id: "t", content: [{ type: "image", source: { type: "url", url: "https://evil.test/a.png" } }] },
     ])
       expect([block.type, refused(user([block]))]).toMatchObject([block.type, { ok: false, reason: "body_not_allowed" }]);

@@ -190,7 +190,7 @@ async function locked(command: string, args: string[], home: string, state: File
     // The run engine is built, and what a previous process left is reaped, before the inbox is touched (M4 on #459).
     let engine: ClaudeEngine | null = null;
     if (keyFile !== undefined) {
-      engine = await claudeEngine({ home, key_file: resolve(keyFile), log });
+      engine = await claudeEngine({ home, key_file: resolve(keyFile), log, notify: say });
       await engine.reap();
     }
     const poller = await Poller.open({

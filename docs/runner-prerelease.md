@@ -62,4 +62,4 @@ Every step here is the owner's. Agents don't sign in to npm, publish, create tok
 4. with `dry_run` on, packs the `.tgz`, prints its SHA-256 and uploads it as an artifact, kept 7 days;
 5. with `dry_run` off, runs `npm publish --provenance --tag test --access public` from `apps/runner`, after the package's guard checks it's this workflow on `main`.
 
-The package holds `build/`, `git/credential-helper`, which Runner runs for Git, the README, and `package.json`. It has no tests, source maps, fixtures or secrets. Runner's two container images aren't in the package: the README says to build them from a checkout.
+The package holds `build/`; `git/credential-helper`, which Git runs for Runner as `/bin/sh <path>`, so it needs no execute bit; the two Dockerfiles, `sandbox/Dockerfile` and `claude-image/Dockerfile`, from which `run --provider-key-file` builds a missing image and pins it; the README; and `package.json`. It has no tests, source maps, fixtures or secrets.

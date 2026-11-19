@@ -51,13 +51,8 @@ chmod 600 <path>
 
 Runner refuses a key file that's a link, that someone else can read, or that holds anything but one key. It reads the key once and keeps it on your machine, in its own process: never in a task's container, a log, an argument or the environment of anything it starts. Use a key with a spending limit you set at the provider.
 
-Runner's two container images are pinned by image ID. Build them from a checkout of `thachp/podster` at the commit this version was published from, then write each ID into Runner's home:
-
-```bash
-docker build -q apps/runner/sandbox > ~/.podster-runner/task-image
-docker build -q apps/runner/claude-image > ~/.podster-runner/claude-image
-```
+Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, and the Claude Code image downloads Claude Code from npm's registry. If a build fails, `run` stops before running anything.
 
 ## Where it comes from
 
-Each version is built and published only by the `runner-prerelease` workflow on `main` of `github.com/thachp/podster`, with npm provenance. MIT licensed.
+Each version is built and published by the `runner-prerelease` workflow on `main` of `github.com/thachp/podster`, with npm provenance. The one possible exception is the first, `0.0.1-test.1`, which the owner may publish once from that workflow's own build, without provenance (see `docs/runner-prerelease.md` in the repository). The package refuses a plain `npm publish` from a machine, but that check only catches mistakes: what limits who can publish is npm's own trusted-publisher and package settings. MIT licensed.

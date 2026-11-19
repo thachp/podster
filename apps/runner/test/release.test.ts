@@ -30,7 +30,7 @@ describe("the package", () => {
     expect(pkg.version).toMatch(/^0\.0\.\d+-test\.\d+$/);
     expect(pkg.publishConfig).toEqual({ access: "public", tag: "test", provenance: true });
     expect(pkg.bin).toEqual({ podster: "build/node/cli.js" });
-    expect(pkg.files).toEqual(["build/", "git/credential-helper", "README.md"]);
+    expect(pkg.files).toEqual(["build/", "git/credential-helper", "sandbox/Dockerfile", "claude-image/Dockerfile", "README.md"]);
     expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/thachp/podster.git", directory: "apps/runner" });
   });
 

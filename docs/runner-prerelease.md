@@ -2,6 +2,8 @@
 
 **Status, 2026-11-19, latest:** `0.0.1-test.2` was staged and approved, and its provenance was verified. `0.0.1-test.3` is next: it carries the tool-path fix (#477), nudge interop's A2A-Version check (#476) and a README with a run-policy (`policy.json`) example and the key-file recipe, after the owner's first run hit two snags (a key file must hold exactly one key, mode 600; `allowed_orgs` must not include `owner_org`). It is staged the same way: bump merged, workflow run on `main` with `dry_run` off, then approve the staged version on npmjs.com.
 
+**Note, 2026-11-19:** `0.0.1-test.3` was published on 2026-11-19 with shasum `6c73c26d…`. `0.0.1-test.4` carries a fix found on the owner's Mac (Docker Desktop 28.5.1): when the pinned task image had been deleted, `ensureImage` stopped with `INSPECT_FAILED` instead of rebuilding, because Docker 28.5.1 answers `Error response from daemon: {"message":"No such image: sha256:…"}` and only the plain forms were recognised. The JSON-wrapped form is now accepted when it is one object whose only key is `message` and whose value names the pinned image; anything else still stops.
+
 *Earlier status, 2026-11-19, later:* `0.0.1-test.1` is on npm, published by the owner through path B. The trusted publisher is added, with staging required, and `0.0.1-test.2` is the first version for the workflow to stage. [What happened.](#2026-11-19-the-first-publish-and-staged-publishing)
 
 *Earlier still, 2026-11-19:* built, not published. The workflow hadn't run.

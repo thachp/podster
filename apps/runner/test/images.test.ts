@@ -108,6 +108,45 @@ describe("ensureImage", () => {
     }
   });
 
+  it("rebuilds and re-pins on Docker 28.5.1's JSON-wrapped \"No such image\"", async () => {
+    const home = await temp();
+    await writeFile(join(home, "task-image"), `${OLD}\n`);
+    const stderr = `Error response from daemon: {"message":"No such image: ${OLD}"}\n`;
+    const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? { code: 1, stderr } : args[0] === "build" ? { stdout: NEW } : {}));
+    expect(await ensureImage("task-image", { home, docker, notify: () => undefined })).toBe(NEW);
+    expect(calls.map((c) => c.args[0])).toEqual(["image", "build"]);
+    expect((await readFile(join(home, "task-image"), "utf8")).trim()).toBe(NEW);
+  });
+
+  it("stops on near-misses of the JSON-wrapped form: extra keys, another image, another message, malformed JSON", async () => {
+    const other = `sha256:${"d".repeat(64)}`;
+    const wrap = (body: string) => `Error response from daemon: ${body}`;
+    for (const stderr of [
+      wrap(`{"message":"No such image: ${OLD}","extra":1}`),
+      wrap(`{"message":"No such image: ${OLD}","message2":"x"}`),
+      wrap(`{"message":"No such image: ${other}"}`),
+      wrap(`{"message":"No such image: ${OLD}x"}`),
+      wrap(`{"message":"No such container: ${OLD}"}`),
+      wrap(`{"message":"Cannot connect, no such image: ${OLD}"}`),
+      wrap(`{"msg":"No such image: ${OLD}"}`),
+      wrap(`{"message":42}`),
+      wrap(`{"message":"No such image: ${OLD}"`),
+      wrap(`{"message":"No such image: ${OLD}"} trailing`),
+      wrap(`["No such image: ${OLD}"]`),
+      wrap(`{"message":"No such image: ${OLD}"}\n{"message":"No such image: ${OLD}"}`),
+      `Error: {"message":"No such image: ${OLD}"}`,
+      `{"message":"No such image: ${OLD}"}`,
+    ]) {
+      const home = await temp();
+      await writeFile(join(home, "task-image"), `${OLD}\n`);
+      const { calls, docker } = fakeDocker((args) => (args[0] === "image" ? { code: 1, stderr } : { stdout: NEW }));
+      const error = await ensureImage("task-image", { home, docker, notify: () => undefined }).catch((e: Error) => e);
+      expect((error as Error).message, stderr).toBe(INSPECT_FAILED["task-image"]);
+      expect(calls.map((c) => c.args[0])).toEqual(["image"]);
+      expect((await readFile(join(home, "task-image"), "utf8")).trim()).toBe(OLD);
+    }
+  });
+
   it("stops with a fixed message when a build fails, says nothing of Docker's output, and pins nothing", async () => {
     for (const answer of [{ code: 1, stderr: "secret-ish build output" }, { stdout: "not an id" }, { stdout: NEW, cut: true }, { code: 0, stdout: "" }] as Answer[]) {
       const home = await temp();

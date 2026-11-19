@@ -113,6 +113,30 @@ export const INSPECT_FAILED: Record<ImageName, string> = {
 /** Docker's own answer for an image it doesn't have, from `docker image inspect`. */
 const NO_SUCH_IMAGE = /^(Error: |Error response from daemon: )?No such image: /m;
 
+const JSON_NO_SUCH_IMAGE_PREFIX = "Error response from daemon: ";
+
+/**
+ * Docker 28.5.1 answers a missing image as `Error response from daemon: {"message":"No such image: <id>"}`. Accepted
+ * only as one JSON object whose single key is `message` and whose value is "No such image: " plus the pinned ID or its
+ * short form; anything else is not Docker's answer for this image.
+ */
+function isJsonNoSuchImage(stderr: string, pinnedId: string): boolean {
+  const text = stderr.trim();
+  if (!text.startsWith(JSON_NO_SUCH_IMAGE_PREFIX)) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(JSON_NO_SUCH_IMAGE_PREFIX.length));
+  } catch {
+    return false;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "message") return false;
+  const message = (parsed as { message: unknown }).message;
+  const hex = pinnedId.replace(/^sha256:/, "");
+  return typeof message === "string" && [pinnedId, hex, hex.slice(0, 12)].some((id) => message === `No such image: ${id}`);
+}
+
 /** A build's bound: Claude Code's image fetches its packages, so it can take minutes. */
 const BUILD_TIMEOUT_MS = 30 * 60_000;
 
@@ -131,7 +155,7 @@ export async function ensureImage(name: ImageName, opts: { home: string; docker:
     const present = await opts.docker(["image", "inspect", "--format", "{{.Id}}", pinnedId], { timeoutMs: 60_000, maxOutputBytes: 4096 });
     if (present.code === 0) return pinnedId;
     // Rebuilt only when Docker says it hasn't the image (security review L4 on #470). Any other failure stops.
-    if (present.code !== 1 || present.cut || !NO_SUCH_IMAGE.test(present.stderr)) throw new Error(INSPECT_FAILED[name]);
+    if (present.code !== 1 || present.cut || !(NO_SUCH_IMAGE.test(present.stderr) || isJsonNoSuchImage(present.stderr, pinnedId))) throw new Error(INSPECT_FAILED[name]);
   }
   opts.notify(BUILDING[name]);
   const built = await opts.docker(["build", "--quiet", "--pull=false", IMAGE_SOURCES[name]], { timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });

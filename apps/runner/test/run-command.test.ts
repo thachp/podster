@@ -129,6 +129,7 @@ function engine() {
     async confirmGone() {
       return true;
     },
+    async reap() {},
   };
   const run: RunEngine = {
     drivers: { claude_agent_sdk: driver },

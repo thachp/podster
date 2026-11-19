@@ -3,7 +3,10 @@
  * published (decision 26). Run `npm run build`, then `node build/node/cli.js <command>`.
  *
  *   pair    --gateway <https://…> --agent <agt_…>   Pair this machine. The code is read from standard input, never an argument.
- *   run     [--interval <seconds>] [--grace <minutes>]   Poll the inbox and record offers until stopped (Ctrl-C).
+ *   run     [--interval <seconds>] [--grace <minutes>] [--provider-key-file <path>]
+ *                                                     Poll the inbox until stopped (Ctrl-C). With a provider key
+ *                                                     file, run tasks through the Claude Agent SDK; without one,
+ *                                                     record offers and accept none.
  *   stop                                              Stop the Runner running from this home, and any run, at once.
  *   status                                            Show what this Runner's record says, by IDs.
  *   forget                                            Delete this Runner's keys and record. The agent stays connected in Podster.
@@ -12,9 +15,9 @@
  * standard output in fixed words; log lines, IDs only, go to standard error.
  *
  * `pair`, `run` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
- * runs. `run` still starts no task: it is wired to the lifecycle and the run interface (`run-command.ts`), but this build
- * has no run engine (`NO_ENGINE`) until step 9(b) adds the Claude Agent SDK's driver, so it opens no lifecycle and
- * accepts nothing it couldn't run.
+ * runs. `run` with `--provider-key-file` builds the Claude engine (`claude-engine.ts`: the pinned SDK, the Docker task
+ * container, the key's transport), reaps what a previous process left, then opens the lifecycle (`run-command.ts`).
+ * Without a key file it opens no lifecycle and accepts nothing it couldn't run.
  */
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,14 +33,17 @@ import { readHidden } from "./hidden-input.js";
 import { systemKeychain } from "./keychain.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
-import { NO_ENGINE, processTerminal, runInbox } from "./run-command.js";
+import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
+import { processTerminal, runInbox } from "./run-command.js";
 
-const USAGE = `Podster Runner (M7 step 6: pairing and the inbox loop; it runs no task yet)
+const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through the Claude Agent SDK)
 
   pair    --gateway <https://…> --agent <agt_…>   Pair this machine with the agent Podster's pairing started.
                                                    Paste the code when asked: it's never taken as an argument.
-  run     [--interval <seconds>] [--grace <minutes>]
-                                                   Poll the inbox and record offers until you stop it (Ctrl-C).
+  run     [--interval <seconds>] [--grace <minutes>] [--provider-key-file <path>]
+                                                   Poll the inbox until you stop it (Ctrl-C). With your Anthropic
+                                                   API key in a file only you can read, run tasks the run policy
+                                                   allows; without one, record offers and accept none.
   stop                                             Stop the Runner running from this home at once, and any run.
                                                    It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
@@ -175,6 +181,13 @@ async function locked(command: string, args: string[], home: string, state: File
     if (!record.gateway) throw new Error("This Runner isn't paired yet. Run `pair` first.");
     const interval = option(args, "interval");
     const grace = option(args, "grace");
+    const keyFile = option(args, "provider-key-file");
+    // The run engine is built, and what a previous process left is reaped, before the inbox is touched (M4 on #459).
+    let engine: ClaudeEngine | null = null;
+    if (keyFile !== undefined) {
+      engine = await claudeEngine({ home, key_file: resolve(keyFile), log });
+      await engine.reap();
+    }
     const poller = await Poller.open({
       origin: record.gateway,
       fetch: globalThis.fetch,
@@ -191,9 +204,7 @@ async function locked(command: string, args: string[], home: string, state: File
     // earlier Runner can't stop this one (L2 on #458).
     const unwatch = watchStop(home, nonce, () => stop.abort());
     say(`Polling every ${poller.intervalMs / 1000} seconds, outbound only. Stop with Ctrl-C or \`stop\`.`);
-    // No run engine in this build: `run` records offers and runs nothing (step 9(b) adds the Claude Agent SDK's driver).
-    const engine = NO_ENGINE;
-    if (engine === null) say("This Runner has no run adapter yet, so it records offers and accepts none.");
+    if (engine === null) say("No provider key file was given, so this Runner records offers and accepts none.");
     let outcome;
     try {
       outcome = await runInbox({ home, poller, clock: systemClock, log, signal: stop.signal, terminal: processTerminal(), engine });

@@ -170,6 +170,11 @@ class FakeDriver implements AgentDriver {
   async confirmGone(ref: string) {
     return !this.alive.has(ref);
   }
+  reaped: string[] = [];
+  async reap(ref: string) {
+    this.reaped.push(ref);
+    this.alive.delete(ref);
+  }
 }
 
 const modelRequest = (over: Record<string, unknown> = {}): BrokerRequest => ({
@@ -625,16 +630,37 @@ describe("stopping", () => {
     expect(t.sandbox.execs).toEqual([]);
   });
 
-  it("a run still going never reads as stopped, and after a restart only the driver and container decide", async () => {
+  it("a run still going never reads as stopped, and after a restart it is reaped before anything is confirmed (M4 on #459)", async () => {
     const t = setup(() => never());
     await t.start();
     expect(await t.adapter.confirmStopped("run_1")).toBe(false);
-    // A fresh interface, as after a restart, with the same machine.
+    expect(t.driver.reaped).toEqual([]);
+    // A fresh interface, as after a restart, with the same machine: the container goes by its label, the driver's tree
+    // is reaped, and only then do the two confirm.
     const again = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: t.sandbox, transports: { testprov: t.transport }, clock: t.clock, log: () => undefined });
+    expect(await again.confirmStopped("run_1")).toBe(true);
+    expect(t.sandbox.killed).toEqual(["run_1"]);
+    expect(t.driver.reaped).toEqual(["run_1"]);
+  });
+
+  it("after a restart, a reap that fails or hangs never reads as stopped", async () => {
+    const t = setup(() => never());
+    await t.start();
+    const again = new SupervisedAdapter({ drivers: { claude_agent_sdk: t.driver }, sandbox: t.sandbox, transports: { testprov: t.transport }, clock: t.clock, log: () => undefined });
+    // A reap that leaves the driver's tree alive, as one that can't reach it would.
+    t.driver.reap = async () => undefined;
+    t.sandbox.killThrows = true;
+    expect(await again.confirmStopped("run_1")).toBe(false);
+    t.sandbox.killThrows = false;
+    t.driver.reap = () => never();
+    const pending = again.confirmStopped("run_1");
+    await settled();
+    await t.clock.advance(STOP_STEP_MS);
+    expect(await pending).toBe(false);
+    // And a driver whose tree outlives the reap still holds it.
+    t.driver.reap = async () => undefined;
     expect(await again.confirmStopped("run_1")).toBe(false);
     t.driver.alive.clear();
-    expect(await again.confirmStopped("run_1")).toBe(false);
-    t.sandbox.alive.clear();
     expect(await again.confirmStopped("run_1")).toBe(true);
   });
 
@@ -672,13 +698,17 @@ describe("Runner's run interface source", () => {
     }
   });
 
-  it("adds no provider SDK and makes no network call of its own", async () => {
+  it("pins the Claude Agent SDK and its peers exactly, and only the Claude driver and its engine name it", async () => {
     const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8")) as { dependencies: Record<string, string> };
-    expect(Object.keys(pkg.dependencies)).toEqual(["@auth/agent"]);
+    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/sdk": "1.32.2", zod: "4.6.7" });
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version: string }> };
+    for (const [name, version] of Object.entries(pkg.dependencies)) expect([name, lock.packages[`node_modules/${name}`]?.version]).toEqual([name, version]);
     const src = new URL("src/", root);
     for (const file of (await readdir(src, { recursive: true })).filter((f) => f.endsWith(".ts"))) {
       const text = await readFile(new URL(file, src), "utf8");
-      expect([file, /@anthropic-ai|openai|claude-agent-sdk/.test(text)]).toEqual([file, false]);
+      const allowed = file === "node/claude-driver.ts" || file === "node/claude-engine.ts";
+      expect([file, /@anthropic-ai|claude-agent-sdk/.test(text) && !allowed]).toEqual([file, false]);
+      expect([file, /openai/i.test(text)]).toEqual([file, false]);
     }
     for (const file of files.slice(0, 3)) expect([file, /\bfetch\s*\(/.test(await readFile(new URL(file, root), "utf8"))]).toEqual([file, false]);
   });

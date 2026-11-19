@@ -187,6 +187,8 @@ export interface AgentDriver {
   begin(session: DriverSession): Promise<DriverRun>;
   /** Whether nothing of the run's process tree is left, after a restart too. */
   confirmGone(run_ref: string): Promise<boolean>;
+  /** After a restart: ends whatever a previous process left of the run's process tree (M4 on #459). */
+  reap(run_ref: string): Promise<void>;
 }
 
 // ---- Progress ----
@@ -278,11 +280,24 @@ export class SupervisedAdapter implements RunAdapter {
     return live.handle;
   }
 
-  /** Nothing of the run is left: not a run still going here, the driver's process tree, or its container. */
+  /**
+   * Nothing of the run is left: not a run still going here, the driver's process tree, or its container. A run this
+   * process never started, as after a restart, is reaped first (M4 on #459): its container, by the run's label, and each
+   * driver's process tree are killed before anything is confirmed, so a previous process's run never reads as stopped
+   * while it still goes.
+   */
   async confirmStopped(run_ref: string): Promise<boolean> {
     const live = this.live.get(run_ref);
     if (live?.active) return false;
     try {
+      if (!live) {
+        const drivers = Object.values(this.deps.drivers).filter((d): d is AgentDriver => d !== undefined);
+        // Bounded like a stop's steps: a reap that hangs reads as not stopped, never as a wait without end.
+        const settled = new AbortController();
+        const reaped = Promise.all([this.deps.sandbox.kill(run_ref), ...drivers.map((d) => d.reap(run_ref))]).then(() => true, () => false).finally(() => settled.abort());
+        const late = this.deps.clock.idle(STOP_STEP_MS, settled.signal).then(() => (settled.signal.aborted ? new Promise<boolean>(() => undefined) : false));
+        if (!(await Promise.race([reaped, late]))) return false;
+      }
       for (const driver of Object.values(this.deps.drivers)) if (driver && !(await driver.confirmGone(run_ref))) return false;
       if (!(await this.deps.sandbox.gone(run_ref))) return false;
     } catch {

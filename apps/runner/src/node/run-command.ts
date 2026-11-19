@@ -4,10 +4,10 @@
  * `TerminalPrompter` only when standard input and output are both terminals, and runs every task through the
  * provider-neutral `SupervisedAdapter`, then `runWithLifecycle` works the inbox.
  *
- * **With no run engine, `run` opens no lifecycle and runs nothing.** That is this build: no driver exists until step
- * 9(b) adds the Claude Agent SDK's, with the task container and the broker's transport. Until then `run` is step 6's
- * inbox loop, which records offers and accepts none, since Runner accepts nothing it couldn't run. An engine with no
- * driver counts as none.
+ * **With no run engine, `run` opens no lifecycle and runs nothing.** Step 9(b)'s engine (`claude-engine.ts`: the Claude
+ * Agent SDK's driver, the Docker task container and the provider transport) is built by `cli.ts` only when the owner
+ * names a provider key file; without one `run` is step 6's inbox loop, which records offers and accepts none, since
+ * Runner accepts nothing it couldn't run. An engine with no driver counts as none.
  */
 import { createInterface } from "node:readline/promises";
 import { Lifecycle, runWithLifecycle } from "../core/lifecycle.js";
@@ -21,7 +21,7 @@ import { TerminalPrompter, type Terminal } from "./prompter.js";
 /** What runs tasks: a driver per agent SDK, the task container, and the provider transports that hold the keys. */
 export type RunEngine = Pick<SupervisedDeps, "drivers" | "sandbox" | "transports">;
 
-/** This build's engine: none, so `run` runs nothing. Step 9(b) replaces it. */
+/** No engine: `run` records offers and runs nothing. `cli.ts` uses the Claude engine instead when given a key file. */
 export const NO_ENGINE: RunEngine | null = null;
 
 export type RunInboxDeps = {

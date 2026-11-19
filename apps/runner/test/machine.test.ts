@@ -215,6 +215,10 @@ describe("the environment of a program Runner starts", () => {
   });
 });
 
+/** The two files step 9(b)'s scoped source-test exceptions name, and no others. */
+const LISTENER_FILE = "node/broker-listener.ts";
+const PROFILE_FILE = "core/claude-profile.ts";
+
 describe("Runner's own source", () => {
   const sources = async () => {
     const root = new URL("apps/runner/src/", repo);
@@ -228,9 +232,34 @@ describe("Runner's own source", () => {
 
   it("never reaches the Rust API, and opens no listening port", async () => {
     for (const { file, text } of await sources()) {
-      expect([file, /api\.internal|x-podster-assertion|\/v1\//.test(text)]).toEqual([file, false]);
-      expect([file, /createServer|\.listen\(|node:net|node:dgram|node:http\b|node:https\b/.test(text)]).toEqual([file, false]);
+      expect([file, /api\.internal|x-podster-assertion/.test(text)]).toEqual([file, false]);
+      // Scoped exception (2), step 9(b): `/v1/` only as the exact literal "/v1/messages", only in the Claude driver's
+      // profile file. Everything else is held to the old rule.
+      const v1 = file === PROFILE_FILE ? text.replaceAll('"/v1/messages"', "") : text;
+      expect([file, /\/v1\//.test(v1)]).toEqual([file, false]);
+      // Scoped exception (1), step 9(b): only the broker listener may use node:http and `.listen(` (with node:http's
+      // createServer); node:net, node:dgram and node:https stay banned there too.
+      const listening = file === LISTENER_FILE ? text.replace(/\bcreateServer\b|\.listen\(|node:http\b(?!s)/g, "") : text;
+      expect([file, /createServer|\.listen\(|node:net|node:dgram|node:http\b|node:https\b/.test(listening)]).toEqual([file, false]);
     }
+  });
+
+  it("lets the broker listener listen only on the literal loopback address (scoped exception 1)", async () => {
+    const text = await readFile(new URL(`apps/runner/src/${LISTENER_FILE}`, repo), "utf8");
+    expect([...text.matchAll(/\.listen\(/g)].length).toBe(1);
+    expect(text).toContain('server.listen(0, "127.0.0.1", () => resolve());');
+    expect(text).not.toMatch(/0\.0\.0\.0|::|localhost/);
+  });
+
+  it("pins the profile file's one versioned path to api.anthropic.com, with no beta header (scoped exception 2)", async () => {
+    const text = await readFile(new URL(`apps/runner/src/${PROFILE_FILE}`, repo), "utf8");
+    expect(text.match(/\/v1\/[^"]*/g)).toEqual(["/v1/messages"]);
+    expect(text).toMatch(/host: "api\.anthropic\.com",/);
+    expect(text).not.toMatch(/anthropic-beta|beta=/i);
+    const { CLAUDE_PROFILE } = await import("../src/core/claude-profile.js");
+    expect(CLAUDE_PROFILE.host).toBe("api.anthropic.com");
+    expect(CLAUDE_PROFILE.path).toBe("/v1/messages");
+    expect(Object.keys(CLAUDE_PROFILE.headers).map((h) => h.toLowerCase())).not.toContain("anthropic-beta");
   });
 
   it("takes the home's lock for pair, run and forget, before anything else they do (decision 227)", async () => {

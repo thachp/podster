@@ -237,7 +237,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      # No package's install script runs: Runner's dependencies are the pinned Agent Auth client and its build tools.
+      # No package's install script runs: Runner's dependencies are the pinned Agent Auth client, the pinned Claude Agent SDK with its peers, and build tools. CI never runs the SDK against a provider.
       - run: npm ci --ignore-scripts
         working-directory: apps/runner
       - run: npm run typecheck

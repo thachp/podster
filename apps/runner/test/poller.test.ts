@@ -7,6 +7,7 @@ import { applyEvents, applyListing, OFFERS_KEPT, readEvents, readTask } from "..
 import { emptyState, MemoryStateStore } from "../src/core/state.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock } from "./fake-gateway.js";
+import { leaksIn } from "./leaks.js";
 
 const ROOM = "ws_room_one";
 const OTHER = "ws_room_two";
@@ -109,7 +110,8 @@ describe("the inbox loop", () => {
     expect(Object.keys(record.offers).sort()).toEqual([`${ROOM}/tsk_a`, `${ROOM}/tsk_b`, `${ROOM}/tsk_e`, `${OTHER}/tsk_f`]);
     expect(record.offers[`${ROOM}/tsk_a`]).toMatchObject({ source: "reconcile", last: "offered", version: 3, seq: null });
     // What a task says never reaches the record.
-    expect(JSON.stringify(record)).not.toMatch(/Ignore|leak/);
+    // As whole tokens: the record holds a random key thumbprint, which can hold `leak` by chance (leaks.ts).
+    expect(leaksIn(record, { words: ["Ignore", "leak"], secrets: [] })).toEqual([]);
     const listed = gateway.calls.filter((c) => c.capability === "list_tasks").map((c) => c.arguments);
     expect(listed).toContainEqual({ workspace_id: ROOM, mine: true, cursor: "tsk_b" });
     expect(record.reconciled_at).not.toBeNull();

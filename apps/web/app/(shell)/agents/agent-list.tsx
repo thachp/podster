@@ -52,7 +52,7 @@ function useStatuses(rows: AgentRow[]) {
 export function AgentList({ rows, truncated, canConnect }: { rows: AgentRow[]; truncated: boolean; canConnect: boolean }) {
   const statuses = useStatuses(rows);
   if (rows.length === 0) {
-    return <p className="text-muted-foreground">{canConnect ? "No agents are connected to your organizations yet. Connect one to give it an identity here." : "Your organizations have no agents yet. An organization admin can connect one."}</p>;
+    return <p className="text-muted-foreground">{canConnect ? "Your organizations have no agents yet. Add one to give it an identity here." : "Your organizations have no agents yet. An organization admin can add one."}</p>;
   }
   return (
     <>
@@ -90,11 +90,12 @@ export function AgentList({ rows, truncated, canConnect }: { rows: AgentRow[]; t
   );
 }
 
+/** Opens the one Sheet for adding an agent: Runner pairing first, connecting an agent you already run second. */
 export function ConnectLink() {
   return (
     <Button asChild className="min-h-11 sm:min-h-9">
       <Link href="/agents/connect" prefetch={false} scroll={false} data-connect-launcher>
-        Connect an agent
+        Add an agent
       </Link>
     </Button>
   );

@@ -27,11 +27,12 @@ describe("the agents layout", () => {
     reads.identity = { ok: false, status: 503, code: "error" };
     await show();
     expect(screen.getByRole("link", { name: /Code Agent/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Connect an agent" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Add an agent" })).toHaveAttribute("href", "/agents/connect");
+    expect(screen.queryByText("Connect an agent")).toBeNull();
     expect(screen.queryByText("Details are for this organization's admins")).toBeNull();
   });
 
-  it("someone known not to be an admin gets no link and no Connect", async () => {
+  it("someone known not to be an admin gets no link and no Add an agent", async () => {
     reads.identity = { ok: true, data: { id: "per_1", org_id: "org_1", orgs: ["org_1"], admin_orgs: [], inbox_unread: 0 } };
     await show();
     expect(screen.queryByRole("link")).toBeNull();
@@ -43,6 +44,6 @@ describe("the agents layout", () => {
     reads.directory = { ok: false, status: 503, code: "error" };
     await show();
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh");
-    expect(screen.queryByText(/No agents are connected/)).toBeNull();
+    expect(screen.queryByText(/no agents yet/)).toBeNull();
   });
 });

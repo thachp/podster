@@ -349,7 +349,7 @@ const screens = (s) => {
     ["Agents", "/agents", "Lead agent"],
     ["Agent Sheet", `/agents?agent=${s.lead.id}`, "Lead agent", "owner", true],
     ["Disconnected agent Sheet", `/agents?agent=${s.off.id}`, "Disconnected agent", "owner", true],
-    ["Connect Sheet", "/agents/connect", "Connect"],
+    ["Add an agent Sheet", "/agents/connect", "Pair with Runner"],
     ["Settings", "/settings/profile", "Ada Owner"],
     ["Notifications", "/settings/notifications", "Notifications"],
     ["Organization", "/settings/organization", "Ada Owner"],

@@ -49,10 +49,10 @@ describe("the agent list", () => {
 
   it("the empty state offers only what this viewer can do", () => {
     const { rerender } = render(<AgentList rows={[]} truncated={false} canConnect />);
-    expect(screen.getByText(/Connect one/)).toBeInTheDocument();
+    expect(screen.getByText(/Add one to give it an identity/)).toBeInTheDocument();
     rerender(<AgentList rows={[]} truncated={false} canConnect={false} />);
-    expect(screen.queryByText(/Connect one/)).toBeNull();
-    expect(screen.getByText(/An organization admin can connect one/)).toBeInTheDocument();
+    expect(screen.queryByText(/Add one to give it an identity/)).toBeNull();
+    expect(screen.getByText(/An organization admin can add one/)).toBeInTheDocument();
   });
 
   it("says when the list was cut", () => {

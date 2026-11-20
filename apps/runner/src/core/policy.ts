@@ -28,8 +28,11 @@
  *   request, are required, each a positive integer under a fixed ceiling, with no "none" (condition 3; spike B rulings 3
  *   and 5). A configuration lacking any of them is refused whole, as is anything else malformed.
  * - **Tools and network** are facts for step 9's adapter, which enforces them: no shell and no network unless listed by
- *   name (condition 2). The adapter's result tool is always named. A room listing hosts is refused at load with
- *   `network_allowlist_unsupported` until Runner's egress proxy exists: only `"network": []` works today.
+ *   name (condition 2). The adapter's result tool is always named. A room's `network` lists exact lower-case host names
+ *   (the owner's approval of 2026-11-20): the task's container then reaches those hosts, over HTTPS on port 443, through
+ *   Runner's egress proxy (`egress-proxy.ts`), and nothing else. An entry that isn't such a name (a scheme, port, path,
+ *   wildcard, IP address, upper case, a trailing dot or a special-use name such as `localhost`) is refused at load with
+ *   `network_host_invalid`, a repeated one with `network_host_duplicate`.
  * - **Run decisions** are bound to every run fact, by a canonical form of the whole `RunFacts` (M1 on #455's review), and
  *   to the task's version, input hash, repository and base. They are single-use and expire.
  * - **The repository** (M7 step 10; L4 on #455's review): a room has one only when the owner named it here, by full name
@@ -206,12 +209,17 @@ export type EvaluateInput = {
 
 type Obj = Record<string, unknown>;
 type Parsed<T> = { ok: true; value: T } | { ok: false; at: string };
-/** A room's `network` listing hosts: refused until Runner's egress proxy exists; only `[]` works. */
-export const NETWORK_UNSUPPORTED = "network_allowlist_unsupported";
+/** A room's `network` entry that isn't an exact lower-case host name Runner can allow. */
+export const NETWORK_HOST_INVALID = "network_host_invalid";
+/** A room's `network` naming one host twice. */
+export const NETWORK_HOST_DUPLICATE = "network_host_duplicate";
 /** What's wrong with a policy that failed to parse, for the owner, by where it failed. */
 export function policyProblem(at: string): string {
-  const network = at.match(new RegExp(`^rooms\\[\\]\\.network:${NETWORK_UNSUPPORTED}:([A-Za-z0-9_-]{1,128})$`));
-  if (network) return `the room ${network[1]} lists hosts in rooms[].network, which Runner can't allow yet (${NETWORK_UNSUPPORTED}): a task's container has no egress proxy, so only "network": [] works`;
+  const host = at.match(/^rooms\[\]\.network:(network_host_invalid|network_host_duplicate):([A-Za-z0-9_-]{1,128}):(\d{1,3})$/);
+  if (host && host[1] === NETWORK_HOST_INVALID) {
+    return `entry ${host[3]} of the room ${host[2]}'s rooms[].network isn't a host name Runner can allow (${NETWORK_HOST_INVALID}): list exact lower-case host names such as registry.npmjs.org, with no scheme, port, path, wildcard, IP address or trailing dot`;
+  }
+  if (host) return `entry ${host[3]} of the room ${host[2]}'s rooms[].network repeats a host already listed (${NETWORK_HOST_DUPLICATE})`;
   return `${at} is missing or out of range`;
 }
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
@@ -272,10 +280,32 @@ function uniqueList<T>(v: unknown, max: number, each: (x: unknown) => x is T): T
   return new Set(v).size === v.length ? [...v] : null;
 }
 
-function isHost(v: unknown): v is string {
+/**
+ * Top-level names that never reach the public internet (RFC 6761, RFC 6762, RFC 8375 and Docker's own
+ * `*.docker.internal`): refused at load, so a listed name can't mean the machine, its LAN or Docker's host. The egress
+ * proxy also refuses any name that resolves to such an address, whatever its name.
+ */
+const SPECIAL_TLDS: readonly string[] = ["localhost", "local", "internal", "arpa", "invalid", "onion", "test", "example"];
+
+/** An exact lower-case DNS host name with at least two labels, no IP address, wildcard, port or trailing dot. */
+export function isHost(v: unknown): v is string {
   if (typeof v !== "string" || v.length > 253) return false;
   const labels = v.split(".");
-  return labels.length >= 2 && labels.every((l) => LABEL.test(l)) && TLD.test(labels[labels.length - 1]);
+  const tld = labels[labels.length - 1];
+  return labels.length >= 2 && labels.every((l) => LABEL.test(l)) && TLD.test(tld) && !SPECIAL_TLDS.includes(tld);
+}
+
+/** A room's `network`: a list of at most `MAX_HOSTS` distinct host names, each checked by `isHost`. */
+function parseNetwork(v: unknown, roomId: string): Parsed<string[]> {
+  if (!Array.isArray(v) || v.length > MAX_HOSTS) return fail("rooms[].network");
+  const seen = new Set<string>();
+  for (let i = 0; i < v.length; i++) {
+    const entry: unknown = v[i];
+    if (!isHost(entry)) return fail(`rooms[].network:${NETWORK_HOST_INVALID}:${roomId}:${i}`);
+    if (seen.has(entry)) return fail(`rooms[].network:${NETWORK_HOST_DUPLICATE}:${roomId}:${i}`);
+    seen.add(entry);
+  }
+  return { ok: true, value: [...seen] };
 }
 const isTool = (v: unknown): v is Tool => typeof v === "string" && (TOOLS as readonly string[]).includes(v);
 
@@ -333,10 +363,10 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   if (!allowed || allowed.includes(ownerOrg)) return fail("rooms[].allowed_orgs");
   const tools = Object.hasOwn(v, "tools") ? uniqueList(v.tools, TOOLS.length, isTool) : [...DEFAULT_TOOLS];
   if (!tools) return fail("rooms[].tools");
-  const network = Object.hasOwn(v, "network") ? uniqueList(v.network, MAX_HOSTS, isHost) : [];
-  if (!network) return fail("rooms[].network");
-  // No sandbox can hold an allowlist until Runner's egress proxy exists: refused here, at load, not at every run's start.
-  if (network.length > 0) return fail(`rooms[].network:${NETWORK_UNSUPPORTED}:${roomId}`);
+  // Each entry an exact host name, checked here, at load, so a bad one is said once, not at every run's start.
+  const parsedNetwork = Object.hasOwn(v, "network") ? parseNetwork(v.network, roomId) : ({ ok: true, value: [] as string[] } as const);
+  if (!parsedNetwork.ok) return parsedNetwork;
+  const network = parsedNetwork.value;
   const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
   const ack = own(v, "acknowledged");

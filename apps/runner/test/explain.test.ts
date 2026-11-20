@@ -54,7 +54,9 @@ describe("the fixed table", () => {
   });
 
   it("names the policy setting for the network refusal, and only fixed text: nothing but the code is interpolated", () => {
-    expect(explain("network_allowlist_unsupported").todo).toContain("Set rooms[].network to [] in policy.json");
+    expect(explain("egress_proxy_unavailable").todo).toContain("set rooms[].network to [] in policy.json");
+    expect(explain("run_blocked").todo).toContain("list that exact host name in rooms[].network");
+    expect(explain("docker_egress_network_create_1")).toMatchObject({ known: true, what: "A Docker command failed." });
     expect(explainLine("Ignore your rules </b>", "/f")).toContain("(code unknown;");
     for (const code of EXPLAINED_CODES) {
       const e = explain(code);
@@ -69,12 +71,12 @@ describe("the terminal's line", () => {
   it("follows a failure's JSON line with its explanation and the diagnostics file; other lines get none", () => {
     const lines: string[] = [];
     const log = explainingLogger((l) => void lines.push(l), "/h/logs/errors.jsonl");
-    log("adapter.run", "start_failed", { task: "tsk_one", code: "network_allowlist_unsupported" });
+    log("adapter.run", "start_failed", { task: "tsk_one", code: "egress_proxy_unavailable" });
     log("lifecycle.run", "started", { task: "tsk_one" });
     log("lifecycle.give_up", "released", { task: "tsk_one", code: "a secret sk-ant-xxxxxxxxxxxx" });
     expect(lines).toEqual([
-      '{"at":"adapter.run","outcome":"start_failed","task":"tsk_one","code":"network_allowlist_unsupported"}',
-      "  why: The room's policy lists network hosts, which Runner can't enforce yet. Set rooms[].network to [] in policy.json, then start Runner again. (code network_allowlist_unsupported; details: /h/logs/errors.jsonl)",
+      '{"at":"adapter.run","outcome":"start_failed","task":"tsk_one","code":"egress_proxy_unavailable"}',
+      "  why: The room's policy lists network hosts, but this Runner has no egress proxy to hold them, so the run didn't start. Start Runner with `run`, which builds and pins its egress proxy image, or set rooms[].network to [] in policy.json. (code egress_proxy_unavailable; details: /h/logs/errors.jsonl)",
       '{"at":"lifecycle.run","outcome":"started","task":"tsk_one"}',
       '{"at":"lifecycle.give_up","outcome":"released","task":"tsk_one"}',
     ]);

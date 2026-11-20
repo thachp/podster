@@ -221,6 +221,8 @@ const LISTENER_FILE = "node/broker-listener.ts";
 /** Step 14's scoped exception: the inbound nudge's loopback listener. */
 const NUDGE_LISTENER_FILE = "node/nudge-listener.ts";
 const PROFILE_FILE = "core/claude-profile.ts";
+/** The egress proxy's program: run only inside its own container per run, never in Runner's process. */
+const EGRESS_PROXY_FILE = "node/egress-proxy.ts";
 
 describe("Runner's own source", () => {
   const sources = async () => {
@@ -243,8 +245,31 @@ describe("Runner's own source", () => {
       // Scoped exception (1), step 9(b): only the broker listener may use node:http and `.listen(` (with node:http's
       // createServer); node:net, node:dgram and node:https stay banned there too.
       // Scoped exception (3), step 14: the nudge listener, under the same rule as the broker listener.
-      const listening = file === LISTENER_FILE || file === NUDGE_LISTENER_FILE ? text.replace(/\bcreateServer\b|\.listen\(|node:http\b(?!s)/g, "") : text;
+      // Scoped exception (4), the egress proxy (the owner's approval of 2026-11-20): node:net's server, in the proxy's
+      // own file only, which Runner never runs itself: it is handed as text to `node` in the proxy's container.
+      const listening =
+        file === LISTENER_FILE || file === NUDGE_LISTENER_FILE
+          ? text.replace(/\bcreateServer\b|\.listen\(|node:http\b(?!s)/g, "")
+          : file === EGRESS_PROXY_FILE
+            ? text.replace(/\bcreateServer\b|\.listen\(|node:net\b/g, "")
+            : text;
       expect([file, /createServer|\.listen\(|node:net|node:dgram|node:http\b|node:https\b/.test(listening)]).toEqual([file, false]);
+    }
+  });
+
+  it("lets the egress proxy listen only in its container, on its own address in the run's internal subnet, and Runner never start it (scoped exception 4)", async () => {
+    const text = await readFile(new URL(`apps/runner/src/${EGRESS_PROXY_FILE}`, repo), "utf8");
+    expect([...text.matchAll(/\.listen\(/g)].length).toBe(1);
+    expect(text).toContain("server.listen(PROXY_PORT, address, () => write({ e: \"ready\" }));");
+    expect(text).toContain('const address = addressIn(subnet ?? "", networkInterfaces());');
+    expect(text).not.toMatch(/localhost|listen\(\s*PROXY_PORT\s*\)|"::"/);
+    expect(text).not.toMatch(/node:http|node:https|node:dgram|node:child_process|node:fs/);
+    // Nothing of Runner's own calls the server or the entry: only its pure checks are imported.
+    for (const { file, text: other } of await sources()) {
+      if (file === EGRESS_PROXY_FILE) continue;
+      expect([file, /\bcreateEgressProxy\b/.test(other)]).toEqual([file, false]);
+      const imported = [...other.matchAll(/import \{([^}]*)\} from "\.\/egress-proxy\.js"/g)].flatMap((m) => m[1].split(",").map((n) => n.trim().replace(/^type /, "")));
+      for (const name of imported) expect([file, name, ["isHostName", "PROXY_REFUSALS", "ProxyRefusal"].includes(name)]).toEqual([file, name, true]);
     }
   });
 
@@ -434,7 +459,7 @@ describe("Runner's own source", () => {
       "|",
     ]);
     expect(job).toContain('RUNNER_LINUX_DOCKER: "1"');
-    expect(job).toMatch(/r\.numPassedTests === 3 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
+    expect(job).toMatch(/r\.numPassedTests === 5 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|publish|secrets\./);
     // merge-gate requires every job ci.yml has, this one included.
     expect(await read("scripts/merge-gate")).toMatch(/^CI_JOBS=".* runner .*"$/m);

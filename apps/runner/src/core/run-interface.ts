@@ -82,7 +82,9 @@ export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network">): 
   return [
     UNTRUSTED_FRAME,
     `Your tools in this run: ${tools.length > 0 ? tools.join(", ") : "none"}, and the structured result.${shell ? "" : " There is no shell: you can't run commands, tests, builds, package managers or tools such as wrangler."}`,
-    facts.network.length > 0 ? `Network: only these hosts: ${facts.network.join(", ")}. Nothing else is reachable.` : "Network: none. There is no network in this run: nothing outside the task's container is reachable, so don't plan to install packages (npm install, pip install), fetch anything or deploy. Work with the files that are there.",
+    facts.network.length > 0
+      ? `Network: only HTTPS, on port 443, to exactly these hosts: ${facts.network.join(", ")}. It goes through Runner's proxy, which the container's HTTPS_PROXY already names, so tools that read it, such as npm, use it without setup. Nothing else is reachable: no other host or subdomain, no plain HTTP, no other port and no IP address.`
+      : "Network: none. There is no network in this run: nothing outside the task's container is reachable, so don't plan to install packages (npm install, pip install), fetch anything or deploy. Work with the files that are there.",
     LIMITS_GUIDANCE,
   ].join("\n");
 }
@@ -118,12 +120,28 @@ export function markUntrusted(bytes: Uint8Array): UntrustedPrompt | null {
 /** The container's whole environment: fixed, nothing inherited, nothing shaped like a secret. */
 export const CONTAINER_ENV: Readonly<Record<string, string>> = Object.freeze({ HOME: "/work", PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" });
 export const CONTAINER_WORKDIR = TASK_FOLDER_IN_CONTAINER;
+/** The egress proxy's name on a run's internal network, and its port (`egress-proxy.ts`). */
+export const EGRESS_ALIAS = "egress";
+export const EGRESS_PORT = 3128;
+/**
+ * What the container's environment adds when its room lists hosts: the proxy, in both spellings tools read, for HTTPS
+ * and plain HTTP alike (the proxy refuses plain HTTP, so it fails plainly instead of hanging), and nothing else. Fixed:
+ * no host, token or credential is in it.
+ */
+export const EGRESS_ENV: Readonly<Record<string, string>> = Object.freeze({
+  HTTPS_PROXY: `http://${EGRESS_ALIAS}:${EGRESS_PORT}`,
+  https_proxy: `http://${EGRESS_ALIAS}:${EGRESS_PORT}`,
+  HTTP_PROXY: `http://${EGRESS_ALIAS}:${EGRESS_PORT}`,
+  http_proxy: `http://${EGRESS_ALIAS}:${EGRESS_PORT}`,
+  NO_PROXY: "localhost,127.0.0.1,::1",
+  no_proxy: "localhost,127.0.0.1,::1",
+});
 
 export type ContainerNetwork = { kind: "none" } | { kind: "allowlist"; hosts: string[] };
 export type ContainerSpec = {
   run_ref: string;
   task_folder: string;
-  /** None unless the policy lists hosts. A sandbox that can't hold an allowlist must refuse to open. */
+  /** None unless the policy lists hosts; then only those, through the egress proxy. A sandbox that can't hold it refuses to open. */
   network: ContainerNetwork;
   env: Record<string, string>;
   /** Only the task's folder. */
@@ -144,7 +162,7 @@ export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folde
     run_ref,
     task_folder: facts.task_folder,
     network: facts.network.length === 0 ? { kind: "none" } : { kind: "allowlist", hosts: [...facts.network] },
-    env: { ...CONTAINER_ENV },
+    env: facts.network.length === 0 ? { ...CONTAINER_ENV } : { ...CONTAINER_ENV, ...EGRESS_ENV },
     mounts: [{ source: facts.task_folder, target: CONTAINER_WORKDIR }],
     read_only_root: true,
     drop_capabilities: "all",
@@ -154,12 +172,15 @@ export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folde
 }
 
 /**
- * Why a spec can't be opened, or null. The environment must be exactly the fixed one, so no key, token, keychain or
- * D-Bus address, agent socket or Docker host reaches a task; the only mount is the task's own folder.
+ * Why a spec can't be opened, or null. The environment must be exactly the fixed one (with the proxy's, `EGRESS_ENV`,
+ * exactly when the network is an allowlist), so no key, token, keychain or D-Bus address, agent socket or Docker host
+ * reaches a task; the only mount is the task's own folder.
  */
 export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mount_not_allowed" | "spec_invalid" | null {
+  const fixed: Readonly<Record<string, string>> = spec.network.kind === "allowlist" ? { ...CONTAINER_ENV, ...EGRESS_ENV } : CONTAINER_ENV;
   const names = Object.keys(spec.env);
-  if (names.length !== Object.keys(CONTAINER_ENV).length || names.some((n) => !Object.hasOwn(CONTAINER_ENV, n) || spec.env[n] !== CONTAINER_ENV[n])) return "env_not_allowed";
+  if (names.length !== Object.keys(fixed).length || names.some((n) => !Object.hasOwn(fixed, n) || spec.env[n] !== fixed[n])) return "env_not_allowed";
+  if (spec.network.kind !== "none" && (spec.network.kind !== "allowlist" || spec.network.hosts.length === 0)) return "spec_invalid";
   if (spec.mounts.length !== 1 || spec.mounts[0].source !== spec.task_folder || spec.mounts[0].target !== CONTAINER_WORKDIR) return "mount_not_allowed";
   if (spec.read_only_root !== true || spec.drop_capabilities !== "all" || spec.user !== "unprivileged") return "spec_invalid";
   if (!Number.isSafeInteger(spec.max_seconds) || spec.max_seconds <= CONTAINER_MARGIN_S) return "spec_invalid";
@@ -168,7 +189,7 @@ export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mo
 
 export type ToolOutput = { ok: boolean; text: string };
 
-/** The task's container (step 9(b): Docker, no network, only the task's folder). Runner's own tools run in it. */
+/** The task's container (step 9(b): Docker, only the task's folder, and no network but the policy's hosts). Runner's own tools run in it. */
 /** What the container tells the run while it lives: a bound it passed on its own, such as the disk bound's timer. */
 export type SandboxEvents = { breach(code: "disk_bound"): void };
 export interface TaskSandbox {
@@ -321,7 +342,7 @@ export class SupervisedAdapter implements RunAdapter {
     try {
       await live.begin();
     } catch (error) {
-      // The cause is kept as a code only, such as the sandbox's `network_allowlist_unsupported`: never a message's words.
+      // The cause is kept as a code only, such as the sandbox's `egress_proxy_unavailable`: never a message's words.
       const cause = codeOf(error);
       await live.halt("start_failed");
       this.deps.log("adapter.run", "start_failed", { workspace: run.workspace_id, task: run.task_id, code: cause });

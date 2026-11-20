@@ -1602,9 +1602,10 @@ describe("a blocked run (the architect's ruling of 2026-11-20)", () => {
 });
 
 describe("a run that never started, and a policy listing network hosts", () => {
-  it("refuses at open a policy whose room lists hosts, naming network_allowlist_unsupported", async () => {
-    const cfg = policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, network: ["registry.npmjs.org"] }] });
-    await expect(setup(cfg)).rejects.toThrow(new RegExp(`the room ${ROOM} lists hosts.*network_allowlist_unsupported.*only "network": \\[\\] works`));
+  it("opens with a policy whose room lists exact hosts, and refuses at open one whose entry isn't a host name, naming network_host_invalid", async () => {
+    const room = (network: unknown[]) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, network }] });
+    await expect(setup(room(["registry.npmjs.org"]))).resolves.toBeDefined();
+    await expect(setup(room(["registry.npmjs.org", "https://evil.example.com"]))).rejects.toThrow(new RegExp(`entry 1 of the room ${ROOM}'s rooms\\[\\]\\.network isn't a host name Runner can allow \\(network_host_invalid\\)`));
   });
 
   it("logs the start's cause code, tells the room in Runner's fixed words, then releases", async () => {

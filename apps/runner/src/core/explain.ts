@@ -19,7 +19,8 @@ const RESTART = `Restart Runner with \`run\`; if it happens again, ${SEND}`;
 
 const TABLE = new Map<string, Explanation>([
   // The run policy and the network.
-  ...group(["network_allowlist_unsupported"], "The room's policy lists network hosts, which Runner can't enforce yet.", "Set rooms[].network to [] in policy.json, then start Runner again."),
+  ...group(["egress_proxy_unavailable"], "The room's policy lists network hosts, but this Runner has no egress proxy to hold them, so the run didn't start.", "Start Runner with `run`, which builds and pins its egress proxy image, or set rooms[].network to [] in policy.json."),
+  ...group(["egress_proxy_not_ready", "egress_subnet_invalid", "egress_hosts_invalid", "egress_program_invalid"], "Runner's egress proxy for the room's listed hosts couldn't be started, so the run didn't start.", "Check that Docker is running; the details file has more. Restart Runner with `run` if it keeps happening."),
   ...group(["config_invalid", "budget_invalid"], "Runner's run policy can't be read or used.", "Fix policy.json; `run` names the field it refused when it starts."),
   ...group(["clock_invalid"], "This machine's clock went back past the day Runner last counted spend.", "Set the clock right; the task waits until then."),
   ...group(["authority_stale"], "Runner hasn't heard from Podster recently enough to trust this agent's access.", "Check the network connection; the task waits and is tried again."),
@@ -31,7 +32,7 @@ const TABLE = new Map<string, Explanation>([
   ...group(["prompt_unavailable", "provenance_invalid", "prompt_mismatch", "task_invalid"], "The task's inputs couldn't be read exactly as Podster listed them, so no prompt was built.", `Ask the room to check the task; if it happens again, ${SEND}`),
   ...group(["prompt_too_large", "prompt_invalid"], "The task's words are too large, or not text Runner can hand to the agent.", "Ask the room to shorten the task."),
   ...group(["blocked_same_inputs"], "The agent already answered blocked on these exact inputs, so Runner won't pay for the same answer again.", "Change the task, request changes, post a message on the task, or change the room's policy (such as adding shell), and it runs again."),
-  ...group(["run_blocked"], "The agent reported it is blocked and couldn't finish.", "Read its reason on the task's thread. If it needs a shell, add \"shell\" to rooms[].tools in policy.json; network access can't be allowed yet (rooms[].network must stay [])."),
+  ...group(["run_blocked"], "The agent reported it is blocked and couldn't finish.", "Read its reason on the task's thread. If it needs a shell, add \"shell\" to rooms[].tools in policy.json; if it needs a host on the internet, list that exact host name in rooms[].network."),
   ...group(["note_scan_unknown", "note_scan_exhausted"], "Runner couldn't read the task's thread to check whether its note landed before a restart.", "It tries again with a growing wait; after six tries it posts its fixed note once."),
   ...group(["runner_could_not_start"], "Runner couldn't start a run for this task.", "The log line before it has the cause code, and the details file has the raw error."),
   // A run that never started.
@@ -79,7 +80,7 @@ const TABLE = new Map<string, Explanation>([
 
 /** Codes with a fixed prefix and a varying part: a Docker command's step and exit code, or a Podster refusal's code. */
 const PREFIXES: [RegExp, Explanation][] = [
-  [/^docker_[a-z]+_(?:\d+|x|cut|output)$/, { what: "A Docker command failed.", todo: "Check that Docker is running; the details file has its exit code and output." }],
+  [/^docker_[a-z_]+_(?:\d+|x|cut|output)$/, { what: "A Docker command failed.", todo: "Check that Docker is running; the details file has its exit code and output." }],
   [/^(?:submit|accept|give_up|consume|pin|issue)_/, { what: "Podster or Runner's policy refused a step for this task.", todo: "The rest of the code says which; the task is read again or released." }],
   [/^repo_/, { what: "A step on the room's repository failed.", todo: "The details file has the cause." }],
   [/^task_[a-z_]+$/, { what: "The task's state changed, so Runner left it.", todo: "Nothing to do." }],

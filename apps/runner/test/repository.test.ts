@@ -27,6 +27,7 @@ import {
   RepoPathError,
   type GitHubRequest,
 } from "../src/core/repository.js";
+import { pullText } from "../src/core/pull-text.js";
 import { lineLogger } from "../src/core/runtime.js";
 import { checkedHelper, findGit, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
@@ -301,7 +302,7 @@ describe("decision 230's own rules", () => {
   });
 
   it("makes only the fixed GitHub calls, none of which can merge, move a ref or administer", () => {
-    const requests: GitHubRequest[] = [GITHUB.repository(SCOPE.full_name), GITHUB.rules(SCOPE.full_name, "main"), GITHUB.ref(SCOPE.full_name, "main"), GITHUB.openPull(SCOPE.full_name, TASK, "podster/task_1", "main"), GITHUB.findPull(SCOPE.full_name, "podster/task_1", "main")];
+    const requests: GitHubRequest[] = [GITHUB.repository(SCOPE.full_name), GITHUB.rules(SCOPE.full_name, "main"), GITHUB.ref(SCOPE.full_name, "main"), GITHUB.openPull(SCOPE.full_name, pullText({ workspace_id: ROOM, task_id: TASK, title: "Add @octocat's fix for #1", app_origin: null }), "podster/task_1", "main"), GITHUB.findPull(SCOPE.full_name, "podster/task_1", "main")];
     expect(requests.map((r) => `${r.method} ${r.path}`)).toEqual([
       "GET /repos/podsterdev/todo-app",
       "GET /repos/podsterdev/todo-app/rules/branches/main",
@@ -310,8 +311,8 @@ describe("decision 230's own rules", () => {
       "GET /repos/podsterdev/todo-app/pulls?state=open&head=podsterdev%3Apodster%2Ftask_1&base=main&per_page=2",
     ]);
     for (const r of requests) expect(r.path).not.toMatch(/merge|dispatch|hooks|rulesets|collaborators|statuses|reviews|actions/);
-    // The pull request carries fixed words and the task's ID, never task text.
-    expect(requests[3].body).toEqual({ title: "Podster task task_1", head: "podster/task_1", base: "main", body: "Opened by Podster Runner for task task_1. Review it in Podster; Runner never merges.", draft: false, maintainer_can_modify: false });
+    // The pull request carries `pullText`'s words: the task's title made inert, fixed words and the task's ID.
+    expect(requests[3].body).toEqual({ title: "chore: add \uFF20octocat's fix for \uFF031", head: "podster/task_1", base: "main", body: "Podster task: `task_1`\n\nOpened by Podster Runner for task task_1. Review it in Podster; Runner never merges.", draft: false, maintainer_can_modify: false });
   });
 
   it("holds a pull request to the repository, never a fork, the default branch and the pushed commit", () => {
@@ -492,10 +493,10 @@ async function world() {
   sh(root, "clone", "--quiet", "--bare", seed, remote);
   const workRoot = join(root, "work");
   const taskFolder = join(workRoot, ROOM, TASK);
-  const calls: { method: string; path: string }[] = [];
+  const calls: { method: string; path: string; body?: unknown }[] = [];
   const api = { rules: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] as unknown, repoId: 9001, pullStatus: 201, revoked: false, lag: 0 };
   const github: GitHubCall = async (request, token) => {
-    calls.push({ method: request.method, path: request.path });
+    calls.push({ method: request.method, path: request.path, body: request.body });
     expect(token).toBe(TOKEN);
     if (api.revoked) throw new RepoPathError("token_revoked");
     const p = request.path;
@@ -636,12 +637,15 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     const w = await world();
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
     await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
-    const first = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    const first = await w.path.publish({ ...w.task, base_commit: base, title: "Add the feature @octocat asked for in #7.\nfixes #7", change_type: "feat" }, w.signal);
     if (first.kind !== "published") throw new Error("not published");
     expect(first.commit).toBe(w.head("podster/task_1"));
     expect(sh(w.remote, "rev-parse", `${first.commit}^`)).toBe(base);
-    // Runner's fixed identity and words, never the task's.
-    expect(sh(w.remote, "log", "-1", "--format=%an <%ae>|%s", first.commit)).toBe("Podster Runner <runner@podster.invalid>|Podster task task_1");
+    // Runner's fixed identity; the commit's first line is the pull request's title, both made inert.
+    const title = "feat: add the feature \uFF20octocat asked for in \uFF037. fixes \uFF037";
+    expect(sh(w.remote, "log", "-1", "--format=%an <%ae>|%s", first.commit)).toBe(`Podster Runner <runner@podster.invalid>|${title}`);
+    expect(sh(w.remote, "log", "-1", "--format=%B", first.commit)).toBe(`${title}\n\nPodster-Task: task_1`);
+    expect(w.calls.find((c) => c.method === "POST")?.body).toMatchObject({ title });
     // The default branch never moved.
     expect(w.head("main")).toBe(base);
     expect(w.calls.filter((c) => c.method === "POST").map((c) => c.path)).toEqual(["/repos/podsterdev/todo-app/pulls"]);

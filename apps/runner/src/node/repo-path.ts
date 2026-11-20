@@ -21,7 +21,8 @@
 import { lstat, opendir, realpath } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { GatewayError, meaningOf } from "../core/errors.js";
-import type { Publication, RepoTask, RepositoryPath } from "../core/lifecycle.js";
+import type { Publication, PublishWords, RepoTask, RepositoryPath } from "../core/lifecycle.js";
+import { pullText } from "../core/pull-text.js";
 import {
   checkProtected,
   COMMIT_IDENTITY,
@@ -37,6 +38,7 @@ import {
   readRepository,
   renewDue,
   RepoPathError,
+  taskBranch,
   type GitHubRequest,
   type RepoAccess,
   type RepoScope,
@@ -126,6 +128,8 @@ export type RepoPathDeps = {
   log: Logger;
   /** Waits between reads of a pull request whose head lags the push. */
   wait?: (ms: number) => Promise<void>;
+  /** The web app's origin for the task's page link, from `appOriginFor`'s fixed table; null leaves the link out. */
+  app_origin?: string | null;
 };
 
 /** Reads of a pull request whose head still shows the commit before the push, and the wait between them. */
@@ -252,9 +256,12 @@ export class GitRepositoryPath implements RepositoryPath {
     return { repository_id: String(scope.provider_repo_id), base_commit: start };
   }
 
-  async publish(task: RepoTask & { base_commit: string }, signal: AbortSignal): Promise<Publication> {
+  async publish(task: RepoTask & { base_commit: string } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication> {
     const scope = scopeOf(task);
     const branch = task.repository.branch;
+    // The task's ID is checked before the words name it.
+    taskBranch(task.task_id);
+    const text = pullText({ workspace_id: task.workspace_id, task_id: task.task_id, title: task.title ?? null, change_type: task.change_type ?? null, app_origin: this.deps.app_origin ?? null });
     // Renewed after a full server recheck when it's due: a run can outlast the hour a token lives.
     const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
     const { default_branch } = await this.checked(task, access, signal);
@@ -269,7 +276,7 @@ export class GitRepositoryPath implements RepositoryPath {
     if (before === task.base_commit) {
       if (await this.clean(task, signal)) return { kind: "no_changes" };
       const identity = ["-c", `user.name=${COMMIT_IDENTITY.name}`, "-c", `user.email=${COMMIT_IDENTITY.email}`];
-      const committed = await this.git(task, [...identity, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "-m", `Podster task ${task.task_id}`], { signal });
+      const committed = await this.git(task, [...identity, "commit", "--quiet", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim", "-m", text.commit_message], { signal });
       if (committed.code !== 0) throw new RepoPathError("commit_failed");
     } else if (!(await this.clean(task, signal))) throw new RepoPathError("commit_unexpected");
     const commit = await this.head(task, signal);
@@ -281,7 +288,7 @@ export class GitRepositoryPath implements RepositoryPath {
     if (!pushed.stdout.split("\n").some((line) => /^[*= ]\t/.test(line) && line.includes(`refs/heads/${branch}:refs/heads/${branch}`))) throw new RepoPathError("push_unconfirmed");
 
     const want = { scope, branch, default_branch, commit };
-    const opened = await this.api(task, access, GITHUB.openPull(scope.full_name, task.task_id, branch, default_branch), signal);
+    const opened = await this.api(task, access, GITHUB.openPull(scope.full_name, text, branch, default_branch), signal);
     if (opened.status !== 201 && opened.status !== 422) {
       if (opened.status >= 500 || opened.status === 403 || opened.status === 429) throw new RepoPathError("github_unavailable", true);
       throw new RepoPathError("pull_request_refused");
@@ -359,7 +366,7 @@ export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTR
  * or trust from the environment. Null, with a log line by code, when any of them can't be had: a room with a repository
  * then refuses its tasks (`repository_unavailable`), and every other room runs as before.
  */
-export async function hostRepositoryPath(home: string, request: AgentRequest, clock: Clock, log: Logger, opts: { git?: string | null; helper?: string; github?: GitHubCall } = {}): Promise<GitRepositoryPath | null> {
+export async function hostRepositoryPath(home: string, request: AgentRequest, clock: Clock, log: Logger, opts: { git?: string | null; helper?: string; github?: GitHubCall; app_origin?: string | null } = {}): Promise<GitRepositoryPath | null> {
   const program = opts.git === undefined ? findGit() : opts.git;
   if (!program) {
     log("repo.setup", "unavailable", { code: "git_not_found" });
@@ -381,5 +388,5 @@ export async function hostRepositoryPath(home: string, request: AgentRequest, cl
   }
   // An empty home for Git, so it reads no one's settings; the Git folders sit beside it, under `git/`.
   const gitHome = await ensureFolder(home, join(home, "git-home"));
-  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git: gitCli(program, gitHome), github, helper, log });
+  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git: gitCli(program, gitHome), github, helper, log, app_origin: opts.app_origin ?? null });
 }

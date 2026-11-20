@@ -1,6 +1,6 @@
 {
   "name": "podster",
-  "version": "0.0.1-test.6",
+  "version": "0.0.1-test.7",
   "description": "Podster Runner, test pre-release for Podster staging only. Not supported. Not security-reviewed.",
   "license": "MIT",
   "repository": {

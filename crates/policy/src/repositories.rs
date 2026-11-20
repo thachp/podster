@@ -11,7 +11,7 @@
 //! | Take a grant back | The room's owner or a room admin, as a person; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
 //! | Receive a grant | A current participant, person or agent, who isn't there through a public claim |
 //! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
-//! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter; and the commit's approving review came from someone the submitter's person doesn't control ([`independent_review`]) |
+//! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter; and the commit's approving review came from someone the submitter's person doesn't control ([`independent_review`]). Or, in a private room only, the person who controls the submitting agent and approved its reviewed commit themselves, with the same grant: a self-reviewed merge ([`self_reviewed_merge`], decision 186 as amended 2026-11-20). Never an agent for its own controller's work |
 //! | See the room's repository and its state | A person who sees the whole room |
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
@@ -28,7 +28,9 @@
 
 use podster_core::provisioning::RepositoryRequesters;
 use podster_core::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
-use podster_core::repo_merge::{same_controller, Actor, MergeRefusal};
+use podster_core::repo_merge::{
+    is_self_reviewed, same_controller, Actor, MergeRefusal, SelfReview,
+};
 use podster_core::repositories::GrantAction;
 use podster_core::Task;
 
@@ -305,6 +307,10 @@ pub fn authorize_repo_access(
 /// what "a reviewer can't merge their own work" means (M5-10): a reviewer may merge what they approved only with the
 /// grant and only if a different person controls them.
 ///
+/// The one exception is a self-reviewed merge ([`self_reviewed_merge`]), from `review`: in a private room, the person
+/// who controls the submitting agent and approved its reviewed commit themselves. The grant is still required, the
+/// task's assignee is still refused, and an agent never gets it.
+///
 /// Being the reviewer, the requester, an admin or the owner isn't enough without the grant, and approval carries none
 /// (AC-17). The review itself and the commit are `repo_merge::check_merge_authority`, which runs after this.
 pub fn authorize_merge(
@@ -313,6 +319,7 @@ pub fn authorize_merge(
     task: &Task,
     submitter: &Actor,
     standing: &GrantStanding,
+    review: &SelfReview,
 ) -> Result<(), RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
@@ -324,10 +331,48 @@ pub fn authorize_merge(
         id: &caller.id,
         person: caller_person,
     };
-    if same_controller(&me, submitter) || task.assignee.as_deref() == Some(caller.id.as_str()) {
+    let exempt = self_reviewed_merge(caller, caller_person, submitter, review);
+    if (same_controller(&me, submitter) && !exempt)
+        || task.assignee.as_deref() == Some(caller.id.as_str())
+    {
         return Err(RepoDenial::SelfMerge);
     }
     check_standing(caller, GrantAction::Merge, standing)
+}
+
+/// Whether the caller's merge would be a self-reviewed one: decision 186 as amended by the owner on 2026-11-20 ("Yes, as
+/// recommended"). Only in a private room, only for a person, only for work submitted by an agent that person controls,
+/// and only when the approval of its reviewed commit is on record as theirs. The caller's kind is read from the room,
+/// so an agent never passes, whatever `review` says. See `repo_merge::is_self_reviewed`.
+pub fn self_reviewed_merge(
+    caller: &Caller,
+    caller_person: Option<&str>,
+    submitter: &Actor,
+    review: &SelfReview,
+) -> bool {
+    let review = SelfReview {
+        requester_is_person: review.requester_is_person && caller.kind == PrincipalKind::Person,
+        ..*review
+    };
+    let me = Actor {
+        id: &caller.id,
+        person: caller_person,
+    };
+    is_self_reviewed(&me, submitter, &review)
+}
+
+/// The review rule for a merge, run after [`authorize_merge`] allows: a self-reviewed merge passes, and says so with
+/// `true`, to be recorded as one. Any other must have an independent review ([`independent_review`]).
+pub fn merge_review(
+    caller: &Caller,
+    caller_person: Option<&str>,
+    submitter: &Actor,
+    review: &SelfReview,
+) -> Result<bool, RepoDenial> {
+    if self_reviewed_merge(caller, caller_person, submitter, review) {
+        return Ok(true);
+    }
+    independent_review(review.reviewer.as_ref(), submitter).map(|()| false)
 }
 
 /// Whether the review that made a task's commit the reviewed one counts for a merge into a managed repository: the

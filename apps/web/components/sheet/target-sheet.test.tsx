@@ -4,7 +4,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Button } from "@/components/ui/button";
 import type { GatewayResult } from "@/lib/gateway/result";
-import { back, currentUrl, dropHeldNavigation, navigate, routerCalls, setHoldNavigation, settleNavigation, setUrl } from "@/test/next-navigation";
+import { back, currentUrl, dropHeldNavigation, landRefreshes, navigate, routerCalls, setHoldNavigation, settleNavigation, setUrl } from "@/test/next-navigation";
 import { SheetLink, TargetSheet, type SheetBinding } from "./target-sheet";
 
 type Item = { id: string; title: string; version: number };
@@ -142,7 +142,9 @@ describe("TargetSheet", () => {
       await userEvent.click(screen.getByRole("button", { name: "Save and close" }));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       expect(currentUrl()).toBe("/agents");
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      // The command's own refresh is still on its way when the close moves the URL, so only the one asked after the move lands.
+      expect(routerCalls.refresh).toBe(2);
+      act(() => landRefreshes());
       expect(routerCalls.refreshed).toBe(1);
     });
 
@@ -153,7 +155,8 @@ describe("TargetSheet", () => {
       await title("Agent A");
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("We can't find that");
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      expect(routerCalls.refresh).toBe(2);
+      act(() => landRefreshes());
       expect(routerCalls.refreshed).toBe(1);
     });
 
@@ -162,8 +165,10 @@ describe("TargetSheet", () => {
       render(<Screen />);
       await title("Agent A");
       await userEvent.keyboard("{Escape}");
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      act(() => landRefreshes());
       expect(routerCalls.refresh).toBe(0);
+      expect(routerCalls.refreshed).toBe(0);
     });
 
     it("closing clears only its own parameter", async () => {
@@ -680,7 +685,7 @@ describe("TargetSheet", () => {
       ),
     ).not.toThrow();
     // React rethrows the render error from the load's update.
-    await expect(act(async () => new Promise((resolve) => setTimeout(resolve, 0)))).rejects.toThrow("A Sheet can't open another Sheet");
+    await expect(act(async () => {})).rejects.toThrow("A Sheet can't open another Sheet");
     error.mockRestore();
   });
 

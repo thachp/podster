@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cpuTime } from "@/test/cpu-time";
 import { FIELD_DELIMITERS, FIELD_FORMAT_BYTES, inertMarkdown, notFoundPage, PAGE_FORMAT_BYTES, pageBudget, roomPage, type PublicView } from "./render";
 
 const view = (content: Partial<PublicView["content"]> = {}): PublicView => ({
@@ -112,18 +113,16 @@ describe("the public room page", () => {
     const plainCount = (html: string) => html.match(/<p class="plain">/g)?.length ?? 0;
 
     it("formats nothing when every field is full of delimiters", () => {
-      const started = performance.now();
-      const html = roomPage(room(fill));
-      expect(performance.now() - started).toBeLessThan(1_000);
+      const { value: html, ms } = cpuTime(() => roomPage(room(fill)));
+      expect(ms).toBeLessThan(1_000);
       expect(plainCount(html)).toBe(102);
       expect(html).not.toMatch(/<(em|strong)>/);
       expect(roomPage(room(fill))).toBe(html);
     });
 
     it("formats only the first 8 KB of fields at the delimiter cap", () => {
-      const started = performance.now();
-      const html = roomPage(room(capped));
-      expect(performance.now() - started).toBeLessThan(1_000);
+      const { value: html, ms } = cpuTime(() => roomPage(room(capped)));
+      expect(ms).toBeLessThan(1_000);
       // The goal, the context and two openings fill the 8 KB; the other 98 fields are plain text.
       expect(plainCount(html)).toBe(98);
       expect(roomPage(room(capped))).toBe(html);

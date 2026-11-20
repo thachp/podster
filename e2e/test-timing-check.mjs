@@ -1,4 +1,4 @@
-// A static check of the API's and the gateway's specs for tests that depend on wall-clock time or on what another
+// A static check of the API's, the gateway's and the web app's tests for tests that depend on wall-clock time or on what another
 // test left running: rule 1 of docs/review-standards.md. Four such tests reached review or main in one week.
 //
 //   node test-timing-check.mjs [--self-test] [--json] [file.spec.ts ...]
@@ -55,7 +55,9 @@
 //   reason. It misses a file whose rooms come from a helper it doesn't import by a relative path.
 //
 // It reads every file under apps/api/test and apps/gateway/test, specs and the helpers and stand-ins beside them, whether a
-// spec imports them or not; the room rules (unquieted, runtime-alarms) apply to the API's specs only, direct-alarm,
+// spec imports them or not, and the web app's tests: every `*.test.ts` and `*.test.tsx` in apps/web and every file under
+// apps/web/test, its router and other stand-ins. The web app's product code beside its tests isn't read, even where a test
+// imports it; the room rules (unquieted, runtime-alarms) apply to the API's specs only, direct-alarm,
 // runtime-opt-out and bare-alarm-read to the API's folder. An imported helper file's sleeping and room-making exports are followed into the specs that call them;
 // a sleeping export is also followed through a default export, a re-export (`export { a as b } from`, `export * from`)
 // and a namespace import (`import * as m`, then `m.f()`), to the function and file its sleep is in.
@@ -99,7 +101,7 @@
 // an entry whose line changed or went away fails. An entry with no reason, no category or no `owed` fails. Every run
 // prints how many entries are owed.
 //
-// With no file named it checks every file under apps/api/test and apps/gateway/test.
+// With no file named it checks every file under apps/api/test and apps/gateway/test, and the web app's tests.
 // Exit 1 if anything is found that isn't allowed, or an entry doesn't match; 2 if esbuild isn't installed.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -109,7 +111,14 @@ import { parse } from "acorn";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const ALLOW = join(here, "test-timing-allow.json");
-const ROOTS = ["apps/api/test", "apps/gateway/test"];
+const ROOTS = ["apps/api/test", "apps/gateway/test", "apps/web"];
+/** apps/web keeps its tests beside the code, so only its test files and its test folder are read there. */
+const WEB = "apps/web";
+const isTestFile = (path) => {
+  const file = relative(root, path).split(sep).join("/");
+  if (!file.startsWith(`${WEB}/`)) return true;
+  return file.startsWith(`${WEB}/test/`) || /\.test\.tsx?$/.test(file);
+};
 
 let build;
 /** The esbuild e2e/package.json pins; null if it isn't installed. */
@@ -210,7 +219,7 @@ const isNewDate = (n) => n.type === "NewExpression" && n.callee.type === "Identi
 export async function analyze(source, { api = false, file = "spec.ts", path = null, helpers = new Map() } = {}) {
   const tool = await esbuild();
   if (!tool) return null;
-  const out = tool.transformSync(source, { loader: "ts", sourcemap: "external", sourcefile: file, format: "esm", target: "esnext" });
+  const out = tool.transformSync(source, { loader: /\.tsx$/.test(file) ? "tsx" : "ts", sourcemap: "external", sourcefile: file, format: "esm", target: "esnext" });
   const at = lines(JSON.parse(out.map));
   const tree = parse(out.code, { ecmaVersion: "latest", sourceType: "module", locations: true });
   link(tree);
@@ -611,7 +620,7 @@ function enclosingName(node) {
 
 function resolveImport(from, specifier) {
   const base = resolve(dirname(from), specifier);
-  for (const candidate of [base, `${base}.ts`, `${base}.mts`, join(base, "index.ts")]) if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}.mts`, join(base, "index.ts")]) if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
   return base;
 }
 
@@ -625,9 +634,9 @@ function specs(dir) {
   const out = [];
   for (const name of readdirSync(dir).sort()) {
     const path = join(dir, name);
-    if (name === "node_modules") continue;
+    if (name === "node_modules" || name === "dist") continue;
     if (statSync(path).isDirectory()) out.push(...specs(path));
-    else if (/\.(m?ts|m?js)$/.test(name)) out.push(path);
+    else if (/\.(m?ts|tsx|m?js)$/.test(name) && isTestFile(path)) out.push(path);
   }
   return out;
 }
@@ -641,7 +650,7 @@ const relativeImports = (source) => [...source.matchAll(/^\s*(?:import|export)\s
  */
 export async function check(files) {
   const folders = ROOTS.map((dir) => join(root, dir));
-  const inFolders = (path) => folders.some((dir) => path.startsWith(dir + sep));
+  const inFolders = (path) => folders.some((dir) => path.startsWith(dir + sep)) && isTestFile(path);
   const results = new Map();
   const visit = async (path, stack = new Set()) => {
     if (results.has(path) || stack.has(path)) return results.get(path);
@@ -650,7 +659,7 @@ export async function check(files) {
     const helpers = new Map();
     for (const specifier of relativeImports(source)) {
       const target = resolveImport(path, specifier);
-      if (inFolders(target) && existsSync(target) && !target.endsWith(".spec.ts")) helpers.set(target, await visit(target, stack));
+      if (inFolders(target) && existsSync(target) && !/\.(spec|test)\.tsx?$/.test(target)) helpers.set(target, await visit(target, stack));
     }
     const file = relative(root, path).split(sep).join("/");
     let result;
@@ -792,6 +801,14 @@ async function selfTest() {
   await expect("direct-alarm: another file named alarm.ts may not", "export const pass = (instance: any) => instance.alarm();\n", ["1: direct-alarm"], { api: false, file: "apps/api/test/other/alarm.ts" });
   await expect("direct-alarm: a computed name, call, apply, bind, and the handler under another name", 'await i["alarm"]();\nawait i.alarm.call(i);\nawait i.alarm.apply(i, []);\nconst bound = i.alarm.bind(i);\nconst run = i.alarm;\nconst { alarm } = i;\nconst { alarm: due } = await pending();\n', ["1: direct-alarm", "2: direct-alarm", "3: direct-alarm", "4: direct-alarm", "5: direct-alarm", "6: direct-alarm"], { api: false });
   await expect("direct-alarm: a gateway test is outside the rule", "await i.alarm();\n", [], { api: false, file: "apps/gateway/test/x.spec.ts" });
+  await expect("sleep: a web test in TSX, with JSX in it, is read", 'it("a", async () => {\n  render(<p>x</p>);\n  await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));\n});\n', ["3: sleep"], { api: false, file: "apps/web/components/x.test.tsx" });
+  await expect("margin: a web test's wall-clock budget is a margin", 'const started = performance.now();\nshow(<p>x</p>);\nexpect(performance.now() - started).toBeLessThan(50);\n', ["3: margin"], { api: false, file: "apps/web/lib/x.test.tsx" });
+  {
+    const read = [join(root, "apps/web/components/x.test.tsx"), join(root, "apps/web/test/next-navigation.ts"), join(root, "apps/web/components/x.tsx"), join(root, "apps/web/lib/x.ts"), join(root, "apps/api/test/x.ts")].map(isTestFile);
+    const passed = JSON.stringify(read) === JSON.stringify([true, true, false, false, true]);
+    if (!passed) failures.push("files: the web app's tests and test folder are read, and its product code isn't");
+    console.log(`${passed ? "ok  " : "FAIL"} files: the web app's tests and test folder are read, and its product code isn't${passed ? "" : `: got ${JSON.stringify(read)}`}`);
+  }
   // Rule 6: every room given back to the runtime is listed.
   await expect("runtime-opt-out: each runtimeAlarms call is a finding", 'it("a", async () => {\n  await runtimeAlarms(stub(a));\n  await manualAlarms(stub(a));\n});\n', ["2: runtime-opt-out"], { api: false });
   // Rule 7: a stored alarm read bare where rooms are the test's.

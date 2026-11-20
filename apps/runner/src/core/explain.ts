@@ -4,7 +4,8 @@
  * to do. Nothing is interpolated but the code itself, which is a fixed shape, so no task text, error message or secret
  * can reach the terminal through it. A code with no entry says so and points to the local diagnostics file.
  *
- * The room is told only `what`, never `todo`, which may name the owner's local settings (`roomText`).
+ * None of this reaches the room: a start failure reaches it as one generic code, `runner_could_not_start`, in Runner's
+ * fixed note (`composeBlockedNote`), and the specific code and its explanation stay on the owner's machine.
  */
 
 export type Explanation = { what: string; todo: string };
@@ -31,6 +32,7 @@ const TABLE = new Map<string, Explanation>([
   ...group(["prompt_too_large", "prompt_invalid"], "The task's words are too large, or not text Runner can hand to the agent.", "Ask the room to shorten the task."),
   ...group(["blocked_same_inputs"], "The agent already answered blocked on these exact inputs, so Runner won't pay for the same answer again.", "Change the task, request changes, post a message on the task, or change the room's policy (such as adding shell), and it runs again."),
   ...group(["run_blocked"], "The agent reported it is blocked and couldn't finish.", "Read its reason on the task's thread. If it needs a shell, add \"shell\" to rooms[].tools in policy.json; network access can't be allowed yet (rooms[].network must stay [])."),
+  ...group(["note_scan_unknown", "note_scan_exhausted"], "Runner couldn't read the task's thread to check whether its note landed before a restart.", "It tries again with a growing wait; after six tries it posts its fixed note once."),
   ...group(["runner_could_not_start"], "Runner couldn't start a run for this task.", "The log line before it has the cause code, and the details file has the raw error."),
   // A run that never started.
   ...group(["docker_unavailable"], "Runner couldn't run Docker.", "Start Docker (Docker Desktop on a Mac), then the next offer runs."),

@@ -90,8 +90,9 @@ export class FileDiagnostics implements Diagnostics {
 
   private write(line: string) {
     if (!existsSync(this.folder)) mkdirSync(this.folder, { mode: 0o700 });
-    chmodSync(this.folder, 0o700);
+    // Checked first, so nothing is ever changed through a link: a real folder, the owner's, writable by no one else.
     ownFolderSync(this.folder);
+    chmodSync(this.folder, 0o700);
     let size: number;
     const fd = openSync(this.file, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600);
     try {

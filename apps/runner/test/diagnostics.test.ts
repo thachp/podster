@@ -102,6 +102,14 @@ describe("review of #489", () => {
     linkSync(join(other, "target"), join(other, "logs", "errors.jsonl"));
     new FileDiagnostics(other, () => NOW).record({ at: "adapter.run", code: "container_failed" });
     expect(readFileSync(join(other, "target"), "utf8")).toBe("");
+    // A symlinked logs folder is refused before anything is changed through it.
+    const victim = home();
+    chmodSync(victim, 0o755);
+    const linkedHome = home();
+    symlinkSync(victim, join(linkedHome, "logs"));
+    new FileDiagnostics(linkedHome, () => NOW).record({ at: "adapter.run", code: "container_failed" });
+    expect(statSync(victim).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(victim, "errors.jsonl"))).toBe(false);
     // Reads refuse a symlinked folder.
     const third = home();
     symlinkSync(join(h, "logs"), join(third, "logs"));

@@ -111,6 +111,11 @@ describe("secrets are redacted", () => {
     }
   });
 
+  it("takes a GitHub token whole even when part of it looks like another secret: its rule runs first", () => {
+    const token = `ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.sk-ant-api03-AbCdEfGhIjKlMnOp.${"eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(10)}`;
+    expect(redactSecrets(`with ${token} here`)).toEqual({ text: "with [redacted] here", count: 1 });
+  });
+
   it("never matches its own [redacted], so redacting twice changes nothing", () => {
     const once = redactSecrets("password: hunter2hunter2 and token = abcdefgh12345678");
     expect(redactSecrets(once.text)).toEqual({ text: once.text, count: 0 });

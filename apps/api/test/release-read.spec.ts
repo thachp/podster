@@ -138,6 +138,19 @@ describe("reading a release from the room's repository", () => {
     expect(most).toBeGreaterThan(1);
     expect(most).toBeLessThanOrEqual(10);
   });
+
+  it("takes a token in GitHub's current shape, `ghs_APPID_JWT` and hundreds of characters long, and reads and revokes with it", async () => {
+    await seed(repository(SITE));
+    await control("/fault", { token: "long_token" });
+    const answer = await read({});
+    expect(answer.failed).toBeUndefined();
+    expect(answer.files.length).toBe(5);
+    const seen = await state();
+    // Every read after the mint was made with that token, which GitHub's stand-in knew, and it was revoked at the end.
+    expect(seen.calls.filter((call) => call.auth !== "app").every((call) => call.auth === "token")).toBe(true);
+    expect(kinds(seen.calls)).toContain("DELETE /installation/token");
+    expect(seen.tokens.map((token) => token.revoked)).toEqual([true]);
+  });
 });
 
 describe("a read that gives nothing to publish", () => {
@@ -150,7 +163,7 @@ describe("a read that gives nothing to publish", () => {
 
   it("waits, and reads nothing, when the token isn't exactly the one asked for", async () => {
     await seed(repository(SITE));
-    for (const fault of [500, 403, 404, 422, "another_repo", "more_permissions", "no_token"] as const) {
+    for (const fault of [500, 403, 404, 422, "another_repo", "more_permissions", "no_token", "token_crlf", "token_space", "token_colon", "token_too_long"] as const) {
       await control("/reset", {});
       await seed(repository(SITE));
       await control("/fault", { token: fault });

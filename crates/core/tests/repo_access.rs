@@ -815,10 +815,12 @@ fn installation_tokens_in_githubs_current_shape_are_taken_up_to_the_bound() {
         long_token(390),
         long_token(520),
         long_token(INSTALLATION_TOKEN_MAX),
+        "a".repeat(INSTALLATION_TOKEN_MIN),
     ] {
         assert!(installation_token_ok(&token), "{}", token.len());
     }
     assert_eq!(long_token(390).len(), 390);
+    assert_eq!((INSTALLATION_TOKEN_MIN, INSTALLATION_TOKEN_MAX), (20, 4096));
 }
 
 #[test]
@@ -826,6 +828,8 @@ fn installation_tokens_that_could_break_a_header_or_credential_line_are_refused(
     let long = long_token(390);
     let refused = [
         String::new(),
+        "ghs_".to_string(),
+        "a".repeat(INSTALLATION_TOKEN_MIN - 1),
         long_token(INSTALLATION_TOKEN_MAX + 1),
         format!("{long} x"),
         format!("{long}\t"),

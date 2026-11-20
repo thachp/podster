@@ -344,10 +344,10 @@ describe("the credential helper", () => {
     const result = spawnSync(HELPER_PATH, [action], { input, stdio: ["pipe", "pipe", "pipe", fd3 === null ? "ignore" : "pipe"], env: { PATH: "/usr/bin:/bin", PODSTER_TOKEN: "ghs_FromTheEnvironment0000000000" }, ...(fd3 === null ? {} : {}) });
     return result;
   };
-  async function viaFd3(input: string, token: string, action = "get") {
+  async function viaFd3(input: string, token: string, action = "get", env: NodeJS.ProcessEnv = {}) {
     const { spawn } = await import("node:child_process");
     return new Promise<string>((resolve) => {
-      const child = spawn(HELPER_PATH, [action], { stdio: ["pipe", "pipe", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin" } });
+      const child = spawn(HELPER_PATH, [action], { stdio: ["pipe", "pipe", "ignore", "pipe"], env: { PATH: "/usr/bin:/bin", ...env } });
       let out = "";
       child.stdout?.on("data", (c) => (out += c));
       // The helper may exit without reading either, as it should for anything but GitHub: a write it never reads is
@@ -421,6 +421,15 @@ describe("the credential helper", () => {
     const get = "protocol=https\nhost=github.com\n\n";
     for (const token of [LONG, longToken(MAX_ACCESS_TOKEN)]) expect(await viaFd3(get, token)).toBe(`username=x-access-token\npassword=${token}\n`);
     for (const token of [`${LONG}:x`, `x@${LONG}`, `${LONG}/x`, `${LONG}=`, `${LONG}\tx`, longToken(MAX_ACCESS_TOKEN + 1)]) expect([token.length, await viaFd3(get, token)]).toEqual([token.length, ""]);
+  });
+
+  it("takes ASCII letters only, whatever the caller's locale: a token with `é` gets nothing, under a UTF-8 locale too", async () => {
+    const get = "protocol=https\nhost=github.com\n\n";
+    const accented = `${LONG.slice(0, 100)}é${LONG.slice(101)}`;
+    for (const env of [{}, { LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", LC_CTYPE: "en_US.UTF-8" }]) {
+      expect([env, await viaFd3(get, accented, "get", env)]).toEqual([env, ""]);
+      expect([env, await viaFd3(get, LONG, "get", env)]).toEqual([env, `username=x-access-token\npassword=${LONG}\n`]);
+    }
   });
 
   it("answers nothing with no descriptor 3, and never reads the environment", () => {

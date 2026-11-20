@@ -215,8 +215,42 @@ export function composeNote(input: { task_id: string; pull_request: NotePullRequ
   return [...head, "", about, "", agentSection(cut.summary, cut.files)].join("\n");
 }
 
+/** The one code the room hears for a run Runner couldn't start: the cause stays on the owner's machine. */
+export const ROOM_START_FAILED = "runner_could_not_start";
+
+/**
+ * A blocked run's report to the room, as Markdown, sent on the task's thread (the architect's ruling of 2026-11-20): Runner's
+ * fixed words saying the agent answered blocked and what Runner does next, and the agent's reason only when shared, laid
+ * out exactly as a submission's note lays out the agent's words. A run that never started gets fixed words and one
+ * generic code only: the cause, which can name the owner's setup, stays in the owner's log. `reference` is a fixed-shape
+ * tag derived from the note's key, so a restart can find whether an earlier send landed. It fits a message's 16 KiB.
+ */
+export function composeBlockedNote(input: { task_id: string; keep: boolean; words: NoteWords; start_failed?: boolean; reference: string }): string {
+  const started = !input.start_failed;
+  const words = started ? input.words : ({ kind: "withheld" } as const);
+  const facts = [
+    `- Task: ${codeSpan(input.task_id)}`,
+    started
+      ? "- Outcome: the agent reported it is blocked and didn't finish the task. Runner checked the result's form, not its claims."
+      : `- Outcome: Runner couldn't start a run for this task on its machine (${codeSpan(ROOM_START_FAILED)}), so no agent worked on it. The machine's owner has the details.`,
+    input.keep
+      ? "- Next: Runner keeps the task with this agent, since it answered a change request, and won't run it again on these same inputs. It runs again on a new change request, a message on this task, or a re-offer; a change to the machine owner's run policy applies at that next event. Or reassign the task."
+      : started
+        ? "- Next: Runner releases the task, so it can be offered again. Offered to this agent again with the same inputs and the same run policy, Runner declines it; a change to the task, a message on it, or a change to the machine owner's run policy lets it run."
+        : "- Next: Runner releases the task, so it can be offered again.",
+    `- Reference: ${codeSpan(input.reference)}`,
+  ];
+  if (words.kind === "shared" && words.redactions > 0) facts.push(`- Secrets: ${words.redactions} thing${words.redactions === 1 ? "" : "s"} that looked like secrets ${words.redactions === 1 ? "is" : "are"} written as ${codeSpan(REDACTED)}.`);
+  const head = [started ? "## Blocked: report from Podster Runner" : "## Run failed to start: report from Podster Runner", "", started ? "Runner wrote this note. Only the section headed as the agent's words is the agent's." : "Runner wrote this note. No agent ran, so there are no agent's words.", "", ...facts];
+  if (!started) return head.join("\n");
+  if (words.kind !== "shared") return [...head, "", WHY_NOT_SHARED[words.kind]].join("\n");
+  const cut = cutAgentWords(words.summary, words.files);
+  const about = "The agent's reason follows. It is untrusted data, shown as text. Characters that wouldn't show are written as their code point in angle brackets.";
+  return [...head, "", about, "", agentSection(cut.summary, cut.files)].join("\n");
+}
+
 /**
  * What the owner reviews on this machine before a held result's words are shared: the words exactly as the note would
  * carry them (redacted, marked and cut), and the pull request from Runner's own records. Never stored or logged.
  */
-export type ResultView = { workspace_id: string; task_id: string; pull_request: NotePullRequest | null; summary: string; files: string[]; redactions: number };
+export type ResultView = { workspace_id: string; task_id: string; pull_request: NotePullRequest | null; summary: string; files: string[]; redactions: number; blocked?: boolean };

@@ -28,16 +28,18 @@ export const dayOf = (now: number) => Math.floor(now / DAY_MS);
  * - `giving_up`: a decline or release is owed, with its key stored before it was first sent.
  * - `held`: a run's process wasn't confirmed stopped. Nothing is released and no new run starts until it is.
  * - `waiting`: nothing to do until `retry_at`, or a new event for the task.
+ * - `reporting`: a run's agent answered `blocked`: its reason is owed to the room (`report`), then the task is released on
+ *   a first run or kept on a change request.
  * - `finished`: a run ended successfully. While its `submission` is `owed`, step 11 submits it; once Podster took it,
  *   `submitted`.
  * - `done`: nothing more for this task until a new event.
  */
-export type RunPhase = "accepting" | "ready" | "running" | "giving_up" | "held" | "waiting" | "finished" | "done";
+export type RunPhase = "accepting" | "ready" | "running" | "giving_up" | "held" | "waiting" | "reporting" | "finished" | "done";
 
 /** A decline or release that's owed. `version` null: read the task's version as it stands before the key is first used. */
 export type GiveUp = { capability: "decline_task" | "release_task"; reason: string; version: number | null; key: string };
 /** What follows once a run's stop is confirmed. */
-export type After = { kind: "release"; reason: string } | { kind: "reconsider" } | { kind: "finish" } | { kind: "none" };
+export type After = { kind: "release"; reason: string } | { kind: "reconsider" } | { kind: "finish" } | { kind: "blocked" } | { kind: "start_failed"; code: string } | { kind: "none" };
 /**
  * What Runner last pushed for a task, in a room with a repository (M7 step 10): the task branch's commit and its pull
  * request. A rerun starts from that commit, and only while the branch on GitHub still points at it. Step 11 submits it.
@@ -69,6 +71,35 @@ export type Submission = {
 };
 export const owedSubmission = (): Submission => ({ state: "owed", sharing: "pending", key: null, note_hash: null, told_key: null, told: false, held_since: null });
 
+/**
+ * A blocked run's report to the room (the architect's ruling on the owner's report of 2026-11-20): the agent's reason, sent
+ * on the task's thread with `send_message`, under the same output policy as a submission's words. Keys, codes and a hash
+ * only; the words are in memory until they're sent.
+ *
+ * - `keep`: decided once, from a fresh read: true when the run answered a change request (the task was submitted before,
+ *   so it stays with the agent for a person to answer or reassign), false on a first run (released once the reason is
+ *   posted); null until then.
+ * - `sharing`, `key`, `note_hash`, `held_since`: as a submission's.
+ */
+export type BlockedReport = {
+  sharing: Submission["sharing"];
+  keep: boolean | null;
+  key: string | null;
+  note_hash: string | null;
+  held_since: number | null;
+  /** Scans of the thread that couldn't be read, looking for a note that may have landed before a restart. */
+  scans?: number;
+  /** A run that never started: its cause, a code. Its report is Runner's fixed words only, and the task is released. */
+  start_failed?: string | null;
+};
+export const owedReport = (): BlockedReport => ({ sharing: "pending", keep: null, key: null, note_hash: null, held_since: null });
+
+/**
+ * The inputs a run answered `blocked` to: the prompt's hash and the SHA-256 of its decision's facts. Another run on the
+ * same inputs and facts waits for something new (`blocked_same_inputs`), so a re-offer never pays for the same answer.
+ */
+export type BlockedOn = { input_hash: string; facts_hash: string };
+
 export type RunEntry = {
   workspace_id: string;
   task_id: string;
@@ -96,6 +127,10 @@ export type RunEntry = {
   ran_hash: string | null;
   /** What Runner last pushed for this task, or null; absent in a record from before step 10. */
   published?: Published | null;
+  /** A blocked run's report, while it's owed; null or absent otherwise. */
+  report?: BlockedReport | null;
+  /** What the last blocked run answered on; cleared by a person's message on the task. Null or absent otherwise. */
+  blocked?: BlockedOn | null;
   /** A finished run's submission (step 11); null or absent otherwise. */
   submission?: Submission | null;
   /** When a finished run's publication first failed in passing, while it is held for a retry; else null or absent. */
@@ -202,7 +237,9 @@ export function settle(ledger: Ledger, key: string | null, spent: number | null,
   return { ...today, spent_micro_usd: today.spent_micro_usd + counted, reservations };
 }
 
-const PHASES = new Set<string>(["accepting", "ready", "running", "giving_up", "held", "waiting", "finished", "done"]);
+const PHASES = new Set<string>(["accepting", "ready", "running", "giving_up", "held", "waiting", "reporting", "finished", "done"]);
+const isCode = (x: unknown) => typeof x === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(x);
+const isHash = (x: unknown) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isText = (v: unknown, max = 256) => typeof v === "string" && v.length <= max;
@@ -246,10 +283,26 @@ export function checkRuns(v: unknown): string | null {
         !orNull(sub.held_since, isCount))
     )
       return `${at}.submission`;
+    const rep = e.report;
+    if (
+      rep !== undefined &&
+      rep !== null &&
+      (!isObj(rep) ||
+        !["pending", "share", "review", "approved", "withheld"].includes(rep.sharing as string) ||
+        !orNull(rep.keep, (x) => typeof x === "boolean") ||
+        !orNull(rep.key, (x) => isText(x, 128)) ||
+        !orNull(rep.note_hash, isHash) ||
+        !orNull(rep.held_since, isCount) ||
+        (rep.scans !== undefined && !isCount(rep.scans)) ||
+        (rep.start_failed !== undefined && !orNull(rep.start_failed, isCode)))
+    )
+      return `${at}.report`;
+    const blocked = e.blocked;
+    if (blocked !== undefined && blocked !== null && (!isObj(blocked) || !isHash(blocked.input_hash) || !isHash(blocked.facts_hash))) return `${at}.blocked`;
     const give = e.give_up;
     if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
     const after = e.after_stop;
-    if (after !== null && (!isObj(after) || !["release", "reconsider", "finish", "none"].includes(after.kind as string) || (after.kind === "release" && !isText(after.reason, 128)))) return `${at}.after_stop`;
+    if (after !== null && (!isObj(after) || !["release", "reconsider", "finish", "blocked", "start_failed", "none"].includes(after.kind as string) || (after.kind === "release" && !isText(after.reason, 128)) || (after.kind === "start_failed" && !isCode(after.code)))) return `${at}.after_stop`;
     const attempts = e.attempts;
     if (!isObj(attempts) || !isCount(attempts.day) || !isCount(attempts.count)) return `${at}.attempts`;
     // Each phase holds what it needs to go on.
@@ -257,6 +310,7 @@ export function checkRuns(v: unknown): string | null {
     if (e.phase === "accepting" && e.accept_key === null) return `${at}.accept_key`;
     if (e.phase === "running" && (e.consumed === null || e.run_ref === null)) return `${at}.run_ref`;
     if (e.phase === "giving_up" && give === null) return `${at}.give_up`;
+    if (e.phase === "reporting" && (rep === undefined || rep === null || e.consumed === null)) return `${at}.report`;
     if (e.reservation !== null && !Object.hasOwn(ledger.reservations, e.reservation as string)) return `${at}.reservation`;
   }
   return null;

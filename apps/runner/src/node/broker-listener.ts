@@ -19,6 +19,7 @@
  *
  * Logs carry codes only, never a body, a header or the token.
  */
+import { holdSecret } from "../core/known-secrets.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { isAbsolute, normalize } from "node:path";
@@ -104,6 +105,8 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
     if (typeof p !== "string" || !isAbsolute(p) || normalize(p) !== p || p.includes("\u0000") || Buffer.byteLength(p) > MAX_SOCKET_PATH_BYTES) throw new Error("listener_socket_path");
   }
   const token = deps.token ?? randomBytes(32).toString("hex");
+  // Held for exact-match redaction in the local diagnostics file until the listener closes.
+  const release = holdSecret(token);
   let port = 0;
   let closed = false;
   const refuse = (res: ServerResponse, status: number, code: string) => {
@@ -174,6 +177,7 @@ export async function startBrokerListener(deps: ListenerDeps): Promise<BrokerLis
     new Promise<void>((resolve) => {
       if (closed) return resolve();
       closed = true;
+      release();
       server.close(() => {
         if (deps.socket === undefined) return resolve();
         void removeSocket(deps.socket).then(resolve);

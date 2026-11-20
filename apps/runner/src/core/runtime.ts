@@ -77,3 +77,14 @@ export function logLine(at: string, outcome: string, fields: LogFields = {}): st
 export const lineLogger = (write: (line: string) => void): Logger => (at, outcome, fields) => write(logLine(at, outcome, fields));
 
 export const silentLogger: Logger = () => undefined;
+
+/**
+ * A failure, for the local diagnostics file only (the owner's request of 2026-11-20): where and which code, the IDs, and
+ * the raw error, which the file's writer redacts and bounds. Never sent anywhere.
+ */
+export type FailureRecord = { at: string; code: string; workspace?: string; task?: string; run_ref?: string; error?: unknown };
+export interface Diagnostics {
+  record(failure: FailureRecord): void;
+  /** Where the file is, for the terminal's line. */
+  readonly file: string;
+}

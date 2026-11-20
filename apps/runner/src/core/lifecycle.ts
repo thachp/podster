@@ -1343,10 +1343,18 @@ export class Lifecycle {
     if (rep.key !== null && rep.note_hash !== (await sha256Hex(new TextEncoder().encode(note)))) {
       // A note was stored and may have been sent, but its body can't be made again (the words went with a restart). It
       // is never followed by a second, contradicting one: the thread is read for its reference first.
-      const landed = await this.noteLanded(entry, await referenceOf(rep.key));
+      const scans = (rep.scans ?? 0) + 1;
+      const landed = scans > MAX_NOTE_SCANS ? false : await this.noteLanded(entry, await referenceOf(rep.key));
       if (landed === "unknown") {
-        this.log("lifecycle.blocked", "unknown", entry, { code });
+        // The thread couldn't be read: tried again after a wait that doubles, from 5 minutes up to an hour.
+        await save({ ...rep, scans });
+        await this.put({ ...this.current(entry), retry_at: this.now() + Math.min(SCAN_FIRST_WAIT_MS * 2 ** (scans - 1), SCAN_LONGEST_WAIT_MS) });
+        this.log("lifecycle.blocked", "unknown", entry, { code: "note_scan_unknown", count: scans });
         return;
+      }
+      if (scans > MAX_NOTE_SCANS) {
+        // Past its scans, a small chance of a second note is taken over a task left stuck: the fixed note goes once.
+        this.log("lifecycle.blocked", "scan_given_up", entry, { code: "note_scan_exhausted", count: MAX_NOTE_SCANS });
       }
       if (landed) {
         this.forgetWords(key);
@@ -1354,7 +1362,7 @@ export class Lifecycle {
         await this.finishReport(entry, rep, code, task.version);
         return;
       }
-      await save({ ...rep, key: null, note_hash: null });
+      await save({ ...rep, key: null, note_hash: null, scans: 0 });
     }
     if (rep.key === null) {
       const fresh = this.newId();
@@ -1495,6 +1503,10 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
   return "stopped";
 }
 
+/** Scans of a thread that couldn't be read before the fixed note is posted anyway, and the waits between them. */
+export const MAX_NOTE_SCANS = 6;
+export const SCAN_FIRST_WAIT_MS = 5 * 60 * 1000;
+export const SCAN_LONGEST_WAIT_MS = 60 * 60 * 1000;
 /** The most pages of a task's thread read to find whether a note landed. */
 const NOTE_PAGES = 40;
 /** A note's reference: a fixed-shape tag from its key, which says nothing of the key. */

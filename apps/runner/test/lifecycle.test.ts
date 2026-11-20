@@ -4,7 +4,7 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
@@ -1757,6 +1757,49 @@ describe("a blocked run's report, review of #488", () => {
     expect(note).toContain("Runner restarted before sending them");
     expect(note).not.toContain("Needs a shell");
     expect(t.gateway.messages[0].idempotency_key).not.toBe(firstKey);
+  });
+
+  it("a thread that can't be read is scanned again with a doubling wait, then the fixed note goes once", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message" && failing-- > 0) t.gateway.executeScript.push(503);
+      if (capability === "list_messages") t.gateway.executeScript.push(503);
+    };
+    await t.pass();
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    const tick = async () => {
+      expect(await t.poller.pollOnce()).toBe("ok");
+      await restarted.tick(t.stop.signal);
+    };
+    const waits: number[] = [];
+    for (let scan = 1; scan <= MAX_NOTE_SCANS; scan++) {
+      await tick();
+      const e = restarted.record.entries[`${ROOM}/tsk_one`];
+      expect(e.report?.scans).toBe(scan);
+      waits.push((e.retry_at as number) - t.clock.now());
+      // Not scanned again before its wait is over.
+      const scans = t.commands("list_messages").length;
+      await tick();
+      expect(t.commands("list_messages").length).toBe(scans);
+      t.clock.at = e.retry_at as number;
+    }
+    expect(waits).toEqual([5, 10, 20, 40, 60, 60].map((m) => m * 60_000));
+    expect(t.gateway.messages).toHaveLength(0);
+    await tick();
+    // Past its scans: the fixed words, once, under a new key, and the release.
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(String(t.gateway.messages[0].body)).toContain("Runner restarted before sending them");
+    expect(t.commands("list_messages")).toHaveLength(MAX_NOTE_SCANS);
+    const logged = t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(logged.filter((l) => l.code === "note_scan_unknown")).toHaveLength(MAX_NOTE_SCANS);
+    expect(logged.find((l) => l.code === "note_scan_exhausted")).toMatchObject({ at: "lifecycle.blocked", outcome: "scan_given_up", count: MAX_NOTE_SCANS });
+    await tick();
+    expect(t.commands("release_task")).toHaveLength(1);
+    expect(t.gateway.messages).toHaveLength(1);
   });
 
   it("hold mode with no answer: after REVIEW_HOLD_MS the room gets Runner's fixed words only", async () => {

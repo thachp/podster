@@ -87,6 +87,8 @@ export type BlockedReport = {
   key: string | null;
   note_hash: string | null;
   held_since: number | null;
+  /** Scans of the thread that couldn't be read, looking for a note that may have landed before a restart. */
+  scans?: number;
   /** A run that never started: its cause, a code. Its report is Runner's fixed words only, and the task is released. */
   start_failed?: string | null;
 };
@@ -291,6 +293,7 @@ export function checkRuns(v: unknown): string | null {
         !orNull(rep.key, (x) => isText(x, 128)) ||
         !orNull(rep.note_hash, isHash) ||
         !orNull(rep.held_since, isCount) ||
+        (rep.scans !== undefined && !isCount(rep.scans)) ||
         (rep.start_failed !== undefined && !orNull(rep.start_failed, isCode)))
     )
       return `${at}.report`;

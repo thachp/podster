@@ -1,4 +1,4 @@
-import { FAILURE_COPY } from "@/components/sheet/target-sheet";
+import { FAILURE_COPY, shownCode } from "@/components/sheet/target-sheet";
 import type { TaskFile } from "./task-model";
 
 /** At most this many links and files together on one submission, as the API counts them. */
@@ -67,6 +67,17 @@ const VERIFY_REFUSED: Record<string, string> = {
   file_changed: "A file in it no longer matches the version that was submitted. Request changes instead.",
   file_removed: "A file in it has been removed since it was submitted. Request changes instead.",
   files_not_checked: "Podster couldn't check its files, so it wasn't approved. Try again, and tell the workroom's owner if it keeps happening.",
+  invalid_argument: "Podster couldn't match the approval to the submission's commit. Reload the task and try again.",
+  repo_not_ready: "The workroom's repository isn't ready: it may be degraded or suspended. Its owner can see why in Settings.",
+  change_not_found: "This submission has no pull request on record, so it can't be approved. Request changes instead.",
+  pull_request_not_found: "Its pull request can't be found on the workroom's repository. Request changes instead.",
+  provider_unavailable: "Podster couldn't read its pull request from GitHub just now. Try again in a minute.",
+  repo_access_unavailable: "Podster can't read the workroom's repository right now. Try again later.",
+  pull_request_not_open: "Its pull request is closed or already merged. Request changes instead.",
+  pull_request_draft: "Its pull request is marked as a draft again. Request changes, or wait until it's ready.",
+  pull_request_wrong_base: "Its pull request no longer targets the repository's default branch. Request changes instead.",
+  pull_request_from_fork: "Its pull request's head is in another repository. Request changes instead.",
+  pull_request_unread: "Podster couldn't read its pull request, so it wasn't approved. Try again.",
 };
 
 /**
@@ -78,11 +89,13 @@ export function verifyProblem(code: string, status: number) {
   if (code === "unknown" || status >= 500) return FAILURE_COPY.unknown;
   if (status === 401) return FAILURE_COPY.signed_out;
   if (status === 429) return FAILURE_COPY.rate_limited;
-  return code === "workspace_archived" ? FAILURE_COPY.workspace_archived : FAILURE_COPY.refused;
+  return code === "workspace_archived" ? FAILURE_COPY.workspace_archived : `That wasn't approved, and nothing changed. You may no longer be allowed to do this. Podster refused this: ${shownCode(code)}.`;
 }
 
 /**
- * `files_not_checked` comes back as a 500, but it's a definite refusal: the API answers it before anything commits. Left as a
+ * `files_not_checked` comes back as a 500, and a failed read of a linked task's pull request as a 502 or 503, but each is a
+ * definite refusal: the API answers it before anything commits. Left as a
  * 500, the Sheet would say it can't tell whether the approval went through.
  */
-export const definiteRefusal = <T extends { ok: boolean; status?: number; code?: string }>(result: T): T => (!result.ok && result.code === "files_not_checked" ? { ...result, status: 409 } : result);
+const ANSWERED_BEFORE_COMMIT = new Set(["files_not_checked", "provider_unavailable", "repo_access_unavailable"]);
+export const definiteRefusal = <T extends { ok: boolean; status?: number; code?: string }>(result: T): T => (!result.ok && result.code && ANSWERED_BEFORE_COMMIT.has(result.code) ? { ...result, status: 409 } : result);

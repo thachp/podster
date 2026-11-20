@@ -324,7 +324,10 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
   const [discarding, setDiscarding] = useState(false);
   const [reason, setReason] = useState("");
   const fieldRef = useRef<HTMLTextAreaElement>(null);
-  const approveKey = useIntentKey(`verify:${submission}`);
+  // A linked task's approval names the commit its submission was made at, and the API refuses one that doesn't (the
+  // contract's `VerifyTask.commit_sha`). Any other task's submission has none, and its approval sends none.
+  const commit = data.submissions.find((item) => item.submission_no === submission)?.commit_sha ?? null;
+  const approveKey = useIntentKey(`verify:${submission}:${commit ?? ""}`);
   const changesKey = useIntentKey(`changes:${submission}:${reason}`);
   const trimmed = reason.trim();
   // The reviewer named on a task reads all its submitted files (decision 97), so this is the whole of them.
@@ -344,7 +347,7 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
 
   const approve = async () => {
     onNotice(null);
-    const result = await run(async () => definiteRefusal(asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission }, { idempotencyKey: approveKey }))), verifyProblem);
+    const result = await run(async () => definiteRefusal(asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission, ...(commit ? { commit_sha: commit } : {}) }, { idempotencyKey: approveKey }))), verifyProblem);
     if (result?.ok) onNotice(`Approved submission ${submission}. This task is completed.`);
   };
 

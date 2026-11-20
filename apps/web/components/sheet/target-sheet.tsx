@@ -77,6 +77,12 @@ export const FAILURE_COPY: Record<string, string> = {
   refused: "That didn't save, and nothing changed. You may no longer be allowed to do this.",
 };
 
+/** A server's error code as shown on screen: only a plain code, never its free text, so nothing it sends can read as more. */
+export const shownCode = (code: string) => (/^[a-z0-9_]{1,64}$/.test(code) ? code : "error");
+
+/** A refusal no screen has its own words for still names its code, so a person can tell one refusal from another and report it. */
+export const refusedWith = (code: string) => `${FAILURE_COPY.refused} Podster refused this: ${shownCode(code)}.`;
+
 function failureKind(status: number, code: string, earlierUnknown: boolean) {
   if (status === 401) return earlierUnknown ? "signed_out_unknown" : "signed_out";
   if (earlierUnknown) return "still_unknown";
@@ -271,6 +277,13 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const [heldFailure, setHeldFailure] = useState(false);
   const [failedCode, setFailedCode] = useState<string | null>(null);
   const [failedText, setFailedText] = useState<string | null>(null);
+  const [failedServerCode, setFailedServerCode] = useState<string | null>(null);
+  const failureRef = useRef<HTMLDivElement>(null);
+  // A command's controls sit at the foot of a long Sheet and its failure at the top, so the failure is brought into view.
+  // Without this, a refusal could land off screen and look like nothing happened.
+  useEffect(() => {
+    if (failedText || failedCode || conflict) failureRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [failedText, failedCode, conflict]);
   // An earlier attempt here may have committed. Authority and rate limits answer before a replay, so a refusal can't rule that out.
   const outcomeUnknown = useRef(false);
   const [asking, setAsking] = useState(false);
@@ -405,6 +418,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     if (!next) {
       setFailedCode(null);
       setFailedText(null);
+      setFailedServerCode(null);
     }
   }
 
@@ -416,6 +430,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     setConflict(false);
     setFailedCode(null);
     setFailedText(null);
+    setFailedServerCode(null);
     setHeldFailure(false);
     try {
       const result = await command(binding);
@@ -435,6 +450,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
         else {
           const kind = result.status >= 500 ? "unknown" : failureKind(result.status, result.code, outcomeUnknown.current);
           setFailedCode(kind);
+          setFailedServerCode(result.code);
           // A command's own explanation says why it was refused, which can't speak for an earlier attempt that may have gone through.
           const answersForEarlier = kind === "still_unknown" || kind === "signed_out_unknown";
           setFailedText(answersForEarlier ? null : (explain?.(kind === "unknown" ? "unknown" : result.code, result.status) ?? null));
@@ -500,35 +516,37 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
                 </Button>
               </p>
             ) : null}
-            {conflict ? (
-              <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
-                This {noun} changed while you were editing. Your changes aren't saved.{" "}
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-status-amber underline"
-                  onClick={() => {
-                    setConflict(false);
-                    setDirty(false);
-                    // Reviewing is the person choosing to carry on from what's there now, so a form that keeps its text answers to that.
-                    ownChange.current = true;
-                    setSettling(true);
-                    setReloads((count) => count + 1);
-                  }}
-                >
-                  Review latest
-                </Button>
-              </p>
-            ) : null}
-            {failedText ? (
-              <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {failedText}
-              </p>
-            ) : null}
-            {failedCode && !failedText ? (
-              <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                {FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused}
-              </p>
-            ) : null}
+            <div ref={failureRef} className="scroll-mt-4 space-y-4 empty:hidden">
+              {conflict ? (
+                <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
+                  This {noun} changed while you were editing. Your changes aren't saved.{" "}
+                  <Button
+                    variant="link"
+                    className="h-auto p-0 text-status-amber underline"
+                    onClick={() => {
+                      setConflict(false);
+                      setDirty(false);
+                      // Reviewing is the person choosing to carry on from what's there now, so a form that keeps its text answers to that.
+                      ownChange.current = true;
+                      setSettling(true);
+                      setReloads((count) => count + 1);
+                    }}
+                  >
+                    Review latest
+                  </Button>
+                </p>
+              ) : null}
+              {failedText ? (
+                <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+                  {failedText}
+                </p>
+              ) : null}
+              {failedCode && !failedText ? (
+                <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+                  {failedCode === "refused" && failedServerCode ? refusedWith(failedServerCode) : (FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused)}
+                </p>
+              ) : null}
+            </div>
             {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, refreshList: onRefreshList, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>

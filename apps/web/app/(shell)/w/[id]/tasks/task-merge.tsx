@@ -5,7 +5,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { visibleText } from "@/lib/public/visible-text";
-import type { SheetApi } from "@/components/sheet/target-sheet";
+import { shownCode, type SheetApi } from "@/components/sheet/target-sheet";
 import type { RepoGrant, RoomRepository } from "../settings/repository-model";
 import type { LoadedTask } from "./task-sheet";
 import type { PullRequestChange } from "./task-change";
@@ -75,7 +75,7 @@ export function explainMergeRefusal(code: string, status = 400): string {
     case "not_found":
       return "Merging isn't available right now. Nothing was asked for.";
     default:
-      return status >= 500 ? "We can't tell whether the merge was asked for. Reload the task: if it was, it shows as requested." : "The merge wasn't asked for. You may no longer be allowed to do this.";
+      return status >= 500 ? "We can't tell whether the merge was asked for. Reload the task: if it was, it shows as requested." : `The merge wasn't asked for. You may no longer be allowed to do this. Podster refused this: ${shownCode(code)}.`;
   }
 }
 

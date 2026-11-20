@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fireEvent } from "@testing-library/react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -7,8 +7,34 @@ import { useEarlyInput } from "./use-early-input";
 
 const seen = vi.fn();
 
+/**
+ * Resolves on the next commit of a component that calls `useCommitted`. Its effect runs after the hook's own, declared before it, so
+ * by then the hook has queued what it hands over. No wall-clock wait: a loaded machine can take longer than any margin to hydrate.
+ */
+let onCommit: (() => void) | null = null;
+const nextCommit = () => new Promise<void>((resolve) => (onCommit = resolve));
+function useCommitted() {
+  useEffect(() => {
+    const resolve = onCommit;
+    onCommit = null;
+    resolve?.();
+  });
+}
+
+/**
+ * Waits for the commit `start` causes, then runs the hook's queued hand-overs, each a timeout of its own, until none is left.
+ * React's own scheduler keeps the real timers it took when it loaded, so only the hook's timeouts are the test's.
+ */
+async function committed(start: () => void) {
+  const commit = nextCommit();
+  start();
+  await commit;
+  vi.runAllTimers();
+}
+
 function Form({ on = true }: { on?: boolean }) {
   const early = useEarlyInput();
+  useCommitted();
   const [state, setState] = useState({ name: "Server", note: "", pick: "a", tick: false });
   const change = (next: Partial<typeof state>) => {
     seen(next);
@@ -27,8 +53,7 @@ function Form({ on = true }: { on?: boolean }) {
   );
 }
 
-// Real timing, not act's, which would hold every update until the end and hide what each step sees.
-const settled = () => new Promise((done) => setTimeout(done, 100));
+// Not act's timing, which would hold every update until the end and hide what each step sees.
 const flag = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean };
 
 let root: Root | undefined;
@@ -40,16 +65,20 @@ async function hydrate(early: (control: Record<string, HTMLInputElement>) => voi
   host.innerHTML = renderToString(<Form on={on} />);
   const get = (label: string) => host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
   early({ name: get("name"), note: get("note"), pick: get("pick"), tick: get("tick") });
-  root = hydrateRoot(host, <Form on={on} />);
-  await settled();
+  await committed(() => {
+    root = hydrateRoot(host, <Form on={on} />);
+  });
   return JSON.parse(host.querySelector("form")!.dataset.state!);
 }
 
 beforeEach(() => {
   flag.IS_REACT_ACT_ENVIRONMENT = false;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 });
 
 afterEach(() => {
+  vi.useRealTimers();
+  onCommit = null;
   root?.unmount();
   host.remove();
   seen.mockClear();
@@ -82,10 +111,11 @@ describe("useEarlyInput", () => {
 
   describe("after the page has hydrated", () => {
     const control = (label: string) => host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement;
-    const trigger = async () => {
+    // Nothing here should queue a hand-over, and anything that did runs before the test looks.
+    const trigger = () => {
       window.dispatchEvent(new Event("load"));
       window.dispatchEvent(new Event("pageshow"));
-      await settled();
+      vi.runAllTimers();
     };
 
     it("doesn't send a change again when someone has typed, ticked and picked", async () => {
@@ -93,9 +123,9 @@ describe("useEarlyInput", () => {
       fireEvent.change(control("name"), { target: { value: "Typed later" } });
       fireEvent.click(control("tick"));
       fireEvent.change(control("pick"), { target: { value: "b" } });
-      await settled();
+      vi.runAllTimers();
       seen.mockClear();
-      await trigger();
+      trigger();
       expect(seen).not.toHaveBeenCalled();
     });
 
@@ -105,7 +135,7 @@ describe("useEarlyInput", () => {
         c.pick.value = "b";
       });
       seen.mockClear();
-      await trigger();
+      trigger();
       expect(seen).not.toHaveBeenCalled();
     });
 
@@ -113,6 +143,7 @@ describe("useEarlyInput", () => {
       host = document.body.appendChild(document.createElement("div"));
       function Driven({ tick, pick }: { tick: boolean; pick: string }) {
         const early = useEarlyInput();
+        useCommitted();
         return (
           <form ref={early}>
             <input aria-label="tick" type="checkbox" checked={tick} onChange={(event) => seen({ tick: event.target.checked })} />
@@ -124,11 +155,11 @@ describe("useEarlyInput", () => {
         );
       }
       host.innerHTML = renderToString(<Driven tick={false} pick="a" />);
-      root = hydrateRoot(host, <Driven tick={false} pick="a" />);
-      await settled();
-      root.render(<Driven tick pick="b" />);
-      await settled();
-      await trigger();
+      await committed(() => {
+        root = hydrateRoot(host, <Driven tick={false} pick="a" />);
+      });
+      await committed(() => root!.render(<Driven tick pick="b" />));
+      trigger();
       expect(seen).not.toHaveBeenCalled();
     });
   });
@@ -138,6 +169,7 @@ describe("useEarlyInput", () => {
     root = createRoot(host);
     function Picked() {
       const early = useEarlyInput();
+      useCommitted();
       return (
         <form ref={early}>
           <select aria-label="pick" value="b" onChange={(event) => seen({ pick: event.target.value })}>
@@ -148,8 +180,7 @@ describe("useEarlyInput", () => {
         </form>
       );
     }
-    root.render(<Picked />);
-    await settled();
+    await committed(() => root!.render(<Picked />));
     expect(seen).not.toHaveBeenCalled();
   });
 });

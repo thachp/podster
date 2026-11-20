@@ -17,10 +17,17 @@ export const routerCalls = { refresh: 0, push: 0, /** Refreshes that landed: a `
 /** Real navigation finishes later. While true, `push` and `replace` wait until `settleNavigation`. */
 let holdNavigation = false;
 let held: (() => void)[] = [];
-/** Long enough for a Sheet's own reads, which answer at once here, to finish first. */
-const REFRESH_LANDS_MS = 10;
-/** Router work still on its way. vinext's `pushState` calls `discardPendingNavigation`, which drops a pending push or refresh. */
-let routerWork = 0;
+/**
+ * Refreshes asked for whose server round trip hasn't come back. They land only when a test calls `landRefreshes`, never on a
+ * timer: a timer is a margin that a loaded machine uses up, and a refresh then lands before a close that should have discarded it.
+ * vinext's `pushState` calls `discardPendingNavigation`, which drops a pending push or refresh.
+ */
+let pendingRefreshes = 0;
+/** The server round trips of every refresh still pending come back now, so each one not discarded counts in `refreshed`. */
+export const landRefreshes = () => {
+  routerCalls.refreshed += pendingRefreshes;
+  pendingRefreshes = 0;
+};
 const heldPushes = new Set<() => void>();
 export const setHoldNavigation = (hold: boolean) => {
   holdNavigation = hold;
@@ -44,7 +51,7 @@ export function setUrl(next: string) {
   routerCalls.refresh = 0;
   routerCalls.push = 0;
   routerCalls.refreshed = 0;
-  routerWork += 1;
+  pendingRefreshes = 0;
   holdNavigation = false;
   held = [];
   notify();
@@ -67,7 +74,7 @@ export const back = () => {
 // vinext patches this so `useSearchParams` follows it, as Next does, and it reads nothing from the server. React may apply
 // it a moment later, so a held navigation holds this too.
 window.history.pushState = (_data, _unused, next) => {
-  routerWork += 1;
+  pendingRefreshes = 0;
   held = held.filter((apply) => !heldPushes.has(apply));
   heldPushes.clear();
   if (next) later(() => navigate(String(next)));
@@ -91,11 +98,8 @@ export const useRouter = () => ({
     }),
   refresh: () => {
     routerCalls.refresh += 1;
-    // It lands after a server round trip, so a `pushState` in the meantime discards it.
-    const asked = routerWork;
-    setTimeout(() => {
-      if (routerWork === asked) routerCalls.refreshed += 1;
-    }, REFRESH_LANDS_MS);
+    // It lands after a server round trip, which `landRefreshes` stands for, so a `pushState` in the meantime discards it.
+    pendingRefreshes += 1;
   },
 });
 

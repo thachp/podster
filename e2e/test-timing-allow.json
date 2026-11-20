@@ -7,7 +7,8 @@
   "`lines_when_listed` and `listed_at` are for a reader: the check doesn't use them, and lines move.",
   "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E.",
   "Rules 4 to 6 (`runtime-alarms`, `direct-alarm`, `runtime-opt-out`) were added with the test-only switch that puts a room's alarms under the test's control (PR 406).",
-  "Rule 7 (`bare-alarm-read`) was added after a bare getAlarm() read null once the runtime's firing took an alarm due at once (PR 428)."
+  "Rule 7 (`bare-alarm-read`) was added after a bare getAlarm() read null once the runtime's firing took an alarm due at once (PR 428).",
+  "The web app's tests (every *.test.ts and *.test.tsx in apps/web, and apps/web/test) were added to the check after three web tests failed once each under a load average near 20 on 2026-11-20 (branch fix/web-test-flakes-under-load). Their remaining sleeps are listed under B, owed."
  ],
  "categories": {
   "A": "sleep: a bounded poll for the state itself (right as it is, unless its reason says owed)",
@@ -1274,6 +1275,411 @@
    "listed_at": "PR 428",
    "code": "const alarm = await state.storage.getAlarm();",
    "reason": "settleAndHold reads a hostname claim's alarm, not a room's, in the same turn as the run that set it: that object's alarms aren't the test's, and nothing can fire in between."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "function settled",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    22
+   ],
+   "code": "const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 10)));",
+   "reason": "Owed: the act-wrapped 10 ms settle the calls below use (B). See their entries for why it holds today and what would remove it."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > reads nothing until someone acts",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    59,
+    61
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > reads one page for one downward move near the bottom, and not for moving up or barely moving",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    105,
+    110
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > reads once for a reader already near the bottom when it starts, and doesn't run on from there",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    120
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > doesn't read when it starts for a reader at the top, or one far from the bottom",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    128,
+    134
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > makes one read when the button is pressed as it starts, whichever goes first",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    145,
+    147
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > doesn't start a second read while one is on its way",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    160,
+    164
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > keeps the rows and offers a retry after an outage, without reading again on scroll",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    190
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > sends a 401 to sign in",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    271
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/activity/activity-list.test.tsx",
+   "rule": "sleep",
+   "where": "Activity's Load more > stops a read when it goes away",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    279
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "function settled",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    31
+   ],
+   "code": "const settled = () => act(() => new Promise((resolve) => setTimeout(resolve, 10)));",
+   "reason": "Owed: the act-wrapped 10 ms settle the calls below use (B). See their entries for why it holds today and what would remove it."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > reads once for a reader already near the bottom when it starts, and doesn't run on from there",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    139
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > doesn't read when it starts for a reader far from the bottom",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    146
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > makes one read when the button is pressed as it starts",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    157
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > looks only once, so a list that gains a next page later doesn't read without a move",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    170,
+    173,
+    175
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 3
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > still looks if the list's bottom goes away and comes back before the look could run",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    190
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > still looks, once, when React runs its effects twice",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    207
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > doesn't read when it starts with a Sheet open over the list",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    216
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > reads nothing until they move",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    224
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > gives one scroll one page, even when that page lands above them and they're still at the bottom",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    237
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > reads again when a jump back to the bottom follows a page that landed below them",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    252
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > doesn't read when they scroll up, or while still far from the bottom",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    263,
+    268
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows.",
+   "count": 2
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > doesn't read behind an open Sheet",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    276
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "loading as the reader scrolls > stops after a failure, so the next read is the person's",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    285
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "Needs my review in a room past one page > costs no read in a room that fits on a page",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    489
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "Needs my review in a room past one page > keeps a later page through a re-read, so a row someone opened from it isn't lost",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    517
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/tasks/task-load-more.test.tsx",
+   "rule": "sleep",
+   "where": "Needs my review in a room past one page > keeps later pages when the first page reaches past where they start, without listing a row twice",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    561
+   ],
+   "code": "await settled();",
+   "reason": "Owed: an act-wrapped 10 ms timer used as the point where everything has happened, mostly before asserting no further read was made (B). It isn't a race the clock can lose for the list's own look, a setTimeout(0) set when the list commits, because Node runs timers in the order they fall due and that one falls due first; it held under load in this branch's runs. But it stands for 'nothing more is coming', which only holds while every read the stand-in answers settles in microtasks. What would remove it: a fetch stand-in that holds each read until the test releases it, and waits on what the list shows."
+  },
+  {
+   "file": "apps/web/app/(shell)/w/[id]/team/role-openings.test.tsx",
+   "rule": "sleep",
+   "where": "a draft through this Sheet's own commands, against an API whose version moves > isn't thrown by a read already out when a command succeeds",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    556
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 20));",
+   "reason": "Owed: 20 ms for an older read's abort to land, then an assertion that the Save button is still held (B). A loaded machine can only make this pass without showing anything, never fail it. What would remove it: await the aborted read's own settling at the stand-in (its signal's abort event), then assert."
+  },
+  {
+   "file": "apps/web/components/sheet/target-sheet.test.tsx",
+   "rule": "sleep",
+   "where": "TargetSheet > URL state > doesn't reopen or refetch while the URL catches up after not-found (UI-05)",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    199
+   ],
+   "code": "await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));",
+   "reason": "20 ms inside act, then an assertion that the Sheet didn't open or read again (B). A loaded machine can only make this pass without showing anything, never fail it. Owed: what would remove it is a load stand-in whose calls the test counts and awaits, with the held navigation released only after the check."
+  },
+  {
+   "file": "apps/web/components/sheet/target-sheet.test.tsx",
+   "rule": "sleep",
+   "where": "TargetSheet > URL state > while closing is still reaching the URL > doesn't open for a press that goes to a new tab",
+   "category": "B",
+   "owed": true,
+   "listed_at": "fix/web-test-flakes-under-load",
+   "lines_when_listed": [
+    246
+   ],
+   "code": "await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));",
+   "reason": "20 ms inside act, then an assertion that the Sheet didn't open or read again (B). A loaded machine can only make this pass without showing anything, never fail it. Owed: what would remove it is a load stand-in whose calls the test counts and awaits, with the held navigation released only after the check."
   }
  ]
 }

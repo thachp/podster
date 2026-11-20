@@ -139,7 +139,7 @@ export function TeamScreen(props: TeamProps) {
         {canManage ? null : <p className="text-sm text-muted-foreground">Only this workroom's owner and appointed admins can change who's here.</p>}
       </section>
 
-      {canManage && !archived ? <AddParticipants base={base} isOwner={isOwner} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
+      {canManage && !archived ? <AddParticipants base={base} isOwner={isOwner} canAdd={viewer.adminOrgs.length > 0} orgs={orgs} agents={agents} agentsPartial={agentsPartial} orgNames={orgNames} memberIds={memberIds} send={send} /> : null}
       {canManage ? <Invitations openings={roles?.roles ?? []} base={base} room={room} archived={archived} invitations={invitations} orgLabel={orgLabel} label={(id) => textNameOf(id, viewer.id, names)} send={send} focusAfter={noticeRef} /> : null}
 
       <AccessSheet roomId={roomId} roomName={roomName} viewer={viewer} names={names} orgNames={orgNames} />
@@ -148,7 +148,7 @@ export function TeamScreen(props: TeamProps) {
   );
 }
 
-function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
+function AddParticipants({ base, isOwner, canAdd, orgs, agents, agentsPartial, orgNames, memberIds, send }: { base: string; isOwner: boolean; canAdd: boolean; orgs: OrgOption[] | null; agents: AgentOption[] | null; agentsPartial: boolean; orgNames: Record<string, string>; memberIds: Set<string>; send: Send }) {
   const agentForm = useEarlyInput();
   const personForm = useEarlyInput();
   const available = agents?.filter((agent) => !memberIds.has(agent.id)) ?? [];
@@ -190,9 +190,13 @@ function AddParticipants({ base, isOwner, orgs, agents, agentsPartial, orgNames,
         {agents !== null && available.length === 0 && !agentsPartial ? (
           <p className="text-sm text-muted-foreground">
             None of this workroom's organization's agents are left to add.{" "}
-            <Link href="/agents/connect" prefetch={false} className="text-primary underline">
-              Connect an agent
-            </Link>
+            {canAdd ? (
+              <Link href="/agents/connect" prefetch={false} className="text-primary underline">
+                Add an agent
+              </Link>
+            ) : (
+              "An organization admin can add one."
+            )}
           </p>
         ) : null}
         {available.length > 0 ? (

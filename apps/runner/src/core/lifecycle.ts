@@ -623,6 +623,8 @@ export class Lifecycle {
       // run on, so no spend. An ask still asks the owner, who may run it.
       this.log("lifecycle.decision", "refuse", entry, { code: "blocked_same_inputs" });
       if (task.status === "offered") await this.giveUp(entry, task.status, "blocked_same_inputs", task.version);
+      // A first run's task is never left accepted: its release, refused or lost before, is sent again.
+      else if (detail.prompt.shape.change_request_event_id === null) await this.giveUp(entry, task.status, "run_blocked", task.version);
       else await this.put({ ...entry, phase: "done", outcome: "blocked_same_inputs" });
       return null;
     }
@@ -1336,9 +1338,29 @@ export class Lifecycle {
       await save({ ...rep, sharing: answer === "approve" ? "approved" : "withheld" });
     }
     const words: NoteWords = rep.start_failed ? { kind: "withheld" } : !result || !cleaned ? { kind: "lost" } : !cleaned.ok ? { kind: "secret_hidden" } : rep.sharing === "share" || rep.sharing === "approved" ? { kind: "shared", ...cleaned } : { kind: "withheld" };
-    const note = composeBlockedNote({ task_id: entry.task_id, keep: rep.keep === true, words, start_failed: rep.start_failed ?? null });
-    const noteHash = await sha256Hex(new TextEncoder().encode(note));
-    if (rep.key === null || rep.note_hash !== noteHash) await save({ ...rep, key: this.newId(), note_hash: noteHash });
+    const compose = async (k: string) => composeBlockedNote({ task_id: entry.task_id, keep: rep.keep === true, words, start_failed: !!rep.start_failed, reference: await referenceOf(k) });
+    let note = rep.key === null ? "" : await compose(rep.key);
+    if (rep.key !== null && rep.note_hash !== (await sha256Hex(new TextEncoder().encode(note)))) {
+      // A note was stored and may have been sent, but its body can't be made again (the words went with a restart). It
+      // is never followed by a second, contradicting one: the thread is read for its reference first.
+      const landed = await this.noteLanded(entry, await referenceOf(rep.key));
+      if (landed === "unknown") {
+        this.log("lifecycle.blocked", "unknown", entry, { code });
+        return;
+      }
+      if (landed) {
+        this.forgetWords(key);
+        logged(true);
+        await this.finishReport(entry, rep, code, task.version);
+        return;
+      }
+      await save({ ...rep, key: null, note_hash: null });
+    }
+    if (rep.key === null) {
+      const fresh = this.newId();
+      note = await compose(fresh);
+      await save({ ...rep, key: fresh, note_hash: await sha256Hex(new TextEncoder().encode(note)) });
+    }
     let posted = false;
     let refused: number | undefined;
     for (let attempt = 0; attempt < COMMAND_TRIES; attempt++) {
@@ -1364,9 +1386,42 @@ export class Lifecycle {
     }
     this.forgetWords(key);
     logged(posted, refused);
+    await this.finishReport(entry, rep, code, task.version);
+  }
+
+  /** After the report: a change request's task is kept; any other is released. */
+  private async finishReport(entry: RunEntry, rep: BlockedReport, code: string, version: number) {
     const done = { ...this.current(entry), report: null, retry_at: null };
     if (rep.keep) await this.put({ ...done, phase: "done", outcome: code });
-    else await this.giveUp(done, "accepted", code, task.version);
+    else await this.giveUp(done, "accepted", code, version);
+  }
+
+  /**
+   * Whether a note with this reference is on the task's thread, sent by this agent: true, false, or `unknown` when the
+   * thread can't be read now. Pages are read to the end, at most `NOTE_PAGES` of them; bodies are only searched for the
+   * fixed-shape reference, never read for meaning.
+   */
+  private async noteLanded(entry: RunEntry, reference: string): Promise<boolean | "unknown"> {
+    const agent = this.deps.poller.agentId;
+    let after: string | null = null;
+    for (let page = 0; page < NOTE_PAGES; page++) {
+      let answer: { messages?: unknown } | null;
+      try {
+        answer = (await this.deps.poller.request("list_messages", { workspace_id: entry.workspace_id, task_id: entry.task_id, ...(after ? { after } : {}) })) as { messages?: unknown } | null;
+      } catch (error) {
+        if (!(error instanceof GatewayError)) throw error;
+        return "unknown";
+      }
+      const messages = Array.isArray(answer?.messages) ? (answer.messages as Record<string, unknown>[]) : [];
+      for (const m of messages) {
+        const from = m && typeof m === "object" ? (m.from as Record<string, unknown> | null) : null;
+        if (from?.id === agent && typeof m.body === "string" && m.body.includes(reference)) return true;
+      }
+      const last = messages.at(-1)?.id;
+      if (messages.length < 50 || typeof last !== "string") return false;
+      after = last;
+    }
+    return "unknown";
   }
 
   private async submitted(entry: RunEntry) {
@@ -1438,6 +1493,13 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
     await waitForNext(clock, poller.nextWaitMs(polled), polled, signal, bell);
   }
   return "stopped";
+}
+
+/** The most pages of a task's thread read to find whether a note landed. */
+const NOTE_PAGES = 40;
+/** A note's reference: a fixed-shape tag from its key, which says nothing of the key. */
+async function referenceOf(key: string): Promise<string> {
+  return `rr_${(await sha256Hex(new TextEncoder().encode(`runner-report:${key}`))).slice(0, 16)}`;
 }
 
 /** A failed start's cause as a code: the adapter's `start_failed:<code>`, or its own bare code; `unknown` otherwise. */

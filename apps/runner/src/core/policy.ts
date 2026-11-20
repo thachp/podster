@@ -210,7 +210,8 @@ type Parsed<T> = { ok: true; value: T } | { ok: false; at: string };
 export const NETWORK_UNSUPPORTED = "network_allowlist_unsupported";
 /** What's wrong with a policy that failed to parse, for the owner, by where it failed. */
 export function policyProblem(at: string): string {
-  if (at === `rooms[].network:${NETWORK_UNSUPPORTED}`) return `rooms[].network lists hosts, which Runner can't allow yet (${NETWORK_UNSUPPORTED}): a task's container has no egress proxy, so only "network": [] works`;
+  const network = at.match(new RegExp(`^rooms\\[\\]\\.network:${NETWORK_UNSUPPORTED}:([A-Za-z0-9_-]{1,128})$`));
+  if (network) return `the room ${network[1]} lists hosts in rooms[].network, which Runner can't allow yet (${NETWORK_UNSUPPORTED}): a task's container has no egress proxy, so only "network": [] works`;
   return `${at} is missing or out of range`;
 }
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
@@ -335,7 +336,7 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const network = Object.hasOwn(v, "network") ? uniqueList(v.network, MAX_HOSTS, isHost) : [];
   if (!network) return fail("rooms[].network");
   // No sandbox can hold an allowlist until Runner's egress proxy exists: refused here, at load, not at every run's start.
-  if (network.length > 0) return fail(`rooms[].network:${NETWORK_UNSUPPORTED}`);
+  if (network.length > 0) return fail(`rooms[].network:${NETWORK_UNSUPPORTED}:${roomId}`);
   const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
   const ack = own(v, "acknowledged");

@@ -464,9 +464,11 @@ describe("property: no external, unknown or inactive author or requester ever yi
 describe("a room's network (no egress proxy yet)", () => {
   it("refuses any listed host at load with network_allowlist_unsupported, and says only [] works", () => {
     const parsed = parsePolicyConfig(config([room({ extra: { network: ["registry.npmjs.org"] } })]));
-    expect(parsed).toEqual({ ok: false, at: `rooms[].network:${NETWORK_UNSUPPORTED}` });
-    expect(policyProblem(`rooms[].network:${NETWORK_UNSUPPORTED}`)).toContain('only "network": [] works');
-    expect(policyProblem(`rooms[].network:${NETWORK_UNSUPPORTED}`)).toContain("network_allowlist_unsupported");
+    expect(parsed).toEqual({ ok: false, at: `rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}` });
+    const problem = policyProblem(`rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}`);
+    expect(problem).toContain('only "network": [] works');
+    expect(problem).toContain("network_allowlist_unsupported");
+    expect(problem).toContain(`the room ${ROOM} lists hosts`);
     expect(policyProblem("caps.turns")).toBe("caps.turns is missing or out of range");
     // Evaluated, it refuses as a configuration Runner can't use: nothing runs, nothing is reserved.
     expect(decide({ config: config([room({ extra: { network: ["registry.npmjs.org"] } })]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });

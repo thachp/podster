@@ -344,9 +344,11 @@ describe("the run's frame names its limits", () => {
     // can be submitted, and the missing capability stated as the policy setting that would unblock it.
     expect(LIMITS_GUIDANCE).toContain("Do every part of the task you can");
     expect(LIMITS_GUIDANCE).toContain('give status completed, and end the summary with a section headed "Not done and why"');
-    expect(LIMITS_GUIDANCE).toContain("Tests written but not run: no shell in this room's policy (rooms[].tools: shell).");
+    expect(LIMITS_GUIDANCE).toContain("Tests written but not run: this run has no shell.");
     expect(LIMITS_GUIDANCE).toContain("Give status blocked only when nothing useful can be submitted.");
-    expect(LIMITS_GUIDANCE).toContain("rooms[].network: registry.npmjs.org");
+    expect(LIMITS_GUIDANCE).toContain('"Needs a shell to run the tests"');
+    // The room reads the agent's words, so they name capabilities in plain words, never the owner's policy keys.
+    expect(LIMITS_GUIDANCE).not.toContain("rooms[]");
     const open = runFrame({ ...FACTS, tools: ["read", "shell"], shell: true, network: ["registry.npmjs.org"] });
     expect(open).toContain("Your tools in this run: read, shell, and the structured result.");
     expect(open).not.toContain("There is no shell");

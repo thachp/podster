@@ -334,6 +334,12 @@ export class FakeGateway {
       this.stored.set(key, { body, answer: structuredClone(answer) });
       return answer;
     }
+    if (capability === "list_messages") {
+      // A task's thread, oldest first, 50 at a time after the message `after` names.
+      const thread = this.messages.map((m, i) => ({ id: `msg_${i + 1}`, task_id: m.task_id, from: { id: this.identity }, body: m.body })).filter((m) => m.task_id === args.task_id);
+      const from = typeof args.after === "string" ? thread.findIndex((m) => m.id === args.after) + 1 : 0;
+      return { messages: thread.slice(from, from + 50).map(({ task_id: _t, ...m }) => m) };
+    }
     if (capability === "ack_inbox") {
       this.acked = Math.max(this.acked, Number(args.up_to));
       return { acked_seq: this.acked, unread: 0 };

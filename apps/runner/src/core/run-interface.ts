@@ -68,8 +68,8 @@ export const UNTRUSTED_FRAME = [
  */
 export const LIMITS_GUIDANCE = [
   "Do every part of the task you can with the tools and network you have. When a part needs something you don't have, still do the rest.",
-  "If the task allows documenting what couldn't be done, give status completed, and end the summary with a section headed \"Not done and why\" naming each part left undone and the missing capability, for example: \"Tests written but not run: no shell in this room's policy (rooms[].tools: shell).\"",
-  "Give status blocked only when nothing useful can be submitted. Then the summary must say plainly what is missing, in words the machine's owner can act on, such as \"Needs shell to run tests (rooms[].tools: shell)\" or \"Needs network access to registry.npmjs.org (rooms[].network: registry.npmjs.org)\". The summary is shown to the room as your unverified words.",
+  "If the task allows documenting what couldn't be done, give status completed, and end the summary with a section headed \"Not done and why\" naming each part left undone and, in plain words, what was missing, for example: \"Tests written but not run: this run has no shell.\"",
+  "Give status blocked only when nothing useful can be submitted. Then the summary must say plainly, in ordinary words, what is missing, such as \"Needs a shell to run the tests\" or \"Needs network access to the npm registry\". The summary is shown to the room as your unverified words.",
 ].join("\n");
 
 /**

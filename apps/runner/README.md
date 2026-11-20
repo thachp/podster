@@ -75,7 +75,9 @@ chmod 600 <path>
 
 Runner refuses a key file that's a link, that someone else can read, or that holds anything but one key. It reads the key once and keeps it on your machine, in its own process: never in a task's container, a log, an argument or the environment of anything it starts. Use a key with a spending limit you set at the provider.
 
-Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, and the Claude Code image downloads Claude Code from npm's registry. If a build fails, `run` stops before running anything.
+Runner's two container images, one for each task and one for Claude Code, are pinned by image ID in Runner's home. The first time `run --provider-key-file` finds one missing, Runner builds it with Docker from the Dockerfile in this package, says so first, and pins what it built. A build takes a few minutes, the Claude Code image downloads Claude Code from npm's registry, and the task image downloads Node.js from nodejs.org. If a build fails, `run` stops before running anything.
+
+The task image is Debian bookworm-slim with the tools Runner's own task tools use (`cat`, `tee`, `mkdir`, `ls`, `kill` and ripgrep's `rg`), `/bin/sh` for a run policy that allows the shell, and Node.js 22.23.5 LTS with its npm and npx, so a task's shell commands can run `node`, `npm test` or `npx` on what's already in the task's folder. Each is pinned: the base by digest, Debian's packages at exact versions from one snapshot, and Node's official tarball by a SHA-256 written in the Dockerfile. npm keeps its cache and logs in the container's `/tmp` and its global prefix in `.npm-global` in the task's folder; the rest of the container is read-only. A task's container has no network yet, so `npm install`, and `npx` of a package that isn't already in the task's `node_modules`, fail.
 
 ## Your run policy (`policy.json`)
 

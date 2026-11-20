@@ -1172,7 +1172,7 @@ describe("review item 11 (L8): Git never looks above the run's folder", () => {
   });
 });
 
-describe("review item 12: ripgrep pinned through snapshot.debian.org", () => {
+describe("review item 12: the task image's tools pinned", () => {
   it("installs exact versions from a fixed snapshot timestamp", async () => {
     const dockerfile = await readFile(new URL("../sandbox/Dockerfile", import.meta.url), "utf8");
     expect(dockerfile).toMatch(/snapshot\.debian\.org\/archive\/debian\/\d{8}T\d{6}Z bookworm main/);
@@ -1181,6 +1181,21 @@ describe("review item 12: ripgrep pinned through snapshot.debian.org", () => {
     expect(dockerfile).toMatch(/libproc2-0=2:4\.0\.2-3/);
     expect(dockerfile).toMatch(/FROM debian:bookworm-slim@sha256:[0-9a-f]{64}/);
     expect(dockerfile).not.toMatch(/deb\.debian\.org/);
+  });
+
+  it("holds Node 22.23.5 from nodejs.org, checked against SHA-256s written in the file, with npm's cache and prefix writable", async () => {
+    const dockerfile = await readFile(new URL("../sandbox/Dockerfile", import.meta.url), "utf8");
+    expect(dockerfile).toContain("https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-arm64.tar.gz");
+    expect(dockerfile).toContain("https://nodejs.org/dist/v22.23.5/node-v22.23.5-linux-x64.tar.gz");
+    expect(dockerfile).toContain("8bd3dc69eee8f3f226315a80d7d1d4faccf217a4c8fae500168ac2e38f3bdba3  linux-arm64.tar.gz");
+    expect(dockerfile).toContain("c54118104acc524633b5abe106bbf44a53126ec8b4e5fa105cb92b5d7de8a1a1  linux-x64.tar.gz");
+    expect(dockerfile).toMatch(/sha256sum -c/);
+    // Never a checksum file fetched during the build (the header comment names where the sums were read).
+    const code = dockerfile.split("\n").filter((line) => !line.startsWith("#")).join("\n");
+    expect(code).not.toMatch(/SHASUMS|--checksum/);
+    expect(dockerfile).not.toMatch(/# syntax=/);
+    expect(dockerfile).toMatch(/cache=\/tmp\/\.npm\\nprefix=\/work\/\.npm-global/);
+    expect(dockerfile).toContain("/usr/local/etc/npmrc");
   });
 });
 

@@ -110,6 +110,7 @@ fn passing<'a>(task: &'a Task, grant: &'a Grant<'a>) -> MergeAuthority<'a> {
         submitter: SUBMITTER,
         grant: Some(grant),
         delegation_holder: Some("owner"),
+        self_review: SelfReview::default(),
         submission_no: 1,
         commit_sha: ABC,
         now: NOW,
@@ -1549,5 +1550,189 @@ fn a2_today_the_controller_is_whoever_linked_the_credential_the_request_came_wit
     assert_eq!(
         check_merge_authority(&through_a),
         Err(MergeRefusal::SelfMerge)
+    );
+}
+
+/// Decision 186 as amended by the owner on 2026-11-20 ("Yes, as recommended"): in a private room, the person who controls
+/// the submitting agent may merge its reviewed commit if they approved it themselves, with a live merge grant. Each
+/// guardrail on its own, at the request and at the job's recheck, which run the same decision.
+#[test]
+fn a_self_reviewed_merge_needs_a_private_room_the_approver_a_person_a_grant_and_the_reviewed_commit(
+) {
+    let task = approved();
+    let mine = Actor {
+        id: "asg",
+        person: Some("p-sub"),
+    };
+    let me = actor("p-sub", "p-sub");
+    let review = SelfReview {
+        room_private: true,
+        requester_is_person: true,
+        reviewer: Some(me),
+    };
+    let merge = grant_to("p-sub", GrantAction::Merge);
+    let self_reviewed = MergeAuthority {
+        requester: me,
+        submitter: mine,
+        self_review: review,
+        ..passing(&task, &merge)
+    };
+    assert!(is_self_reviewed(&me, &mine, &review));
+    // What the room's rows keep after the request says the same: who asked, controls the submitter and approved.
+    assert!(controls_and_approved(&me, &mine, Some(&me)));
+    assert!(!controls_and_approved(&me, &mine, None));
+    let other = actor("p-other", "p-other");
+    assert!(!controls_and_approved(&other, &mine, Some(&other)));
+    let proof = check_merge_authority(&self_reviewed).unwrap();
+    assert!(proof.self_reviewed());
+    assert_eq!(
+        decide_merge_request(&self_reviewed, Some(&FRESH)),
+        Ok(MergeState::Requested)
+    );
+    // An ordinary merge, by someone independent, isn't recorded as self-reviewed.
+    let other = grant(GrantAction::Merge);
+    assert!(!check_merge_authority(&passing(&task, &other))
+        .unwrap()
+        .self_reviewed());
+
+    let refused = |authority: MergeAuthority, refusal: MergeRefusal, name: &str| {
+        assert_eq!(check_merge_authority(&authority), Err(refusal), "{name}");
+        assert_eq!(
+            decide_merge_request(&authority, Some(&FRESH)),
+            Err(refusal),
+            "{name}, as a request"
+        );
+    };
+    // 1. A public room keeps the second-person rule.
+    refused(
+        MergeAuthority {
+            self_review: SelfReview {
+                room_private: false,
+                ..review
+            },
+            ..self_reviewed
+        },
+        MergeRefusal::SelfMerge,
+        "public room",
+    );
+    // 2. No grant, or another's: controlling the agent implies nothing.
+    refused(
+        MergeAuthority {
+            grant: None,
+            ..self_reviewed
+        },
+        MergeRefusal::Grant(GrantRefusal::GrantRequired),
+        "no grant",
+    );
+    refused(
+        MergeAuthority {
+            grant: Some(&other),
+            ..self_reviewed
+        },
+        MergeRefusal::Grant(GrantRefusal::GrantRequired),
+        "someone else's grant",
+    );
+    // 3. Only the approver: another of the controller's agents approved, or someone independent did.
+    for reviewer in [
+        actor("agt_other", "p-sub"),
+        actor("p-other", "p-other"),
+        Actor {
+            id: "p-sub",
+            person: None,
+        },
+    ] {
+        refused(
+            MergeAuthority {
+                self_review: SelfReview {
+                    reviewer: Some(reviewer),
+                    ..review
+                },
+                ..self_reviewed
+            },
+            MergeRefusal::SelfMerge,
+            &format!("approved by {reviewer:?}"),
+        );
+    }
+    refused(
+        MergeAuthority {
+            self_review: SelfReview {
+                reviewer: None,
+                ..review
+            },
+            ..self_reviewed
+        },
+        MergeRefusal::SelfMerge,
+        "no approval on record",
+    );
+    // An agent never self-merges, whether marked as one or another agent of the controller that approved.
+    refused(
+        MergeAuthority {
+            self_review: SelfReview {
+                requester_is_person: false,
+                ..review
+            },
+            ..self_reviewed
+        },
+        MergeRefusal::SelfMerge,
+        "requester is an agent",
+    );
+    let agent_grant = grant_to("agt_other", GrantAction::Merge);
+    let agent = actor("agt_other", "p-sub");
+    refused(
+        MergeAuthority {
+            requester: agent,
+            grant: Some(&agent_grant),
+            self_review: SelfReview {
+                reviewer: Some(agent),
+                ..review
+            },
+            ..self_reviewed
+        },
+        MergeRefusal::SelfMerge,
+        "the controller's other agent, which approved",
+    );
+    // The task's assignee is refused whatever is on record.
+    let asg_grant = grant_to("asg", GrantAction::Merge);
+    refused(
+        MergeAuthority {
+            requester: actor("asg", "asg"),
+            submitter: actor("asg", "asg"),
+            grant: Some(&asg_grant),
+            self_review: SelfReview {
+                reviewer: Some(actor("asg", "asg")),
+                ..review
+            },
+            ..self_reviewed
+        },
+        MergeRefusal::SelfMerge,
+        "the assignee",
+    );
+    // Only the reviewed commit, unchanged.
+    refused(
+        MergeAuthority {
+            commit_sha: DEF,
+            ..self_reviewed
+        },
+        MergeRefusal::CommitChanged,
+        "another commit",
+    );
+    let moved = ChangeStanding {
+        reviewed_commit_sha: Some(ABC),
+        commit_changed: true,
+        watched: true,
+    };
+    assert_eq!(
+        check_change_standing(&moved, ABC),
+        Err(MergeRefusal::CommitChanged)
+    );
+    assert_eq!(
+        decide_merge_request(
+            &self_reviewed,
+            Some(&Change {
+                reviewed_commit_sha: Some(DEF),
+                ..FRESH
+            })
+        ),
+        Err(MergeRefusal::CommitChanged)
     );
 }

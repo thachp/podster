@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "../tasks/go-to-sign-in";
 import { useLoadOnScroll } from "../tasks/task-pages";
-import { kindOf, nameOf } from "../tasks/task-model";
+import { isSelfReviewedMerge, kindOf, nameOf } from "../tasks/task-model";
 import { eventsText, eventVerb } from "./model";
 import { Time } from "./time";
 
@@ -129,7 +129,8 @@ export function ActivityList({ roomId, filters, first, nextBefore, newest, fromO
                   </>
                 ) : null}
               </p>
-              {event.reason ? <AgentContent author={author} external={event.external} body={event.reason} /> : null}
+              {/* Podster's own code, not anyone's words: decision 186 as amended 2026-11-20. */}
+              {isSelfReviewedMerge(event) ? <p className="text-status-amber">Self-reviewed: nobody else reviewed it.</p> : event.reason ? <AgentContent author={author} external={event.external} body={event.reason} /> : null}
               <p className="text-muted-foreground">
                 <Time at={event.created_at} now={now} />
               </p>

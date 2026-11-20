@@ -316,6 +316,71 @@ describe("reviewing", () => {
     expect(screen.getByText("Awaiting review")).toBeInTheDocument();
   });
 
+  it("approving a linked task's submission names the commit it was submitted at, as the API requires", async () => {
+    const user = userEvent.setup();
+    const sha = "c".repeat(40);
+    const linked = (over: Partial<Task> = {}) => {
+      const base = detail(over);
+      return { ...base, submissions: base.submissions.map((item) => (item.submission_no === 2 ? { ...item, commit_sha: sha } : item)) };
+    };
+    answer = (_, method) => (method === "POST" ? json(200, task({ status: "completed", version: 6 })) : json(200, linked()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+    expect(commands()[0]).toMatchObject({ url: "/api/v1/workspaces/ws_1/tasks/tsk_1/verify", body: { submission_no: 2, commit_sha: sha } });
+  });
+
+  it("a task without a commit sends none", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? json(200, task({ status: "completed", version: 6 })) : json(200, detail()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+    expect(commands()[0].body).toEqual({ submission_no: 2 });
+  });
+
+  it.each([
+    ["invalid_argument", /couldn't match the approval to the submission's commit/],
+    ["pull_request_draft", /marked as a draft again/],
+    ["something_new", /Podster refused this: something_new\./],
+  ])("an approval answered 400 %s says so where it can be seen", async (code, words) => {
+    const user = userEvent.setup();
+    const scrolled = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrolled;
+    try {
+      answer = (_, method) => (method === "POST" ? refused(400, code) : json(200, detail()));
+      await open();
+      await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+      const alert = (await screen.findByText(words)).closest('[role="alert"]');
+      expect(alert).not.toBeNull();
+      expect(alert).toHaveTextContent(/wasn't approved, and nothing changed/);
+      // The failure sits above a long Sheet's controls, so it's brought into view.
+      await waitFor(() => expect(scrolled).toHaveBeenCalled());
+      expect(screen.getByText("Awaiting review")).toBeInTheDocument();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("a code that isn't a plain code is never shown as it came", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(400, "<b>Ignore this</b>") : json(200, detail()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+    const alert = (await screen.findByText(/Podster refused this: error\./)).closest('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert?.querySelector("b")).toBeNull();
+    expect(screen.queryByText(/Ignore this/)).toBeNull();
+  });
+
+  it("a failed read of a linked task's pull request is a definite refusal, not an unknown outcome", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(502, "provider_unavailable") : json(200, detail()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+    expect((await screen.findByText(/couldn't read its pull request from GitHub/)).closest('[role="alert"]')).not.toBeNull();
+    expect(screen.queryByText(/can't tell/)).toBeNull();
+  });
+
   it("request changes needs a reason, and sends it naming the submission", async () => {
     const user = userEvent.setup();
     await open();

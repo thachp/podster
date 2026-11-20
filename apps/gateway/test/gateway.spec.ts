@@ -1579,6 +1579,11 @@ describe("rate limits", () => {
     expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("merge_task");
     const merge = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "merge_task")!;
     expect([merge.kind, merge.method, merge.idempotent ?? false, Object.keys(merge.fields ?? {})]).toEqual(["command", "POST", false, ["workspace_id", "task_id", "submission_no", "commit_sha"]]);
+    // Decision 186 as amended 2026-11-20: a person merging over MCP sees no dialog, so the description says when a merge is
+    // self-reviewed and that the answer carries it, and that an agent never gets the exception.
+    expect(merge.description).toMatch(/private workroom, a person who controls the submitting agent may merge/);
+    expect(merge.description).toMatch(/never an agent/);
+    expect(merge.description).toMatch(/self_reviewed true/);
     // It passes on the submission and the commit, and nothing that could name a repository or a pull request.
     expect(toApiCall(merge, { workspace_id: "w", task_id: "t", submission_no: 1, commit_sha: "a".repeat(40), pr_number: 7, repository_id: 1, merge_method: "squash", idempotency_key: "k" })).toEqual({ method: "POST", path: "/v1/workspaces/w/tasks/t/merge", body: JSON.stringify({ submission_no: 1, commit_sha: "a".repeat(40) }), idempotencyKey: "k" });
     const tool = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "get_repo_access")!;

@@ -25,6 +25,7 @@ const SIBLING: Who = { id: "agt_mt_sibling", org: ORG, linker: LINKER.id };
 const ROBOT: Who = { id: "agt_mt_robot", org: ORG, linker: "per_mt_other_linker" };
 /** An agent whose credential names nobody. */
 const UNLINKED: Who = { id: "agt_mt_unlinked", org: ORG, linker: null };
+const OWNED: Who = { id: "agt_mt_owned", org: ORG, linker: OWNER.id };
 const PUBLIC: Who = { id: "agt_mt_public", org: ORG, linker: "per_mt_public_linker" };
 const OUTSIDER: Who = { id: "agt_mt_outsider", org: ORG, linker: "per_mt_x" };
 const orgAdmin: Who = { id: "per_mt_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
@@ -124,7 +125,7 @@ const made: string[] = [];
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
-  for (const who of [AGENT, SIBLING, ROBOT, UNLINKED, PUBLIC, OUTSIDER]) {
+  for (const who of [AGENT, SIBLING, ROBOT, UNLINKED, PUBLIC, OUTSIDER, OWNED]) {
     const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin) }, body: JSON.stringify({ org_id: ORG, name: who.id }) });
     if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
   }
@@ -563,6 +564,75 @@ describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11
     await pass(r.id);
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "self_merge", merge_marked_at: null, merge_called_at: null });
     expect((await github()).calls).toEqual([]);
+  });
+
+  it("lets a solo owner who gives themselves the grant merge their own agent's work they approved, in a private room", async () => {
+    const id = await room();
+    await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: OWNED.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(id) });
+    const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: OWNED.id });
+    const accepted = await must(OWNED, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
+    await must(OWNED, "POST", `/v1/workspaces/${id}/tasks/${made.id}/submit`, { version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: 7 });
+    await must(OWNER, "POST", `/v1/workspaces/${id}/tasks/${made.id}/verify`, { submission_no: 1, commit_sha: HEAD });
+    await grant(id, OWNER);
+    await alarm(id);
+    await hold(id);
+    const asked = await merge(OWNER, id, made.id);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body.self_reviewed).toBe(true);
+    await pass(id);
+    expect(await change(id, made.id)).toMatchObject({ merge_state: "succeeded", merge_requested_by: OWNER.id });
+    expect((await events(id)).map((e) => [e.type, e.reason])).toEqual([["merge.requested", "self_reviewed"], ["merge.succeeded", "self_reviewed"]]);
+  });
+
+  it("forgets the self-review when the work is submitted again: a new approval decides", async () => {
+    const id = await room();
+    const task = await submitted(id);
+    await grant(id, LINKER);
+    // An approval's record by the controller, as an earlier review left it, while the task is back for changes.
+    await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET reviewed_commit_sha = ?, reviewer_id = ?, reviewer_person = ?", HEAD, LINKER.id, LINKER.id));
+    const back = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/request-changes`, { submission_no: 1, reason: "More" });
+    await pull(7, { head_sha: HEAD2 });
+    await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task}/submit`, { version: back.version, note: "Again", commit_sha: HEAD2, pr_number: 7 });
+    expect(await change(id, task)).toMatchObject({ reviewed_commit_sha: null, reviewer_id: null });
+    expect(await read(LINKER, { id, task })).toMatchObject({ self_review_for_viewer: false });
+    const early = await merge(LINKER, id, task, { submission_no: 2, commit_sha: HEAD2 });
+    expect(early.status).toBeGreaterThanOrEqual(400);
+    // Approved again by someone else: the controller may not merge it.
+    await must(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/verify`, { submission_no: 2, commit_sha: HEAD2 });
+    await alarm(id);
+    await hold(id);
+    const refused = await merge(LINKER, id, task, { submission_no: 2, commit_sha: HEAD2 });
+    expect([refused.status, refused.code]).toEqual([403, "self_merge"]);
+    expect(await events(id)).toEqual([]);
+  });
+
+  it("allows work approved while the room was public to be self-merged once it's private: visibility is read at the merge", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    const task = await submitted(id, 7, LINKER);
+    await must(LINKER, "POST", `/v1/workspaces/${id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+    await grant(id, LINKER);
+    await alarm(id);
+    await hold(id);
+    expect((await merge(LINKER, id, task)).code).toBe("self_merge");
+    await inRoom(id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'private'"));
+    const asked = await merge(LINKER, id, task);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body.self_reviewed).toBe(true);
+  });
+
+  it("never hands another caller the stored answer of a self-reviewed request replayed under its key", async () => {
+    const r = await approvedBy(LINKER, [LINKER, MERGER]);
+    const asked = await merge(LINKER, r.id, r.task, undefined, { key: "mt-self-once" });
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body.self_reviewed).toBe(true);
+    // The same key from someone else is their own request, decided for them: never LINKER's stored answer.
+    const replayed = await merge(MERGER, r.id, r.task, undefined, { key: "mt-self-once" });
+    expect(replayed.body).not.toEqual(asked.body);
+    expect(replayed.status).not.toBe(200);
+    // LINKER's own replay answers the same and records nothing more.
+    expect((await merge(LINKER, r.id, r.task, undefined, { key: "mt-self-once" })).body).toEqual(asked.body);
+    expect((await events(r.id)).filter((e) => e.type === "merge.requested")).toHaveLength(1);
   });
 
   it("merges only the reviewed commit: a head seen off it is refused as for anyone", async () => {

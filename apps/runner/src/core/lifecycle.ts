@@ -40,8 +40,8 @@
  * failure leaves it to be evaluated afresh.
  *
  * **Results (M7 step 11).** A run that ends `succeeded` with a structured result Runner checks again, of status
- * `completed`, is finished and its submission owed; a `blocked` result, none, or a malformed one is released, never
- * submitted. The result's words are kept in memory only, until they're sent. At a later pass the submission is bound to
+ * `completed`, is finished and its submission owed; none, or a malformed one, is released, never submitted. A `blocked`
+ * result is an answer, not a failure (the architect's ruling of 2026-11-20, below). The result's words are kept in memory only, until they're sent. At a later pass the submission is bound to
  * the run: what it says of the work (the pull request, its commit, the repository) comes from Runner's own records of the
  * run's publication, never from the agent's words; a fresh `get_task` must show the task still accepted by this agent at
  * the version the run started at, with the inputs the run was decided on, or nothing is submitted. The agent's words go
@@ -51,6 +51,15 @@
  * redacted and its hidden characters marked first (`results.ts`). The note is Runner's own. `submit_task` is sent with a
  * key stored first and bound to the note, retried with it on an unknown outcome.
  *
+ * **A blocked run (the architect's ruling of 2026-11-20).** The agent's reason is reported to the room on the task's thread
+ * with `send_message`, as a Runner note built like a submission's (`composeBlockedNote`) and under the same output
+ * policy: shared at once where sharing is allowed, otherwise shown to the owner first, with Runner's fixed words only if
+ * they decline or the hold runs out. Then, from a fresh read: a run that answered a change request (the task was
+ * submitted before) keeps the task with the agent, for a person to answer or reassign; a first run is released, after
+ * the report. The run's inputs and facts are recorded (`blocked`), and a later evaluation with the same ones never runs
+ * again (`blocked_same_inputs`): a re-offer is declined and an accepted task left as it is. A new change request or
+ * edit (new inputs), a change to the owner's policy (new facts), or a message on the task (a person acted) lets it run.
+ *
  * Agent content is data: a task's words are read only to build and hash the prompt and to show the owner on an ask, and a
  * result's only to show the owner and to submit. Logs carry IDs and codes only.
  */
@@ -59,14 +68,14 @@ import { GatewayError, meaningOf } from "./errors.js";
 import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
 import { pullRequestUrl, RepoPathError } from "./repository.js";
 import { readTaskDetail, sha256Hex, type TaskDetail } from "./prompt.js";
-import { cleanResult, composeNote, type NotePullRequest, type NoteWords, type ResultView } from "./results.js";
+import { cleanResult, composeBlockedNote, composeNote, type NotePullRequest, type NoteWords, type ResultView } from "./results.js";
 import { parseRunResult, type RunResult } from "./tool-policy.js";
 import type { NudgeBell } from "./nudge.js";
 import { AuthorityEnded, waitForNext, type Poller } from "./poller.js";
 import { MAX_PROMPT_BYTES } from "./run-interface.js";
 import type { Offer } from "./state.js";
 import type { Clock, Logger } from "./runtime.js";
-import { budgetOf, clockWentBack, dayOf, newEntry, owedSubmission, reserve, settle, type After, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore, type Submission } from "./runs.js";
+import { budgetOf, clockWentBack, dayOf, newEntry, owedReport, owedSubmission, reserve, settle, type After, type BlockedReport, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore, type Submission } from "./runs.js";
 
 /** The check-in's fixed maximum interval during a run (S-33, S-43). **Proposed** figure. */
 export const CHECK_IN_MS = 60_000;
@@ -233,7 +242,9 @@ class Gate {
 const keyOf = (workspace: string, task: string) => `${workspace}/${task}`;
 /** What marks an offer as new: its latest event, sequence, status and version, never the time it was last listed. */
 export const markerOf = (offer: Offer) => `${offer.last}|${offer.seq ?? "-"}|${offer.version ?? "-"}`;
-const ACTIVE = new Set(["accepting", "ready", "running", "giving_up", "held"]);
+const ACTIVE = new Set(["accepting", "ready", "running", "giving_up", "held", "reporting"]);
+/** The SHA-256 of a decision's facts, as a blocked run's record keeps it. */
+const factsHash = (key: string) => sha256Hex(new TextEncoder().encode(key));
 
 /** Resolves with `promise`, or with `aborted` at once when the signal fires, whichever is first. */
 function orAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeof ABORTED> {
@@ -417,6 +428,11 @@ export class Lifecycle {
       if (signal.aborted) return "stopped";
       if (entry.submission?.state === "owed" && (entry.retry_at === null || this.now() >= entry.retry_at)) await this.submit(entry, signal);
     }
+    for (const entry of this.entries("reporting")) {
+      // A blocked run's reason, owed to the room, once any wait for the owner's review is over.
+      if (signal.aborted) return "stopped";
+      if (entry.retry_at === null || this.now() >= entry.retry_at) await this.report(entry, signal);
+    }
     for (const entry of this.entries("giving_up")) {
       if (signal.aborted) return "stopped";
       await this.sendGiveUp(entry, signal);
@@ -450,6 +466,11 @@ export class Lifecycle {
       if (!entry) counted = true;
       else if (entry.marker === "") counted = false;
       else if (entry.marker !== marker && TRIGGERS.has(offer.last)) counted = true;
+      else if (entry.marker !== marker && offer.last === "task.message" && entry.blocked) {
+        // A message on a task whose last run answered blocked: a person acted, so the same inputs may run again.
+        await this.put({ ...entry, blocked: null });
+        counted = true;
+      }
       else if (entry.marker !== marker && RECHECKS.has(offer.last)) onlyIfOffered = offer.last === "task.updated";
       else {
         if (entry.marker !== marker) await this.put({ ...entry, marker });
@@ -594,6 +615,15 @@ export class Lifecycle {
     if (decision.outcome === "refuse") {
       if (LOCAL.has(decision.reason)) await this.put({ ...entry, phase: "waiting", outcome: decision.reason, retry_at: this.now() + WAIT_MS });
       else await this.giveUp(entry, task.status, decision.reason, task.version);
+      return null;
+    }
+    const blocked = entry.blocked;
+    if (decision.outcome === "run" && blocked && blocked.input_hash === detail.prompt.hash && blocked.facts_hash === (await factsHash(factsKey(decision) ?? ""))) {
+      // The last run on these exact inputs and facts answered blocked, and its reason went to the room: nothing new to
+      // run on, so no spend. An ask still asks the owner, who may run it.
+      this.log("lifecycle.decision", "refuse", entry, { code: "blocked_same_inputs" });
+      if (task.status === "offered") await this.giveUp(entry, task.status, "blocked_same_inputs", task.version);
+      else await this.put({ ...entry, phase: "done", outcome: "blocked_same_inputs" });
       return null;
     }
     let approved = false;
@@ -1033,13 +1063,17 @@ export class Lifecycle {
       return "idle";
     }
     // Step 11: the result is evidence, checked again here, so an adapter that hands over a malformed one is caught, not
-    // trusted. Only `completed` is work to submit; `blocked`, none or a malformed one is released.
+    // trusted. Only `completed` is work to submit; `blocked` is an answer whose reason the room is told; none or a
+    // malformed one is released.
     const parsed = report.result ? parseRunResult(report.result) : null;
     if (parsed?.ok && parsed.value.status === "completed") {
       this.results.set(keyOf(entry.workspace_id, entry.task_id), { run_ref: entry.run_ref as string, result: parsed.value });
       await this.stopped(entry, result, spent, "succeeded", { kind: "finish" });
+    } else if (parsed?.ok && parsed.value.status === "blocked") {
+      this.results.set(keyOf(entry.workspace_id, entry.task_id), { run_ref: entry.run_ref as string, result: parsed.value });
+      await this.stopped(entry, result, spent, "run_blocked", { kind: "blocked" });
     } else {
-      const reason = !report.result ? "result_missing" : !parsed?.ok ? "result_invalid" : "run_blocked";
+      const reason = !report.result ? "result_missing" : "result_invalid";
       await this.stopped(entry, result, spent, reason, { kind: "release", reason });
     }
     return "idle";
@@ -1104,6 +1138,19 @@ export class Lifecycle {
       this.forgetWords(keyOf(entry.workspace_id, entry.task_id));
       if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
       await this.giveUp(base, "accepted", after.reason);
+    }
+    else if (after.kind === "blocked") {
+      // Nothing is published for a blocked run; its reason is owed to the room, and its inputs recorded.
+      const key = keyOf(entry.workspace_id, entry.task_id);
+      this.titles.delete(key);
+      if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+      const consumed = entry.consumed;
+      if (!consumed) {
+        this.forgetWords(key);
+        await this.giveUp(base, "accepted", "run_blocked");
+        return;
+      }
+      await this.put({ ...base, phase: "reporting", retry_at: null, report: owedReport(), blocked: { input_hash: consumed.input_hash, facts_hash: await factsHash(consumed.facts_key) } });
     }
     else if (after.kind === "reconsider") await this.put({ ...base, phase: "done", marker: "" });
     else await this.put({ ...base, phase: "done" });
@@ -1220,6 +1267,90 @@ export class Lifecycle {
     }
     // Unknown: it may have gone through. Only the same key is sent for this note, at a later pass.
     this.log("lifecycle.submit", "unknown", entry);
+  }
+
+  /**
+   * A blocked run's report: a fresh read must show the task as the run left it, or nothing is sent; the agent's reason goes
+   * only where sharing is allowed or the owner approved it; then `send_message`, with a key stored first and bound to the
+   * note. Once it's posted, or the server refused it, a change request's task is kept and a first run's released.
+   */
+  private async report(entry: RunEntry, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    const key = keyOf(entry.workspace_id, entry.task_id);
+    const agent = this.deps.poller.agentId;
+    const consumed = entry.consumed as NonNullable<RunEntry["consumed"]>;
+    const logged = (posted: boolean, status?: number) => this.log("lifecycle.blocked", posted ? "reason_posted" : "reason_not_posted", entry, { code: "run_blocked", ...(status === undefined ? {} : { status }) });
+    const detail = await this.read(entry.workspace_id, entry.task_id);
+    if (signal.aborted) return;
+    const task = detail?.task;
+    if (!detail || !task || task.assignee !== agent || task.status !== "accepted" || task.version !== entry.expected_version || detail.prompt?.hash !== consumed.input_hash) {
+      // The task moved on since the run: a reason about other inputs isn't sent, and the task is read afresh.
+      this.forgetWords(key);
+      logged(false);
+      await this.put({ ...this.current(entry), phase: "done", marker: "", outcome: task ? `blocked_task_${task.status}` : "blocked_not_readable", report: null, retry_at: null });
+      return;
+    }
+    let rep = this.current(entry).report as BlockedReport;
+    const save = async (next: BlockedReport) => {
+      rep = next;
+      await this.put({ ...this.current(entry), report: next });
+    };
+    // From the task as it stands: a run that answered a change request keeps the task (ruling 2).
+    if (rep.keep === null) await save({ ...rep, keep: detail.prompt.shape.change_request_event_id !== null });
+    if (rep.sharing === "pending") {
+      const share = await this.sharingAllowed(entry.workspace_id, consumed);
+      await save({ ...rep, sharing: share ? "share" : "review", held_since: share ? null : this.now() });
+    }
+    const kept = this.results.get(key);
+    const result = kept && kept.run_ref === entry.run_ref ? kept.result : null;
+    const cleaned = result ? cleanResult(result) : null;
+    if (rep.sharing === "review" && cleaned?.ok && this.now() - (rep.held_since ?? this.now()) >= REVIEW_HOLD_MS) {
+      await save({ ...rep, sharing: "withheld" });
+      this.log("lifecycle.review", "withheld", entry, { code: "review_hold_expired" });
+    }
+    if (rep.sharing === "review" && cleaned?.ok) {
+      const review = this.deps.prompter.review;
+      const answer = review ? await review.call(this.deps.prompter, { workspace_id: entry.workspace_id, task_id: entry.task_id, pull_request: null, summary: cleaned.summary, files: cleaned.files, redactions: cleaned.redactions, blocked: true }, signal) : "later";
+      if (signal.aborted) return;
+      this.log("lifecycle.review", answer, entry, { code: "run_blocked" });
+      if (answer === "later") {
+        await this.put({ ...this.current(entry), retry_at: this.now() + ASK_AGAIN_MS });
+        return;
+      }
+      await save({ ...rep, sharing: answer === "approve" ? "approved" : "withheld" });
+    }
+    const words: NoteWords = !result || !cleaned ? { kind: "lost" } : !cleaned.ok ? { kind: "secret_hidden" } : rep.sharing === "share" || rep.sharing === "approved" ? { kind: "shared", ...cleaned } : { kind: "withheld" };
+    const note = composeBlockedNote({ task_id: entry.task_id, keep: rep.keep === true, words });
+    const noteHash = await sha256Hex(new TextEncoder().encode(note));
+    if (rep.key === null || rep.note_hash !== noteHash) await save({ ...rep, key: this.newId(), note_hash: noteHash });
+    let posted = false;
+    let refused: number | undefined;
+    for (let attempt = 0; attempt < COMMAND_TRIES; attempt++) {
+      try {
+        await this.deps.poller.request("send_message", { workspace_id: entry.workspace_id, task_id: entry.task_id, body: note, idempotency_key: rep.key });
+        posted = true;
+        break;
+      } catch (error) {
+        if (!(error instanceof GatewayError)) throw error;
+        if (meaningOf(error) === "refused") {
+          // The server won't take it as it is: the task goes on without it, and the log says so.
+          refused = error.status;
+          break;
+        }
+        if (attempt + 1 < COMMAND_TRIES) await this.backoff(attempt, signal, error);
+        if (signal.aborted) return;
+      }
+    }
+    if (!posted && refused === undefined) {
+      // Unknown: it may have gone through. Only the same key is sent for this note, at a later pass.
+      this.log("lifecycle.blocked", "unknown", entry, { code: "run_blocked" });
+      return;
+    }
+    this.forgetWords(key);
+    logged(posted, refused);
+    const done = { ...this.current(entry), report: null, retry_at: null };
+    if (rep.keep) await this.put({ ...done, phase: "done", outcome: "run_blocked" });
+    else await this.giveUp(done, "accepted", "run_blocked", task.version);
   }
 
   private async submitted(entry: RunEntry) {

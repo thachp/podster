@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { cleanResult, codeBlock, codeSpan, composeNote, cutAgentWords, markHidden, MAX_NOTE_BYTES, NOTE_WORDS_BYTES, redactSecrets } from "../src/core/results.js";
 import { pullRequestUrl } from "../src/core/repository.js";
-import { checkRuns, emptyRuns, newEntry, owedSubmission } from "../src/core/runs.js";
+import { checkRuns, emptyRuns, newEntry, owedReport, owedSubmission } from "../src/core/runs.js";
 import { reviewScreen, SHOWN_CHARS, TerminalPrompter, visible } from "../src/node/prompter.js";
 
 /** Every character that would draw nothing, or reorder what's around it, and must come out as a mark. */
@@ -329,5 +329,30 @@ describe("the record's submission", () => {
     for (const bad of [{ ...owedSubmission(), sharing: "everyone" }, { ...owedSubmission(), note_hash: "Fixed the build." }, { ...owedSubmission(), summary: undefined, told: "yes" }, "words"]) {
       expect(checkRuns(record(bad))).toBe('entries["ws_room_one/tsk_one"].submission');
     }
+  });
+});
+
+describe("the record's blocked report", () => {
+  it("is checked whole: fixed states, keys, hashes; a reporting entry needs its report", () => {
+    const at = 'entries["ws_room_one/tsk_one"]';
+    const consumed = { mode: "unattended" };
+    const entry = { ...newEntry("ws_room_one", "tsk_one", 1_800_000_000_000), phase: "reporting", consumed };
+    const record = (over: Record<string, unknown>) => ({ ...emptyRuns(), entries: { "ws_room_one/tsk_one": { ...entry, ...over } } });
+    expect(checkRuns(record({ report: owedReport() }))).toBeNull();
+    expect(checkRuns(record({ report: { ...owedReport(), keep: true, key: "id_1", note_hash: "b".repeat(64), sharing: "share" }, blocked: { input_hash: "a".repeat(64), facts_hash: "c".repeat(64) } }))).toBeNull();
+    expect(checkRuns(record({ report: null }))).toBe(`${at}.report`);
+    expect(checkRuns(record({ report: { ...owedReport(), keep: "yes" } }))).toBe(`${at}.report`);
+    expect(checkRuns(record({ report: { ...owedReport(), note_hash: "Needs shell." } }))).toBe(`${at}.report`);
+    expect(checkRuns(record({ report: owedReport(), blocked: { input_hash: "Needs shell.", facts_hash: "c".repeat(64) } }))).toBe(`${at}.blocked`);
+    expect(checkRuns(record({ phase: "done", after_stop: { kind: "blocked" } }))).toBeNull();
+  });
+
+  it("the review screen says the run is blocked and that it's the agent's reason", async () => {
+    const screens: string[] = [];
+    const t = { inputIsTTY: true, outputIsTTY: true, columns: 100, write: (s: string) => void screens.push(s), question: async () => "y" };
+    const blocked = { workspace_id: "ws_room_one", task_id: "tsk_one", pull_request: null, summary: "Needs shell to run tests (rooms[].tools: shell).", files: [], redactions: 0, blocked: true };
+    expect(await new TerminalPrompter(t).review(blocked)).toBe("approve");
+    expect(screens.join("")).toContain("the agent reporting it is blocked");
+    expect(reviewScreen(blocked).screen).toContain("Needs shell to run tests");
   });
 });

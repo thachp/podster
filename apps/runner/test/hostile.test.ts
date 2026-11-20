@@ -24,6 +24,7 @@ import {
   STOP_STEP_MS,
   SupervisedAdapter,
   UNTRUSTED_FRAME,
+  runFrame,
   type AgentDriver,
   type ContainerSpec,
   type DriverSession,
@@ -847,7 +848,11 @@ describe("R-19: prompt-injection text", () => {
     // Exactly the words, marked, beside Runner's fixed frame; the placeholder key; only Runner's tools for the SDK's lock.
     const session = t.driver.sessions[1];
     expect(session.prompt).toEqual({ trust: "untrusted", origin: "podster_task", text: JSON.stringify({ inputs: [{ input: "title", text: "Fix the build" }, { input: "instructions", text: words }] }) });
-    expect(session.frame).toBe(UNTRUSTED_FRAME);
+    // The frame is Runner's own and the run's facts', the same as the benign task's, and holds none of the words.
+    expect(session.frame).toBe(runFrame(t.starts[1].facts));
+    expect(session.frame).toBe(t.driver.sessions[0].frame);
+    expect(session.frame.startsWith(UNTRUSTED_FRAME)).toBe(true);
+    expect(session.frame).not.toContain(words);
     expect(session.provider).toEqual({ api_key: PLACEHOLDER_KEY });
     expect(session.allowed_tools).toEqual(["read", "search", "write", "edit", "StructuredOutput"]);
     // Every call the words asked for is refused with its own code; nothing refused reached the container.

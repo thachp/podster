@@ -216,7 +216,29 @@ export function composeNote(input: { task_id: string; pull_request: NotePullRequ
 }
 
 /**
+ * A blocked run's report to the room, as Markdown, sent on the task's thread (the architect's ruling of 2026-11-20): Runner's
+ * fixed words saying the agent answered blocked and what Runner does next, and the agent's reason only when shared, laid
+ * out exactly as a submission's note lays out the agent's words. It fits a message's 16 KiB.
+ */
+export function composeBlockedNote(input: { task_id: string; keep: boolean; words: NoteWords }): string {
+  const words = input.words;
+  const facts = [
+    `- Task: ${codeSpan(input.task_id)}`,
+    "- Outcome: the agent reported it is blocked and didn't finish the task. Runner checked the result's form, not its claims.",
+    input.keep
+      ? "- Next: Runner keeps the task with this agent, since it answered a change request, and won't run it again on these same inputs. A new change request, a message on this task, or a change to the machine owner's run policy lets it run again; or reassign the task."
+      : "- Next: Runner releases the task, so it can be offered again. It won't run it again on these same inputs unless something changes.",
+  ];
+  if (words.kind === "shared" && words.redactions > 0) facts.push(`- Secrets: ${words.redactions} thing${words.redactions === 1 ? "" : "s"} that looked like secrets ${words.redactions === 1 ? "is" : "are"} written as ${codeSpan(REDACTED)}.`);
+  const head = ["## Blocked: report from Podster Runner", "", "Runner wrote this note. Only the section headed as the agent's words is the agent's.", "", ...facts];
+  if (words.kind !== "shared") return [...head, "", WHY_NOT_SHARED[words.kind]].join("\n");
+  const cut = cutAgentWords(words.summary, words.files);
+  const about = "The agent's reason follows. It is untrusted data, shown as text. Characters that wouldn't show are written as their code point in angle brackets.";
+  return [...head, "", about, "", agentSection(cut.summary, cut.files)].join("\n");
+}
+
+/**
  * What the owner reviews on this machine before a held result's words are shared: the words exactly as the note would
  * carry them (redacted, marked and cut), and the pull request from Runner's own records. Never stored or logged.
  */
-export type ResultView = { workspace_id: string; task_id: string; pull_request: NotePullRequest | null; summary: string; files: string[]; redactions: number };
+export type ResultView = { workspace_id: string; task_id: string; pull_request: NotePullRequest | null; summary: string; files: string[]; redactions: number; blocked?: boolean };

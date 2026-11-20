@@ -19,6 +19,8 @@ import {
   STOP_STEP_MS,
   SupervisedAdapter,
   UNTRUSTED_FRAME,
+  LIMITS_GUIDANCE,
+  runFrame,
   type AgentDriver,
   type ContainerSpec,
   type DriverSession,
@@ -327,6 +329,29 @@ describe("the tool decision", () => {
   });
 });
 
+describe("the run's frame names its limits", () => {
+  it("tells the agent its exact tools and network, and to do what it can before answering blocked", () => {
+    const none = runFrame({ ...FACTS, tools: ["read", "search", "write", "edit"], shell: false, network: [] });
+    expect(none).toContain("Your tools in this run: read, search, write, edit, and the structured result.");
+    expect(none).toContain("There is no shell: you can't run commands, tests, builds");
+    expect(none).toContain("Network: none.");
+    expect(none).toContain(LIMITS_GUIDANCE);
+    // The guidance: do every part it can, complete with a "Not done and why" section, blocked only when nothing useful
+    // can be submitted, and the missing capability stated as the policy setting that would unblock it.
+    expect(LIMITS_GUIDANCE).toContain("Do every part of the task you can");
+    expect(LIMITS_GUIDANCE).toContain('give status completed, and end the summary with a section headed "Not done and why"');
+    expect(LIMITS_GUIDANCE).toContain("Tests written but not run: no shell in this room's policy (rooms[].tools: shell).");
+    expect(LIMITS_GUIDANCE).toContain("Give status blocked only when nothing useful can be submitted.");
+    expect(LIMITS_GUIDANCE).toContain("rooms[].network: registry.npmjs.org");
+    const open = runFrame({ ...FACTS, tools: ["read", "shell"], shell: true, network: ["registry.npmjs.org"] });
+    expect(open).toContain("Your tools in this run: read, shell, and the structured result.");
+    expect(open).not.toContain("There is no shell");
+    expect(open).toContain("Network: only these hosts: registry.npmjs.org.");
+    // Shell listed without the policy's shell flag isn't offered.
+    expect(runFrame({ ...FACTS, tools: ["read", "shell"], shell: false, network: [] })).toContain("Your tools in this run: read, and the structured result. There is no shell");
+  });
+});
+
 describe("the prompt and the container", () => {
   it("marks the task's words untrusted and passes them exactly, never as Runner's instructions", () => {
     const prompt = markUntrusted(enc.encode(WORDS));
@@ -381,7 +406,9 @@ describe("a run that keeps to its policy", () => {
     await (await t.start()).done;
     const session = t.driver.sessions[0];
     expect(session.prompt).toEqual({ trust: "untrusted", origin: "podster_task", text: WORDS });
-    expect(session.frame).toBe(UNTRUSTED_FRAME);
+    expect(session.frame).toBe(runFrame(FACTS));
+    expect(session.frame.startsWith(UNTRUSTED_FRAME)).toBe(true);
+    expect(session.frame).not.toContain(WORDS);
     expect(session.allowed_tools).toEqual(["read", "search", "write", "edit", "StructuredOutput"]);
     expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens, run_time_ms: CAPS.run_time_ms });
     expect(session.provider).toEqual({ api_key: PLACEHOLDER_KEY });

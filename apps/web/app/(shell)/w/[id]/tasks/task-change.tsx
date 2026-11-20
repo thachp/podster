@@ -28,6 +28,10 @@ export type PullRequestChange = {
   merge_requested_by?: string | null;
   merge_requested_at?: number | null;
   merge_finished_at?: number | null;
+  /** The last merge request was self-reviewed: decision 186 as amended 2026-11-20. Optional, so an older read still renders. */
+  merge_self_reviewed?: boolean;
+  /** Display only: a merge this viewer asked for now would be self-reviewed. The API decides when asked. */
+  self_review_for_viewer?: boolean;
 };
 
 /** docs/spec/DESIGN.md section 4's merge stage. "Commit changed" outranks the rest until a merge is recorded. */
@@ -86,6 +90,7 @@ export function TaskChangePanel({ change, mergeControl, deployment }: { change: 
         <dt className="text-muted-foreground">Merge</dt>
         <dd>
           {mergeLabel(change)}
+          {change.merge_self_reviewed && change.merge_state !== "not_requested" ? <span className="block text-xs text-status-amber">Self-reviewed: nobody else reviewed it</span> : null}
           {change.merge_requested_at ? (
             <span className="block text-xs text-muted-foreground">
               Asked for <Timestamp at={change.merge_requested_at} />

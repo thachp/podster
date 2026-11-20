@@ -156,6 +156,13 @@ export function mergeOffered(task: LoadedTask["task"], change: PullRequestChange
   return change.merge_state === "failed" && change.merge_reason !== "commit_changed" && change.merge_reason !== "unrequested_merge" && change.merge_reason !== "unreviewed_merge";
 }
 
+/**
+ * What the merge dialog says when the merge would be self-reviewed (decision 186 as amended 2026-11-20): in a private
+ * workroom, the person who controls the agent that wrote the work, and who approved it, merges it. Nobody else reviewed it.
+ */
+export const SELF_REVIEWED_WARNING =
+  "Nobody else reviewed this. You control the agent that wrote it, and you approved it yourself. This workroom is private, so you may merge it, and Podster records the merge as self-reviewed.";
+
 /** A live merge grant of the viewer's own, by the list's display state. Convenience only. */
 export const holdsMergeGrant = (grants: RepoGrant[], me: string) => grants.some((grant) => grant.principal_id === me && grant.action === "merge" && grant.state === "live");
 
@@ -220,6 +227,11 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
             <AlertDialogDescription className="break-words">
               Podster merges exactly commit <code className="font-mono">{commit}</code>, the one approved in submission {data.task.approved_submission_no}, into {target}, as a merge commit. If the pull request has changed since review, nothing is merged. The repository is public, so the merge is public as soon as it lands. {MERGE_RELEASES_NOTHING}
             </AlertDialogDescription>
+            {change.self_review_for_viewer ? (
+              <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+                {SELF_REVIEWED_WARNING}
+              </p>
+            ) : null}
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>

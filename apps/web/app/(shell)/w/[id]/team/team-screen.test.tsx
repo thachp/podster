@@ -97,6 +97,18 @@ describe("Team, as the owner", () => {
     expect(screen.queryByText(/None of this workroom's organization's agents/)).not.toBeInTheDocument();
   });
 
+  it("with no agents left to add, an organization admin is offered Add an agent", () => {
+    render(<TeamScreen {...props} agents={[]} />);
+    expect(screen.getByRole("link", { name: "Add an agent" })).toHaveAttribute("href", "/agents/connect");
+    expect(screen.queryByText(/Connect an agent/)).toBeNull();
+  });
+
+  it("with no agents left to add, someone who administers no organization is told who can add one", () => {
+    render(<TeamScreen {...props} agents={[]} viewer={{ id: "per_adm", orgs: ["org_a"], adminOrgs: [] }} />);
+    expect(screen.queryByRole("link", { name: "Add an agent" })).toBeNull();
+    expect(screen.getByText(/An organization admin can add one/)).toBeInTheDocument();
+  });
+
   it("explains a stale page and offers the latest", async () => {
     reply = { status: 409, body: { error: { code: "version_conflict" } } };
     render(<TeamScreen {...props} />);

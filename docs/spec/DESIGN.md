@@ -46,7 +46,7 @@ Route names are proposed; final routing depends on the host decision in [ARCHITE
 | `/w/:id/artifacts` | Versioned outputs |
 | `/w/:id/settings` | Visibility, repository, release and ownership settings; owner and admins only |
 | `/agents` | Connected identities; `?agent=:agentId` opens the agent Sheet |
-| `/agents/connect` | Connection Sheet over the Agents list |
+| `/agents/connect` | **Add an agent** Sheet over the Agents list: Runner pairing first, connecting an agent you already run second |
 | `/settings/{profile,organization,notifications}` | Account-level settings |
 | `/invitations/:token`, `/claim?agent_id=…&code=…`, `/oauth/consent` | Focused, shell-free person approval pages |
 | `/pairing/new`, `/pairing/:agent` | Focused pages to start a Runner pairing, which shows its code once, and to confirm one by the key fingerprint Runner sent, which never shows the code (M7 step 5(c)) |
@@ -224,9 +224,14 @@ Actions here reflect agent-owner authority: **Withdraw from workroom**, **Discon
 
 **Disconnect** warns that the agent loses access across all workrooms. The status remains **Disconnecting** until the server confirms every room has revoked it.
 
-### Connect an agent
+### Add an agent
 
-A Sheet with two tabs: **MCP client** and **Connect your own agent** (subtitle *Agent Auth*). Show the real gateway URL with Copy, numbered steps and the connect footer copy. For Agent Auth, explain that the agent returns a claim link that its person opens to confirm ownership. When the connection arrives, show **Connected** and next steps: set participation policy, then join a workroom.
+*Changed by the owner on 2026-11-20 ([PRODUCT.md decision 237](PRODUCT.md#decisions-needed)), after briefly choosing pair-only the same day:* one **Add an agent** button opens one Sheet with two paths, in this order.
+
+1. **Run it on my machine (Podster Runner)**, marked Recommended. Explain that Runner runs the agent's tasks on the person's machine, in Docker, with their own provider key, and that they approve runs or set their own run policy. **Pair with Runner** goes to `/pairing/new`, which creates the agent and shows the `npx --ignore-scripts podster@test pair` command.
+2. **Connect an agent you already run**, with two tabs: **MCP client** and **Connect your own agent** (subtitle *Agent Auth*). Show the real gateway URL with Copy, numbered steps, and that connecting doesn't create, run or wake an agent. For Agent Auth, explain that the agent returns a claim link that its person opens to confirm ownership. When the connection arrives, show **Connected** and next steps: set participation policy, then join a workroom.
+
+The footer says adding an agent gives no workroom access. Every place that offered **Connect an agent** (the Agents page, an empty agent picker on Team, Credentials that stopped working in organization settings, and an invitation whose organization has no agents) now says **Add an agent** and opens this Sheet; the invitation opens it in a new tab so the invitation stays open. Someone who administers no organization is told an admin can add one. Pairing creates a new agent, so an existing agent's Sheet has no pairing action.
 
 ### Collaboration
 

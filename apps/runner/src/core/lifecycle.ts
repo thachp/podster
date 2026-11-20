@@ -34,7 +34,9 @@
  * gate as the fresh evaluation, `RepositoryPath.prepare` makes a fresh, verified checkout at the commit the run starts
  * from; that commit is pinned into the stored decision (`pinRunBase`) and the consume binds it. A run that succeeds is
  * published only after its container is confirmed stopped: committed, pushed to the task's one branch and opened as a
- * pull request, through Runner's broker. A refusal on the repository path releases the task with its code; a passing
+ * pull request, through Runner's broker. Its title and commit message are a Conventional Commits line from the task's
+ * title, as the run's inputs had it, and the type the agent proposed from a fixed list, both held in memory only and made
+ * inert on GitHub (`pull-text.ts`). A refusal on the repository path releases the task with its code; a passing
  * failure leaves it to be evaluated afresh.
  *
  * **Results (M7 step 11).** A run that ends `succeeded` with a structured result Runner checks again, of status
@@ -159,6 +161,11 @@ export type PolicyCalls = { evaluate: typeof evaluate; issueRunDecision: typeof 
 
 /** A task's repository work, as the lifecycle hands it over: the repository and branch are the decision's own facts. */
 export type RepoTask = { workspace_id: string; task_id: string; task_folder: string; repository: NonNullable<RunFacts["repository"]> };
+/**
+ * What a publication's words are made from (`pull-text.ts`): the task's title as the run's inputs had it, untrusted, and
+ * the type the agent proposed. Both are held in memory only, so after a restart they are null and the title falls back.
+ */
+export type PublishWords = { title: string | null; change_type: string | null };
 export type Publication = { kind: "published"; branch: string; commit: string; pr_number: number } | { kind: "no_changes" };
 
 /**
@@ -173,7 +180,7 @@ export interface RepositoryPath {
    */
   prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }>;
   /** After the run's container is confirmed stopped: commit on top of `base_commit`, push the task branch, open its pull request. */
-  publish(task: RepoTask & { base_commit: string }, signal: AbortSignal): Promise<Publication>;
+  publish(task: RepoTask & { base_commit: string } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication>;
   /** Drops what it holds for the task, its token included. */
   forget(workspace_id: string, task_id: string): void;
 }
@@ -265,6 +272,8 @@ export class Lifecycle {
   private readonly approvals = new Map<string, { hash: string; version: number; facts: string }>();
   /** Each finished run's structured result, by task, until it's submitted: in memory only, never stored or logged. */
   private readonly results = new Map<string, { run_ref: string; result: RunResult }>();
+  /** Each repository run's task title, as its inputs had it, by task, for its pull request: in memory only, never stored or logged. */
+  private readonly titles = new Map<string, { run_ref: string; title: string }>();
   /** The agent's own organization, checked at open: a policy reread later must still name it. */
   private ownerOrg = "";
 
@@ -518,7 +527,7 @@ export class Lifecycle {
     const detail = await this.read(offer.workspace_id, offer.task_id);
     const task = detail?.task;
     if (!detail || !task || task.assignee !== this.deps.poller.agentId || (task.status !== "offered" && task.status !== "accepted")) {
-      this.results.delete(key);
+      this.forgetWords(key);
       await this.put({ ...entry, phase: "done", outcome: task ? `task_${task.status}` : "not_readable" });
       return;
     }
@@ -762,6 +771,8 @@ export class Lifecycle {
       // Stored as returned, with the run's ID, before the adapter starts anything.
       const running: RunEntry = { ...entry, phase: "running", outcome: "started", consumed: consumed.record, run_ref };
       await this.put(running);
+      const title = prompt?.inputs.find((i) => i.input === "title")?.text;
+      if (consumed.record.repository_id !== null && title !== undefined) this.titles.set(keyOf(entry.workspace_id, entry.task_id), { run_ref, title });
       return { running, facts: (fresh as Decision & { facts: RunFacts }).facts };
     });
     if (started === "aborted") return "stopped";
@@ -873,7 +884,13 @@ export class Lifecycle {
       return null;
     }
     try {
-      const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit }, signal ?? new AbortController().signal);
+      const key = keyOf(entry.workspace_id, entry.task_id);
+      const held = this.titles.get(key);
+      const kept = this.results.get(key);
+      const words: PublishWords = { title: held && held.run_ref === entry.run_ref ? held.title : null, change_type: kept && kept.run_ref === entry.run_ref ? (kept.result.change_type ?? null) : null };
+      const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit, ...words }, signal ?? new AbortController().signal);
+      // Published or not, the title has done its work; the result stays held for the submission.
+      this.titles.delete(key);
       if (publication.kind === "no_changes") {
         this.log("lifecycle.publish", "no_changes", entry);
         return { published: entry.published ?? null, outcome: "no_changes" };
@@ -888,6 +905,7 @@ export class Lifecycle {
         this.log("lifecycle.publish", "unavailable", entry, { code: error.code });
         return { wait: `repo_${error.code}` };
       }
+      this.titles.delete(keyOf(entry.workspace_id, entry.task_id));
       this.log("lifecycle.publish", "refused", entry, { code: error.code });
       await this.giveUp(entry, "accepted", `repo_${error.code}`);
       return null;
@@ -1075,7 +1093,7 @@ export class Lifecycle {
       // Step 11: in a room with a repository, only a commit Runner itself pushed for these inputs can be submitted: this
       // run's own, or, when it changed nothing, the one it started from. Otherwise there is no work to submit.
       if (consumed?.repository_id && !(pub && pub.repository_id === consumed.repository_id && (published.outcome === "published" || pub.commit === consumed.base_commit))) {
-        this.results.delete(keyOf(entry.workspace_id, entry.task_id));
+        this.forgetWords(keyOf(entry.workspace_id, entry.task_id));
         this.log("lifecycle.submit", "nothing_to_submit", entry, { code: "run_no_changes" });
         await this.giveUp({ ...base, publish_since: null, retry_at: null, published: pub }, "accepted", "run_no_changes");
         return;
@@ -1083,12 +1101,18 @@ export class Lifecycle {
       await this.put({ ...base, phase: "finished", publish_since: null, retry_at: null, ran_hash: consumed?.input_hash ?? null, published: pub, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome, submission: owedSubmission() });
     }
     else if (after.kind === "release") {
-      this.results.delete(keyOf(entry.workspace_id, entry.task_id));
+      this.forgetWords(keyOf(entry.workspace_id, entry.task_id));
       if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
       await this.giveUp(base, "accepted", after.reason);
     }
     else if (after.kind === "reconsider") await this.put({ ...base, phase: "done", marker: "" });
     else await this.put({ ...base, phase: "done" });
+  }
+
+  /** Drops what is held in memory for a task's run: its result and its title. */
+  private forgetWords(key: string): void {
+    this.results.delete(key);
+    this.titles.delete(key);
   }
 
   /** The entry as it stands in the record, which a step of the submission may have just saved. */
@@ -1107,12 +1131,12 @@ export class Lifecycle {
     const agent = this.deps.poller.agentId;
     const consumed = entry.consumed;
     const release = async (reason: string) => {
-      this.results.delete(key);
+      this.forgetWords(key);
       this.log("lifecycle.submit", "refused", entry, { code: reason });
       await this.giveUp({ ...this.current(entry), submission: null, retry_at: null }, "accepted", reason);
     };
     const notSubmitted = async (why: string) => {
-      this.results.delete(key);
+      this.forgetWords(key);
       this.log("lifecycle.submit", "not_submitted", entry, { code: `submit_${why}` });
       // Read and evaluated afresh at its next turn.
       await this.put({ ...this.current(entry), phase: "done", marker: "", outcome: `submit_${why}`, submission: null, retry_at: null });
@@ -1199,7 +1223,7 @@ export class Lifecycle {
   }
 
   private async submitted(entry: RunEntry) {
-    this.results.delete(keyOf(entry.workspace_id, entry.task_id));
+    this.forgetWords(keyOf(entry.workspace_id, entry.task_id));
     const current = this.current(entry);
     await this.put({ ...current, outcome: "submitted", retry_at: null, submission: { ...(current.submission as Submission), state: "submitted" } });
     this.log("lifecycle.submit", "submitted", entry);

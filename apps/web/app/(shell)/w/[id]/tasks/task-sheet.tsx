@@ -18,7 +18,7 @@ import { MergeControl } from "./task-merge";
 import { DeploymentStageRow } from "./task-release-stage";
 import { mayManageAssets } from "@/components/files/model";
 import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, viaA2a, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, isSelfReviewedMerge, kindOf, nameOf, roleOf, verbFor, viaA2a, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -335,7 +335,7 @@ export function Activity({ data, me, names, orgNames }: SectionProps) {
           {event.type === "task.a2a_response_held" ? (
             <p className="rounded-lg bg-status-amber-surface p-2 text-xs text-status-amber">A held response isn't a submission and needs no review. The agent can accept and submit it.</p>
           ) : null}
-          {event.reason ? <AgentContent author={author(event.from, me, names, orgNames)} external={event.external} body={event.reason} /> : null}
+          {event.reason && !isSelfReviewedMerge(event) ? <AgentContent author={author(event.from, me, names, orgNames)} external={event.external} body={event.reason} /> : null}
         </li>
       ))}
     </ol>

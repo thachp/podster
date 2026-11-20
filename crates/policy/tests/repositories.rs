@@ -6,7 +6,7 @@
 )]
 
 use podster_core::repo_grants::{Grant, GrantRefusal};
-use podster_core::repo_merge::Actor;
+use podster_core::repo_merge::{Actor, SelfReview};
 use podster_core::repositories::GrantAction;
 use podster_core::{decide_create, NewTask, Task};
 use podster_policy::repositories::*;
@@ -475,7 +475,8 @@ fn a_public_claim_holder_uses_no_grant() {
             Some("p-rev"),
             &task,
             &SUBMITTER,
-            &standing(Some(&merge))
+            &standing(Some(&merge)),
+            &SelfReview::default()
         ),
         Ok(())
     );
@@ -484,7 +485,14 @@ fn a_public_claim_holder_uses_no_grant() {
         ..standing(Some(&merge))
     };
     assert_eq!(
-        authorize_merge(&reviewer, Some("p-rev"), &task, &SUBMITTER, &public),
+        authorize_merge(
+            &reviewer,
+            Some("p-rev"),
+            &task,
+            &SUBMITTER,
+            &public,
+            &SelfReview::default()
+        ),
         Err(RepoDenial::PublicParticipant)
     );
     // With no grant at all the answer is the same, so it says nothing about what rows exist.
@@ -498,7 +506,8 @@ fn a_public_claim_holder_uses_no_grant() {
             Some("p-rev"),
             &task,
             &SUBMITTER,
-            &public_no_grant
+            &public_no_grant,
+            &SelfReview::default()
         ),
         Err(RepoDenial::PublicParticipant)
     );
@@ -609,7 +618,8 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
                             Some("p-caller"),
                             &task,
                             &SUBMITTER,
-                            &standing(held)
+                            &standing(held),
+                            &SelfReview::default()
                         ),
                         expected,
                         "{kind:?} {role:?} {party} {held:?}"
@@ -675,14 +685,28 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
             ),
         ] {
             assert_eq!(
-                authorize_merge(&who, Some(id), &task, &SUBMITTER, &standing(held)),
+                authorize_merge(
+                    &who,
+                    Some(id),
+                    &task,
+                    &SUBMITTER,
+                    &standing(held),
+                    &SelfReview::default()
+                ),
                 Err(RepoDenial::Grant(refusal)),
                 "{id} {:?} with {name}",
                 who.role
             );
         }
         assert_eq!(
-            authorize_merge(&who, Some(id), &task, &SUBMITTER, &standing(Some(&merge))),
+            authorize_merge(
+                &who,
+                Some(id),
+                &task,
+                &SUBMITTER,
+                &standing(Some(&merge)),
+                &SelfReview::default()
+            ),
             Ok(())
         );
         // A grant from an owner who no longer holds the delegation doesn't count.
@@ -691,7 +715,14 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
             ..standing(Some(&merge))
         };
         assert_eq!(
-            authorize_merge(&who, Some(id), &task, &SUBMITTER, &stale),
+            authorize_merge(
+                &who,
+                Some(id),
+                &task,
+                &SUBMITTER,
+                &stale,
+                &SelfReview::default()
+            ),
             Err(RepoDenial::Grant(GrantRefusal::GrantStale))
         );
     }
@@ -768,7 +799,14 @@ fn m5_10_a_merger_controlled_by_the_submitters_person_is_refused() {
         };
         let merge = grant(id, GrantAction::Merge);
         assert_eq!(
-            authorize_merge(&who, person, &task, &SUBMITTER, &standing(Some(&merge))),
+            authorize_merge(
+                &who,
+                person,
+                &task,
+                &SUBMITTER,
+                &standing(Some(&merge)),
+                &SelfReview::default()
+            ),
             expected,
             "{name}"
         );
@@ -785,7 +823,8 @@ fn m5_10_a_merger_controlled_by_the_submitters_person_is_refused() {
             Some("rev"),
             &task,
             &unknown_submitter,
-            &standing(Some(&merge))
+            &standing(Some(&merge)),
+            &SelfReview::default()
         ),
         Err(RepoDenial::SelfMerge)
     );
@@ -1340,7 +1379,8 @@ fn a1_the_submitters_own_person_may_still_approve_but_their_review_merges_nothin
             Some("p-other"),
             &task,
             &submitter,
-            &standing(Some(&theirs))
+            &standing(Some(&theirs)),
+            &SelfReview::default()
         ),
         Ok(())
     );
@@ -1438,6 +1478,7 @@ fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
             &task,
             &SUBMITTER,
             &standing(Some(&merge)),
+            &SelfReview::default(),
         );
         for (reviewer_name, reviewer, independent) in &reviewers {
             let label = format!("{merger_name} merging after {reviewer_name}");
@@ -1475,4 +1516,257 @@ fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
         RepoDenial::ReviewUnrecorded.as_merge_refusal().code(),
         "self_review"
     );
+}
+
+/// Decision 186 as amended by the owner on 2026-11-20 ("Yes, as recommended"): in a private room, the person who controls
+/// the submitting agent may merge its work if they approved the reviewed commit themselves and hold a live merge grant.
+/// Every guardrail is checked on its own, and the second-person rule stands wherever one fails.
+#[test]
+fn a_self_reviewed_merge_is_only_the_approving_controllers_in_a_private_room_with_a_grant() {
+    let task = task();
+    // The submitting agent `asg` is controlled by `rev`, the task's reviewer, who approved its reviewed commit.
+    let submitter = Actor {
+        id: "asg",
+        person: Some("rev"),
+    };
+    let approved_by_rev = Actor {
+        id: "rev",
+        person: Some("rev"),
+    };
+    let private = SelfReview {
+        room_private: true,
+        requester_is_person: true,
+        reviewer: Some(approved_by_rev),
+    };
+    let rev = caller("rev", Person, Role::Member);
+    let merge = grant("rev", GrantAction::Merge);
+    let held = standing(Some(&merge));
+
+    // All guardrails hold: allowed, and recorded as self-reviewed.
+    assert_eq!(
+        authorize_merge(&rev, Some("rev"), &task, &submitter, &held, &private),
+        Ok(())
+    );
+    assert_eq!(
+        merge_review(&rev, Some("rev"), &submitter, &private),
+        Ok(true)
+    );
+
+    // 1. A public room keeps the second-person rule.
+    let public = SelfReview {
+        room_private: false,
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(&rev, Some("rev"), &task, &submitter, &held, &public),
+        Err(RepoDenial::SelfMerge)
+    );
+    assert_eq!(
+        merge_review(&rev, Some("rev"), &submitter, &public),
+        Err(RepoDenial::SelfReview)
+    );
+
+    // 2. Controlling the agent implies no grant: without a live one, refused as anyone is.
+    assert_eq!(
+        authorize_merge(
+            &rev,
+            Some("rev"),
+            &task,
+            &submitter,
+            &standing(None),
+            &private
+        ),
+        Err(RepoDenial::Grant(GrantRefusal::GrantRequired))
+    );
+    let stale = GrantStanding {
+        delegation_holder: Some("new-owner"),
+        ..held
+    };
+    assert_eq!(
+        authorize_merge(&rev, Some("rev"), &task, &submitter, &stale, &private),
+        Err(RepoDenial::Grant(GrantRefusal::GrantStale))
+    );
+    // And a participant through a public claim uses no grant.
+    let claimed = GrantStanding {
+        through_public_claim: true,
+        ..held
+    };
+    assert_eq!(
+        authorize_merge(&rev, Some("rev"), &task, &submitter, &claimed, &private),
+        Err(RepoDenial::PublicParticipant)
+    );
+
+    // 3. Only the person who approved it. Another of the controller's agents approved: the controller may not merge.
+    let by_my_other_agent = SelfReview {
+        reviewer: Some(Actor {
+            id: "agt_other",
+            person: Some("rev"),
+        }),
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(
+            &rev,
+            Some("rev"),
+            &task,
+            &submitter,
+            &held,
+            &by_my_other_agent
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // An independent person approved: the controller still may not merge their own agent's work.
+    let by_someone_else = SelfReview {
+        reviewer: Some(Actor {
+            id: "p-other",
+            person: Some("p-other"),
+        }),
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(
+            &rev,
+            Some("rev"),
+            &task,
+            &submitter,
+            &held,
+            &by_someone_else
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // No approval on record, or one whose reviewer wasn't recorded.
+    for reviewer in [
+        None,
+        Some(Actor {
+            id: "",
+            person: None,
+        }),
+        Some(Actor {
+            id: "rev",
+            person: None,
+        }),
+    ] {
+        let unrecorded = SelfReview {
+            reviewer,
+            ..private
+        };
+        assert_eq!(
+            authorize_merge(&rev, Some("rev"), &task, &submitter, &held, &unrecorded),
+            Err(RepoDenial::SelfMerge),
+            "{reviewer:?}"
+        );
+    }
+    // Another person who approved it and controls nothing here merges as before: an independent review.
+    let admin = caller("admin", Person, Role::Admin);
+    let admins = grant("admin", GrantAction::Merge);
+    let by_admin = SelfReview {
+        reviewer: Some(Actor {
+            id: "admin",
+            person: Some("admin"),
+        }),
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(
+            &admin,
+            Some("admin"),
+            &task,
+            &submitter,
+            &standing(Some(&admins)),
+            &by_admin
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        merge_review(&admin, Some("admin"), &submitter, &by_admin),
+        Ok(false)
+    );
+
+    // An agent never self-merges: not the controller's other agent, even one that approved, and not a caller whose kind
+    // the room has as an agent whatever the review says.
+    let other_agent = caller("agt_other", Agent, Role::Member);
+    let others = grant("agt_other", GrantAction::Merge);
+    let approved_by_agent = SelfReview {
+        reviewer: Some(Actor {
+            id: "agt_other",
+            person: Some("rev"),
+        }),
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(
+            &other_agent,
+            Some("rev"),
+            &task,
+            &submitter,
+            &standing(Some(&others)),
+            &approved_by_agent
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    let rev_as_agent = caller("rev", Agent, Role::Member);
+    assert!(!self_reviewed_merge(
+        &rev_as_agent,
+        Some("rev"),
+        &submitter,
+        &private
+    ));
+    assert!(!self_reviewed_merge(
+        &rev,
+        Some("rev"),
+        &submitter,
+        &SelfReview {
+            requester_is_person: false,
+            ..private
+        }
+    ));
+
+    // The submitter itself, and the task's assignee, are refused whatever is on record.
+    let asg = caller("asg", Agent, Role::Member);
+    let asgs = grant("asg", GrantAction::Merge);
+    let by_asg = SelfReview {
+        reviewer: Some(Actor {
+            id: "asg",
+            person: Some("asg"),
+        }),
+        ..private
+    };
+    assert_eq!(
+        authorize_merge(
+            &asg,
+            Some("asg"),
+            &task,
+            &submitter,
+            &standing(Some(&asgs)),
+            &by_asg
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // A submitter whose controlling person isn't known is nobody's to self-merge.
+    let unknown = Actor {
+        id: "asg",
+        person: None,
+    };
+    assert_eq!(
+        authorize_merge(&rev, Some("rev"), &task, &unknown, &held, &private),
+        Err(RepoDenial::SelfMerge)
+    );
+    // A person who submitted their own work isn't merging an agent's: there's no agent, so no exception.
+    let self_submitted = Actor {
+        id: "rev",
+        person: Some("rev"),
+    };
+    assert!(!self_reviewed_merge(
+        &rev,
+        Some("rev"),
+        &self_submitted,
+        &private
+    ));
+    // The caller's controlling person must be themselves.
+    assert!(!self_reviewed_merge(
+        &rev,
+        Some("p-else"),
+        &submitter,
+        &private
+    ));
 }

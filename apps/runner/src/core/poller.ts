@@ -139,6 +139,11 @@ export class Poller {
     }
   }
 
+  /** The gateway's origin this Runner is paired with, as checked at open. */
+  get origin(): string {
+    return this.deps.origin;
+  }
+
   /** The Podster agent this Runner acts as. */
   get agentId(): string {
     return this.state.agent_id as string;

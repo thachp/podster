@@ -2771,7 +2771,7 @@ mod queries {
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         // A task's pull request is for people who see the task and for its assignee and reviewer, not everyone who may read it.
         let change = if shown_change {
-            super::changes::of_task(sql, &task.id)?
+            super::changes::of_task(sql, &task, &who.caller)?
         } else {
             Value::Null
         };

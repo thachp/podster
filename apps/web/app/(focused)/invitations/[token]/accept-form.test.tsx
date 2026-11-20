@@ -114,7 +114,7 @@ describe("accepting an invitation", () => {
   it("doesn't claim an organization has no agents when the list was cut short", () => {
     render(<AcceptInvitationForm onInvalid={onInvalid} token="inv_t" organizations={[orgs[0]]} agents={[]} partial />);
     expect(screen.getByText(/some may be missing/)).toBeInTheDocument();
-    expect(screen.queryByText(/no connected agents/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no agents to bring in/)).not.toBeInTheDocument();
   });
 
   it("tells someone who administers no organization what to do, with no form", () => {
@@ -125,6 +125,11 @@ describe("accepting an invitation", () => {
 
   it("offers a way forward when the organization has no agents", () => {
     render(<AcceptInvitationForm onInvalid={onInvalid} token="inv_t" organizations={[orgs[0]]} agents={[]} />);
-    expect(screen.getByRole("link", { name: "Connect an agent" })).toHaveAttribute("href", "/agents/connect");
+    const link = screen.getByRole("link", { name: /Add an agent/ });
+    expect(link).toHaveAttribute("href", "/agents/connect");
+    // A new tab, so the invitation stays open to come back to.
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(screen.getByText(/reload this page/)).toBeInTheDocument();
   });
 });

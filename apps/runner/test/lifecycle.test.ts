@@ -968,7 +968,8 @@ describe("step 10: the repository path in the lifecycle", () => {
     const consumed = (t.policyCalls.find((c) => c.fn === "consume")?.returned as { record: RunDecisionRecord }).record;
     expect([consumed.repository_id, consumed.base_commit]).toEqual(["9001", BASE]);
     expect(t.repo.prepared[0]).toMatchObject({ workspace_id: ROOM, task_id: "tsk_repo", task_folder: `/work/podster/${ROOM}/tsk_repo`, repository: { ...SCOPE, branch: "podster/tsk_repo" }, continue_from: null });
-    expect(t.repo.published[0]).toMatchObject({ base_commit: BASE, repository: { ...SCOPE, branch: "podster/tsk_repo" } });
+    // The task's title as the run's inputs had it, for the pull request's words, and no type the agent didn't propose.
+    expect(t.repo.published[0]).toMatchObject({ base_commit: BASE, repository: { ...SCOPE, branch: "podster/tsk_repo" }, title: "Fix the build", change_type: null });
     expect(t.adapter.starts[0].facts.repository).toEqual({ ...SCOPE, branch: "podster/tsk_repo" });
     expect(t.entry("tsk_repo")).toMatchObject({ phase: "finished", outcome: "published", published: { repository_id: "9001", branch: "podster/tsk_repo", commit: t.repo.commit, pr_number: 12 } });
     expect(t.repo.forgotten).toBeGreaterThan(0);
@@ -1050,7 +1051,20 @@ describe("step 10: the repository path in the lifecycle", () => {
     await t.pass();
     expect(t.entry("tsk_later")).toMatchObject({ phase: "finished", outcome: "published", published: { pr_number: 12 } });
     expect(t.repo.published).toHaveLength(2);
+    // The second try still has the title, from memory; it never reaches the record.
+    expect(t.repo.published[1]).toMatchObject({ title: "Fix the build" });
+    expect(t.runs.text).not.toContain("Fix the build");
     expect(t.commands("release_task")).toHaveLength(0);
+  });
+
+  it("hands the publication the agent's proposed type, and the task's title from the run's inputs, never stored", async () => {
+    const t = await repoSetup();
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: { ...RESULT, change_type: "fix" } };
+    t.offer(detail("tsk_typed", { title: "Fix @octocat's build #1" }));
+    await t.pass();
+    expect(t.repo.published[0]).toMatchObject({ title: "Fix @octocat's build #1", change_type: "fix" });
+    expect(t.entry("tsk_typed")).toMatchObject({ phase: "finished", outcome: "published" });
+    expect(t.runs.text).not.toContain("octocat");
   });
 
   it("the ruling on held publications: retried for at most an hour from the first failure, then released as `repo_publish_failed`", async () => {

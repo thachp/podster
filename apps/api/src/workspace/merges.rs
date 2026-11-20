@@ -6,7 +6,9 @@
 //! - **The command** ([`request`]) only records that a merge was asked for, with its event, outbox rows and idempotency
 //!   record, in one transaction, and the room's alarm is armed. It never calls GitHub. Policy decides first, then
 //!   `core::repo_merge`: a visible task, a `merge` grant that counts, a requester whose controlling person isn't the
-//!   submitter's, an approval with a reviewed commit that Podster read for itself and hasn't seen change since.
+//!   submitter's, an approval with a reviewed commit that Podster read for itself and hasn't seen change since. In a
+//!   private room the person who controls the submitting agent and approved its reviewed commit may merge it too, as a
+//!   self-reviewed merge (decision 186 as amended 2026-11-20), which is recorded as one on the change and its events.
 //! - **The job** ([`Workspace::merge_upkeep`]) runs from the room's alarm, which may run it more than once, so each
 //!   pass starts from what the room holds and what GitHub shows, and writes down what it is about to do before each
 //!   call that changes anything there:
@@ -42,17 +44,20 @@ use podster_core::repo_merge::{
     requestable_state, settle_unknown_from_watch, unknown_read_allowed, unknown_read_wait_ms,
     Actor, Change, ChangeStanding, Landed, MergeAuthority, MergeAuthorized, MergeEvent,
     MergeFailure, MergeObserved, MergeRefusal, MergeStep, PullObservation, PullState, ReviewedBase,
-    WatchSettles,
+    SelfReview, WatchSettles,
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
-use podster_policy::repositories::{authorize_merge, independent_review, GrantStanding};
+use podster_policy::repositories::{authorize_merge, merge_review, GrantStanding};
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 /// How many merges one alarm works on. The rest wait for the next alarm.
 const MAX_MERGES_PER_ALARM: usize = 2;
 /// Who a recorded outcome is from: nobody in the room.
 const SYSTEM: &str = "system";
+/// The reason a merge's `merge.requested` and `merge.succeeded` carry when it was self-reviewed: decision 186 as amended
+/// 2026-11-20. A code, never anyone's text.
+pub(super) const SELF_REVIEWED: &str = "self_reviewed";
 
 fn refuse(status: u16, code: &'static str) -> ApiError {
     ApiError::api(status, code)
@@ -105,6 +110,8 @@ struct Inputs {
     request: Option<RequestState>,
     /// The link's status, repository ID, default branch and whether it's public.
     link: Option<(Option<LinkStatus>, i64, String, bool)>,
+    /// The room is private now, from its own row. Anything else, a missing row included, is not.
+    room_private: bool,
 }
 
 fn read_inputs(sql: &SqlStorage, requester: &str, task_id: &str, now: i64) -> R<Option<Inputs>> {
@@ -154,7 +161,32 @@ fn read_inputs(sql: &SqlStorage, requester: &str, task_id: &str, now: i64) -> R<
         grant,
         request,
         link,
+        room_private: room_is_private(sql)?,
     }))
+}
+
+/// Whether the room is private now, from its own row: a self-reviewed merge is for private rooms only. A room whose
+/// visibility reads as anything but `private` keeps the second-person rule.
+pub(super) fn room_is_private(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|room| room["visibility"].as_str() == Some("private")))
+}
+
+/// What a self-reviewed merge by `caller` would rest on, from the room's rows: its visibility and the approval on record.
+pub(super) fn self_review_of<'a>(
+    caller: &Caller,
+    room_private: bool,
+    reviewer: Option<&'a (String, Option<String>)>,
+) -> SelfReview<'a> {
+    SelfReview {
+        room_private,
+        requester_is_person: caller.kind == PrincipalKind::Person,
+        reviewer: reviewer.map(|(id, person)| Actor {
+            id,
+            person: person.as_deref(),
+        }),
+    }
 }
 
 impl Inputs {
@@ -173,25 +205,14 @@ impl Inputs {
     /// Who made the approved submission, and the person who controlled them then. A change with no submitter on
     /// record names nobody, and core then refuses every requester as possibly the same.
     fn submitter(&self) -> (String, Option<String>) {
-        let from = |name: &str| self.change.as_ref().and_then(|row| text(&row[name]));
-        (
-            from("submitter_id")
-                .or_else(|| self.task.assignee.clone())
-                .unwrap_or_default(),
-            from("submitter_person"),
-        )
+        submitter_of(self.change.as_ref(), &self.task)
     }
 
     /// Who approved the reviewed commit, and the person who controlled them then, from the room's own record of the
     /// approval. `None` with no reviewed commit on record, which core refuses. An approval recorded before the room kept
     /// its reviewer names nobody, and the review counts as not independent: nothing is guessed.
     fn reviewer(&self) -> Option<(String, Option<String>)> {
-        let row = self.change.as_ref()?;
-        row["reviewed_commit_sha"].as_str()?;
-        Some((
-            text(&row["reviewer_id"]).unwrap_or_default(),
-            text(&row["reviewer_person"]).filter(|_| row["reviewer_id"].is_string()),
-        ))
+        reviewer_of(self.change.as_ref()?)
     }
 
     fn standing(&self) -> ChangeStanding<'_> {
@@ -210,6 +231,28 @@ impl Inputs {
             .and_then(MergeState::from_name)
             .unwrap_or(MergeState::NotRequested)
     }
+}
+
+/// Who made the approved submission, and the person who controlled them then, from the task's change row. A change with
+/// no submitter on record names the task's assignee, with no controlling person, which core refuses as possibly anyone.
+pub(super) fn submitter_of(change: Option<&Value>, task: &Task) -> (String, Option<String>) {
+    let from = |name: &str| change.and_then(|row| text(&row[name]));
+    (
+        from("submitter_id")
+            .or_else(|| task.assignee.clone())
+            .unwrap_or_default(),
+        from("submitter_person"),
+    )
+}
+
+/// Who approved the reviewed commit, and the person who controlled them then, from the change row. `None` with no
+/// reviewed commit on record. An approval recorded before the room kept its reviewer names nobody.
+pub(super) fn reviewer_of(row: &Value) -> Option<(String, Option<String>)> {
+    row["reviewed_commit_sha"].as_str()?;
+    Some((
+        text(&row["reviewer_id"]).unwrap_or_default(),
+        text(&row["reviewer_person"]).filter(|_| row["reviewer_id"].is_string()),
+    ))
 }
 
 /// Whoever asks for a merge, as the decision reads them: the room's view of them now, the person who controls them, and
@@ -264,22 +307,21 @@ fn decide_merge<T>(
         through_public_claim: public_claims::is_public_participant(sql, &caller.id)?,
         now,
     };
+    // A self-reviewed merge rests on the room's visibility and the approval on record, both from this transaction.
+    let reviewer = inputs.reviewer();
+    let review = self_review_of(caller, inputs.room_private, reviewer.as_ref());
     match authorize_merge(
         caller,
         requester.person,
         &inputs.task,
         &submitter,
         &standing,
+        &review,
     ) {
-        // The approving review must be independent of the submitter (review A1), decided only for a caller who may
-        // otherwise merge, so nobody else learns anything about the review.
+        // The approving review must be independent of the submitter (review A1), or the merge a self-reviewed one,
+        // decided only for a caller who may otherwise merge, so nobody else learns anything about the review.
         Ok(()) => {
-            let reviewer = inputs.reviewer();
-            let reviewer = reviewer.as_ref().map(|(id, person)| Actor {
-                id,
-                person: person.as_deref(),
-            });
-            if let Err(denial) = independent_review(reviewer.as_ref(), &submitter) {
+            if let Err(denial) = merge_review(caller, requester.person, &submitter, &review) {
                 return Ok(Err(Denied::Policy(denial)));
             }
         }
@@ -306,6 +348,7 @@ fn decide_merge<T>(
         submitter,
         grant: grant.as_ref(),
         delegation_holder: holder,
+        self_review: review,
         submission_no,
         commit_sha: &commit_sha,
         now,
@@ -378,10 +421,19 @@ pub(super) fn request(
         |authority| {
             decide_merge_request(authority, change.as_ref())?;
             check_change_standing(&inputs.standing(), authority.commit_sha)?;
-            Ok((authority.submission_no, authority.commit_sha.to_string()))
+            let self_reviewed = podster_core::repo_merge::is_self_reviewed(
+                &authority.requester,
+                &authority.submitter,
+                &authority.self_review,
+            );
+            Ok((
+                authority.submission_no,
+                authority.commit_sha.to_string(),
+                self_reviewed,
+            ))
         },
     )?;
-    let (submission_no, commit_sha) = match decided {
+    let (submission_no, commit_sha, self_reviewed) = match decided {
         Ok(named) => named,
         Err(Denied::Policy(denial)) => return Err(repositories::denied(denial)),
         Err(Denied::Core(refusal)) => return Err(refused(refusal)),
@@ -434,12 +486,15 @@ pub(super) fn request(
         MergeEvent::Requested.name(),
         &caller.id,
         Some(task_id),
-        &Transition::NONE,
+        &Transition {
+            reason: self_reviewed.then_some(SELF_REVIEWED),
+            ..Transition::NONE
+        },
         told,
         now,
     )?;
     Ok(
-        json!({ "task_id": task_id, "merge_state": MergeState::Requested.name(), "commit_sha": commit_sha, "submission_no": submission_no, "requested_at": now }),
+        json!({ "task_id": task_id, "merge_state": MergeState::Requested.name(), "commit_sha": commit_sha, "submission_no": submission_no, "requested_at": now, "self_reviewed": self_reviewed }),
     )
 }
 
@@ -996,13 +1051,23 @@ fn finish_succeeded(
         ],
     )?;
     let requester = requester_of(sql, task_id)?;
+    let self_reviewed = rows(
+        sql,
+        "SELECT * FROM task_change WHERE task_id = ?",
+        vec![task_id.into()],
+    )?
+    .first()
+    .is_some_and(self_reviewed_request);
     store::record_event_about(
         sql,
         event.name(),
         SYSTEM,
         Some(&requester),
         Some(task_id),
-        &Transition::NONE,
+        &Transition {
+            reason: self_reviewed.then_some(SELF_REVIEWED),
+            ..Transition::NONE
+        },
         told_of_outcome(sql, &requester)?,
         now,
     )?;
@@ -1011,6 +1076,36 @@ fn finish_succeeded(
         json!({ "event": "merge.succeeded", "ws": room, "task": task_id })
     );
     Ok(())
+}
+
+/// Whether the task's last merge request was a self-reviewed one, from the change row's record of who asked, who
+/// submitted and who approved: `core::repo_merge::controls_and_approved`. No other request can carry those facts, since
+/// the decision refuses any other merge by the submitter's controlling person.
+pub(super) fn self_reviewed_request(row: &Value) -> bool {
+    let Some(requester) = text(&row["merge_requested_by"]) else {
+        return false;
+    };
+    let requester_person = text(&row["merge_requester_person"]);
+    let submitter_id = text(&row["submitter_id"]).unwrap_or_default();
+    let submitter_person = text(&row["submitter_person"]);
+    let reviewer = reviewer_of(row);
+    podster_core::repo_merge::controls_and_approved(
+        &Actor {
+            id: &requester,
+            person: requester_person.as_deref(),
+        },
+        &Actor {
+            id: &submitter_id,
+            person: submitter_person.as_deref(),
+        },
+        reviewer
+            .as_ref()
+            .map(|(id, person)| Actor {
+                id,
+                person: person.as_deref(),
+            })
+            .as_ref(),
+    )
 }
 
 /// What the job read, in the terms `core::decide_merge_step` judges.

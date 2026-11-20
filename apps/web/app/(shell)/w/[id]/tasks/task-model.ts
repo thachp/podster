@@ -125,6 +125,14 @@ const VERBS: Record<string, string> = {
   "task.a2a_remote_failed": "reported through its A2A endpoint that the work failed. The submission is still for the reviewer to decide",
 };
 
+/** A merge recorded as self-reviewed (decision 186 as amended 2026-11-20). Its reason is Podster's code, not anyone's words. */
+export const isSelfReviewedMerge = (event: Pick<HistoryEvent, "type" | "reason">) => (event.type === "merge.requested" || event.type === "merge.succeeded") && event.reason === "self_reviewed";
+
+const SELF_REVIEWED_VERBS: Record<string, string> = {
+  "merge.requested": "asked to merge the reviewed commit, self-reviewed: nobody else reviewed it",
+  "merge.succeeded": "recorded the merge, self-reviewed: nobody else reviewed it",
+};
+
 /** Whether Podster posted this from what the agent's own A2A endpoint reported. */
 export const viaA2a = (item: { origin?: string | null }) => item.origin === "a2a_remote";
 
@@ -132,7 +140,8 @@ export const viaA2a = (item: { origin?: string | null }) => item.origin === "a2a
 const isReofferingEdit = (event: Pick<HistoryEvent, "type" | "prior_status">) => event.type === "task.offered" && event.prior_status === "accepted";
 
 /** The API can add event types before this does. A new one reads as what it is, not as something it isn't. */
-export const verbFor = (event: Pick<HistoryEvent, "type" | "prior_status">) => (isReofferingEdit(event) ? "edited the instructions or criteria, so this needs accepting again" : (VERBS[event.type] ?? "changed this task"));
+export const verbFor = (event: Pick<HistoryEvent, "type" | "prior_status"> & { reason?: string | null }) =>
+  isReofferingEdit(event) ? "edited the instructions or criteria, so this needs accepting again" : isSelfReviewedMerge({ type: event.type, reason: event.reason ?? null }) ? (SELF_REVIEWED_VERBS[event.type] ?? "changed this task") : (VERBS[event.type] ?? "changed this task");
 
 /** Who wrote the brief: the last person to create or edit it. The history is the only place that carries an organization and `external` for it. */
 export function briefAuthor(detail: Pick<TaskDetail, "task" | "history">) {

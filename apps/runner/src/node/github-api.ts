@@ -7,7 +7,7 @@
  * The token is never logged, returned or put in an error; nor is anything GitHub answers, beyond the checked fields the
  * caller reads.
  */
-import { API_ORIGIN, RepoPathError, type GitHubRequest } from "../core/repository.js";
+import { API_ORIGIN, RepoPathError, isAccessToken, type GitHubRequest } from "../core/repository.js";
 import { transportEnvRefusal } from "./provider-transport.js";
 
 export type GitHubAnswer = { status: number; body: unknown };
@@ -15,7 +15,6 @@ export type GitHubCall = (request: GitHubRequest, token: string, signal?: AbortS
 
 export const MAX_GITHUB_ANSWER = 1024 * 1024;
 export const GITHUB_TIMEOUT_MS = 30_000;
-const TOKEN = /^[A-Za-z0-9_]{20,255}$/;
 
 async function bounded(response: Response): Promise<string> {
   const reader = response.body?.getReader();
@@ -40,7 +39,7 @@ export function githubApi(fetchImpl: typeof fetch = fetch, env: NodeJS.ProcessEn
   const refusal = transportEnvRefusal(env, execArgv);
   if (refusal) throw new Error(`Runner won't reach GitHub with this environment (${refusal}).`);
   return async (request, token, signal) => {
-    if (!TOKEN.test(token)) throw new RepoPathError("access_invalid");
+    if (!isAccessToken(token)) throw new RepoPathError("access_invalid");
     if (!request.path.startsWith("/repos/") || request.path.includes("..") || /[\s#]/.test(request.path)) throw new RepoPathError("request_invalid");
     const url = new URL(request.path, API_ORIGIN);
     if (url.origin !== API_ORIGIN) throw new RepoPathError("request_invalid");

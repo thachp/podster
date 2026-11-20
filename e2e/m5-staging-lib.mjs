@@ -288,11 +288,18 @@ export class Tally {
   }
 }
 
+/**
+ * Anything shaped like a GitHub token, old (`ghs_` and 36 characters) or current (`ghs_APPID_JWT`, about 520, with `_`, `-`
+ * and dots joining its segments; GitHub's changelog, 2026-04-24), matched whole.
+ */
+export const GITHUB_TOKEN_SHAPE = /gh[a-z]_(?:[A-Za-z0-9_-]|\.(?=[A-Za-z0-9_-])){16,}/g;
+const GITHUB_TOKEN_SEEN = new RegExp(GITHUB_TOKEN_SHAPE.source);
+
 /** Text with every secret, and anything shaped like a GitHub token, taken out, for anything that's printed. */
 export function scrub(text, secrets = []) {
   let out = String(text);
   for (const secret of secrets) if (secret) out = out.split(secret).join("[redacted]");
-  return out.replace(/gh[a-z]_[A-Za-z0-9_]{16,}/g, "[redacted]");
+  return out.replace(GITHUB_TOKEN_SHAPE, "[redacted]");
 }
 
 /** The one name the repository token travels under, to the `git` child and nowhere else. */
@@ -644,7 +651,7 @@ export function logHits(tails, needles) {
         // A name that holds one of the strings isn't printed either.
         const name = wanted.some(({ value }) => given.includes(value)) || /gh[a-z]_/.test(given) ? "a line with no event name" : given;
         for (const { label, value } of wanted) if (text.includes(value)) note(app, name, label);
-        if (/gh[a-z]_[A-Za-z0-9_]{16,}/.test(text)) note(app, name, "something shaped like a GitHub token");
+        if (GITHUB_TOKEN_SEEN.test(text)) note(app, name, "something shaped like a GitHub token");
         if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) note(app, name, "key material");
       }
     }

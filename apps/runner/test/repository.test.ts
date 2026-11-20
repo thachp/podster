@@ -15,7 +15,9 @@ import {
   fetchArgs,
   GITHUB,
   hardening,
+  isAccessToken,
   locate,
+  MAX_ACCESS_TOKEN,
   pushArgs,
   readAccess,
   readPullRequest,
@@ -36,6 +38,17 @@ const TASK = "task_1";
 const NOW = 1_800_000_000_000;
 const SCOPE = { full_name: "podsterdev/todo-app", provider_repo_id: 9001 };
 const TOKEN = "ghs_TestToken0123456789abcdefABCDEF";
+/**
+ * A made-up token in GitHub's current installation-token shape, `ghs_APPID_JWT`: base64url segments joined by dots, with
+ * `-` and `_` in them. 390 characters by default, as a real one on staging was (0.0.1-test.4 refused it).
+ */
+function longToken(length = 390): string {
+  const head = "ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.";
+  const tail = ".Zq9-Xk3_Lm7Vb2Nc8Wd4Ts6Yh-0_aB";
+  const body = "eyJpc3MiOiJnaXRodWIiLCJzdWIiOiJ4In0-_abcXYZ019".repeat(Math.ceil(length / 40));
+  return head + body.slice(0, length - head.length - tail.length) + tail;
+}
+const LONG = longToken();
 const CAPS = { spend_micro_usd: 2_000_000, run_time_ms: 30 * 60_000, turns: 40, output_tokens: 50_000, max_tokens: 4_096 };
 
 const temps: string[] = [];
@@ -182,13 +195,42 @@ describe("decision 230's own rules", () => {
     expect(code(without)).toBe("access_fields");
     expect(code({ ...ACCESS, token: "short" })).toBe("access_token_format");
     expect(code({ ...ACCESS, token: 7 })).toBe("access_token_format");
-    expect(code({ ...ACCESS, token: `${TOKEN}-x` })).toBe("access_token_format");
+    expect(code({ ...ACCESS, token: `${TOKEN}:x` })).toBe("access_token_format");
     expect(code({ ...ACCESS, authority_ends_at: "soon" })).toBe("access_authority_invalid");
     expect(code({ ...ACCESS, authority_ends_at: undefined })).toBe("access_authority_invalid");
   });
 
+  it("takes GitHub's current installation tokens, `ghs_APPID_JWT` and hundreds of characters long, up to 4096", () => {
+    expect(LONG.length).toBe(390);
+    expect(LONG).toMatch(/^ghs_[0-9]+_eyJ[^.]+\.[^.]+\.[^.]+$/);
+    for (const token of [TOKEN, LONG, longToken(520), longToken(MAX_ACCESS_TOKEN)]) expect([token.length, readAccess({ ...ACCESS, token }, SCOPE, NOW).token === token]).toEqual([token.length, true]);
+    expect(MAX_ACCESS_TOKEN).toBe(4096);
+  });
+
+  it("refuses a token with anything that could break a header, a URL or a Git credential line, or one over 4096", () => {
+    const code = (token: string) => { try { readAccess({ ...ACCESS, token }, SCOPE, NOW); return "taken"; } catch (e) { return (e as RepoPathError).code; } };
+    const bad: [string, string][] = [
+      ["too long", longToken(MAX_ACCESS_TOKEN + 1)],
+      ["too short", "ghs_1234567_eyJ.a.b"],
+      ["a space", `${LONG.slice(0, 200)} ${LONG.slice(201)}`],
+      ["a tab", `${LONG}\t`],
+      ["a newline", `${LONG}\nhost=evil.example`],
+      ["a carriage return", `${LONG}\r\nx-evil: 1`],
+      ["a colon", `${LONG.slice(0, 100)}:${LONG.slice(101)}`],
+      ["an at sign", `${LONG.slice(0, 100)}@${LONG.slice(101)}`],
+      ["a slash", `${LONG.slice(0, 100)}/${LONG.slice(101)}`],
+      ["an equals sign", `${LONG}=`],
+      ["a NUL", `${LONG.slice(0, 100)}\u0000${LONG.slice(101)}`],
+      ["a DEL", `${LONG}\u007f`],
+      ["a non-ASCII letter", `${LONG.slice(0, 100)}é${LONG.slice(101)}`],
+    ];
+    for (const [what, token] of bad) {
+      expect([what, isAccessToken(token), code(token)]).toEqual([what, false, "access_token_format"]);
+    }
+  });
+
   it("logs one fixed-shape line for each refusal, with key names, a token's length and shape, or a type, and no token character", async () => {
-    const secret = "ghs_Zq9Xk3Lm7Vb2Nc8Wd4Ts-6Yh!"; // not a valid token: it has a "-" and a "!"
+    const secret = "ghs_Zq9Xk3Lm7Vb2Nc8Wd4Ts-6Yh!"; // not a valid token: it has a "!"
     const run = async (answer: unknown) => {
       const logged: string[] = [];
       const broker = new RepoBroker(async () => answer, { now: () => NOW, idle: async () => undefined }, lineLogger((l) => logged.push(l)));
@@ -209,7 +251,7 @@ describe("decision 230's own rules", () => {
     expect(token.error.code).toBe("access_token_format");
     expect(token.lines).toEqual([{ at: "repo.access", outcome: "refused", workspace: ROOM, task: TASK, code: "access_token_format", length: secret.length, prefix: "yes" }]);
     for (const piece of ["ghs", "Zq9", "Xk3", secret.slice(0, 6), secret.slice(-6)]) expect(token.text).not.toContain(piece);
-    const bare = await run({ ...ACCESS, token: "NoPrefixHere-123456789012" });
+    const bare = await run({ ...ACCESS, token: "NoPrefixHere!123456789012" });
     expect(bare.lines[0]).toMatchObject({ code: "access_token_format", length: 25, prefix: "no" });
     expect(bare.text).not.toContain("NoPrefix");
     const notObject = await run(secret);
@@ -373,6 +415,12 @@ describe("the credential helper", () => {
     // A token that isn't plain can't add lines or fields to Git's credential protocol: only one plain line is ever read.
     expect(await viaFd3("protocol=https\nhost=github.com\n\n", "ghs_x host=evil")).toBe("");
     expect(await viaFd3("protocol=https\nhost=github.com\n\n", "ghs_x\nhost=evil")).toBe("username=x-access-token\npassword=ghs_x\n");
+  });
+
+  it("answers GitHub's current 390-character `ghs_APPID_JWT` tokens and ones up to 4096, and nothing for one with `:`, `@`, `/` or longer", async () => {
+    const get = "protocol=https\nhost=github.com\n\n";
+    for (const token of [LONG, longToken(MAX_ACCESS_TOKEN)]) expect(await viaFd3(get, token)).toBe(`username=x-access-token\npassword=${token}\n`);
+    for (const token of [`${LONG}:x`, `x@${LONG}`, `${LONG}/x`, `${LONG}=`, `${LONG}\tx`, longToken(MAX_ACCESS_TOKEN + 1)]) expect([token.length, await viaFd3(get, token)]).toEqual([token.length, ""]);
   });
 
   it("answers nothing with no descriptor 3, and never reads the environment", () => {
@@ -701,6 +749,15 @@ describe.skipIf(realGit === null)("the review of #462: Git's own refusals and Ru
 });
 
 describe("the broker", () => {
+  it("holds a 390-character `ghs_APPID_JWT` token from `get_repo_access` and gives it back whole, with none of it in a log", async () => {
+    const logged: string[] = [];
+    const broker = new RepoBroker(async () => ({ ...ACCESS, token: LONG }), { now: () => NOW, idle: async () => undefined }, lineLogger((l) => logged.push(l)));
+    const access = await broker.access(ROOM, TASK, SCOPE);
+    expect(access.token).toBe(LONG);
+    expect(logged.map((l) => JSON.parse(l).outcome)).toEqual(["issued"]);
+    for (const piece of [LONG, LONG.slice(0, 20), LONG.slice(-20), LONG.slice(150, 190)]) expect(logged.join("\n")).not.toContain(piece);
+  });
+
   it("holds the token, asks again only when it's due, and reports each refusal by its code with no token in a log", async () => {
     const logged: string[] = [];
     let now = NOW;
@@ -758,6 +815,12 @@ describe("GitHub's API, as Runner reaches it", () => {
     await expect(api({ method: "GET", path: "/repos/../user" }, TOKEN)).rejects.toMatchObject({ code: "request_invalid" });
     status = 401;
     await expect(api(GITHUB.repository(SCOPE.full_name), TOKEN)).rejects.toMatchObject({ code: "token_revoked" });
+    status = 200;
+    expect(await api(GITHUB.repository(SCOPE.full_name), LONG)).toEqual({ status: 200, body: { ok: true } });
+    expect((seen.at(-1)?.init.headers as Record<string, string>).authorization).toBe(`Bearer ${LONG}`);
+    const before = seen.length;
+    for (const token of [`${LONG}\r\nx-evil: 1`, `${LONG} x`, longToken(MAX_ACCESS_TOKEN + 1)]) await expect(api(GITHUB.repository(SCOPE.full_name), token)).rejects.toMatchObject({ code: "access_invalid" });
+    expect(seen.length).toBe(before);
     expect(() => githubApi(fetch, { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, [])).toThrow();
     expect(() => githubApi(fetch, { NODE_USE_ENV_PROXY: "1" }, [])).toThrow();
   });

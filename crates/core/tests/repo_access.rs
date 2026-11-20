@@ -799,3 +799,47 @@ fn a_ready_read_back_stands_for_a_minute_on_an_unchanged_link() {
     assert!(!read_back_reusable(None, REPO, 7, NOW));
     assert_eq!(READ_BACK_REUSE_MS, 60_000);
 }
+
+/// A made-up token in GitHub's current installation-token shape, `ghs_APPID_JWT`, of the given length.
+fn long_token(length: usize) -> String {
+    let head = "ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.";
+    let tail = ".Zq9-Xk3_Lm7Vb2Nc8Wd4Ts6Yh-0_aB";
+    let body = "eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(length / 20 + 1);
+    format!("{head}{}{tail}", &body[..length - head.len() - tail.len()])
+}
+
+#[test]
+fn installation_tokens_in_githubs_current_shape_are_taken_up_to_the_bound() {
+    for token in [
+        "ghs_16C7e42F292c6912E7710c838347Ae178B4a".to_string(),
+        long_token(390),
+        long_token(520),
+        long_token(INSTALLATION_TOKEN_MAX),
+    ] {
+        assert!(installation_token_ok(&token), "{}", token.len());
+    }
+    assert_eq!(long_token(390).len(), 390);
+}
+
+#[test]
+fn installation_tokens_that_could_break_a_header_or_credential_line_are_refused() {
+    let long = long_token(390);
+    let refused = [
+        String::new(),
+        long_token(INSTALLATION_TOKEN_MAX + 1),
+        format!("{long} x"),
+        format!("{long}\t"),
+        format!("{long}\nhost=evil.example"),
+        format!("{long}\r\nx-evil: 1"),
+        format!("{long}:x"),
+        format!("x@{long}"),
+        format!("{long}/x"),
+        format!("{long}="),
+        format!("{long}\u{0}"),
+        format!("{long}\u{7f}"),
+        format!("{long}é"),
+    ];
+    for token in &refused {
+        assert!(!installation_token_ok(token), "{:?}", token.len());
+    }
+}

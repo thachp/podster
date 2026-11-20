@@ -24,7 +24,7 @@ use podster_core::provisioning::{
 use podster_core::rate_limit::{
     has_secondary_marker, primary_403, rate_limit_wait_ms, LimitSignals,
 };
-use podster_core::repo_access::{minted_token_matches, TokenPermissions};
+use podster_core::repo_access::{installation_token_ok, minted_token_matches, TokenPermissions};
 use podster_core::repo_merge::PullState;
 use podster_core::repositories::valid_commit_sha;
 use podster_core::task_change::PullSeen;
@@ -609,7 +609,7 @@ impl GitHubApp {
         }
         let token = answer["token"]
             .as_str()
-            .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
+            .filter(|token| installation_token_ok(token))
             .ok_or(Failure::Unreadable)?
             .to_string();
         let (repo_ids, granted) = granted(&answer);
@@ -1094,7 +1094,7 @@ impl TokenIssuer for AgentTokens {
         }
         let Some(token) = answer["token"]
             .as_str()
-            .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
+            .filter(|token| installation_token_ok(token))
             .map(str::to_string)
         else {
             return Err(Failure::Unreadable);

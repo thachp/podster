@@ -40,6 +40,7 @@ Then:
 
 ```bash
 npx --ignore-scripts podster@test status   # what this Runner's record says, by IDs
+npx --ignore-scripts podster@test why <tsk_…>   # the newest failure recorded for a task on this machine
 npx --ignore-scripts podster@test stop     # stop the Runner running from this home, and any run, at once
 npx --ignore-scripts podster@test forget   # delete this Runner's keys and record; disconnect the agent in Podster yourself
 ```
@@ -47,6 +48,20 @@ npx --ignore-scripts podster@test forget   # delete this Runner's keys and recor
 Every command takes `--home <folder>`, Runner's own folder. The default is `~/.podster-runner`.
 
 Running tasks needs plain paths: letters, digits, `.`, `_`, `-` and `/` only. If your home folder's path has a space or any other character, Runner refuses to run tasks (`helper_unavailable`, or `path_unsafe` for its home), since both npm's cache, where `npx` puts Runner (`<cache>/_npx`), and `~/.podster-runner` sit under it. Then point npm's cache and Runner's home at plain folders only you can write, for example `npm_config_cache=/Users/Shared/podster-npm npx --ignore-scripts podster@test run --home /Users/Shared/podster-runner …`, and use the same two on every command.
+
+## When something fails
+
+Runner's log is one JSON line per event, with IDs and a code, on standard error. Under each failure, refusal or stop it adds a line in plain English: what happened, what to do, the code, and where the details are. For example:
+
+```text
+  why: The room's policy lists network hosts, which Runner can't enforce yet. Set rooms[].network to [] in policy.json, then start Runner again. (code network_allowlist_unsupported; details: ~/.podster-runner/logs/errors.jsonl)
+```
+
+The details are in `logs/errors.jsonl` in Runner's home: one line per failure, with the time, the run's IDs, the code, and the raw error's message and stack. For a Docker command it also has Docker's exit code and the end of its error output. Each text is cut to 4 KiB, and anything that looks like a key or token is written as `[redacted]` first. The folder is readable only by you (mode 700, the file 600). The file is kept to 1 MiB and moves to `errors.jsonl.1` and `.2` as it fills, so at most three files are kept. It stays on this machine: Runner never sends it to Podster or anywhere else. `podster why <tsk_…>` prints a task's newest entry.
+
+The room sees only fixed words. When the agent answers `blocked`, Runner posts its reason on the task's thread, under the room's output policy. When a run can't start, Runner posts a fixed note with the code and a plain line saying what happened, never the raw error.
+
+When the agent's structured result breaks one of Runner's rules, Runner tells the agent which rule, in fixed words, so it can fix it and give the result again. Examples: a summary that's too long, a file outside the task's folder, an unknown field. The log's code names the rule, such as `result_file_outside_folder`.
 
 ## Your provider key
 

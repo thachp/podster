@@ -31,6 +31,7 @@
  * The `docker` program is a seam (`DockerCli`), so tests run no Docker. It gets the allow-listed environment plus its
  * own settings: a throwaway `DOCKER_CONFIG`, and the daemon's address. Logs carry IDs and codes only.
  */
+import { DetailedError } from "../core/errors.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -269,7 +270,7 @@ export class DockerSandbox implements TaskSandbox {
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
     const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
     this.opened.set(spec.run_ref, opened);
-    if (run.code !== 0) throw new Error("container_failed");
+    if (run.code !== 0) throw new DetailedError("container_failed", { exit_code: run.code, stderr: run.stderr });
     // The disk bound, for the whole run, whatever runs in the container (M2).
     opened.unwatch = this.every(LIMITS.watch_ms, async () => {
       if (this.opened.get(spec.run_ref) === opened && (await this.overBound(opened))) await this.breach(opened);
@@ -279,7 +280,7 @@ export class DockerSandbox implements TaskSandbox {
     const pids = children.stdout.trim().split(/\s+/).filter((p) => p !== "");
     if (children.code !== 0 || pids.length !== 1 || !/^\d+$/.test(pids[0])) {
       await this.kill(spec.run_ref).catch(() => undefined);
-      throw new Error("container_failed");
+      throw new DetailedError("container_failed", { exit_code: children.code, stderr: children.stderr });
     }
     opened.sleep_pid = pids[0];
   }
@@ -460,7 +461,7 @@ export function dockerCli(program: string, opts: { config_dir: string; host?: st
       child.on("error", (error) => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
-        reject(new Error(`docker couldn't start (${(error as NodeJS.ErrnoException).code ?? "error"})`));
+        reject(new DetailedError("docker_unavailable", { errno: String((error as NodeJS.ErrnoException).code ?? "error") }));
       });
       child.on("close", (code) => {
         clearTimeout(timer);

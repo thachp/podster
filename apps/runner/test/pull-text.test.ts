@@ -177,7 +177,7 @@ describe("the agent's proposed type", () => {
     expect(parseRunResult({ ...base, change_type: "release" })).toEqual({ ok: true, value: base });
     expect(parseRunResult({ ...base, change_type: 7 })).toEqual({ ok: true, value: base });
     expect(parseRunResult(base)).toEqual({ ok: true, value: base });
-    expect(parseRunResult({ ...base, other: "x" })).toEqual({ ok: false });
+    expect(parseRunResult({ ...base, other: "x" })).toEqual({ ok: false, rule: "result_unknown_field" });
   });
 
   it("is in the result schema and the frame, from the fixed list", () => {

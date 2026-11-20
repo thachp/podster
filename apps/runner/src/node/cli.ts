@@ -26,6 +26,9 @@
  * container, the key's transport), reaps what a previous process left, then opens the lifecycle (`run-command.ts`).
  * Without a key file it opens no lifecycle and accepts nothing it couldn't run.
  */
+import { explain } from "../core/explain.js";
+import { FileDiagnostics } from "./diagnostics.js";
+import { explainingLogger } from "./explaining-log.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -64,6 +67,8 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
   stop                                             Stop the Runner running from this home at once, and any run.
                                                    It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
+  why     <tsk_…>                                  Show the newest failure recorded for a task on this machine:
+                                                   what happened, what to do, and the local details.
   forget                                           Delete this Runner's keys and record. The agent stays
                                                    connected in Podster until you disconnect it there.
 
@@ -106,6 +111,27 @@ async function main(argv: string[]) {
     const phases: Record<string, number> = {};
     for (const entry of Object.values(runs.entries)) phases[entry.phase] = (phases[entry.phase] ?? 0) + 1;
     say(JSON.stringify({ gateway: record.gateway, agent: record.agent_id, phase: record.phase, stopped: record.stopped, inbox_cursor: record.inbox_cursor, offers: Object.keys(record.offers).length, last_contact_at: record.last_contact_at, reconciled_at: record.reconciled_at, runs: phases }));
+    return 0;
+  }
+
+  if (command === "why") {
+    // The newest failure recorded for a task on this machine, from the local diagnostics file. Nothing is sent anywhere.
+    const task = args[args.indexOf("why") + 1];
+    if (!task || !/^[A-Za-z0-9_-]{1,128}$/.test(task)) {
+      say("Name a task: `why <tsk_…>`.");
+      return 2;
+    }
+    const diagnostics = new FileDiagnostics(home);
+    const last = diagnostics.lastFor(task);
+    if (!last) {
+      say(`No failure is recorded for ${task} in ${diagnostics.file}.`);
+      return 0;
+    }
+    const code = typeof last.code === "string" ? last.code : "unknown";
+    const e = explain(code);
+    say(`${String(last.time)} at ${String(last.at)}: ${e.what} ${e.todo} (code ${code})`);
+    say(`From ${diagnostics.file}, local to this machine and redacted:`);
+    say(JSON.stringify(last, null, 2));
     return 0;
   }
 
@@ -198,6 +224,9 @@ async function locked(command: string, args: string[], home: string, state: File
   }
 
   if (command === "run") {
+    // Each failure's raw cause goes to the local diagnostics file only; the terminal explains its code in fixed words.
+    const diagnostics = new FileDiagnostics(home);
+    const log = explainingLogger((line) => process.stderr.write(`${line}\n`), diagnostics.file);
     const record = await state.load();
     if (!record.gateway) throw new Error("This Runner isn't paired yet. Run `pair` first.");
     const interval = option(args, "interval");
@@ -234,7 +263,7 @@ async function locked(command: string, args: string[], home: string, state: File
       outcome = await alongsidePolling(
         async (bell) => {
           try {
-            return await runInbox({ home, poller, clock: systemClock, log, signal: stop.signal, terminal: processTerminal(), engine, ...(bell ? { bell } : {}) });
+            return await runInbox({ home, poller, clock: systemClock, log, diagnostics, signal: stop.signal, terminal: processTerminal(), engine, ...(bell ? { bell } : {}) });
           } finally {
             // Shutdown closes the nudge endpoint at once (R-15), even while its setup is still waiting on Podster.
             stop.abort();

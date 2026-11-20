@@ -14,7 +14,7 @@ import { Lifecycle, runWithLifecycle, type RepositoryPath } from "../core/lifecy
 import type { NudgeBell } from "../core/nudge.js";
 import type { LoopOutcome, Poller } from "../core/poller.js";
 import { SupervisedAdapter, type ProgressEvent, type SupervisedDeps } from "../core/run-interface.js";
-import type { Clock, Logger } from "../core/runtime.js";
+import type { Clock, Diagnostics, Logger } from "../core/runtime.js";
 import { FileRunStore } from "./file-runs.js";
 import { policyFile } from "./policy-file.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
@@ -32,6 +32,8 @@ export type RunInboxDeps = {
   poller: Poller;
   clock: Clock;
   log: Logger;
+  /** The local diagnostics file, for each failure's raw cause. */
+  diagnostics?: Diagnostics;
   /** The owner's local stop or Ctrl-C. */
   signal: AbortSignal;
   terminal: Terminal;
@@ -52,7 +54,7 @@ const progressLog = (log: Logger) => (event: ProgressEvent) =>
 export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   const engine = deps.engine;
   if (engine === null || !Object.values(engine.drivers).some((driver) => driver !== undefined)) return deps.poller.run(deps.signal, deps.bell);
-  const adapter = new SupervisedAdapter({ ...engine, clock: deps.clock, log: deps.log, progress: progressLog(deps.log) });
+  const adapter = new SupervisedAdapter({ ...engine, clock: deps.clock, log: deps.log, progress: progressLog(deps.log), ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}) });
   const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log, { app_origin: appOriginFor(deps.poller.origin) });
   const lifecycle = await Lifecycle.open({
     poller: deps.poller,
@@ -64,6 +66,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
     prompter: new TerminalPrompter(deps.terminal),
     clock: deps.clock,
     log: deps.log,
+    ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}),
   });
   return runWithLifecycle(deps.poller, lifecycle, deps.clock, deps.signal, deps.bell);
 }

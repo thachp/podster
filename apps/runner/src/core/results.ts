@@ -13,12 +13,15 @@
  * - **Secrets.** Words whose raw text hides characters and in which a secret shows once they're taken out are withheld
  *   whole; otherwise every secret of a fixed shape is redacted, before the words are marked. Redaction is a backstop, not
  *   a control: the output policy is.
- * - **The note is Runner's.** It states the outcome, the pull request and commit from Runner's own records, and tests as
- *   not run by Runner, in fixed words. The agent's words appear only when sharing is allowed, between Runner's fences,
- *   with every line of theirs starting `| `, so none can pass for Runner's (review 1 on #465). They're cut once, to
- *   `NOTE_WORDS_BYTES` as the note lays them out, never inside a mark, when they're cleaned: the owner reviews exactly
- *   the cut words the note carries.
+ * - **The note is Runner's, in Markdown.** It states the outcome, the pull request (linked from fixed parts), branch and
+ *   commit from Runner's own records, and tests as not run by Runner, in fixed words. The agent's words appear only when
+ *   sharing is allowed, under Runner's own heading, the summary in a fenced code block whose fence no run of backticks in
+ *   it can close and each file in a code span, so none can pass for Runner's or render as anything but text (review 1 on
+ *   #465). They're cut once, to `NOTE_WORDS_BYTES` as the note lays them out, never inside a mark, when they're cleaned:
+ *   the owner reviews exactly the cut words the note carries.
  */
+import { isFullName } from "./policy.js";
+import { pullRequestUrl } from "./repository.js";
 import type { RunResult } from "./tool-policy.js";
 
 /** The server's limit on a submission's note (`crates/core` `MAX_NOTE_BYTES`). */
@@ -115,71 +118,101 @@ const WHY_NOT_SHARED: Record<Exclude<NoteWords["kind"], "shared">, string> = {
 };
 const CUT = "⟨cut by Runner⟩";
 
-/** Each line of the agent's words in the note starts with this, as the terminal fences them; nothing of Runner's does. */
-const FENCE = "| ";
-const FILES_DIVIDER = "--- files the agent named ---";
+const WORDS_HEADING = "### Agent's words (unverified)";
+const FILES_HEADING = "### Files the agent named";
 const TOKENS = /⟨U\+[0-9A-F]{4,6}⟩|[\s\S]/gu;
+const longestRun = (text: string, ch: "`" | "~") => Math.max(0, ...[...text.matchAll(ch === "`" ? /`+/g : /~+/g)].map((m) => m[0].length));
 
 /**
- * The agent's words, marked, cut so that their part of the note, as `agentSection` lays it out (each line fenced, the
- * files after Runner's divider), is at most `NOTE_WORDS_BYTES`, on a character's edge and never inside a mark, with `CUT`
- * at the end when cut. Words that fit come back as they are, so cutting twice changes nothing.
+ * Text as a Markdown code span, so nothing in it is read as Markdown: its delimiter is longer than any run of backticks in
+ * it, and it's padded with a space on each side when it needs one, which the reader takes off again. A line feed can't be
+ * in one, since it could start a block of its own, so it's written as a mark.
+ */
+export function codeSpan(text: string): string {
+  const one = text.replace(/\n/g, mark(0x0a));
+  const fence = "`".repeat(longestRun(one, "`") + 1);
+  const pad = one === "" || one.startsWith("`") || one.endsWith("`") || one.startsWith(" ") || one.endsWith(" ") ? " " : "";
+  return `${fence}${pad}${one}${pad}${fence}`;
+}
+
+/**
+ * Text as a fenced Markdown code block marked `text`: its fence is backticks, longer than any run of backticks in it and
+ * never fewer than three, so no line of the text can close it, and nothing in it is read as Markdown or HTML.
+ */
+export function codeBlock(text: string): string {
+  const fence = "`".repeat(Math.max(3, longestRun(text, "`") + 1));
+  return `${fence}text\n${text}\n${fence}`;
+}
+
+/**
+ * The agent's words, marked, cut so that their part of the note, as `agentSection` lays it out, is at most
+ * `NOTE_WORDS_BYTES`, on a character's edge and never inside a mark, with `CUT` at the end when cut. Words that fit come
+ * back as they are, so cutting twice changes nothing.
  */
 export function cutAgentWords(summary: string, files: string[]): { summary: string; files: string[] } {
   if (byteLength(agentSection(summary, files)) <= NOTE_WORDS_BYTES) return { summary, files };
-  const room = NOTE_WORDS_BYTES - byteLength(CUT);
-  let size = byteLength(FENCE);
-  let out = "";
-  for (const token of summary.match(TOKENS) ?? []) {
-    const n = token === "\n" ? 1 + byteLength(FENCE) : byteLength(token);
-    if (size + n > room) return { summary: `${out}${CUT}`, files: [] };
-    out += token;
-    size += n;
-  }
-  const kept: string[] = [];
-  if (files.length > 0) size += 1 + byteLength(FILES_DIVIDER);
-  for (const file of files) {
-    let line = "";
-    size += 1 + byteLength(`${FENCE}- `);
-    for (const token of file.match(TOKENS) ?? []) {
-      const n = byteLength(token);
-      if (size + n > room) {
-        if (line !== "") kept.push(`${line}${CUT}`);
+  const said = summary.match(TOKENS) ?? [];
+  const named = files.map((f) => f.match(TOKENS) ?? []);
+  // The words kept up to a count of characters (marks count as one), read through the summary and then each file.
+  const keep = (count: number): { summary: string; files: string[] } => {
+    if (count < said.length || named.length === 0) return { summary: `${said.slice(0, count).join("")}${CUT}`, files: [] };
+    let left = count - said.length;
+    const kept: string[] = [];
+    for (const file of named) {
+      if (left < file.length) {
+        if (left > 0) kept.push(`${file.slice(0, left).join("")}${CUT}`);
         else if (kept.length > 0) kept[kept.length - 1] += CUT;
-        else return { summary: `${out}${CUT}`, files: [] };
-        return { summary: out, files: kept };
+        else return { summary: `${summary}${CUT}`, files: [] };
+        return { summary, files: kept };
       }
-      line += token;
-      size += n;
+      kept.push(file.join(""));
+      left -= file.length;
     }
-    kept.push(line);
+    return { summary, files: kept };
+  };
+  // Each more character kept makes the section no shorter, so the most that fits is found by halving.
+  const total = said.length + named.reduce((n, f) => n + f.length, 0);
+  let low = 0;
+  let high = total - 1;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (byteLength(agentSection(keep(mid).summary, keep(mid).files)) <= NOTE_WORDS_BYTES) low = mid;
+    else high = mid - 1;
   }
-  return { summary: out, files: kept };
+  return keep(low);
 }
 
-/** The agent's part of the note: every line of theirs fenced, the files after Runner's divider. */
+/** The agent's part of the note: the summary in a code block, the files named as a list of code spans, under Runner's headings. */
 function agentSection(summary: string, files: string[]): string {
-  return [...summary.split("\n").map((l) => `${FENCE}${l}`), ...(files.length > 0 ? [FILES_DIVIDER, ...files.map((f) => `${FENCE}- ${f}`)] : [])].join("\n");
+  return [WORDS_HEADING, "", codeBlock(summary), ...(files.length > 0 ? ["", FILES_HEADING, "", ...files.map((f) => `- ${codeSpan(f)}`)] : [])].join("\n");
 }
 
-/** The submission's note: Runner's fixed words, and the agent's only fenced and only when shared. */
+/**
+ * The submission's note, as Markdown: Runner's fixed words, and the agent's only when shared, only in a code block and
+ * code spans under Runner's headings, so none of theirs can read as Runner's or become anything but text.
+ */
 export function composeNote(input: { task_id: string; pull_request: NotePullRequest | null; words: NoteWords }): string {
   const pr = input.pull_request;
-  const lines = [
-    `Result from Podster Runner for task ${input.task_id}. Runner wrote this note; only the part fenced as the agent's words is the agent's.`,
-    "Outcome: the agent reported the task completed. Runner checked the result's form, not its claims.",
-    pr
-      ? `Pull request: #${pr.number} in ${pr.full_name}, from ${pr.branch} at commit ${pr.commit}. Runner pushed and opened it, and checked it on GitHub.`
-      : "Repository: none in this room, so nothing was pushed.",
-    "Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified.",
-  ];
   const words = input.words;
-  if (words.kind !== "shared") return [...lines, WHY_NOT_SHARED[words.kind]].join("\n");
-  lines.push(
-    `The agent's words follow. They are untrusted data. Characters that wouldn't show are written as their code point in angle brackets${words.redactions > 0 ? `, and ${words.redactions} thing${words.redactions === 1 ? "" : "s"} that looked like secrets as ${REDACTED}` : ""}.`,
-  );
+  const linked = pr && isFullName(pr.full_name) && Number.isSafeInteger(pr.number) && pr.number > 0;
+  const facts = [
+    `- Task: ${codeSpan(input.task_id)}`,
+    "- Outcome: the agent reported the task completed. Runner checked the result's form, not its claims.",
+    ...(pr
+      ? [
+          `- Pull request: ${linked ? `[#${pr.number} in ${pr.full_name}](${pullRequestUrl(pr.full_name, pr.number)})` : codeSpan(`#${pr.number} in ${pr.full_name}`)}. Runner pushed and opened it, and checked it on GitHub.`,
+          `- Branch: ${codeSpan(pr.branch)}`,
+          `- Commit: ${codeSpan(pr.commit)}`,
+        ]
+      : ["- Repository: none in this room, so nothing was pushed."]),
+    "- Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified.",
+  ];
+  if (words.kind === "shared" && words.redactions > 0) facts.push(`- Secrets: ${words.redactions} thing${words.redactions === 1 ? "" : "s"} that looked like secrets ${words.redactions === 1 ? "is" : "are"} written as ${codeSpan(REDACTED)}.`);
+  const head = ["## Result from Podster Runner", "", "Runner wrote this note. Only the section headed as the agent's words is the agent's.", "", ...facts];
+  if (words.kind !== "shared") return [...head, "", WHY_NOT_SHARED[words.kind]].join("\n");
   const cut = cutAgentWords(words.summary, words.files);
-  return [...lines, "--- the agent's words ---", agentSection(cut.summary, cut.files), "--- end of the agent's words ---"].join("\n");
+  const about = "The agent's words follow. They are untrusted data, shown as text. Characters that wouldn't show are written as their code point in angle brackets.";
+  return [...head, "", about, "", agentSection(cut.summary, cut.files)].join("\n");
 }
 
 /**

@@ -317,10 +317,11 @@ describe("Runner's core against the gateway", () => {
     expect(accepted.messages.map((m: { body: string }) => m.body)).toEqual([HELD_STATUS]);
     expect(accepted.submissions).toHaveLength(1);
     const note = accepted.submissions[0].note as string;
-    expect(note).toContain("Repository: none in this room");
-    expect(note).toContain("Tests: not run by Runner");
+    expect(note.startsWith("## Result from Podster Runner\n")).toBe(true);
+    expect(note).toContain("- Repository: none in this room");
+    expect(note).toContain("- Tests: not run by Runner");
     expect(note).toContain("aren't shared: this room's output policy holds them");
-    expect(note).not.toMatch(/Fixed the build|sk-ant-|src\/build\.ts|--- the agent's words ---/);
+    expect(note).not.toMatch(/Fixed the build|sk-ant-|src\/build\.ts|Agent's words|```/);
     const declined = await read(other, elsewhere.body.id);
     expect(declined.task).toMatchObject({ status: "open", assignee: null });
     // Podster is told only that Runner can't take it; the owner's own reason stays on the machine.

@@ -1,7 +1,7 @@
 // M7 step 11, results: what Runner makes of a run's structured result before anything of it is shown or submitted.
 // Pure: hidden characters made visible, secrets redacted, and the note built from Runner's fixed words around the agent's.
 import { describe, expect, it } from "vitest";
-import { cleanResult, composeNote, cutAgentWords, markHidden, MAX_NOTE_BYTES, NOTE_WORDS_BYTES, redactSecrets } from "../src/core/results.js";
+import { cleanResult, codeBlock, codeSpan, composeNote, cutAgentWords, markHidden, MAX_NOTE_BYTES, NOTE_WORDS_BYTES, redactSecrets } from "../src/core/results.js";
 import { pullRequestUrl } from "../src/core/repository.js";
 import { checkRuns, emptyRuns, newEntry, owedSubmission } from "../src/core/runs.js";
 import { reviewScreen, SHOWN_CHARS, TerminalPrompter, visible } from "../src/node/prompter.js";
@@ -150,54 +150,140 @@ describe("cleanResult: what may be shown and sent of a result", () => {
   });
 });
 
-describe("composeNote: Runner's fixed words, with the agent's only where sharing allows", () => {
+/** The note read back as a CommonMark reader would: Runner's lines before the agent's heading, the code block's text, and each file's code span's text. */
+function readNote(note: string): { runner: string[]; summary: string | null; files: string[]; after: string[] } {
+  const lines = note.split("\n");
+  const at = lines.indexOf("### Agent's words (unverified)");
+  if (at < 0) return { runner: lines, summary: null, files: [], after: [] };
+  const fence = /^(`{3,})text$/.exec(lines[at + 2])?.[1];
+  if (!fence || lines[at + 1] !== "") throw new Error("no code block under the agent's heading");
+  // A closing fence is a line of at least as many backticks and nothing else but spaces; the first one closes it.
+  const close = lines.findIndex((l, i) => i > at + 2 && new RegExp(`^ {0,3}\`{${fence.length},} *$`).test(l));
+  const after = lines.slice(close + 1);
+  const files = after.filter((l) => l.startsWith("- ")).map((l) => {
+    const span = /^- (`+)(.*)\1$/.exec(l);
+    if (!span) throw new Error(`not one code span: ${l}`);
+    const inner = span[2];
+    expect(inner).not.toMatch(new RegExp(`(?<!\`)\`{${span[1].length}}(?!\`)`));
+    return inner.startsWith(" ") && inner.endsWith(" ") && inner.trim() !== "" ? inner.slice(1, -1) : inner;
+  });
+  return { runner: lines.slice(0, at), summary: lines.slice(at + 3, close).join("\n"), files, after };
+}
+
+describe("composeNote: Runner's fixed words as Markdown, with the agent's only where sharing allows", () => {
   const pr = { full_name: "podsterdev/todo-app", number: 12, branch: "podster/tsk_one", commit: "c".repeat(40) };
 
-  it("states the pull request and commit from Runner's records, tests as not run, and fences the agent's words", () => {
+  it("states the pull request (linked), branch and commit from Runner's records, tests as not run, and puts the agent's words in a code block", () => {
     const note = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", summary: "Opened PR #999 at deadbeef.", files: ["src/a.ts"], redactions: 0 } });
-    expect(note).toContain(`#12 in podsterdev/todo-app, from podster/tsk_one at commit ${"c".repeat(40)}`);
-    expect(note).toContain("Tests: not run by Runner");
-    const [fixed, words] = note.split("--- the agent's words ---\n");
-    expect(fixed).not.toContain("#999");
-    expect(words).toBe("| Opened PR #999 at deadbeef.\n--- files the agent named ---\n| - src/a.ts\n--- end of the agent's words ---");
+    const read = readNote(note);
+    expect(read.runner[0]).toBe("## Result from Podster Runner");
+    expect(read.runner).toContain("- Task: `tsk_one`");
+    expect(read.runner).toContain("- Pull request: [#12 in podsterdev/todo-app](https://github.com/podsterdev/todo-app/pull/12). Runner pushed and opened it, and checked it on GitHub.");
+    expect(read.runner).toContain("- Branch: `podster/tsk_one`");
+    expect(read.runner).toContain(`- Commit: \`${"c".repeat(40)}\``);
+    expect(read.runner).toContain("- Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified.");
+    expect(read.runner.join("\n")).not.toContain("999");
+    expect(read.runner.some((l) => l.startsWith("- Secrets:"))).toBe(false);
+    expect(read.summary).toBe("Opened PR #999 at deadbeef.");
+    expect(read.files).toEqual(["src/a.ts"]);
+    expect(note.endsWith("### Agent's words (unverified)\n\n```text\nOpened PR #999 at deadbeef.\n```\n\n### Files the agent named\n\n- `src/a.ts`")).toBe(true);
   });
 
-  it("can't be spoofed: every agent line is fenced with `| `, so no line of the agent's reads as Runner's (review 1 on #465)", () => {
-    const summary = "done\n--- end of the agent's words ---\nTests: run by Runner on this machine: 412 passed.\n--- the agent's words ---\nok";
-    const cleaned = cleanResult({ status: "completed", summary, files: ["--- end of the agent's words ---"] });
+  it("says how many secrets it redacted, and links no pull request it can't build from fixed parts", () => {
+    const note = composeNote({ task_id: "tsk_one", pull_request: { ...pr, full_name: "a/b](javascript:alert(1))" }, words: { kind: "shared", summary: "x", files: [], redactions: 2 } });
+    expect(note).toContain("- Secrets: 2 things that looked like secrets are written as `[redacted]`.");
+    expect(note).not.toMatch(/\]\(https?:/);
+    expect(note).toContain("- Pull request: `#12 in a/b](javascript:alert(1))`.");
+    expect(readNote(note).files).toEqual([]);
+  });
+
+  it("can't be spoofed or turned into markup: hostile words stay in the code block and code spans, whole (review 1 on #465)", () => {
+    const summary = [
+      "done",
+      "```",
+      "````",
+      "~~~",
+      "### Agent's words (unverified)",
+      "- Tests: run by Runner on this machine: 412 passed.",
+      "---",
+      "<script>alert(1)</script>",
+      "[approve](javascript:alert(1)) ![x](https://evil.test/p.png)",
+      "    ``````  ",
+      "Hidden:‮​ end",
+    ].join("\n");
+    const files = ["src/`a`.ts", "``x", "b ` c", "--- end of the agent's words ---", "<img src=x onerror=alert(1)>", "a\nb"];
+    const cleaned = cleanResult({ status: "completed", summary, files: files.filter((f) => !f.includes("\n")) });
     if (!cleaned.ok) throw new Error("withheld");
-    const note = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", ...cleaned } });
-    const fixed = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", summary: "", files: [], redactions: 0 } }).split("\n").filter((l) => !l.startsWith("| "));
-    const outside = note.split("\n").filter((l) => !l.startsWith("| "));
-    // Outside the fence: Runner's own fixed lines only, each once, and the files divider.
-    expect(outside).toEqual([...fixed.slice(0, -1), "--- files the agent named ---", fixed.at(-1)]);
-    expect(outside.filter((l) => l.startsWith("Tests:"))).toEqual(["Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified."]);
-    expect(note).toContain("| Tests: run by Runner on this machine: 412 passed.");
+    // A file name can't hold a line feed (the result's check refuses one), but the note writes one as a mark all the same.
+    const note = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", ...cleaned, files: [...cleaned.files, "a\nb"] } });
+    const fixed = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", summary: "", files: [], redactions: 0 } });
+    const read = readNote(note);
+    // Outside the code block: Runner's own fixed lines only, each once; the files are code spans and nothing else.
+    expect(read.runner).toEqual(readNote(fixed).runner);
+    expect(read.runner.filter((l) => l.startsWith("- Tests:"))).toEqual(["- Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified."]);
+    expect(read.summary).toBe(cleaned.summary);
+    expect(read.summary).toContain("Hidden:⟨U+202E⟩⟨U+200B⟩ end");
+    expect(read.files).toEqual([...cleaned.files, "a⟨U+000A⟩b"]);
+    expect(read.after.filter((l) => l !== "" && !l.startsWith("- "))).toEqual(["### Files the agent named"]);
+    expect(note.split("\n").at(-1)).toBe("- `a⟨U+000A⟩b`");
+  });
+
+  it("writes code spans and blocks that no backtick in the text can end early", () => {
+    expect(codeSpan("a.ts")).toBe("`a.ts`");
+    expect(codeSpan("a`b")).toBe("``a`b``");
+    expect(codeSpan("`x")).toBe("`` `x ``");
+    expect(codeSpan("x ``` y")).toBe("````x ``` y````");
+    expect(codeBlock("plain")).toBe("```text\nplain\n```");
+    expect(codeBlock("a\n`````\nb")).toBe("``````text\na\n`````\nb\n``````");
   });
 
   it("says why the words aren't shared, in fixed words, and carries none of them", () => {
     for (const kind of ["withheld", "lost", "secret_hidden"] as const) {
       const note = composeNote({ task_id: "tsk_one", pull_request: null, words: { kind } });
-      expect(note).toContain("Repository: none in this room");
-      expect(note).not.toContain("--- the agent's words ---");
+      expect(note).toContain("- Repository: none in this room");
+      expect(note).not.toContain("Agent's words");
+      expect(note).not.toContain("```");
       expect(note).toMatch(/aren't shared/);
     }
   });
 
   it("cuts long words on a character's edge, never inside a mark, and stays under the server's note limit", () => {
-    const summary = "\u202e".repeat(2_000);
-    const files = Array.from({ length: 100 }, (_, i) => `${"\u202e".repeat(100)}/${i}`);
+    const summary = "‮".repeat(2_000);
+    const files = Array.from({ length: 100 }, (_, i) => `${"‮".repeat(100)}/${i}`);
     const cleaned = cleanResult({ status: "completed", summary, files });
     if (!cleaned.ok) throw new Error("withheld");
     const note = composeNote({ task_id: "tsk_one", pull_request: pr, words: { kind: "shared", ...cleaned } });
     expect(Buffer.byteLength(note)).toBeLessThanOrEqual(MAX_NOTE_BYTES);
     expect(NOTE_WORDS_BYTES).toBeLessThan(MAX_NOTE_BYTES);
-    const section = note.slice(note.indexOf("--- the agent's words ---\n") + 26, note.lastIndexOf("\n--- end of the agent's words ---"));
+    const section = note.slice(note.indexOf("### Agent's words (unverified)"));
     expect(Buffer.byteLength(section)).toBeLessThanOrEqual(NOTE_WORDS_BYTES);
     expect(note).toContain("⟨cut by Runner⟩");
     expect(note.replace(/⟨U\+202E⟩/g, "").replace("⟨cut by Runner⟩", "")).not.toMatch(/⟨|⟩|U\+202/);
     // The cut is made once, when the words are cleaned: cutting again, as the note does, changes nothing.
     expect(cutAgentWords(cleaned.summary, cleaned.files)).toEqual({ summary: cleaned.summary, files: cleaned.files });
+  });
+
+  it("cuts within the files once the summary fits, keeping as much as the limit allows", () => {
+    const files = Array.from({ length: 100 }, (_, i) => `${"d".repeat(150)}/${i}`);
+    const cut = cutAgentWords("short", files);
+    expect(cut.summary).toBe("short");
+    expect(cut.files.length).toBeGreaterThan(10);
+    expect(cut.files.length).toBeLessThan(100);
+    expect(cut.files.at(-1)).toMatch(/⟨cut by Runner⟩$/);
+    const section = composeNote({ task_id: "tsk_one", pull_request: null, words: { kind: "shared", ...cut, redactions: 0 } });
+    const words = Buffer.byteLength(section.slice(section.indexOf("### Agent's words (unverified)")));
+    expect(words).toBeLessThanOrEqual(NOTE_WORDS_BYTES);
+    // One more character would not have fitted.
+    expect(words).toBeGreaterThan(NOTE_WORDS_BYTES - 200);
+  });
+
+  it("cuts a summary full of backticks inside its code block, whose fence still closes it", () => {
+    const summary = "`".repeat(13_000);
+    const cut = cutAgentWords(summary, []);
+    expect(cut.summary.endsWith("⟨cut by Runner⟩")).toBe(true);
+    const note = composeNote({ task_id: "tsk_one", pull_request: null, words: { kind: "shared", ...cut, redactions: 0 } });
+    expect(readNote(note).summary).toBe(cut.summary);
+    expect(Buffer.byteLength(note.slice(note.indexOf("### Agent's words (unverified)")))).toBeLessThanOrEqual(NOTE_WORDS_BYTES);
   });
 });
 

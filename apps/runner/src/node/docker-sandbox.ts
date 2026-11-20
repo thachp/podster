@@ -270,7 +270,7 @@ export class DockerSandbox implements TaskSandbox {
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
     const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
     this.opened.set(spec.run_ref, opened);
-    if (run.code !== 0) throw new DetailedError("container_failed", { exit_code: run.code, stderr: run.stderr });
+    if (run.code !== 0) throw new DetailedError("container_failed", { exit_code: run.code, stderr: run.stderr, cut: run.cut });
     // The disk bound, for the whole run, whatever runs in the container (M2).
     opened.unwatch = this.every(LIMITS.watch_ms, async () => {
       if (this.opened.get(spec.run_ref) === opened && (await this.overBound(opened))) await this.breach(opened);
@@ -280,7 +280,7 @@ export class DockerSandbox implements TaskSandbox {
     const pids = children.stdout.trim().split(/\s+/).filter((p) => p !== "");
     if (children.code !== 0 || pids.length !== 1 || !/^\d+$/.test(pids[0])) {
       await this.kill(spec.run_ref).catch(() => undefined);
-      throw new DetailedError("container_failed", { exit_code: children.code, stderr: children.stderr });
+      throw new DetailedError("container_failed", { exit_code: children.code, stderr: children.stderr, cut: children.cut });
     }
     opened.sleep_pid = pids[0];
   }

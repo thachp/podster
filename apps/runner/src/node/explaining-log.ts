@@ -6,6 +6,7 @@
  */
 import { explainLine, FAILURE_OUTCOMES } from "../core/explain.js";
 import { logLine, type Logger } from "../core/runtime.js";
+import { FileDiagnostics } from "./diagnostics.js";
 
 export function explainingLogger(write: (line: string) => void, diagnosticsFile: string): Logger {
   return (at, outcome, fields = {}) => {
@@ -14,4 +15,10 @@ export function explainingLogger(write: (line: string) => void, diagnosticsFile:
     const code = (JSON.parse(line) as { code?: string }).code;
     if (FAILURE_OUTCOMES.has(outcome) && code !== undefined) write(explainLine(code, diagnosticsFile));
   };
+}
+
+/** `run`'s logger and diagnostics for a home: the terminal's explained log, naming that home's diagnostics file. */
+export function runLogger(home: string, write: (line: string) => void): { log: Logger; diagnostics: FileDiagnostics } {
+  const diagnostics = new FileDiagnostics(home);
+  return { log: explainingLogger(write, diagnostics.file), diagnostics };
 }

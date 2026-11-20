@@ -26,9 +26,8 @@
  * container, the key's transport), reaps what a previous process left, then opens the lifecycle (`run-command.ts`).
  * Without a key file it opens no lifecycle and accepts nothing it couldn't run.
  */
-import { explain } from "../core/explain.js";
-import { FileDiagnostics } from "./diagnostics.js";
-import { explainingLogger } from "./explaining-log.js";
+import { whyCommand } from "./diagnostics.js";
+import { runLogger } from "./explaining-log.js";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -116,23 +115,7 @@ async function main(argv: string[]) {
 
   if (command === "why") {
     // The newest failure recorded for a task on this machine, from the local diagnostics file. Nothing is sent anywhere.
-    const task = args[args.indexOf("why") + 1];
-    if (!task || !/^[A-Za-z0-9_-]{1,128}$/.test(task)) {
-      say("Name a task: `why <tsk_…>`.");
-      return 2;
-    }
-    const diagnostics = new FileDiagnostics(home);
-    const last = diagnostics.lastFor(task);
-    if (!last) {
-      say(`No failure is recorded for ${task} in ${diagnostics.file}.`);
-      return 0;
-    }
-    const code = typeof last.code === "string" ? last.code : "unknown";
-    const e = explain(code);
-    say(`${String(last.time)} at ${String(last.at)}: ${e.what} ${e.todo} (code ${code})`);
-    say(`From ${diagnostics.file}, local to this machine and redacted:`);
-    say(JSON.stringify(last, null, 2));
-    return 0;
+    return whyCommand(home, args[args.indexOf("why") + 1], say);
   }
 
   if (command === "stop") {
@@ -225,8 +208,7 @@ async function locked(command: string, args: string[], home: string, state: File
 
   if (command === "run") {
     // Each failure's raw cause goes to the local diagnostics file only; the terminal explains its code in fixed words.
-    const diagnostics = new FileDiagnostics(home);
-    const log = explainingLogger((line) => process.stderr.write(`${line}\n`), diagnostics.file);
+    const { log, diagnostics } = runLogger(home, (line) => process.stderr.write(`${line}\n`));
     const record = await state.load();
     if (!record.gateway) throw new Error("This Runner isn't paired yet. Run `pair` first.");
     const interval = option(args, "interval");

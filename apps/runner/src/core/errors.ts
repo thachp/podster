@@ -130,8 +130,9 @@ export function meaningOf(error: unknown): Meaning {
  * there, never to a log line, Podster or the network.
  */
 export class DetailedError extends Error {
-  readonly detail: { exit_code?: number; stderr?: string; errno?: string };
-  constructor(code: string, detail: { exit_code?: number; stderr?: string; errno?: string } = {}) {
+  /** `cut`: the error output was cut at its head cap, so its last word may be part of a secret. */
+  readonly detail: { exit_code?: number; stderr?: string; errno?: string; cut?: boolean };
+  constructor(code: string, detail: { exit_code?: number; stderr?: string; errno?: string; cut?: boolean } = {}) {
     super(code);
     this.detail = detail;
   }

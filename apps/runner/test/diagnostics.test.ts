@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { DetailedError } from "../src/core/errors.js";
-import { diagnosticLine, FileDiagnostics, MAX_FIELD_BYTES, MAX_FILE_BYTES, scrub } from "../src/node/diagnostics.js";
+import { cutEdge, diagnosticLine, FileDiagnostics, MAX_FIELD_BYTES, MAX_FILE_BYTES, scrub, whyCommand, whyLines } from "../src/node/diagnostics.js";
+import { holdSecret } from "../src/core/known-secrets.js";
+import { runLogger } from "../src/node/explaining-log.js";
+import { chmodSync, linkSync, writeFileSync } from "node:fs";
 
 const home = () => mkdtempSync(join(tmpdir(), "runner-diag-"));
 const NOW = 1_800_000_000_000;
@@ -65,5 +68,81 @@ describe("the diagnostics file", () => {
     const linked = new FileDiagnostics(other, () => NOW);
     expect(() => linked.record({ at: "adapter.run", code: "container_failed" })).not.toThrow();
     expect(existsSync(join(other, "elsewhere"))).toBe(false);
+  });
+});
+
+describe("review of #489", () => {
+  it("redacts the exact secrets Runner holds, such as a bare 64-hex broker token, until they're released", () => {
+    const token = "a".repeat(32) + "0123456789abcdef0123456789abcdef";
+    const release = holdSecret(token);
+    expect(scrub(`refused with ${token} in the header`)).toBe("refused with [redacted] in the header");
+    release();
+    expect(scrub(`refused with ${token}`)).toContain(token);
+  });
+
+  it("redacts the partial word at the edge of error output Docker cut at its cap", () => {
+    expect(cutEdge("docker: Error: token ghs_abc")).toBe("docker: Error: token [cut: partial word redacted]");
+    const line = JSON.parse(diagnosticLine({ at: "adapter.run", code: "container_failed", error: new DetailedError("container_failed", { exit_code: 125, stderr: "failed: key sk-ant-ab", cut: true }) }, NOW));
+    expect(line.stderr_tail).toBe("failed: key [cut: partial word redacted]");
+    // Not cut: the last word stays.
+    expect(JSON.parse(diagnosticLine({ at: "adapter.run", code: "container_failed", error: new DetailedError("container_failed", { stderr: "it failed" }) }, NOW)).stderr_tail).toBe("it failed");
+  });
+
+  it("makes an existing file private before the first write, and refuses a hard-linked file", () => {
+    const h = home();
+    mkdirSync(join(h, "logs"), { mode: 0o700 });
+    const file = join(h, "logs", "errors.jsonl");
+    writeFileSync(file, "");
+    chmodSync(file, 0o644);
+    new FileDiagnostics(h, () => NOW).record({ at: "adapter.run", code: "container_failed", task: "tsk_one" });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    const other = home();
+    mkdirSync(join(other, "logs"), { mode: 0o700 });
+    writeFileSync(join(other, "target"), "");
+    linkSync(join(other, "target"), join(other, "logs", "errors.jsonl"));
+    new FileDiagnostics(other, () => NOW).record({ at: "adapter.run", code: "container_failed" });
+    expect(readFileSync(join(other, "target"), "utf8")).toBe("");
+    // Reads refuse a symlinked folder.
+    const third = home();
+    symlinkSync(join(h, "logs"), join(third, "logs"));
+    expect(new FileDiagnostics(third).lastFor("tsk_one")).toBeNull();
+  });
+});
+
+describe("podster why", () => {
+  it("refuses a task that isn't an ID, and says when nothing is recorded", () => {
+    const said: string[] = [];
+    expect(whyCommand(home(), "../tsk", (l) => void said.push(l))).toBe(2);
+    expect(whyCommand(home(), undefined, (l) => void said.push(l))).toBe(2);
+    expect(said).toEqual(["Name a task: `why <tsk_…>`.", "Name a task: `why <tsk_…>`."]);
+    const h = home();
+    const out: string[] = [];
+    expect(whyCommand(h, "tsk_one", (l) => void out.push(l))).toBe(0);
+    expect(out[0]).toBe(`No failure is recorded for tsk_one in ${join(h, "logs", "errors.jsonl")}.`);
+  });
+
+  it("prints the explanation and the entry with control, format and bidi characters made visible; bad shapes read invalid", () => {
+    const h = home();
+    const d = new FileDiagnostics(h, () => NOW);
+    d.record({ at: "adapter.run", code: "network_allowlist_unsupported", task: "tsk_one", error: new Error("evil \u202e\u0085\u2066 text \u001b[2J") });
+    const out: string[] = [];
+    expect(whyCommand(h, "tsk_one", (l) => void out.push(l))).toBe(0);
+    expect(out[0]).toBe(`${new Date(NOW).toISOString()} at adapter.run: The room's policy lists network hosts, which Runner can't enforce yet. Set rooms[].network to [] in policy.json, then start Runner again. (code network_allowlist_unsupported)`);
+    const printed = out.join("\n");
+    expect(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069\u001b]/.test(printed)).toBe(false);
+    expect(printed).toContain("⟨U+202E⟩");
+    const lines = whyLines("tsk_one", { time: "yesterday\u202e", at: "Not An At", code: "Bad Code", task: "tsk_one" }, "/f");
+    expect(lines[0]).toBe("invalid at invalid: Runner has no explanation for this code. The diagnostics file has the details. (code invalid)");
+  });
+});
+
+describe("run's logger", () => {
+  it("explains failures on the terminal, naming this home's diagnostics file", () => {
+    const h = home();
+    const lines: string[] = [];
+    const { log, diagnostics } = runLogger(h, (l) => void lines.push(l));
+    expect(diagnostics.file).toBe(join(h, "logs", "errors.jsonl"));
+    log("lifecycle.run", "run_failed", { task: "tsk_one", code: "exec_exited" });
+    expect(lines[1]).toBe(`  why: The agent's run failed before it gave a result. The details file has the driver's code; the task is released, and offered again by the room. (code exec_exited; details: ${diagnostics.file})`);
   });
 });

@@ -18,6 +18,7 @@
  * Host-side folder access goes through `safe-fs.ts` (`lstat`, `O_NOFOLLOW`, `realpath`; L3 on #459). Git runs as
  * `git.ts` says (L2 on #459). Logs carry IDs and codes only.
  */
+import { holdSecret } from "../core/known-secrets.js";
 import { lstat, opendir, realpath } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { GatewayError, meaningOf } from "../core/errors.js";
@@ -60,6 +61,13 @@ const key = (workspace_id: string, task_id: string) => `${workspace_id}/${task_i
 /** Holds each task's token in memory, outside every container, and asks Podster again only when it's due. */
 export class RepoBroker {
   private readonly held = new Map<string, RepoAccess>();
+  /** Each held token's release from exact-match redaction (`known-secrets.ts`). */
+  private readonly releases = new Map<string, () => void>();
+  private drop(k: string) {
+    this.held.delete(k);
+    this.releases.get(k)?.();
+    this.releases.delete(k);
+  }
   private readonly request: AgentRequest;
   private readonly clock: Clock;
   private readonly log: Logger;
@@ -79,7 +87,7 @@ export class RepoBroker {
     try {
       answer = await this.request("get_repo_access", { workspace_id, task_id });
     } catch (error) {
-      this.held.delete(k);
+      this.drop(k);
       if (!(error instanceof GatewayError)) throw error;
       const meaning = meaningOf(error);
       // An authority error is the lifecycle's: it stops everything and retires the key.
@@ -92,23 +100,25 @@ export class RepoBroker {
     try {
       access = readAccess(answer, scope, this.clock.now());
     } catch (error) {
-      this.held.delete(k);
+      this.drop(k);
       this.log("repo.access", "refused", error instanceof RepoPathError ? { ...ids, code: error.code, ...error.detail } : { ...ids, code: "access_invalid" });
       throw error;
     }
+    this.drop(k);
     this.held.set(k, access);
+    this.releases.set(k, holdSecret(access.token));
     this.log("repo.access", held ? "renewed" : "issued", ids);
     return access;
   }
 
   /** A token GitHub no longer takes: dropped and reported, so the next use asks Podster again. */
   revoked(workspace_id: string, task_id: string): void {
-    this.held.delete(key(workspace_id, task_id));
+    this.drop(key(workspace_id, task_id));
     this.log("repo.access", "revoked", { workspace: workspace_id, task: task_id });
   }
 
   forget(workspace_id: string, task_id: string): void {
-    this.held.delete(key(workspace_id, task_id));
+    this.drop(key(workspace_id, task_id));
   }
 
   /** How many tokens are held, for tests. */

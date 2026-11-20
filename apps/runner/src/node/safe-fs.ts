@@ -11,7 +11,7 @@
  * Errors carry fixed words only, never a path.
  */
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, openSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, writeSync } from "node:fs";
 import { lstat, mkdir, open, opendir, readdir, realpath, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 
@@ -36,6 +36,28 @@ async function realFolder(path: string, uid: number | null) {
 }
 
 const ownUid = () => (typeof process.getuid === "function" ? process.getuid() : null);
+
+/**
+ * The same checks as `realFolder`, synchronously, for the local diagnostics file (review of #489): a real folder, not a
+ * link, owned by this user, writable by no one else.
+ */
+export function ownFolderSync(path: string): void {
+  const info = lstatSync(path);
+  const uid = ownUid();
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new UnsafePath("not a real folder");
+  if (uid !== null && info.uid !== uid) throw new UnsafePath("not the owner's");
+  if ((info.mode & 0o022) !== 0) throw new UnsafePath("writable by others");
+}
+
+/** An open file that is a plain file, owned by this user, with one link: not a hard link to something else. */
+export function ownFileSync(fd: number): { size: number } {
+  const info = fstatSync(fd);
+  const uid = ownUid();
+  if (!info.isFile()) throw new UnsafePath("not a plain file");
+  if (uid !== null && info.uid !== uid) throw new UnsafePath("not the owner's");
+  if (info.nlink !== 1) throw new UnsafePath("linked elsewhere");
+  return { size: info.size };
+}
 
 /**
  * Makes `folder` under `root`, each missing segment with mode 0700, and checks every segment from `root` down with

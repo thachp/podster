@@ -14,8 +14,11 @@ type Tree = { tree: unknown[]; truncated?: boolean };
 type Repo = { trees: Record<string, Tree>; blobs: Record<string, string> };
 /** What a test makes go wrong. Each is one thing GitHub, or something in its place, could answer. */
 type Faults = {
-  /** The token call: a status, or a token that isn't exactly what was asked for. */
-  token?: number | "another_repo" | "more_permissions" | "no_token";
+  /**
+   * The token call: a status, or a token that isn't exactly what was asked for. `long_token` is a good one in GitHub's
+   * current shape, `ghs_APPID_JWT` and 600 characters; the `token_*` ones are tokens no header or credential line may carry.
+   */
+  token?: number | "another_repo" | "more_permissions" | "no_token" | "long_token" | "token_crlf" | "token_space" | "token_colon" | "token_too_long";
   /** A tree read, by the sha asked for: a status, an answer too long to parse, one that isn't a tree, or a `200` that isn't JSON at all. */
   tree?: Record<string, number | "too_long" | "not_a_tree" | "html">;
   /** A blob read, by its sha: a status, bytes that aren't the file's, or more bytes than a file may have. A list is taken one read at a time, so a file can be right the first time it is read and wrong the second. */
@@ -97,7 +100,21 @@ export async function fakeGithubRelease(request: Request): Promise<Response | nu
     here.minted.push(body);
     const faults = here.faults;
     if (typeof faults.token === "number") return json({ message: "SECRET-PROVIDER-TEXT" }, faults.token);
-    const token = `ghs_release_${crypto.randomUUID().replaceAll("-", "")}`;
+    const id = crypto.randomUUID().replaceAll("-", "");
+    const long = (length: number) => {
+      const head = `ghs_888004_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${id}`;
+      const tail = ".Zq9-Xk3_Lm7Vb2Nc8Wd4Ts6Yh-0_aB";
+      return head + "eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(Math.ceil(length / 26)).slice(0, length - head.length - tail.length) + tail;
+    };
+    const shaped: Partial<Record<NonNullable<Faults["token"]>, string>> = {
+      long_token: long(600),
+      // Under 512 bytes, which the room's old check took as long as they were ASCII.
+      token_crlf: `${long(200)}\r\nx-evil: 1`,
+      token_space: `${long(150)} ${long(150)}`,
+      token_colon: `${long(150)}:${long(150)}`,
+      token_too_long: long(4097),
+    };
+    const token = (typeof faults.token === "string" ? shaped[faults.token] : undefined) ?? `ghs_release_${id}`;
     const granted = faults.token === "more_permissions" ? { ...body.permissions, pull_requests: "write" } : { ...body.permissions };
     const named = faults.token === "another_repo" ? repo + 1 : repo;
     tokens.set(token, { repo: named, asked: repo, permissions: granted, revoked: false });

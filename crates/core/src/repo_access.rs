@@ -20,6 +20,25 @@ use crate::{Task, TaskStatus};
 /// the token the room already holds, so an agent has one live token for a task.
 pub const TOKEN_RENEW_BEFORE_MS: i64 = 5 * 60 * 1000;
 
+/// The shortest installation token the room takes from GitHub, in bytes, as Runner's (`isAccessToken`).
+pub const INSTALLATION_TOKEN_MIN: usize = 20;
+
+/// The longest installation token the room takes from GitHub, in bytes. GitHub's installation tokens are now
+/// `ghs_APPID_JWT`, "~520 characters" that "will vary", with no published maximum, and GitHub says to treat them as
+/// opaque (changelog, 2026-04-24 and 2026-10-02). This leaves room for that to grow and bounds what the room seals and
+/// hands on. Runner holds the same bounds (`isAccessToken` and `MAX_ACCESS_TOKEN` in `apps/runner/src/core/repository.ts`).
+pub const INSTALLATION_TOKEN_MAX: usize = 4096;
+
+/// Whether GitHub's answer can be an installation token: `INSTALLATION_TOKEN_MIN` to `INSTALLATION_TOKEN_MAX` bytes of letters, digits, `_`,
+/// `-` and `.` (a JWT's base64url segments and their dots). Nothing about its contents: never whitespace, a control
+/// character, `:`, `@`, `/` or anything else that could bend a header, a URL or a Git credential line.
+pub fn installation_token_ok(token: &str) -> bool {
+    (INSTALLATION_TOKEN_MIN..=INSTALLATION_TOKEN_MAX).contains(&token.len())
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
 /// What a repository permission allows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {

@@ -98,6 +98,24 @@ describe("secrets are redacted", () => {
     }
   });
 
+  it("redacts all of a GitHub token in the current `ghs_APPID_JWT` shape, hundreds of characters with `_`, `-` and dots", () => {
+    const jwt = `eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${"eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(12)}.Zq9-Xk3_Lm7Vb2Nc8Wd4Ts6Yh-0_aB`;
+    for (const prefix of ["ghs", "ghu", "gho"]) {
+      const token = `${prefix}_1234567_${jwt}`;
+      expect(token.length).toBeGreaterThan(300);
+      const { text, count } = redactSecrets(`pushed with ${token}. Then stopped.`);
+      expect([prefix, text, count]).toEqual([prefix, "pushed with [redacted]. Then stopped.", 1]);
+      // Glued to a word, or with hidden characters inside, it's still found.
+      expect(redactSecrets(`x${token}`).text).toBe("x[redacted]");
+      expect(cleanResult({ status: "completed", summary: `key ${token.slice(0, 60)}\u200b${token.slice(60)}`, files: [] })).toEqual({ ok: false, reason: "secret_hidden" });
+    }
+  });
+
+  it("takes a GitHub token whole even when part of it looks like another secret: its rule runs first", () => {
+    const token = `ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.sk-ant-api03-AbCdEfGhIjKlMnOp.${"eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(10)}`;
+    expect(redactSecrets(`with ${token} here`)).toEqual({ text: "with [redacted] here", count: 1 });
+  });
+
   it("never matches its own [redacted], so redacting twice changes nothing", () => {
     const once = redactSecrets("password: hunter2hunter2 and token = abcdefgh12345678");
     expect(redactSecrets(once.text)).toEqual({ text: once.text, count: 0 });

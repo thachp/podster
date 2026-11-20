@@ -69,7 +69,21 @@ export const BRANCH_PREFIX = "podster/";
 /** The fixed identity of a commit Runner makes, so no name or address from anywhere else is ever used. */
 export const COMMIT_IDENTITY = { name: "Podster Runner", email: "runner@podster.invalid" } as const;
 
-const TOKEN = /^[A-Za-z0-9_]{20,255}$/;
+/**
+ * The longest installation token Runner takes. GitHub's installation tokens are now `ghs_APPID_JWT`, "~520 characters"
+ * that "will vary", with no published maximum, and GitHub says to treat them as opaque (changelog, 2026-04-24 and
+ * 2026-10-02). This leaves room for that to grow while keeping a hostile answer bounded. The server holds the same bound
+ * (`INSTALLATION_TOKEN_MAX` in `crates/core/src/repo_access.rs`).
+ */
+export const MAX_ACCESS_TOKEN = 4096;
+/**
+ * A token's characters: a JWT's base64url segments, their dots, and the `_` of `ghs_APPID_`. Never whitespace, a control
+ * character, `:`, `@`, `/`, `=` or anything else that could end or bend an `Authorization` header, a URL or a line of Git's
+ * credential protocol.
+ */
+const TOKEN = new RegExp(`^[A-Za-z0-9._-]{20,${MAX_ACCESS_TOKEN}}$`);
+/** Whether a string can be an installation token: its characters and length, nothing about its contents. */
+export const isAccessToken = (v: string): boolean => TOKEN.test(v);
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const TASK = /^[a-z0-9_-]{1,128}$/;
 /** A branch name Runner will use or accept as a default branch: plain segments, no ref syntax. */
@@ -116,7 +130,7 @@ export function readAccess(answer: unknown, scope: RepoScope, now: number): Repo
   }
   const { token, expires_at, repository, clone_url, permissions, authority_ends_at } = answer;
   if (typeof token !== "string") throw new RepoPathError("access_token_format", false, { type: typeName(token) });
-  if (!TOKEN.test(token)) throw new RepoPathError("access_token_format", false, { length: token.length, prefix: /^[a-z]{3}_/.test(token) ? "yes" : "no" });
+  if (!isAccessToken(token)) throw new RepoPathError("access_token_format", false, { length: token.length, prefix: /^[a-z]{3}_/.test(token) ? "yes" : "no" });
   if (!isCount(expires_at) || expires_at <= now) throw new RepoPathError("access_expired");
   if (!(authority_ends_at === null || isCount(authority_ends_at))) throw new RepoPathError("access_authority_invalid");
   if (!isObj(permissions) || Object.keys(permissions).length !== 3 || permissions.contents !== "write" || permissions.pull_requests !== "write" || permissions.metadata !== "read") throw new RepoPathError("access_permissions");

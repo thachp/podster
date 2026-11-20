@@ -170,6 +170,9 @@ const quiet = () => new Tally(PLAN, () => {});
 
 // ---- nothing secret is printed ----
 const token = `ghs_${"a1B2".repeat(9)}`;
+// GitHub's current installation-token shape, `ghs_APPID_JWT`, hundreds of characters with `_`, `-` and dots: all of it goes.
+const longToken = `ghs_1234567_eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.${"eyJpc3MiOiJnaXRodWIifQ-_x9".repeat(12)}.Zq9-Xk3_Lm7Vb2Nc8Wd4Ts6Yh-0_aB`;
+check(longToken.length > 300 && scrub(`pushed ${longToken}. done`, []) === "pushed [redacted]. done", "a GitHub token in the current, longer shape is taken out of output whole");
 check(scrub(`before ${token} after`, []) === "before [redacted] after" && scrub("cookie=abcdefghijklmnopqrstu", ["abcdefghijklmnopqrstu"]) === "cookie=[redacted]", "a GitHub token and a named secret are taken out of output");
 check(scrub("pull request 7, head 0123abc", ["", undefined]) === "pull request 7, head 0123abc", "ordinary output is left alone");
 

@@ -208,7 +208,7 @@ try {
 // Last, so it covers everything written before it. It never prints what it found, only that it found something.
 const output = written.join("");
 const leakedValues = [...secrets].filter((value) => output.includes(value)).length;
-const leakedShapes = (output.match(/a2asec_[0-9a-f]{8,}|e2eA2aTok_[0-9a-f]{8,}|gh[oprsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g) ?? []).length;
+const leakedShapes = (output.match(/a2asec_[0-9a-f]{8,}|e2eA2aTok_[0-9a-f]{8,}|gh[oprsu]_(?:[A-Za-z0-9_-]|\.(?=[A-Za-z0-9_-])){20,}|github_pat_[A-Za-z0-9_]{20,}/g) ?? []).length;
 check(leakedValues === 0 && leakedShapes === 0, "no endpoint token, signing secret or repository token anywhere in this script's output", leakedValues || leakedShapes ? `${leakedValues} known values and ${leakedShapes} lookalikes found` : `${secrets.size} values checked`);
 const count = (status) => results.filter((r) => r.status === status).length;
 console.log(`\n${count("ok")} passed, ${count("fail")} failed, ${count("skip")} skipped.${room ? ` Room ${room}.` : ""}`);

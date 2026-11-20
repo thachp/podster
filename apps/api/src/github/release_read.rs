@@ -41,6 +41,7 @@ use podster_core::release_tree::{
     manifest_hash_prefix, release_directory, served_type, ContentProblem, EntryKind, FetchMismatch,
     PlannedFile, ReadProblem, TreeEntry, MAX_FILE_BYTES, MAX_TREE_ANSWER_BYTES,
 };
+use podster_core::repo_access::installation_token_ok;
 use sha2::{Digest, Sha256};
 
 /// The names of the read-only App's ID, installation ID and key in the Worker's configuration. None is set anywhere.
@@ -278,7 +279,7 @@ impl<'a> ReleaseReader<'a> {
         }
         let token = answer["token"]
             .as_str()
-            .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
+            .filter(|token| installation_token_ok(token))
             .ok_or(UNAVAILABLE)?
             .to_string();
         let reader = ReleaseReader {

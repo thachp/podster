@@ -54,8 +54,11 @@ const REDACTED = "[redacted]";
  */
 const SECRETS: { pattern: RegExp; keep?: boolean }[] = [
   { pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g },
+  // GitHub's tokens, old (`ghs_` and 36 characters) and new (`ghs_APPID_JWT`, about 520): `_`, `-` and a dot that joins
+  // two segments are all part of one, so the whole token goes, not just up to its first `_` or `.`. It runs before
+  // `sk-ant-` and the rest, so another rule can't take a piece from the middle of one and leave its ends.
+  { pattern: /gh[pousr]_(?:[A-Za-z0-9_-]|\.(?=[A-Za-z0-9_-])){20,}/g },
   { pattern: /sk-ant-[A-Za-z0-9_-]{8,}/g },
-  { pattern: /gh[pousr]_[A-Za-z0-9]{20,}/g },
   { pattern: /github_pat_[A-Za-z0-9_]{20,}/g },
   { pattern: /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g },
   { pattern: /(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])/g },

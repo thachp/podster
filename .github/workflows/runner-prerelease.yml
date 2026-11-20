@@ -119,7 +119,8 @@ jobs:
     needs: build
     if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Room for the registry check's wait (up to about 15 minutes) after publishing.
+    timeout-minutes: 25
     # The owner requires approval on this environment and limits it to main; npm's trusted publisher names it.
     environment: npm-test-prerelease
     permissions:
@@ -150,7 +151,8 @@ jobs:
           printf '%s' "$SHA256" | grep -Eq '^[0-9a-f]{64}$'
           echo "$SHA256  $FILE" | sha256sum --check --strict
           npm publish "./$FILE" --provenance --tag test --access public
-      # What the registry now holds must be the file build packed. Retried for propagation.
+      # What the registry now holds must be the file build packed. npm can take minutes to show a new version, so this
+      # polls for up to about 15 minutes, with --prefer-online so a cached packument can't hide it.
       - name: Check the registry's copy against the packed file
         working-directory: ${{ runner.temp }}/pack
         env:
@@ -158,17 +160,23 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           local_sha=$(sha1sum "$FILE" | cut -d' ' -f1)
-          for attempt in 1 2 3 4 5 6; do
-            remote_sha=$(npm view "podster@$VERSION" dist.shasum 2>/dev/null || true)
+          remote_sha=""
+          for attempt in $(seq 1 90); do
+            remote_sha=$(npm view --prefer-online "podster@$VERSION" dist.shasum 2>/dev/null || true)
             if [ -n "$remote_sha" ]; then break; fi
-            echo "Not visible on the registry yet (attempt $attempt); waiting."
+            echo "Not visible on the registry yet (attempt $attempt of 90); waiting."
             sleep 10
           done
-          integrity=$(npm view "podster@$VERSION" dist.integrity 2>/dev/null || true)
+          echo "packed file shasum: $local_sha"
+          if [ -z "$remote_sha" ]; then
+            echo "podster@$VERSION was published, but the registry still doesn't show it after about 15 minutes."
+            echo "Check it later with: npm view --prefer-online podster@$VERSION dist.shasum (expect $local_sha)"
+            exit 1
+          fi
+          integrity=$(npm view --prefer-online "podster@$VERSION" dist.integrity 2>/dev/null || true)
           echo "registry shasum:    $remote_sha"
           echo "registry integrity: $integrity"
-          echo "packed file shasum: $local_sha"
-          if [ -z "$remote_sha" ] || [ "$remote_sha" != "$local_sha" ]; then
+          if [ "$remote_sha" != "$local_sha" ]; then
             echo "The registry's shasum for podster@$VERSION doesn't match the packed file's."
             exit 1
           fi

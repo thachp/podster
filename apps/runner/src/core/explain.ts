@@ -30,7 +30,8 @@ const TABLE = new Map<string, Explanation>([
   ...group(["prompt_unavailable", "provenance_invalid", "prompt_mismatch", "task_invalid"], "The task's inputs couldn't be read exactly as Podster listed them, so no prompt was built.", `Ask the room to check the task; if it happens again, ${SEND}`),
   ...group(["prompt_too_large", "prompt_invalid"], "The task's words are too large, or not text Runner can hand to the agent.", "Ask the room to shorten the task."),
   ...group(["blocked_same_inputs"], "The agent already answered blocked on these exact inputs, so Runner won't pay for the same answer again.", "Change the task, request changes, post a message on the task, or change the room's policy (such as adding shell), and it runs again."),
-  ...group(["run_blocked"], "The agent reported it is blocked and couldn't finish.", "Read its reason on the task's thread; it names what it was missing."),
+  ...group(["run_blocked"], "The agent reported it is blocked and couldn't finish.", "Read its reason on the task's thread. If it needs a shell, add \"shell\" to rooms[].tools in policy.json; network access can't be allowed yet (rooms[].network must stay [])."),
+  ...group(["runner_could_not_start"], "Runner couldn't start a run for this task.", "The log line before it has the cause code, and the details file has the raw error."),
   // A run that never started.
   ...group(["docker_unavailable"], "Runner couldn't run Docker.", "Start Docker (Docker Desktop on a Mac), then the next offer runs."),
   ...group(["container_failed", "container_invalid", "strays_remain"], "The task's container couldn't be started or prepared.", "Check that Docker is running and the task image is built; the details file has Docker's exit code and output."),

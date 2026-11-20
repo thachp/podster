@@ -138,7 +138,9 @@ export function reviewScreen(view: ResultView, width = 80): { screen: string; cu
   const pr = view.pull_request;
   const lines = [
     "",
-    "A run finished, and its room holds the agent's words for you before they're shared with Podster.",
+    view.blocked
+      ? "A run ended with the agent reporting it is blocked, and its room holds the agent's reason for you before it's shared with Podster."
+      : "A run finished, and its room holds the agent's words for you before they're shared with Podster.",
     `  room ${view.workspace_id}, task ${view.task_id}`,
     `  pull request: ${pr ? `#${pr.number} in ${pr.full_name}, from ${pr.branch} at ${pr.commit}` : "none"}`,
     `  secrets redacted: ${view.redactions}`,
@@ -188,7 +190,8 @@ export class TerminalPrompter implements OwnerPrompter {
     this.terminal.write(`${screen}\n`);
     let answer: string;
     try {
-      answer = (await this.terminal.question(cut ? "Submit it without the agent's words? [y/N] " : "Share the agent's words with Podster? [y/N] ", signal)).trim();
+      const without = view.blocked ? "Report it without the agent's reason? [y/N] " : "Submit it without the agent's words? [y/N] ";
+      answer = (await this.terminal.question(cut ? without : "Share the agent's words with Podster? [y/N] ", signal)).trim();
     } catch {
       return "later";
     }

@@ -19,6 +19,8 @@ import {
   STOP_STEP_MS,
   SupervisedAdapter,
   UNTRUSTED_FRAME,
+  LIMITS_GUIDANCE,
+  runFrame,
   type AgentDriver,
   type ContainerSpec,
   type DriverSession,
@@ -106,12 +108,15 @@ class FakeSandbox implements TaskSandbox {
   openHangs = false;
   /** When set, open waits for this, then makes the container: a slow `docker run` that finishes after all. */
   openGate: Promise<void> | null = null;
+  /** When set, open throws an error with this message, as the Docker sandbox refuses an allowlist. */
+  openThrows: string | null = null;
   output = "ran";
   breach: ((code: string) => void) | null = null;
   async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
     this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
     if (this.openGate) await this.openGate;
+    if (this.openThrows) throw new Error(this.openThrows);
     this.alive.add(spec.run_ref);
     if (this.openHangs) await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   }
@@ -327,6 +332,32 @@ describe("the tool decision", () => {
   });
 });
 
+describe("the run's frame names its limits", () => {
+  it("tells the agent its exact tools and network, and to do what it can before answering blocked", () => {
+    const none = runFrame({ ...FACTS, tools: ["read", "search", "write", "edit"], shell: false, network: [] });
+    expect(none).toContain("Your tools in this run: read, search, write, edit, and the structured result.");
+    expect(none).toContain("There is no shell: you can't run commands, tests, builds");
+    expect(none).toContain("Network: none. There is no network in this run");
+    expect(none).toContain("don't plan to install packages (npm install, pip install), fetch anything or deploy");
+    expect(none).toContain(LIMITS_GUIDANCE);
+    // The guidance: do every part it can, complete with a "Not done and why" section, blocked only when nothing useful
+    // can be submitted, and the missing capability stated as the policy setting that would unblock it.
+    expect(LIMITS_GUIDANCE).toContain("Do every part of the task you can");
+    expect(LIMITS_GUIDANCE).toContain('give status completed, and end the summary with a section headed "Not done and why"');
+    expect(LIMITS_GUIDANCE).toContain("Tests written but not run: this run has no shell.");
+    expect(LIMITS_GUIDANCE).toContain("Give status blocked only when nothing useful can be submitted.");
+    expect(LIMITS_GUIDANCE).toContain('"Needs a shell to run the tests"');
+    // The room reads the agent's words, so they name capabilities in plain words, never the owner's policy keys.
+    expect(LIMITS_GUIDANCE).not.toContain("rooms[]");
+    const open = runFrame({ ...FACTS, tools: ["read", "shell"], shell: true, network: ["registry.npmjs.org"] });
+    expect(open).toContain("Your tools in this run: read, shell, and the structured result.");
+    expect(open).not.toContain("There is no shell");
+    expect(open).toContain("Network: only these hosts: registry.npmjs.org.");
+    // Shell listed without the policy's shell flag isn't offered.
+    expect(runFrame({ ...FACTS, tools: ["read", "shell"], shell: false, network: [] })).toContain("Your tools in this run: read, and the structured result. There is no shell");
+  });
+});
+
 describe("the prompt and the container", () => {
   it("marks the task's words untrusted and passes them exactly, never as Runner's instructions", () => {
     const prompt = markUntrusted(enc.encode(WORDS));
@@ -381,7 +412,9 @@ describe("a run that keeps to its policy", () => {
     await (await t.start()).done;
     const session = t.driver.sessions[0];
     expect(session.prompt).toEqual({ trust: "untrusted", origin: "podster_task", text: WORDS });
-    expect(session.frame).toBe(UNTRUSTED_FRAME);
+    expect(session.frame).toBe(runFrame(FACTS));
+    expect(session.frame.startsWith(UNTRUSTED_FRAME)).toBe(true);
+    expect(session.frame).not.toContain(WORDS);
     expect(session.allowed_tools).toEqual(["read", "search", "write", "edit", "StructuredOutput"]);
     expect(session.limits).toEqual({ turns: CAPS.turns, max_tokens: CAPS.max_tokens, output_tokens: CAPS.output_tokens, run_time_ms: CAPS.run_time_ms });
     expect(session.provider).toEqual({ api_key: PLACEHOLDER_KEY });
@@ -631,6 +664,19 @@ describe("the run-time timer starts with the run (L4 on #459)", () => {
     expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "halted", fields: { workspace: "ws_room_one", task: "tsk_one", code: "run_time" } });
     expect(t.sandbox.killed).toContain("run_1");
     expect(t.driver.sessions).toEqual([]);
+  });
+});
+
+describe("a run that fails to start keeps its cause, as a code only", () => {
+  it("names the sandbox's code in the error and the log line; a message that isn't a code reads as unknown", async () => {
+    const t = setup(async () => RESULT);
+    t.sandbox.openThrows = "network_allowlist_unsupported";
+    await expect(t.start()).rejects.toThrow("start_failed:network_allowlist_unsupported");
+    expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "start_failed", fields: { workspace: "ws_room_one", task: "tsk_one", code: "network_allowlist_unsupported" } });
+    const u = setup(async () => RESULT);
+    u.sandbox.openThrows = "docker: Error response from daemon: secret /Users/owner path";
+    await expect(u.start("run_2")).rejects.toThrow("start_failed:unknown");
+    expect(JSON.stringify(u.logged)).not.toMatch(/daemon|Users/);
   });
 });
 

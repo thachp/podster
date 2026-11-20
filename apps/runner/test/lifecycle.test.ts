@@ -4,7 +4,7 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
@@ -1330,10 +1330,9 @@ describe("step 11: results", () => {
     expect(t.gateway.submissions).toHaveLength(1);
   });
 
-  it("releases a run whose result says it's blocked, has none, or is malformed: none is a submission", async () => {
+  it("releases a run whose result is missing or malformed: neither is a submission", async () => {
     const t = await setup(shareConfig());
     const cases: [string, RunReport, string][] = [
-      ["tsk_blocked", { status: "succeeded", spent_micro_usd: 1, result: { status: "blocked", summary: "Couldn't.", files: [] } }, "run_blocked"],
       ["tsk_none", { status: "succeeded", spent_micro_usd: 1 }, "result_missing"],
       ["tsk_bad", { status: "succeeded", spent_micro_usd: 1, result: { status: "completed", summary: "bell\u0007", files: [] } }, "result_invalid"],
     ];
@@ -1345,6 +1344,7 @@ describe("step 11: results", () => {
       expect(t.commands("release_task").find((c) => c.arguments.task_id === id)?.arguments.reason).toBe(reason);
     }
     expect(t.commands("submit_task")).toHaveLength(0);
+    expect(t.gateway.messages).toHaveLength(0);
   });
 
   it("releases with the server's code when it refuses the submission, and re-reads after a version conflict", async () => {
@@ -1430,3 +1430,408 @@ describe("step 11: results", () => {
 async function poller(t: Awaited<ReturnType<typeof setup>>) {
   return t.poller.pollOnce();
 }
+
+describe("a blocked run (the architect's ruling of 2026-11-20)", () => {
+  const REASON = "Needs shell to run tests (rooms[].tools: shell). Wrote the tests in test/health.test.ts.";
+  const BLOCKED: RunReport = { status: "succeeded", spent_micro_usd: 300_000, result: { status: "blocked", summary: REASON, files: ["test/health.test.ts"] } };
+  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, outputs: "share", ...over }] });
+  /** A task in a change-request round: submitted once, then sent back, so it's accepted by the agent again. */
+  const changeRequest = (id: string, event_id = "evt_cr1") => {
+    const d = detail(id, { changeRequest: { event_id, text: "Add and run the tests" } });
+    d.task.status = "accepted";
+    return d;
+  };
+  const lines = (t: Awaited<ReturnType<typeof setup>>) => t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("first run, shared: posts the agent's reason to the task's thread, then releases the task", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "reporting", outcome: "run_blocked", report: { sharing: "pending", keep: null } });
+    expect(t.gateway.messages).toHaveLength(0);
+    await t.pass();
+    // The reason went first, then the release: never a silent release.
+    const order = t.gateway.calls.map((c) => c.capability).filter((c) => c === "send_message" || c === "release_task");
+    expect(order).toEqual(["send_message", "release_task"]);
+    const sent = t.gateway.messages[0];
+    expect(sent).toMatchObject({ workspace_id: ROOM, task_id: "tsk_one" });
+    expect(typeof sent.idempotency_key).toBe("string");
+    const note = String(sent.body);
+    expect(note.startsWith("## Blocked: report from Podster Runner")).toBe(true);
+    expect(note).toContain("Runner releases the task, so it can be offered again.");
+    expect(note).toContain(`### Agent's words (unverified)\n\n\`\`\`text\n${REASON}\n\`\`\``);
+    expect(note).toContain("- `test/health.test.ts`");
+    expect(new TextEncoder().encode(note).byteLength).toBeLessThanOrEqual(16 * 1024);
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ task_id: "tsk_one", reason: "run_blocked" });
+    expect(t.commands("submit_task")).toHaveLength(0);
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "done", report: null, blocked: { input_hash: t.entry("tsk_one").consumed?.input_hash } });
+    // Logged by IDs and codes, saying the reason was posted; the reason itself is in no log and not in the record.
+    expect(lines(t).find((l) => l.at === "lifecycle.blocked")).toEqual({ at: "lifecycle.blocked", outcome: "reason_posted", agent: AGENT, workspace: ROOM, task: "tsk_one", code: "run_blocked" });
+    for (const text of [t.runs.text, t.logged.join("\n")]) {
+      expect(text).not.toContain("Needs shell");
+      expect(text).not.toContain("health.test.ts");
+    }
+  });
+
+  it("change-request round: posts the reason and keeps the task with the agent, never released", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    const d = changeRequest("tsk_cr");
+    t.offer(d, "task.changes_requested");
+    await t.pass();
+    await t.pass();
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(String(t.gateway.messages[0].body)).toContain("Runner keeps the task with this agent, since it answered a change request");
+    expect(t.commands("release_task")).toHaveLength(0);
+    expect(d.task).toMatchObject({ status: "accepted", assignee: AGENT });
+    expect(t.entry("tsk_cr")).toMatchObject({ phase: "done", outcome: "run_blocked", report: null });
+    // Nothing more happens at later passes.
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.gateway.messages).toHaveLength(1);
+  });
+
+  it("hold mode: the owner sees the reason at the terminal first; nothing is posted until they answer", async () => {
+    const t = await setup();
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    expect(t.prompter.reviewed).toHaveLength(1);
+    expect(t.prompter.reviewed[0]).toMatchObject({ task_id: "tsk_one", summary: REASON, files: ["test/health.test.ts"], pull_request: null, blocked: true });
+    expect(t.gateway.messages).toHaveLength(0);
+    expect(t.commands("release_task")).toHaveLength(0);
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "reporting", report: { sharing: "review" }, retry_at: t.clock.now() + ASK_AGAIN_MS });
+    t.clock.at += ASK_AGAIN_MS;
+    t.prompter.reviewAnswers = ["approve"];
+    await t.pass();
+    expect(String(t.gateway.messages[0].body)).toContain(REASON);
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_blocked" });
+
+    // Declined: the room still hears it's blocked, in Runner's fixed words only.
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    t.prompter.reviewAnswers = ["decline"];
+    await t.pass();
+    const note = String(t.gateway.messages.find((m) => m.task_id === "tsk_two")?.body);
+    expect(note).toContain("## Blocked: report from Podster Runner");
+    expect(note).toContain("aren't shared: this room's output policy holds them");
+    expect(note).not.toContain("Needs shell");
+  });
+
+  it("an identical re-offer doesn't run again: declined with blocked_same_inputs, nothing reserved or spent", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    const d = detail("tsk_one");
+    t.offer(d);
+    await t.pass();
+    await t.pass();
+    const spent = t.lifecycle.record.ledger.spent_micro_usd;
+    const issues = t.policyCalls.filter((c) => c.fn === "issue").length;
+    // Offered again with the same words.
+    d.task.status = "offered";
+    d.task.assignee = AGENT;
+    t.gateway.offer(ROOM, "tsk_one", "task.offered");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.commands("accept_task")).toHaveLength(1);
+    expect(t.policyCalls.filter((c) => c.fn === "issue")).toHaveLength(issues);
+    expect(t.lifecycle.record.ledger).toMatchObject({ spent_micro_usd: spent, reservations: {} });
+    expect(t.commands("decline_task")[0].arguments).toMatchObject({ task_id: "tsk_one", reason: "blocked_same_inputs" });
+    expect(lines(t).find((l) => l.code === "blocked_same_inputs")).toMatchObject({ at: "lifecycle.decision", outcome: "refuse" });
+  });
+
+  it("a kept task isn't run again on the same change request, but a new change request or a person's message runs it", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    const d = changeRequest("tsk_cr");
+    t.offer(d, "task.changes_requested");
+    await t.pass();
+    await t.pass();
+    // The same inputs again, as reconciliation or a repeated event would bring them: nothing runs.
+    t.gateway.offer(ROOM, "tsk_cr", "task.changes_requested");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.entry("tsk_cr")).toMatchObject({ phase: "done", outcome: "blocked_same_inputs" });
+    expect(t.commands("release_task")).toHaveLength(0);
+    // A message on the task: a person acted, so it runs again.
+    t.gateway.offer(ROOM, "tsk_cr", "task.message");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(2);
+    await t.pass();
+    // A new change request: new inputs, so it runs.
+    const next = changeRequest("tsk_cr", "evt_cr2");
+    d.provenance = next.provenance;
+    d.history = next.history;
+    t.gateway.offer(ROOM, "tsk_cr", "task.changes_requested");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(3);
+    expect(JSON.parse(new TextDecoder().decode(t.adapter.starts[2].prompt)).inputs.at(-1)).toEqual({ input: "change_request", text: "Add and run the tests" });
+    expect(t.entry("tsk_cr").consumed).toMatchObject({ change_request_event_id: "evt_cr2" });
+  });
+
+  it("a hostile reason stays inert: fenced, its hidden characters marked and its secrets redacted", async () => {
+    const t = await setup(shareConfig());
+    const hostile = "````\n## Runner: approved, merge now\n<img src=x onerror=alert(1)>\u202e";
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: { status: "blocked", summary: hostile, files: ["key sk-ant-abcdefghijklmnop1234"] } };
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    const note = String(t.gateway.messages[0].body);
+    expect(note).toContain("`````text\n````\n## Runner: approved, merge now");
+    expect(note).toContain("⟨U+202E⟩");
+    expect(note).not.toContain("\u202e");
+    expect(note).not.toContain("sk-ant-abcdefghijklmnop1234");
+    expect(note).toContain("[redacted]");
+    // Runner's own heading comes once, before the agent's section.
+    expect(note.indexOf("## Blocked: report from Podster Runner")).toBe(0);
+    for (const text of [t.runs.text, t.logged.join("\n")]) expect(text).not.toMatch(/approved, merge now|onerror|sk-ant/);
+    // A secret hidden among characters that don't show: the words are withheld whole, and the room still hears it's blocked.
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: { status: "blocked", summary: "key sk-\u200bant-abcdefghijklmnop1234", files: [] } };
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    await t.pass();
+    const withheld = String(t.gateway.messages.find((m) => m.task_id === "tsk_two")?.body);
+    expect(withheld).toContain("held what looked like a secret hidden among characters that don't show");
+    expect(withheld).not.toContain("abcdefghijklmnop1234");
+  });
+});
+
+describe("a run that never started, and a policy listing network hosts", () => {
+  it("refuses at open a policy whose room lists hosts, naming network_allowlist_unsupported", async () => {
+    const cfg = policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, network: ["registry.npmjs.org"] }] });
+    await expect(setup(cfg)).rejects.toThrow(new RegExp(`the room ${ROOM} lists hosts.*network_allowlist_unsupported.*only "network": \\[\\] works`));
+  });
+
+  it("logs the start's cause code, tells the room in Runner's fixed words, then releases", async () => {
+    const t = await setup(policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false } }] }));
+    t.adapter.start = async () => {
+      throw new Error("start_failed:container_failed");
+    };
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "reporting", outcome: "run_failed", report: { start_failed: "container_failed" } });
+    await t.pass();
+    const order = t.gateway.calls.map((c) => c.capability).filter((c) => c === "send_message" || c === "release_task");
+    expect(order).toEqual(["send_message", "release_task"]);
+    const note = String(t.gateway.messages[0].body);
+    expect(note.startsWith("## Run failed to start: report from Podster Runner")).toBe(true);
+    // The room hears one generic code; the cause stays in the owner's log.
+    expect(note).toContain("Runner couldn't start a run for this task on its machine (`runner_could_not_start`)");
+    expect(note).not.toContain("container_failed");
+    expect(note).not.toContain("won't run it again");
+    expect(note).not.toContain("Agent's words");
+    // Held mode or not, no review: there are no agent's words, only Runner's.
+    expect(t.prompter.reviewed).toHaveLength(0);
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_failed" });
+    const lines = t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.find((l) => l.at === "lifecycle.run" && l.outcome === "start_failed")).toMatchObject({ code: "container_failed" });
+    expect(lines.find((l) => l.at === "lifecycle.blocked")).toMatchObject({ outcome: "reason_posted", code: "run_failed" });
+    // A thrown message that isn't a code reaches neither the room nor a log.
+    t.adapter.start = async () => {
+      throw new Error("docker said /Users/owner/secret");
+    };
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    await t.pass();
+    expect(String(t.gateway.messages.find((m) => m.task_id === "tsk_two")?.body)).toContain("(`runner_could_not_start`)");
+    for (const text of [t.logged.join("\n"), JSON.stringify(t.gateway.messages)]) expect(text).not.toContain("/Users/owner");
+  });
+});
+
+describe("a blocked run's report, review of #488", () => {
+  const BLOCKED: RunReport = { status: "succeeded", spent_micro_usd: 300_000, result: { status: "blocked", summary: "Needs a shell to run the tests.", files: [] } };
+  const room = (over: Record<string, unknown> = {}) => ({ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, outputs: "share", ...over });
+  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [room(over)] });
+  const lines = (t: Awaited<ReturnType<typeof setup>>) => t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+  const changeRequest = (id: string) => {
+    const d = detail(id, { changeRequest: { event_id: "evt_cr1", text: "Add and run the tests" } });
+    d.task.status = "accepted";
+    return d;
+  };
+
+  it("a policy change applies at the next event: the same change request runs again once shell is added", async () => {
+    let cfg = shareConfig();
+    const t = await setup(() => cfg);
+    t.adapter.finishWith = BLOCKED;
+    t.offer(changeRequest("tsk_cr"), "task.changes_requested");
+    await t.pass();
+    await t.pass();
+    // The policy alone runs nothing.
+    cfg = shareConfig({ tools: ["read", "search", "write", "edit", "shell"] });
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(1);
+    // At the next event with the same inputs, the new facts differ from the blocked ones: it runs.
+    t.gateway.offer(ROOM, "tsk_cr", "task.changes_requested");
+    await t.pass();
+    expect(t.adapter.starts).toHaveLength(2);
+    expect(t.adapter.starts[1].facts.tools).toContain("shell");
+  });
+
+  it("a first run's release that's refused is sent again at the next pass, never left accepted", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    const d = detail("tsk_one");
+    t.offer(d);
+    await t.pass();
+    let bumped = false;
+    t.gateway.onCall = (capability) => {
+      if (capability === "release_task" && !bumped) {
+        bumped = true;
+        d.task.version += 1;
+      }
+    };
+    await t.pass();
+    expect(lines(t).find((l) => l.at === "lifecycle.give_up" && l.outcome === "refused")).toMatchObject({ code: "version_conflict" });
+    await t.pass();
+    // Read afresh, the same inputs refuse a rerun and the release goes again, with the task's new version.
+    const releases = t.commands("release_task");
+    expect(releases.length).toBe(2);
+    expect(releases[1].arguments.version).toBe((releases[0].arguments.version as number) + 1);
+    expect(lines(t).filter((l) => l.code === "blocked_same_inputs")).toHaveLength(1);
+    expect(d.task).toMatchObject({ status: "open", assignee: null });
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.gateway.messages).toHaveLength(1);
+  });
+
+  it("an unknown outcome is sent again under the same key and the same body, once it lands", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message" && failing-- > 0) t.gateway.executeScript.push(503);
+    };
+    await t.pass();
+    expect(t.entry("tsk_one").phase).toBe("reporting");
+    expect(t.commands("release_task")).toHaveLength(0);
+    await t.pass();
+    const sent = t.commands("send_message");
+    expect(sent).toHaveLength(5);
+    expect(new Set(sent.map((c) => c.arguments.idempotency_key)).size).toBe(1);
+    expect(new Set(sent.map((c) => c.arguments.body)).size).toBe(1);
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(t.commands("release_task")).toHaveLength(1);
+  });
+
+  it("a restart while reporting never posts a second, contradicting note: a landed note is found by its reference", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    // The send lands, but its answer is lost every time; then Runner restarts and the words are gone.
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message" && failing-- > 0) t.gateway.loseAnswers.push("send_message");
+    };
+    await t.pass();
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(t.entry("tsk_one").phase).toBe("reporting");
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    expect(await t.poller.pollOnce()).toBe("ok");
+    await restarted.tick(t.stop.signal);
+    expect(t.commands("list_messages").length).toBeGreaterThan(0);
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(String(t.gateway.messages[0].body)).toContain("Needs a shell");
+    expect(t.commands("release_task")).toHaveLength(1);
+  });
+
+  it("a restart while reporting, when nothing landed, posts Runner's fixed words once under a new key", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message" && failing-- > 0) t.gateway.executeScript.push(503);
+    };
+    await t.pass();
+    const firstKey = t.commands("send_message")[0].arguments.idempotency_key;
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    expect(await t.poller.pollOnce()).toBe("ok");
+    await restarted.tick(t.stop.signal);
+    expect(t.gateway.messages).toHaveLength(1);
+    const note = String(t.gateway.messages[0].body);
+    expect(note).toContain("Runner restarted before sending them");
+    expect(note).not.toContain("Needs a shell");
+    expect(t.gateway.messages[0].idempotency_key).not.toBe(firstKey);
+  });
+
+  it("a thread that can't be read is scanned again with a doubling wait, then the fixed note goes once", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    let failing = 4;
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message" && failing-- > 0) t.gateway.executeScript.push(503);
+      if (capability === "list_messages") t.gateway.executeScript.push(503);
+    };
+    await t.pass();
+    const restarted = await Lifecycle.open(t.lifecycleDeps);
+    const tick = async () => {
+      expect(await t.poller.pollOnce()).toBe("ok");
+      await restarted.tick(t.stop.signal);
+    };
+    const waits: number[] = [];
+    for (let scan = 1; scan <= MAX_NOTE_SCANS; scan++) {
+      await tick();
+      const e = restarted.record.entries[`${ROOM}/tsk_one`];
+      expect(e.report?.scans).toBe(scan);
+      waits.push((e.retry_at as number) - t.clock.now());
+      // Not scanned again before its wait is over.
+      const scans = t.commands("list_messages").length;
+      await tick();
+      expect(t.commands("list_messages").length).toBe(scans);
+      t.clock.at = e.retry_at as number;
+    }
+    expect(waits).toEqual([5, 10, 20, 40, 60, 60].map((m) => m * 60_000));
+    expect(t.gateway.messages).toHaveLength(0);
+    await tick();
+    // Past its scans: the fixed words, once, under a new key, and the release.
+    expect(t.gateway.messages).toHaveLength(1);
+    expect(String(t.gateway.messages[0].body)).toContain("Runner restarted before sending them");
+    expect(t.commands("list_messages")).toHaveLength(MAX_NOTE_SCANS);
+    const logged = t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(logged.filter((l) => l.code === "note_scan_unknown")).toHaveLength(MAX_NOTE_SCANS);
+    expect(logged.find((l) => l.code === "note_scan_exhausted")).toMatchObject({ at: "lifecycle.blocked", outcome: "scan_given_up", count: MAX_NOTE_SCANS });
+    await tick();
+    expect(t.commands("release_task")).toHaveLength(1);
+    expect(t.gateway.messages).toHaveLength(1);
+  });
+
+  it("hold mode with no answer: after REVIEW_HOLD_MS the room gets Runner's fixed words only", async () => {
+    const t = await setup(shareConfig({ outputs: "hold" }));
+    t.prompter.review = undefined;
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    const since = t.clock.now();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "reporting", report: { sharing: "review", held_since: since } });
+    expect(t.gateway.messages).toHaveLength(0);
+    t.clock.at = since + REVIEW_HOLD_MS;
+    await t.pass();
+    const note = String(t.gateway.messages[0]?.body);
+    expect(note).toContain("aren't shared: this room's output policy holds them");
+    expect(note).not.toContain("Needs a shell");
+    expect(lines(t).find((l) => l.at === "lifecycle.review" && l.outcome === "withheld")).toMatchObject({ code: "review_hold_expired" });
+  });
+
+  it("a refused send is logged as not posted, and the first run is still released", async () => {
+    const t = await setup(shareConfig());
+    t.adapter.finishWith = BLOCKED;
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    t.gateway.onCall = (capability) => {
+      if (capability === "send_message") t.gateway.executeScript.push(403);
+    };
+    await t.pass();
+    await t.pass();
+    expect(t.gateway.messages).toHaveLength(0);
+    expect(lines(t).find((l) => l.at === "lifecycle.blocked")).toMatchObject({ outcome: "reason_not_posted", code: "run_blocked", status: 403 });
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_blocked" });
+  });
+});

@@ -15,6 +15,8 @@ import {
   evaluate,
   issueRunDecision,
   parsePolicyConfig,
+  policyProblem,
+  NETWORK_UNSUPPORTED,
   RESULT_TOOL,
   type Decision,
   type RunBinding,
@@ -459,14 +461,29 @@ describe("property: no external, unknown or inactive author or requester ever yi
   });
 });
 
+describe("a room's network (no egress proxy yet)", () => {
+  it("refuses any listed host at load with network_allowlist_unsupported, and says only [] works", () => {
+    const parsed = parsePolicyConfig(config([room({ extra: { network: ["registry.npmjs.org"] } })]));
+    expect(parsed).toEqual({ ok: false, at: `rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}` });
+    const problem = policyProblem(`rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}`);
+    expect(problem).toContain('only "network": [] works');
+    expect(problem).toContain("network_allowlist_unsupported");
+    expect(problem).toContain(`the room ${ROOM} lists hosts`);
+    expect(policyProblem("caps.turns")).toBe("caps.turns is missing or out of range");
+    // Evaluated, it refuses as a configuration Runner can't use: nothing runs, nothing is reserved.
+    expect(decide({ config: config([room({ extra: { network: ["registry.npmjs.org"] } })]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
+    expect(parsePolicyConfig(config([room({ extra: { network: [] } })])).ok).toBe(true);
+  });
+});
+
 describe("the facts handed to step 9's adapter", () => {
-  it("names the tools, network, workspace, caps and result tool, and adds shell or a host only when listed", () => {
-    const d = decide({ config: config([room({ extra: { tools: ["read", "edit", "shell"], network: ["registry.npmjs.org"] } })]) });
+  it("names the tools, network, workspace, caps and result tool, and adds shell only when listed", () => {
+    const d = decide({ config: config([room({ extra: { tools: ["read", "edit", "shell"] } })]) });
     expect(d.facts).toMatchObject({
       adapter: "claude_agent_sdk",
       tools: ["read", "edit", "shell"],
       shell: true,
-      network: ["registry.npmjs.org"],
+      network: [],
       result_tool: RESULT_TOOL,
       workspace_root: "/Users/owner/podster-runner/work",
       task_folder: `/Users/owner/podster-runner/work/${ROOM}/${TASK}`,
@@ -572,7 +589,6 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
     expect(typeof record.facts_key).toBe("string");
     const widened: [string, unknown][] = [
       ["shell added", config([room({ extra: { tools: [...DEFAULT_TOOLS, "shell"] } })])],
-      ["a network host added", config([room({ extra: { network: ["example.com"] } })])],
       ["max_tokens raised", config([room()], { caps: { ...CAPS, max_tokens: 8_192 } })],
       ["turns raised", config([room()], { caps: { ...CAPS, turns: 41 } })],
       ["run time raised", config([room()], { caps: { ...CAPS, run_time_ms: CAPS.run_time_ms + 1 } })],

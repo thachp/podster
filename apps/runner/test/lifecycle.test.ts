@@ -13,6 +13,7 @@ import { sha256Hex } from "../src/core/prompt.js";
 import { budgetOf, DAY_MS, MemoryRunStore, reserve, rolled, settle, emptyRuns } from "../src/core/runs.js";
 import type { ResultView } from "../src/core/results.js";
 import { MemoryStateStore } from "../src/core/state.js";
+import type { FailureRecord } from "../src/core/runtime.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock, type Detail } from "./fake-gateway.js";
 
@@ -157,7 +158,9 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
     },
   };
   let ids = 0;
-  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
+  const diagnosed: FailureRecord[] = [];
+  const diagnostics = { file: "/home/logs/errors.jsonl", record: (f: FailureRecord) => void diagnosed.push(f) };
+  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, diagnostics, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
   const lifecycle = await Lifecycle.open(lifecycleDeps);
   const stop = new AbortController();
   /** Offers a task: its record in the gateway and its inbox event. */
@@ -172,7 +175,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
   };
   const entry = (task: string) => lifecycle.record.entries[`${ROOM}/${task}`];
   const commands = (name: string) => gateway.calls.filter((c) => c.capability === name);
-  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, hooks, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline };
+  return { clock, gateway, secrets, state, logged, poller, adapter, prompter, runs, policyCalls, hooks, lifecycle, lifecycleDeps, stop, offer, pass, entry, commands, timeline, diagnosed };
 }
 
 /** The next `n` accepts each answer 503, with nothing applied. */
@@ -1833,5 +1836,45 @@ describe("a blocked run's report, review of #488", () => {
     expect(t.gateway.messages).toHaveLength(0);
     expect(lines(t).find((l) => l.at === "lifecycle.blocked")).toMatchObject({ outcome: "reason_not_posted", code: "run_blocked", status: 403 });
     expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_blocked" });
+  });
+});
+
+describe("a failure's specific cause (the owner's request of 2026-11-20)", () => {
+  const lines = (t: Awaited<ReturnType<typeof setup>>) => t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+
+  it("logs and records the driver's own code for a failed run, not only run_failed", async () => {
+    const t = await setup();
+    t.adapter.finishWith = { status: "failed", spent_micro_usd: 10, stop_reason: "driver_failed", stop_detail: "exec_exited" };
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(lines(t).find((l) => l.at === "lifecycle.run" && l.outcome === "run_failed")).toMatchObject({ code: "exec_exited", count: 10 });
+    expect(t.diagnosed).toContainEqual(expect.objectContaining({ at: "lifecycle.run", code: "exec_exited", task: "tsk_one" }));
+    // Podster still hears the generic class.
+    await t.pass();
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_failed" });
+  });
+
+  it("names the rule a malformed result broke, and records no word of it", async () => {
+    const t = await setup();
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: { status: "completed", summary: "secret plan", files: ["../escape"] } };
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(lines(t).find((l) => l.at === "lifecycle.run" && l.outcome === "result_invalid")).toMatchObject({ code: "result_file_outside_folder" });
+    expect(t.diagnosed).toContainEqual(expect.objectContaining({ code: "result_file_outside_folder" }));
+    expect(JSON.stringify([t.diagnosed, t.logged])).not.toMatch(/secret plan|escape/);
+  });
+
+  it("records a refused give-up's raw error locally, and only its code in the log", async () => {
+    const t = await setup();
+    t.adapter.finishWith = { status: "failed", spent_micro_usd: 1 };
+    const d = detail("tsk_one");
+    t.offer(d);
+    t.gateway.onCall = (capability) => {
+      if (capability === "release_task") d.task.version += 5;
+    };
+    await t.pass();
+    await t.pass();
+    expect(lines(t).find((l) => l.at === "lifecycle.give_up" && l.outcome === "refused")).toMatchObject({ code: "version_conflict", status: 409 });
+    expect(t.diagnosed.find((f) => f.at === "lifecycle.give_up")).toMatchObject({ code: "version_conflict", task: "tsk_one" });
   });
 });

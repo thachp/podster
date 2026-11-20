@@ -74,7 +74,7 @@ import type { NudgeBell } from "./nudge.js";
 import { AuthorityEnded, waitForNext, type Poller } from "./poller.js";
 import { MAX_PROMPT_BYTES } from "./run-interface.js";
 import type { Offer } from "./state.js";
-import type { Clock, Logger } from "./runtime.js";
+import type { Clock, Diagnostics, Logger } from "./runtime.js";
 import { budgetOf, clockWentBack, dayOf, newEntry, owedReport, owedSubmission, reserve, settle, type After, type BlockedReport, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore, type Submission } from "./runs.js";
 
 /** The check-in's fixed maximum interval during a run (S-33, S-43). **Proposed** figure. */
@@ -216,6 +216,8 @@ export type LifecycleDeps = {
   prompter: OwnerPrompter;
   clock: Clock;
   log: Logger;
+  /** The local diagnostics file: each failure's code and raw error, redacted and bounded there, never sent anywhere. */
+  diagnostics?: Diagnostics;
   /** For tests, to watch the calls. The policy itself by default. */
   policy?: PolicyCalls;
   /** Idempotency keys and run IDs. */
@@ -337,6 +339,11 @@ export class Lifecycle {
     this.deps.log(at, outcome, { agent: this.deps.poller.agentId, workspace: entry.workspace_id, task: entry.task_id, ...extra });
   }
 
+  /** A failure, for the local diagnostics file only: its code, the task's IDs and the raw error, if there is one. */
+  private diagnose(at: string, entry: { workspace_id: string; task_id: string; run_ref?: string | null }, code: string, error?: unknown) {
+    this.deps.diagnostics?.record({ at, code, workspace: entry.workspace_id, task: entry.task_id, ...(entry.run_ref ? { run_ref: entry.run_ref } : {}), ...(error === undefined ? {} : { error }) });
+  }
+
   /**
    * Ends every attempt that has no process: its reservation settles at zero, and nothing more is sent for it. A run that
    * may still be going stays held.
@@ -389,6 +396,7 @@ export class Lifecycle {
       if (signal.aborted) return "stopped";
       const failure = error instanceof GatewayError ? error : new GatewayError(0, "unknown");
       this.deps.log("lifecycle.tick", "unreachable", { agent: this.deps.poller.agentId, status: failure.status, code: failure.code });
+      this.deps.diagnostics?.record({ at: "lifecycle.tick", code: failure.code, error });
       return "idle";
     } finally {
       this.busy = false;
@@ -704,6 +712,7 @@ export class Lifecycle {
           // The task changed under it: it's read and evaluated afresh at its next turn.
           await this.put({ ...entry, phase: "done", give_up: null, marker: "", outcome: `give_up_${error.code}` });
           this.log("lifecycle.give_up", "refused", entry, { status: error.status, code: error.code });
+          this.diagnose("lifecycle.give_up", entry, error.code, error);
           return;
         }
         if (attempt + 1 < COMMAND_TRIES) await this.backoff(attempt, signal, error);
@@ -875,6 +884,7 @@ export class Lifecycle {
       if (signal.aborted) return "aborted";
       if (!(error instanceof RepoPathError)) throw error;
       this.log("lifecycle.repository", error.transient ? "unavailable" : "refused", entry, { code: error.code });
+      this.diagnose("lifecycle.repository", entry, error.code, error);
       if (error.transient) {
         // Passing: the decision is dropped and the task evaluated afresh at its next turn, with a new checkout.
         path.forget(entry.workspace_id, entry.task_id);
@@ -938,10 +948,12 @@ export class Lifecycle {
       if (error.transient) {
         // Passing: the finished work is kept and published again at a later pass, never released (ruling 5 on #462).
         this.log("lifecycle.publish", "unavailable", entry, { code: error.code });
+        this.diagnose("lifecycle.publish", entry, error.code, error);
         return { wait: `repo_${error.code}` };
       }
       this.titles.delete(keyOf(entry.workspace_id, entry.task_id));
       this.log("lifecycle.publish", "refused", entry, { code: error.code });
+      this.diagnose("lifecycle.publish", entry, error.code, error);
       await this.giveUp(entry, "accepted", `repo_${error.code}`);
       return null;
     } finally {
@@ -1064,7 +1076,10 @@ export class Lifecycle {
     const result = await this.safeStop(handle);
     const spent = typeof report.spent_micro_usd === "number" ? report.spent_micro_usd : null;
     if (report.status !== "succeeded") {
-      await this.stopped(entry, result, spent, `run_${report.status}`, { kind: "release", reason: `run_${report.status}` });
+      // The most specific cause the adapter gave: the driver's own code, else Runner's stop reason.
+      const cause = codeOf(report.stop_detail) ?? codeOf(report.stop_reason) ?? `run_${report.status}`;
+      this.diagnose("lifecycle.run", entry, cause);
+      await this.stopped(entry, result, spent, `run_${report.status}`, { kind: "release", reason: `run_${report.status}` }, true, cause);
       return "idle";
     }
     // Step 11: the result is evidence, checked again here, so an adapter that hands over a malformed one is caught, not
@@ -1079,17 +1094,19 @@ export class Lifecycle {
       await this.stopped(entry, result, spent, "run_blocked", { kind: "blocked" });
     } else {
       const reason = !report.result ? "result_missing" : "result_invalid";
-      await this.stopped(entry, result, spent, reason, { kind: "release", reason });
+      const cause = parsed && !parsed.ok ? parsed.rule : reason;
+      this.diagnose("lifecycle.run", entry, cause);
+      await this.stopped(entry, result, spent, reason, { kind: "release", reason }, true, cause);
     }
     return "idle";
   }
 
   /** Settles the run's reservation and records what follows: at once if the stop is confirmed, held if it isn't. */
-  private async stopped(entry: RunEntry, result: StopResult, spent: number | null, outcome: string, after: After, act = true) {
+  private async stopped(entry: RunEntry, result: StopResult, spent: number | null, outcome: string, after: After, act = true, code?: string) {
     const ledger = settle(this.state.ledger, entry.reservation, spent, this.now());
     this.state = { ...this.state, ledger };
     const settled: RunEntry = { ...entry, reservation: null, outcome };
-    this.log("lifecycle.run", outcome, entry, { count: spent ?? undefined });
+    this.log("lifecycle.run", outcome, entry, { count: spent ?? undefined, ...(code ? { code } : {}) });
     if (result !== "stopped") {
       await this.put({ ...settled, phase: "held", after_stop: after });
       this.log("lifecycle.run", "held", entry, { code: outcome });
@@ -1273,6 +1290,7 @@ export class Lifecycle {
         if (!(error instanceof GatewayError)) throw error;
         if (meaningOf(error) === "refused" && !SUBMIT_AGAIN.has(error.code)) {
           this.log("lifecycle.submit", "refused", entry, { status: error.status, code: error.code });
+          this.diagnose("lifecycle.submit", entry, error.code, error);
           // The task changed under it: read afresh. Anything else the server refused can't be submitted as it is.
           if (error.code === "version_conflict") return notSubmitted("version_conflict");
           return release(`submit_${error.code}`);
@@ -1513,6 +1531,8 @@ const NOTE_PAGES = 40;
 async function referenceOf(key: string): Promise<string> {
   return `rr_${(await sha256Hex(new TextEncoder().encode(`runner-report:${key}`))).slice(0, 16)}`;
 }
+/** A value that is a fixed code, or undefined. */
+const codeOf = (v: unknown): string | undefined => (typeof v === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(v) ? v : undefined);
 
 /** A failed start's cause as a code: the adapter's `start_failed:<code>`, or its own bare code; `unknown` otherwise. */
 function startCause(error: unknown): string {

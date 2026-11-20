@@ -34,7 +34,7 @@ import type { RunAdapter, RunHandle, RunReport, RunStart, RunStatus, StopResult 
 import { RunBroker, type BrokerRefusal, type BrokerRequest, type Forward, type HardStop, type ProviderProfile } from "./broker.js";
 import type { Adapter, RunFacts } from "./policy.js";
 import { CHANGE_TYPES } from "./pull-text.js";
-import type { Clock, Logger } from "./runtime.js";
+import type { Clock, Diagnostics, Logger } from "./runtime.js";
 import { decideToolCall, MAX_RESULT_FILES, MAX_SUMMARY_CHARS, parseRunResult, TASK_FOLDER_IN_CONTAINER, type AllowedCall, type ToolCall, type ToolDecision } from "./tool-policy.js";
 
 /** An error's message when it's a bare code, as Runner's own errors are; `unknown` for anything else. */
@@ -272,6 +272,8 @@ export type SupervisedDeps = {
   clock: Clock;
   log: Logger;
   progress?: (event: ProgressEvent) => void;
+  /** The local diagnostics file: the raw error behind a failure, redacted and bounded there, never sent anywhere. */
+  diagnostics?: Diagnostics;
 };
 
 const REFUSED: ToolOutput = { ok: false, text: "Runner refused this call." };
@@ -323,6 +325,7 @@ export class SupervisedAdapter implements RunAdapter {
       const cause = codeOf(error);
       await live.halt("start_failed");
       this.deps.log("adapter.run", "start_failed", { workspace: run.workspace_id, task: run.task_id, code: cause });
+      this.deps.diagnostics?.record({ at: "adapter.run", code: cause, workspace: run.workspace_id, task: run.task_id, run_ref: run.run_ref, error });
       throw new Error(`start_failed:${cause}`);
     }
     return live.handle;
@@ -516,6 +519,7 @@ class LiveRun {
     // The driver's own code, when it is one: a fixed lower-case identifier; anything else is the SDK's, never kept as text.
     const message = error instanceof Error ? error.message : "";
     this.detail = threw ? (/^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "sdk_error") : null;
+    if (threw) this.deps.diagnostics?.record({ at: "adapter.driver", code: this.detail as string, workspace: this.run.workspace_id, task: this.run.task_id, run_ref: this.run.run_ref, error });
     // The SDK's own end, its turn limit or any error of its, once Runner's broker has let the run's whole turn cap go: the
     // cap reached is the cause (the tenth real run of #460). Only then: below the cap, or for a failure Runner names
     // itself (`hook_bypassed`, `plugins_unexpected` and the rest), the driver's failure stands.
@@ -544,6 +548,7 @@ class LiveRun {
       const parsed = parseRunResult(outcome.result);
       status = parsed.ok ? "succeeded" : "failed";
       code = parsed.ok ? null : "result_invalid";
+      if (!parsed.ok) this.detail ??= parsed.rule;
       result = parsed.ok ? parsed.value : null;
     }
     this.emit("ended", code ?? status);
@@ -560,8 +565,11 @@ class LiveRun {
     if (!decision.allow) {
       const id = callIdOf(call);
       if (id !== null) this.refused.add(id);
-      this.log("adapter.tool", "refused", decision.reason);
-      this.emit("tool_refused", decision.reason);
+      // A refused result names the rule it broke, so the log says which (the agent is told in fixed words).
+      this.log("adapter.tool", "refused", decision.rule ?? decision.reason);
+      // Which rule, as a code only: never the agent's words.
+      if (decision.rule) this.deps.diagnostics?.record({ at: "adapter.tool", code: decision.rule, workspace: this.run.workspace_id, task: this.run.task_id, run_ref: this.run.run_ref });
+      this.emit("tool_refused", decision.rule ?? decision.reason);
     }
     return decision;
   }

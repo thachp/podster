@@ -45,7 +45,24 @@ export type AllowedCall =
 
 export type ToolRefusal = "call_invalid" | "tool_not_allowed" | "shell_not_allowed" | "input_invalid" | "path_outside_folder" | "path_not_allowed" | "result_invalid" | "run_stopped";
 
-export type ToolDecision = { allow: true; call: AllowedCall } | { allow: false; reason: ToolRefusal };
+/** Which rule a refused structured result broke: a fixed code, logged and told to the agent, never its text. */
+export const RESULT_RULES = [
+  "result_not_object",
+  "result_missing_field",
+  "result_unknown_field",
+  "result_status_invalid",
+  "result_summary_empty",
+  "result_summary_too_long",
+  "result_summary_control_char",
+  "result_files_not_list",
+  "result_too_many_files",
+  "result_file_outside_folder",
+  "result_file_not_allowed",
+  "result_file_duplicate",
+] as const;
+export type ResultRule = (typeof RESULT_RULES)[number];
+
+export type ToolDecision = { allow: true; call: AllowedCall } | { allow: false; reason: ToolRefusal; rule?: ResultRule };
 
 /**
  * A run's structured result: bounded, and only ever data. `change_type` is the kind of change the agent says it made,
@@ -112,7 +129,8 @@ export function taskPath(raw: unknown, folderAllowed = false): { ok: true; path:
  * What a refusal tells the model: fixed text for each code, so a model that named a path its own way can name it again
  * the folder's way. Nothing of the call's input is in it.
  */
-export function refusalText(reason: ToolRefusal): string {
+export function refusalText(reason: ToolRefusal, rule?: ResultRule): string {
+  if (reason === "result_invalid" && rule) return `Runner refused this result: ${RESULT_RULE_TEXT[rule]} Fix that and give the structured result again.`;
   switch (reason) {
     case "path_outside_folder":
       return `Runner refused this call: the path is outside the task's folder. Give a path relative to the task's folder, such as notes.txt or src/a.ts; the folder is also ${TASK_FOLDER_IN_CONTAINER}, your working folder.`;
@@ -123,19 +141,42 @@ export function refusalText(reason: ToolRefusal): string {
   }
 }
 
+/** Each result rule, in fixed words for the agent: what was wrong, never what it wrote. */
+export const RESULT_RULE_TEXT: Record<ResultRule, string> = {
+  result_not_object: "the result must be an object with status, summary and files.",
+  result_missing_field: "a required field is missing: status, summary and files are all required.",
+  result_unknown_field: "it has an unknown field: only status, summary, files and change_type are allowed.",
+  result_status_invalid: "status must be completed or blocked.",
+  result_summary_empty: "summary must not be empty.",
+  result_summary_too_long: `summary is longer than ${MAX_SUMMARY_CHARS} characters; shorten it.`,
+  result_summary_control_char: "summary holds a control character; only tabs and line breaks are allowed.",
+  result_files_not_list: "files must be a list of paths.",
+  result_too_many_files: `files lists more than ${MAX_RESULT_FILES} paths.`,
+  result_file_outside_folder: `a file in files is not a path inside the task's folder; give paths relative to it, such as src/a.ts (the folder is ${TASK_FOLDER_IN_CONTAINER}).`,
+  result_file_not_allowed: "a file in files isn't allowed: Git's own folder, a name starting with - and a name ending in a space or a dot are refused.",
+  result_file_duplicate: "files names the same path twice.",
+};
+
 /**
  * The structured result, bounded: a status, a summary of at most `MAX_SUMMARY_CHARS`, and files inside the folder. An
  * optional `change_type` not on the list is dropped, never a reason to refuse the result: the title's type is then `chore`.
  */
-export function parseRunResult(v: unknown): { ok: true; value: RunResult } | { ok: false } {
-  if (!shaped(v, ["status", "summary", "files"], ["change_type"])) return { ok: false };
-  if (v.status !== "completed" && v.status !== "blocked") return { ok: false };
-  if (!text(v.summary, MAX_SUMMARY_CHARS, 1) || CONTROL.test(v.summary)) return { ok: false };
-  if (!Array.isArray(v.files) || v.files.length > MAX_RESULT_FILES) return { ok: false };
+export function parseRunResult(v: unknown): { ok: true; value: RunResult } | { ok: false; rule: ResultRule } {
+  const no = (rule: ResultRule) => ({ ok: false as const, rule });
+  if (!isObj(v)) return no("result_not_object");
+  if (!["status", "summary", "files"].every((k) => Object.hasOwn(v, k))) return no("result_missing_field");
+  if (!Object.keys(v).every((k) => ["status", "summary", "files", "change_type"].includes(k))) return no("result_unknown_field");
+  if (v.status !== "completed" && v.status !== "blocked") return no("result_status_invalid");
+  if (typeof v.summary !== "string" || v.summary.length === 0) return no("result_summary_empty");
+  if (!text(v.summary, MAX_SUMMARY_CHARS, 1)) return no("result_summary_too_long");
+  if (CONTROL.test(v.summary)) return no("result_summary_control_char");
+  if (!Array.isArray(v.files)) return no("result_files_not_list");
+  if (v.files.length > MAX_RESULT_FILES) return no("result_too_many_files");
   const files: string[] = [];
   for (const f of v.files) {
     const path = taskPath(f);
-    if (!path.ok || files.includes(path.path)) return { ok: false };
+    if (!path.ok) return no(path.reason === "path_not_allowed" ? "result_file_not_allowed" : "result_file_outside_folder");
+    if (files.includes(path.path)) return no("result_file_duplicate");
     files.push(path.path);
   }
   return { ok: true, value: { status: v.status, summary: v.summary, files, ...(isChangeType(v.change_type) ? { change_type: v.change_type } : {}) } };
@@ -150,7 +191,7 @@ export function decideToolCall(facts: Pick<RunFacts, "tools" | "shell" | "result
 
   if (call.tool === facts.result_tool && call.tool === RESULT_TOOL) {
     const result = parseRunResult(input);
-    return result.ok ? { allow: true, call: { call_id, tool: RESULT_TOOL, result: result.value } } : refuse("result_invalid");
+    return result.ok ? { allow: true, call: { call_id, tool: RESULT_TOOL, result: result.value } } : { allow: false, reason: "result_invalid", rule: result.rule };
   }
   const tool = call.tool as Tool;
   if (tool === "shell") {

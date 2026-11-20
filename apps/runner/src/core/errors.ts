@@ -123,3 +123,17 @@ export function meaningOf(error: unknown): Meaning {
   if (error.status === 401 || AUTHORITY.has(error.code)) return "authority";
   return "refused";
 }
+
+/**
+ * An error whose message is a fixed code, with the facts a person needs to see why (the owner's request of 2026-11-20):
+ * a command's exit code and the tail of its error output. The detail goes only to the local diagnostics file, redacted
+ * there, never to a log line, Podster or the network.
+ */
+export class DetailedError extends Error {
+  /** `cut`: the error output was cut at its head cap, so its last word may be part of a secret. */
+  readonly detail: { exit_code?: number; stderr?: string; errno?: string; cut?: boolean };
+  constructor(code: string, detail: { exit_code?: number; stderr?: string; errno?: string; cut?: boolean } = {}) {
+    super(code);
+    this.detail = detail;
+  }
+}

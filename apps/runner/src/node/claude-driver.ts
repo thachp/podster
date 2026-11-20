@@ -576,7 +576,7 @@ export class ClaudeDriver implements AgentDriver {
       checked.add(call_id);
       const key = keyOf(name, input.tool_input);
       pending.set(key, [...(pending.get(key) ?? []), call_id]);
-      return decision.allow ? {} : deny(refusalText(decision.reason));
+      return decision.allow ? {} : deny(refusalText(decision.reason, decision.rule));
     };
 
     const handler = (name: string) => async (args: Record<string, unknown>, extra: unknown) => {

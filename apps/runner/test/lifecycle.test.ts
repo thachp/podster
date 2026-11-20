@@ -1597,3 +1597,42 @@ describe("a blocked run (the architect's ruling of 2026-11-20)", () => {
     expect(withheld).not.toContain("abcdefghijklmnop1234");
   });
 });
+
+describe("a run that never started, and a policy listing network hosts", () => {
+  it("refuses at open a policy whose room lists hosts, naming network_allowlist_unsupported", async () => {
+    const cfg = policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, network: ["registry.npmjs.org"] }] });
+    await expect(setup(cfg)).rejects.toThrow(/network_allowlist_unsupported.*only "network": \[\] works/);
+  });
+
+  it("logs the start's cause code, tells the room in Runner's fixed words, then releases", async () => {
+    const t = await setup(policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false } }] }));
+    t.adapter.start = async () => {
+      throw new Error("start_failed:container_failed");
+    };
+    t.offer(detail("tsk_one"));
+    await t.pass();
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "reporting", outcome: "run_failed", report: { start_failed: "container_failed" } });
+    await t.pass();
+    const order = t.gateway.calls.map((c) => c.capability).filter((c) => c === "send_message" || c === "release_task");
+    expect(order).toEqual(["send_message", "release_task"]);
+    const note = String(t.gateway.messages[0].body);
+    expect(note.startsWith("## Run failed to start: report from Podster Runner")).toBe(true);
+    expect(note).toContain("Runner couldn't start a run for this task (`container_failed`)");
+    expect(note).not.toContain("Agent's words");
+    // Held mode or not, no review: there are no agent's words, only Runner's.
+    expect(t.prompter.reviewed).toHaveLength(0);
+    expect(t.commands("release_task")[0].arguments).toMatchObject({ reason: "run_failed" });
+    const lines = t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.find((l) => l.at === "lifecycle.run" && l.outcome === "start_failed")).toMatchObject({ code: "container_failed" });
+    expect(lines.find((l) => l.at === "lifecycle.blocked")).toMatchObject({ outcome: "reason_posted", code: "run_failed" });
+    // A thrown message that isn't a code reaches neither the room nor a log.
+    t.adapter.start = async () => {
+      throw new Error("docker said /Users/owner/secret");
+    };
+    t.offer(detail("tsk_two"));
+    await t.pass();
+    await t.pass();
+    expect(String(t.gateway.messages.find((m) => m.task_id === "tsk_two")?.body)).toContain("(`unknown`)");
+    for (const text of [t.logged.join("\n"), JSON.stringify(t.gateway.messages)]) expect(text).not.toContain("/Users/owner");
+  });
+});

@@ -118,7 +118,7 @@ A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` 
 | `rooms[].mode` | `"ask"` shows each run at your terminal for you to approve. `"unattended"` runs without asking. Unattended runs are off by default: leave `mode` out or set `"ask"` until you choose otherwise. |
 | `rooms[].outputs` | `"hold"` keeps a finished run's result on your machine until you approve publishing it. `"share"` publishes it. Leaving it out means `"hold"`. |
 | `rooms[].tools` | Runner's own tools for a task. `read`, `search`, `write` and `edit` are the default. `shell` is never on unless you list it. |
-| `rooms[].network` | Host names a task may reach, such as `"registry.npmjs.org"`. An empty list, the default, means no network. |
+| `rooms[].network` | Must be `[]` (the default): no network. Runner can't allow hosts yet, since a task's container has no egress proxy, so a room listing any host is refused when Runner starts, with `network_allowlist_unsupported`. Host names will be allowed once the proxy exists. |
 | `rooms[].repository` | `null` for a task that starts in an empty folder, or `{ "full_name": "owner/name", "provider_repo_id": 123456 }` for one GitHub repository. |
 | `rooms[].allowed_orgs` | Other organizations whose tasks you'll run in this room. Do not list `owner_org`: your own organization is always allowed, and Runner refuses a policy that lists it. An empty list is fine. |
 | `rooms[].acknowledged` | Both flags are required. Until `trust_statement` is `true`, Runner asks you at your terminal each time. Until `public_room_warning` is `true`, it also asks for a public room. |

@@ -108,12 +108,15 @@ class FakeSandbox implements TaskSandbox {
   openHangs = false;
   /** When set, open waits for this, then makes the container: a slow `docker run` that finishes after all. */
   openGate: Promise<void> | null = null;
+  /** When set, open throws an error with this message, as the Docker sandbox refuses an allowlist. */
+  openThrows: string | null = null;
   output = "ran";
   breach: ((code: string) => void) | null = null;
   async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
     this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
     if (this.openGate) await this.openGate;
+    if (this.openThrows) throw new Error(this.openThrows);
     this.alive.add(spec.run_ref);
     if (this.openHangs) await new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
   }
@@ -334,7 +337,8 @@ describe("the run's frame names its limits", () => {
     const none = runFrame({ ...FACTS, tools: ["read", "search", "write", "edit"], shell: false, network: [] });
     expect(none).toContain("Your tools in this run: read, search, write, edit, and the structured result.");
     expect(none).toContain("There is no shell: you can't run commands, tests, builds");
-    expect(none).toContain("Network: none.");
+    expect(none).toContain("Network: none. There is no network in this run");
+    expect(none).toContain("don't plan to install packages (npm install, pip install), fetch anything or deploy");
     expect(none).toContain(LIMITS_GUIDANCE);
     // The guidance: do every part it can, complete with a "Not done and why" section, blocked only when nothing useful
     // can be submitted, and the missing capability stated as the policy setting that would unblock it.
@@ -658,6 +662,19 @@ describe("the run-time timer starts with the run (L4 on #459)", () => {
     expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "halted", fields: { workspace: "ws_room_one", task: "tsk_one", code: "run_time" } });
     expect(t.sandbox.killed).toContain("run_1");
     expect(t.driver.sessions).toEqual([]);
+  });
+});
+
+describe("a run that fails to start keeps its cause, as a code only", () => {
+  it("names the sandbox's code in the error and the log line; a message that isn't a code reads as unknown", async () => {
+    const t = setup(async () => RESULT);
+    t.sandbox.openThrows = "network_allowlist_unsupported";
+    await expect(t.start()).rejects.toThrow("start_failed:network_allowlist_unsupported");
+    expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "start_failed", fields: { workspace: "ws_room_one", task: "tsk_one", code: "network_allowlist_unsupported" } });
+    const u = setup(async () => RESULT);
+    u.sandbox.openThrows = "docker: Error response from daemon: secret /Users/owner path";
+    await expect(u.start("run_2")).rejects.toThrow("start_failed:unknown");
+    expect(JSON.stringify(u.logged)).not.toMatch(/daemon|Users/);
   });
 });
 

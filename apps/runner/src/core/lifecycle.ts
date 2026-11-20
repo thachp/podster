@@ -65,7 +65,7 @@
  */
 import type { RunAdapter, RunHandle, RunReport, StopResult } from "./adapter.js";
 import { GatewayError, meaningOf } from "./errors.js";
-import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
+import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, policyProblem, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
 import { pullRequestUrl, RepoPathError } from "./repository.js";
 import { readTaskDetail, sha256Hex, type TaskDetail } from "./prompt.js";
 import { cleanResult, composeBlockedNote, composeNote, type NotePullRequest, type NoteWords, type ResultView } from "./results.js";
@@ -303,7 +303,7 @@ export class Lifecycle {
    */
   static async open(deps: LifecycleDeps): Promise<Lifecycle> {
     const parsed = parsePolicyConfig(await readConfig(deps.config), homeOf(deps));
-    if (!parsed.ok) throw new Error(`Runner's run policy can't be used: ${parsed.at} is missing or out of range. Nothing was started.`);
+    if (!parsed.ok) throw new Error(`Runner's run policy can't be used: ${policyProblem(parsed.at)}. Nothing was started.`);
     const identity = (await deps.poller.request("get_identity")) as Record<string, unknown> | null;
     if (identity?.id !== deps.poller.agentId) throw new AuthorityEnded();
     if (identity?.org_id !== parsed.value.owner_org) throw new Error("The run policy's owner_org isn't this agent's organization. Nothing was started.");
@@ -823,9 +823,12 @@ export class Lifecycle {
           return "stopped";
         }
         handle = answered;
-      } catch {
+      } catch (error) {
+        // A run that never started: its cause, a code only, is logged and reported to the room before the release.
+        const cause = startCause(error);
+        this.log("lifecycle.run", "start_failed", running, { code: cause });
         const stopped = await this.deps.adapter.confirmStopped(running.run_ref as string).catch(() => false);
-        await this.stopped(running, stopped ? "stopped" : "unknown", null, "run_failed", { kind: "release", reason: "run_failed" });
+        await this.stopped(running, stopped ? "stopped" : "unknown", null, "run_failed", { kind: "start_failed", code: cause });
         return "idle";
       }
       // A local stop that came while the adapter started ends the run now, with no wait for a check-in (M1 on #458).
@@ -1139,6 +1142,17 @@ export class Lifecycle {
       if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
       await this.giveUp(base, "accepted", after.reason);
     }
+    else if (after.kind === "start_failed") {
+      // Nothing ran: the room is told why in Runner's fixed words, then the task is released as before.
+      const key = keyOf(entry.workspace_id, entry.task_id);
+      this.forgetWords(key);
+      if (entry.consumed?.repository_id) this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+      if (!entry.consumed) {
+        await this.giveUp(base, "accepted", "run_failed");
+        return;
+      }
+      await this.put({ ...base, phase: "reporting", retry_at: null, report: { ...owedReport(), sharing: "withheld", start_failed: after.code } });
+    }
     else if (after.kind === "blocked") {
       // Nothing is published for a blocked run; its reason is owed to the room, and its inputs recorded.
       const key = keyOf(entry.workspace_id, entry.task_id);
@@ -1279,7 +1293,8 @@ export class Lifecycle {
     const key = keyOf(entry.workspace_id, entry.task_id);
     const agent = this.deps.poller.agentId;
     const consumed = entry.consumed as NonNullable<RunEntry["consumed"]>;
-    const logged = (posted: boolean, status?: number) => this.log("lifecycle.blocked", posted ? "reason_posted" : "reason_not_posted", entry, { code: "run_blocked", ...(status === undefined ? {} : { status }) });
+    const code = entry.report?.start_failed ? "run_failed" : "run_blocked";
+    const logged = (posted: boolean, status?: number) => this.log("lifecycle.blocked", posted ? "reason_posted" : "reason_not_posted", entry, { code, ...(status === undefined ? {} : { status }) });
     const detail = await this.read(entry.workspace_id, entry.task_id);
     if (signal.aborted) return;
     const task = detail?.task;
@@ -1295,8 +1310,9 @@ export class Lifecycle {
       rep = next;
       await this.put({ ...this.current(entry), report: next });
     };
-    // From the task as it stands: a run that answered a change request keeps the task (ruling 2).
-    if (rep.keep === null) await save({ ...rep, keep: detail.prompt.shape.change_request_event_id !== null });
+    // From the task as it stands: a run that answered a change request keeps the task (ruling 2). A run that never
+    // started answered nothing, so its task is released as before.
+    if (rep.keep === null) await save({ ...rep, keep: !rep.start_failed && detail.prompt.shape.change_request_event_id !== null });
     if (rep.sharing === "pending") {
       const share = await this.sharingAllowed(entry.workspace_id, consumed);
       await save({ ...rep, sharing: share ? "share" : "review", held_since: share ? null : this.now() });
@@ -1319,8 +1335,8 @@ export class Lifecycle {
       }
       await save({ ...rep, sharing: answer === "approve" ? "approved" : "withheld" });
     }
-    const words: NoteWords = !result || !cleaned ? { kind: "lost" } : !cleaned.ok ? { kind: "secret_hidden" } : rep.sharing === "share" || rep.sharing === "approved" ? { kind: "shared", ...cleaned } : { kind: "withheld" };
-    const note = composeBlockedNote({ task_id: entry.task_id, keep: rep.keep === true, words });
+    const words: NoteWords = rep.start_failed ? { kind: "withheld" } : !result || !cleaned ? { kind: "lost" } : !cleaned.ok ? { kind: "secret_hidden" } : rep.sharing === "share" || rep.sharing === "approved" ? { kind: "shared", ...cleaned } : { kind: "withheld" };
+    const note = composeBlockedNote({ task_id: entry.task_id, keep: rep.keep === true, words, start_failed: rep.start_failed ?? null });
     const noteHash = await sha256Hex(new TextEncoder().encode(note));
     if (rep.key === null || rep.note_hash !== noteHash) await save({ ...rep, key: this.newId(), note_hash: noteHash });
     let posted = false;
@@ -1343,14 +1359,14 @@ export class Lifecycle {
     }
     if (!posted && refused === undefined) {
       // Unknown: it may have gone through. Only the same key is sent for this note, at a later pass.
-      this.log("lifecycle.blocked", "unknown", entry, { code: "run_blocked" });
+      this.log("lifecycle.blocked", "unknown", entry, { code });
       return;
     }
     this.forgetWords(key);
     logged(posted, refused);
     const done = { ...this.current(entry), report: null, retry_at: null };
-    if (rep.keep) await this.put({ ...done, phase: "done", outcome: "run_blocked" });
-    else await this.giveUp(done, "accepted", "run_blocked", task.version);
+    if (rep.keep) await this.put({ ...done, phase: "done", outcome: code });
+    else await this.giveUp(done, "accepted", code, task.version);
   }
 
   private async submitted(entry: RunEntry) {
@@ -1422,6 +1438,13 @@ export async function runWithLifecycle(poller: LoopPoller, lifecycle: Lifecycle,
     await waitForNext(clock, poller.nextWaitMs(polled), polled, signal, bell);
   }
   return "stopped";
+}
+
+/** A failed start's cause as a code: the adapter's `start_failed:<code>`, or its own bare code; `unknown` otherwise. */
+function startCause(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const code = message.startsWith("start_failed:") ? message.slice("start_failed:".length) : message;
+  return /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "unknown";
 }
 
 const homeOf = (deps: Pick<LifecycleDeps, "home">) => (deps.home === undefined ? {} : { runner_home: deps.home });

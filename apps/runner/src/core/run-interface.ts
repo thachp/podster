@@ -37,6 +37,12 @@ import { CHANGE_TYPES } from "./pull-text.js";
 import type { Clock, Logger } from "./runtime.js";
 import { decideToolCall, MAX_RESULT_FILES, MAX_SUMMARY_CHARS, parseRunResult, TASK_FOLDER_IN_CONTAINER, type AllowedCall, type ToolCall, type ToolDecision } from "./tool-policy.js";
 
+/** An error's message when it's a bare code, as Runner's own errors are; `unknown` for anything else. */
+export function codeOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return /^[a-z][a-z0-9_]{0,63}$/.test(message) ? message : "unknown";
+}
+
 /** What the driver gives its SDK as the provider key. The broker never reads it; the real key never leaves the transport. */
 export const PLACEHOLDER_KEY = "runner-broker-placeholder";
 
@@ -76,7 +82,7 @@ export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network">): 
   return [
     UNTRUSTED_FRAME,
     `Your tools in this run: ${tools.length > 0 ? tools.join(", ") : "none"}, and the structured result.${shell ? "" : " There is no shell: you can't run commands, tests, builds, package managers or tools such as wrangler."}`,
-    facts.network.length > 0 ? `Network: only these hosts: ${facts.network.join(", ")}. Nothing else is reachable.` : "Network: none. Nothing outside this machine's container is reachable, so nothing can be installed, fetched or deployed.",
+    facts.network.length > 0 ? `Network: only these hosts: ${facts.network.join(", ")}. Nothing else is reachable.` : "Network: none. There is no network in this run: nothing outside the task's container is reachable, so don't plan to install packages (npm install, pip install), fetch anything or deploy. Work with the files that are there.",
     LIMITS_GUIDANCE,
   ].join("\n");
 }
@@ -312,9 +318,12 @@ export class SupervisedAdapter implements RunAdapter {
     this.live.set(run.run_ref, live);
     try {
       await live.begin();
-    } catch {
+    } catch (error) {
+      // The cause is kept as a code only, such as the sandbox's `network_allowlist_unsupported`: never a message's words.
+      const cause = codeOf(error);
       await live.halt("start_failed");
-      throw new Error("start_failed");
+      this.deps.log("adapter.run", "start_failed", { workspace: run.workspace_id, task: run.task_id, code: cause });
+      throw new Error(`start_failed:${cause}`);
     }
     return live.handle;
   }

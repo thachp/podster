@@ -39,7 +39,7 @@ export type RunPhase = "accepting" | "ready" | "running" | "giving_up" | "held" 
 /** A decline or release that's owed. `version` null: read the task's version as it stands before the key is first used. */
 export type GiveUp = { capability: "decline_task" | "release_task"; reason: string; version: number | null; key: string };
 /** What follows once a run's stop is confirmed. */
-export type After = { kind: "release"; reason: string } | { kind: "reconsider" } | { kind: "finish" } | { kind: "blocked" } | { kind: "none" };
+export type After = { kind: "release"; reason: string } | { kind: "reconsider" } | { kind: "finish" } | { kind: "blocked" } | { kind: "start_failed"; code: string } | { kind: "none" };
 /**
  * What Runner last pushed for a task, in a room with a repository (M7 step 10): the task branch's commit and its pull
  * request. A rerun starts from that commit, and only while the branch on GitHub still points at it. Step 11 submits it.
@@ -87,6 +87,8 @@ export type BlockedReport = {
   key: string | null;
   note_hash: string | null;
   held_since: number | null;
+  /** A run that never started: its cause, a code. Its report is Runner's fixed words only, and the task is released. */
+  start_failed?: string | null;
 };
 export const owedReport = (): BlockedReport => ({ sharing: "pending", keep: null, key: null, note_hash: null, held_since: null });
 
@@ -234,6 +236,7 @@ export function settle(ledger: Ledger, key: string | null, spent: number | null,
 }
 
 const PHASES = new Set<string>(["accepting", "ready", "running", "giving_up", "held", "waiting", "reporting", "finished", "done"]);
+const isCode = (x: unknown) => typeof x === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(x);
 const isHash = (x: unknown) => typeof x === "string" && /^[0-9a-f]{64}$/.test(x);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -287,7 +290,8 @@ export function checkRuns(v: unknown): string | null {
         !orNull(rep.keep, (x) => typeof x === "boolean") ||
         !orNull(rep.key, (x) => isText(x, 128)) ||
         !orNull(rep.note_hash, isHash) ||
-        !orNull(rep.held_since, isCount))
+        !orNull(rep.held_since, isCount) ||
+        (rep.start_failed !== undefined && !orNull(rep.start_failed, isCode)))
     )
       return `${at}.report`;
     const blocked = e.blocked;
@@ -295,7 +299,7 @@ export function checkRuns(v: unknown): string | null {
     const give = e.give_up;
     if (give !== null && (!isObj(give) || (give.capability !== "decline_task" && give.capability !== "release_task") || !isText(give.reason, 128) || !orNull(give.version, isCount) || !isText(give.key, 128))) return `${at}.give_up`;
     const after = e.after_stop;
-    if (after !== null && (!isObj(after) || !["release", "reconsider", "finish", "blocked", "none"].includes(after.kind as string) || (after.kind === "release" && !isText(after.reason, 128)))) return `${at}.after_stop`;
+    if (after !== null && (!isObj(after) || !["release", "reconsider", "finish", "blocked", "start_failed", "none"].includes(after.kind as string) || (after.kind === "release" && !isText(after.reason, 128)) || (after.kind === "start_failed" && !isCode(after.code)))) return `${at}.after_stop`;
     const attempts = e.attempts;
     if (!isObj(attempts) || !isCount(attempts.day) || !isCount(attempts.count)) return `${at}.attempts`;
     // Each phase holds what it needs to go on.

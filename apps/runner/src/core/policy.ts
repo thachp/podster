@@ -28,7 +28,8 @@
  *   request, are required, each a positive integer under a fixed ceiling, with no "none" (condition 3; spike B rulings 3
  *   and 5). A configuration lacking any of them is refused whole, as is anything else malformed.
  * - **Tools and network** are facts for step 9's adapter, which enforces them: no shell and no network unless listed by
- *   name (condition 2). The adapter's result tool is always named.
+ *   name (condition 2). The adapter's result tool is always named. A room listing hosts is refused at load with
+ *   `network_allowlist_unsupported` until Runner's egress proxy exists: only `"network": []` works today.
  * - **Run decisions** are bound to every run fact, by a canonical form of the whole `RunFacts` (M1 on #455's review), and
  *   to the task's version, input hash, repository and base. They are single-use and expire.
  * - **The repository** (M7 step 10; L4 on #455's review): a room has one only when the owner named it here, by full name
@@ -205,6 +206,13 @@ export type EvaluateInput = {
 
 type Obj = Record<string, unknown>;
 type Parsed<T> = { ok: true; value: T } | { ok: false; at: string };
+/** A room's `network` listing hosts: refused until Runner's egress proxy exists; only `[]` works. */
+export const NETWORK_UNSUPPORTED = "network_allowlist_unsupported";
+/** What's wrong with a policy that failed to parse, for the owner, by where it failed. */
+export function policyProblem(at: string): string {
+  if (at === `rooms[].network:${NETWORK_UNSUPPORTED}`) return `rooms[].network lists hosts, which Runner can't allow yet (${NETWORK_UNSUPPORTED}): a task's container has no egress proxy, so only "network": [] works`;
+  return `${at} is missing or out of range`;
+}
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
 
 /**
@@ -326,6 +334,8 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   if (!tools) return fail("rooms[].tools");
   const network = Object.hasOwn(v, "network") ? uniqueList(v.network, MAX_HOSTS, isHost) : [];
   if (!network) return fail("rooms[].network");
+  // No sandbox can hold an allowlist until Runner's egress proxy exists: refused here, at load, not at every run's start.
+  if (network.length > 0) return fail(`rooms[].network:${NETWORK_UNSUPPORTED}`);
   const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
   const ack = own(v, "acknowledged");

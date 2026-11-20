@@ -100,6 +100,7 @@ describe("people in an organization", () => {
     expect(within(row("Sam")).queryByRole("button")).toBeNull();
     expect(screen.queryByRole("button", { name: "Create invitation link" })).toBeNull();
     expect(screen.getByText(/Only this organization's admins/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Add an agent" })).toBeNull();
   });
 
   it("leaves, and goes to what's still theirs", async () => {
@@ -121,6 +122,8 @@ describe("people in an organization", () => {
   it("lists agents whose credentials stopped working, and says when it can't tell", () => {
     const { rerender } = render(<PeopleScreen {...props} lostCredentials={[{ id: "agt_1", name: "Builder", count: 2 }]} />);
     expect(row("Builder")).toHaveTextContent("2 credentials refused");
+    expect(screen.getByRole("link", { name: "Add an agent" })).toHaveAttribute("href", "/agents/connect");
+    expect(screen.queryByText(/Connect an agent/)).toBeNull();
     rerender(<PeopleScreen {...props} lostCredentials={null} />);
     expect(within(screen.getByRole("region", { name: "Credentials that stopped working" })).getByRole("alert")).toBeInTheDocument();
   });

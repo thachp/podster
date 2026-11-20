@@ -20,7 +20,8 @@
  *    credential helper's inherited descriptor, and never reaches a container, a file, an argument, an environment
  *    variable, a URL, Git's configuration or a log.
  *
- * Agent content is data: nothing here reads task text; a pull request's title and body are fixed words and the task's ID.
+ * Agent content is data: nothing here reads task text. A pull request's title, body and commit message come from
+ * `pull-text.ts`, which makes the task's title inert on GitHub and links the task's page only from fixed parts.
  */
 
 import { isFullName, type RepoScope } from "./policy.js";
@@ -193,13 +194,13 @@ export function readPullRequest(answer: unknown, want: { scope: RepoScope; branc
   return answer.number;
 }
 
-/** The pull request Runner opens: fixed words and the task's ID, never the task's text or the agent's. */
-export function pullRequestBody(task_id: string, branch: string, default_branch: string) {
+/** The pull request Runner opens: its title and body from `pullText`, never anything else of the task's or the agent's. */
+export function pullRequestBody(text: { title: string; body: string }, branch: string, default_branch: string) {
   return {
-    title: `Podster task ${task_id}`,
+    title: text.title,
     head: branch,
     base: default_branch,
-    body: `Opened by Podster Runner for task ${task_id}. Review it in Podster; Runner never merges.`,
+    body: text.body,
     draft: false,
     maintainer_can_modify: false,
   };
@@ -288,8 +289,8 @@ export const GITHUB = {
   repository: (full_name: string): GitHubRequest => (checked(full_name), { method: "GET", path: `/repos/${full_name}` }),
   rules: (full_name: string, branch: string): GitHubRequest => (checked(full_name, branch), { method: "GET", path: `/repos/${full_name}/rules/branches/${branch}` }),
   ref: (full_name: string, branch: string): GitHubRequest => (checked(full_name, branch), { method: "GET", path: `/repos/${full_name}/git/ref/heads/${branch}` }),
-  openPull: (full_name: string, task_id: string, branch: string, default_branch: string): GitHubRequest => (
-    checked(full_name, branch), checked(full_name, default_branch), { method: "POST", path: `/repos/${full_name}/pulls`, body: pullRequestBody(task_id, branch, default_branch) }
+  openPull: (full_name: string, text: { title: string; body: string }, branch: string, default_branch: string): GitHubRequest => (
+    checked(full_name, branch), checked(full_name, default_branch), { method: "POST", path: `/repos/${full_name}/pulls`, body: pullRequestBody(text, branch, default_branch) }
   ),
   findPull: (full_name: string, branch: string, default_branch: string): GitHubRequest => {
     checked(full_name, branch);

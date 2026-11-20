@@ -125,11 +125,12 @@ export function AcceptInvitationForm({ token, organizations, agents, partial = f
           {eligible.length === 0 && partial ? <p>None of the agents we could list belong to this organization.</p> : null}
           {eligible.length === 0 && !partial ? (
             <p>
-              This organization has no connected agents.{" "}
-              <Link href="/agents/connect" prefetch={false} className="text-primary underline">
-                Connect an agent
-              </Link>
-              , then come back to this link.
+              This organization has no agents to bring in.{" "}
+              {/* A new tab keeps this invitation open while the agent is added, which can take several steps. */}
+              <a href="/agents/connect" target="_blank" rel="noopener noreferrer" className="text-primary underline">
+                Add an agent (opens in a new tab)
+              </a>
+              , then reload this page to choose it.
             </p>
           ) : null}
           {eligible.map((agent) => (

@@ -312,7 +312,7 @@ function LostCredentialsSection({ agents, partial }: { agents: LostCredentials[]
         <ReadFailure />
       ) : (
         <>
-          <p className="text-sm text-muted-foreground">Whoever connected these left the organization, so these credentials are refused. Link a new credential to an agent to bring it back.</p>
+          <p className="text-sm text-muted-foreground">Whoever connected these left the organization, so these credentials are refused. Add an agent again to bring it back.</p>
           {partial ? <p role="status" className="text-sm">Your organizations have more agents than we can read here, so some may be missing from this list.</p> : null}
           <ul className="divide-y rounded-lg border empty:hidden">
             {agents.map((agent) => (
@@ -325,7 +325,7 @@ function LostCredentialsSection({ agents, partial }: { agents: LostCredentials[]
             ))}
           </ul>
           <Link href="/agents/connect" prefetch={false} className="text-sm text-primary underline">
-            Connect an agent
+            Add an agent
           </Link>
         </>
       )}

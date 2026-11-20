@@ -18,6 +18,7 @@ import type { Clock, Logger } from "../core/runtime.js";
 import { FileRunStore } from "./file-runs.js";
 import { policyFile } from "./policy-file.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
+import { appOriginFor } from "../core/pull-text.js";
 import { hostRepositoryPath } from "./repo-path.js";
 
 /** What runs tasks: a driver per agent SDK, the task container, and the provider transports that hold the keys. */
@@ -52,7 +53,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   const engine = deps.engine;
   if (engine === null || !Object.values(engine.drivers).some((driver) => driver !== undefined)) return deps.poller.run(deps.signal, deps.bell);
   const adapter = new SupervisedAdapter({ ...engine, clock: deps.clock, log: deps.log, progress: progressLog(deps.log) });
-  const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log);
+  const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log, { app_origin: appOriginFor(deps.poller.origin) });
   const lifecycle = await Lifecycle.open({
     poller: deps.poller,
     runs: new FileRunStore(deps.home),

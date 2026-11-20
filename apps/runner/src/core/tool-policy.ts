@@ -24,6 +24,7 @@
  * Agent content is data: a call's input is checked, never followed as instructions, and a decision carries codes only.
  */
 import { RESULT_TOOL, type RunFacts, type Tool } from "./policy.js";
+import { isChangeType, type ChangeType } from "./pull-text.js";
 
 export const MAX_PATH_CHARS = 1_024;
 export const MAX_CONTENT_CHARS = 1_000_000;
@@ -46,8 +47,11 @@ export type ToolRefusal = "call_invalid" | "tool_not_allowed" | "shell_not_allow
 
 export type ToolDecision = { allow: true; call: AllowedCall } | { allow: false; reason: ToolRefusal };
 
-/** A run's structured result: bounded, and only ever data. */
-export type RunResult = { status: "completed" | "blocked"; summary: string; files: string[] };
+/**
+ * A run's structured result: bounded, and only ever data. `change_type` is the kind of change the agent says it made,
+ * kept only when it is one of `CHANGE_TYPES`; it picks the pull request title's type and nothing else (`pull-text.ts`).
+ */
+export type RunResult = { status: "completed" | "blocked"; summary: string; files: string[]; change_type?: ChangeType };
 
 const CALL_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** Control characters, other than tab and newline in free text. */
@@ -119,9 +123,12 @@ export function refusalText(reason: ToolRefusal): string {
   }
 }
 
-/** The structured result, bounded: a status, a summary of at most `MAX_SUMMARY_CHARS`, and files inside the folder. */
+/**
+ * The structured result, bounded: a status, a summary of at most `MAX_SUMMARY_CHARS`, and files inside the folder. An
+ * optional `change_type` not on the list is dropped, never a reason to refuse the result: the title's type is then `chore`.
+ */
 export function parseRunResult(v: unknown): { ok: true; value: RunResult } | { ok: false } {
-  if (!shaped(v, ["status", "summary", "files"])) return { ok: false };
+  if (!shaped(v, ["status", "summary", "files"], ["change_type"])) return { ok: false };
   if (v.status !== "completed" && v.status !== "blocked") return { ok: false };
   if (!text(v.summary, MAX_SUMMARY_CHARS, 1) || CONTROL.test(v.summary)) return { ok: false };
   if (!Array.isArray(v.files) || v.files.length > MAX_RESULT_FILES) return { ok: false };
@@ -131,7 +138,7 @@ export function parseRunResult(v: unknown): { ok: true; value: RunResult } | { o
     if (!path.ok || files.includes(path.path)) return { ok: false };
     files.push(path.path);
   }
-  return { ok: true, value: { status: v.status, summary: v.summary, files } };
+  return { ok: true, value: { status: v.status, summary: v.summary, files, ...(isChangeType(v.change_type) ? { change_type: v.change_type } : {}) } };
 }
 
 /** Whether the run's facts allow this call, and the call as Runner will run it. */

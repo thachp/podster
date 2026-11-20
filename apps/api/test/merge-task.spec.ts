@@ -198,7 +198,7 @@ describe("asking for a merge", () => {
     const tokensBefore = (await minted()).length;
     const asked = await merge(MERGER, r.id, r.task, undefined, { key: "mt-once" });
     expect(asked.status, asked.text).toBe(200);
-    expect(asked.body).toEqual({ task_id: r.task, merge_state: "requested", commit_sha: HEAD, submission_no: 1, requested_at: expect.any(Number) });
+    expect(asked.body).toEqual({ task_id: r.task, merge_state: "requested", commit_sha: HEAD, submission_no: 1, requested_at: expect.any(Number), self_reviewed: false });
     // The command itself asked GitHub for nothing, and a replay answers the same and records nothing more.
     expect((await minted()).length).toBe(tokensBefore);
     expect((await github()).calls).toEqual([]);
@@ -478,10 +478,101 @@ describe("an independent review (the owner's decision of 2026-11-11 on review A1
     // No grant: the grant's refusal, not the review's.
     const robot = await merge(ROBOT, r.id, r.task);
     expect([robot.status, robot.code]).toEqual([403, "grant_required"]);
-    // The submitter's own person: `self_merge`, as before.
-    expect((await merge(LINKER, r.id, r.task)).code).toBe("self_merge");
+    // The submitter's own person, who approved it: in a private room that's a self-reviewed merge (decision 186 as
+    // amended 2026-11-20), which still needs the grant, so the grant's refusal too.
+    expect((await merge(LINKER, r.id, r.task)).code).toBe("grant_required");
+    // Another agent of that person, with no grant: `self_merge`, as before.
+    expect((await merge(SIBLING, r.id, r.task)).code).toBe("self_merge");
   });
 
+});
+
+describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11-20)", () => {
+  /** A room whose task the agent submitted and `reviewer` approved at `HEAD`, with merge grants for `granted` and the job held. */
+  async function approvedBy(reviewer: Who, granted: Who[] = [LINKER]) {
+    const id = await room();
+    const task = await submitted(id, 7, reviewer);
+    const done = await api(reviewer, "POST", `/v1/workspaces/${id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+    expect(done.status, done.text).toBe(200);
+    for (const who of granted) await grant(id, who);
+    await alarm(id);
+    await hold(id);
+    return { id, task };
+  }
+  const read = async (who: Who, r: { id: string; task: string }) => (await must(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change;
+
+  it("lets the person who controls the submitting agent merge what they approved in a private room, recorded as self-reviewed", async () => {
+    const r = await approvedBy(LINKER, [LINKER, MERGER]);
+    // The dialog's hint is for the controller who approved it, and nobody else; it decides nothing.
+    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: true, merge_self_reviewed: false });
+    expect(await read(MERGER, r)).toMatchObject({ self_review_for_viewer: false });
+    const asked = await merge(LINKER, r.id, r.task);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body).toMatchObject({ merge_state: "requested", self_reviewed: true });
+    expect(await events(r.id)).toEqual([{ type: "merge.requested", actor_id: LINKER.id, subject_id: null, task_id: r.task, reason: "self_reviewed" }]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_requested_by: LINKER.id, merge_requester_person: LINKER.id, submitter_id: AGENT.id, submitter_person: LINKER.id, reviewer_id: LINKER.id });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect((await events(r.id)).at(-1)).toEqual({ type: "merge.succeeded", actor_id: "system", subject_id: LINKER.id, task_id: r.task, reason: "self_reviewed" });
+    // Visible in the room's read of the task, to the owner too.
+    expect(await read(OWNER, r)).toMatchObject({ merge_state: "succeeded", merge_self_reviewed: true, self_review_for_viewer: false });
+  });
+
+  it("refuses it in a public room, where the second-person rule stands", async () => {
+    const r = await approvedBy(LINKER);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: false });
+    const refused = await merge(LINKER, r.id, r.task);
+    expect([refused.status, refused.code]).toEqual([403, "self_merge"]);
+    expect(await events(r.id)).toEqual([]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
+  });
+
+  it("refuses a controller who didn't approve it, another of their agents, and a controller with no grant", async () => {
+    // The owner approved: the agent's controller, with a grant, still may not merge it.
+    const byOwner = await approvedBy(OWNER);
+    expect(await read(LINKER, byOwner)).toMatchObject({ self_review_for_viewer: false });
+    const notApprover = await merge(LINKER, byOwner.id, byOwner.task);
+    expect([notApprover.status, notApprover.code]).toEqual([403, "self_merge"]);
+    // Another agent of the same person approved it: neither that agent nor the person may merge it.
+    REPO_ID = IDS.next();
+    await fake({});
+    await ready();
+    const bySibling = await approvedBy(SIBLING, [LINKER, SIBLING]);
+    for (const who of [LINKER, SIBLING]) {
+      const got = await merge(who, bySibling.id, bySibling.task);
+      expect([got.status, got.code], who.id).toEqual([403, "self_merge"]);
+    }
+    // The controller approved it but holds no grant: controlling the agent implies none.
+    REPO_ID = IDS.next();
+    await fake({});
+    await ready();
+    const noGrant = await approvedBy(LINKER, []);
+    const refused = await merge(LINKER, noGrant.id, noGrant.task);
+    expect([refused.status, refused.code]).toEqual([403, "grant_required"]);
+    for (const r of [byOwner, bySibling, noGrant]) expect(await events(r.id)).toEqual([]);
+  });
+
+  it("refuses the submitting agent itself, and ends a requested merge when the room goes public before the job runs", async () => {
+    const r = await approvedBy(LINKER, [LINKER, AGENT]);
+    const agent = await merge(AGENT, r.id, r.task);
+    expect([agent.status, agent.code]).toEqual([403, "self_merge"]);
+    const asked = await merge(LINKER, r.id, r.task);
+    expect(asked.status, asked.text).toBe(200);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "self_merge", merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("merges only the reviewed commit: a head seen off it is refused as for anyone", async () => {
+    const r = await approvedBy(LINKER);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET commit_changed_at = 5"));
+    const refused = await merge(LINKER, r.id, r.task);
+    expect([refused.status, refused.code]).toEqual([409, "commit_changed"]);
+    const other = await merge(LINKER, r.id, r.task, { submission_no: 1, commit_sha: HEAD2 });
+    expect([other.status, other.code]).toEqual([409, "commit_changed"]);
+  });
 });
 
 describe("the job checks everything again", () => {

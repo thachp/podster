@@ -606,27 +606,54 @@ pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<V
     Ok(read)
 }
 
-pub(super) fn of_task(sql: &SqlStorage, task_id: &str) -> R<Value> {
-    Ok(change_row(sql, task_id)?.map_or(Value::Null, |row| {
-        let observed = row["pr_observed_at"].as_i64();
-        let head_here = row["head_repo_id"]
-            .as_i64()
-            .is_some_and(|head| Some(head) == row["provider_repo_id"].as_i64());
-        json!({
-            "provider_repo_id": row["provider_repo_id"], "pr_number": row["pr_number"], "submission_no": row["submission_no"],
-            "pr_state": row["pr_state"], "pr_draft": row["pr_draft"].as_i64().map(|draft| draft != 0), "pr_observed_at": row["pr_observed_at"],
-            "observed_head_sha": row["observed_head_sha"], "head_observed_at": row["head_observed_at"],
-            "head_in_repository": observed.map(|_| head_here),
-            "base_is_default": observed.map(|_| row["base_ref"].is_string()),
-            "observed_base_sha": row["observed_base_sha"],
-            "reviewed_commit_sha": row["reviewed_commit_sha"], "reviewed_base_sha": row["reviewed_base_sha"],
-            "commit_changed": row["commit_changed_at"].as_i64().is_some(), "commit_changed_at": row["commit_changed_at"],
-            "watched": row["unwatched_at"].is_null(),
-            "merge_state": row["merge_state"], "merge_reason": row["merge_reason"], "merge_sha": row["merge_sha"],
-            "merge_observed_at": row["merge_observed_at"],
-            "merge_requested_by": row["merge_requested_by"], "merge_requested_at": row["merge_requested_at"],
-            "merge_finished_at": row["merge_finished_at"],
-        })
+/// A task's change as the task read shows it. `merge_self_reviewed` says the last merge request was a self-reviewed one,
+/// from the change row's record of who asked, submitted and approved. `self_review_for_viewer` says whether a merge this viewer asked for now would be a self-reviewed
+/// one, by the same pure rule the merge decides with, so the merge dialog can say so. It shows and never authorizes:
+/// `merge_task` decides again from the room's rows when asked.
+pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value> {
+    let task_id = task.id.as_str();
+    let Some(row) = change_row(sql, task_id)? else {
+        return Ok(Value::Null);
+    };
+    let merge_self_reviewed = super::merges::self_reviewed_request(&row);
+    let reviewer = super::merges::reviewer_of(&row);
+    let (submitter_id, submitter_person) = super::merges::submitter_of(Some(&row), task);
+    let review = super::merges::self_review_of(
+        viewer,
+        super::merges::room_is_private(sql)?,
+        reviewer.as_ref(),
+    );
+    let self_review_for_viewer = viewer.kind == PrincipalKind::Person
+        && podster_core::repo_merge::is_self_reviewed(
+            &podster_core::repo_merge::Actor {
+                id: &viewer.id,
+                person: Some(&viewer.id),
+            },
+            &podster_core::repo_merge::Actor {
+                id: &submitter_id,
+                person: submitter_person.as_deref(),
+            },
+            &review,
+        );
+    let observed = row["pr_observed_at"].as_i64();
+    let head_here = row["head_repo_id"]
+        .as_i64()
+        .is_some_and(|head| Some(head) == row["provider_repo_id"].as_i64());
+    Ok(json!({
+        "provider_repo_id": row["provider_repo_id"], "pr_number": row["pr_number"], "submission_no": row["submission_no"],
+        "pr_state": row["pr_state"], "pr_draft": row["pr_draft"].as_i64().map(|draft| draft != 0), "pr_observed_at": row["pr_observed_at"],
+        "observed_head_sha": row["observed_head_sha"], "head_observed_at": row["head_observed_at"],
+        "head_in_repository": observed.map(|_| head_here),
+        "base_is_default": observed.map(|_| row["base_ref"].is_string()),
+        "observed_base_sha": row["observed_base_sha"],
+        "reviewed_commit_sha": row["reviewed_commit_sha"], "reviewed_base_sha": row["reviewed_base_sha"],
+        "commit_changed": row["commit_changed_at"].as_i64().is_some(), "commit_changed_at": row["commit_changed_at"],
+        "watched": row["unwatched_at"].is_null(),
+        "merge_state": row["merge_state"], "merge_reason": row["merge_reason"], "merge_sha": row["merge_sha"],
+        "merge_observed_at": row["merge_observed_at"],
+        "merge_requested_by": row["merge_requested_by"], "merge_requested_at": row["merge_requested_at"],
+        "merge_finished_at": row["merge_finished_at"],
+        "merge_self_reviewed": merge_self_reviewed, "self_review_for_viewer": self_review_for_viewer,
     }))
 }
 

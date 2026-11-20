@@ -5,7 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-change";
-import { explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal } from "./task-merge";
+import { explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, SELF_REVIEWED_WARNING } from "./task-merge";
+import { verbFor } from "./task-model";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
 import { MERGE_RELEASES_NOTHING } from "./release-stage";
@@ -173,6 +174,48 @@ describe("merging from the task Sheet", () => {
     reads.repository = () => refused(403, "not_allowed");
     await open();
     expect(await screen.findByRole("button", { name: "Merge reviewed commit" })).toHaveAccessibleDescription(/into the repository's default branch\. Approval/);
+  });
+});
+
+// Decision 186 as amended by the owner on 2026-11-20: in a private room, the person who controls the agent that wrote
+// the work and approved it may merge it. The Sheet says so plainly; the API decides.
+describe("a self-reviewed merge", () => {
+  it("offers the controller who approved it the merge, and the dialog says nobody else reviewed it", async () => {
+    reads.task = () => json(200, detail({ self_review_for_viewer: true }));
+    await open();
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByRole("note")).toHaveTextContent(SELF_REVIEWED_WARNING);
+    expect(SELF_REVIEWED_WARNING).toMatch(/Nobody else reviewed this/);
+    expect(SELF_REVIEWED_WARNING).toMatch(/You control the agent that wrote it/);
+    const results = await axe.run(document.body, { rules: { "color-contrast": { enabled: false }, region: { enabled: false } } });
+    expect(results.violations.map((v) => v.id)).toEqual([]);
+  });
+
+  it("says nothing of it to anyone else, and hides the control exactly as before", async () => {
+    await open();
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    expect(within(await screen.findByRole("alertdialog")).queryByText(SELF_REVIEWED_WARNING)).toBeNull();
+    // The hint never shows a control the ordinary rules hide.
+    const hinted = change({ self_review_for_viewer: true });
+    expect(mergeOffered(task(), hinted, "agt_a", true)).toBe(false);
+    expect(mergeOffered(task(), hinted, "per_me", false)).toBe(false);
+    expect(mergeOffered(task({ approved_submission_no: null }), hinted, "per_me", true)).toBe(false);
+    expect(mergeOffered(task(), change({ self_review_for_viewer: true, commit_changed: true }), "per_me", true)).toBe(false);
+    expect(mergeOffered(task(), hinted, "per_me", true)).toBe(true);
+  });
+
+  it("shows a self-reviewed merge as one on the change and in the task's history", () => {
+    render(<TaskChangePanel change={change({ merge_state: "succeeded", merge_self_reviewed: true, merge_requested_at: 1, merge_finished_at: 2 })} />);
+    expect(screen.getByText("Self-reviewed: nobody else reviewed it")).toBeInTheDocument();
+    expect(verbFor({ type: "merge.requested", prior_status: null, reason: "self_reviewed" })).toMatch(/self-reviewed: nobody else reviewed it/);
+    expect(verbFor({ type: "merge.succeeded", prior_status: null, reason: "self_reviewed" })).toMatch(/self-reviewed/);
+    expect(verbFor({ type: "merge.requested", prior_status: null, reason: null })).not.toMatch(/self-reviewed/);
+  });
+
+  it("doesn't show the label for an ordinary merge", () => {
+    render(<TaskChangePanel change={change({ merge_state: "succeeded", merge_self_reviewed: false })} />);
+    expect(screen.queryByText(/Self-reviewed/)).toBeNull();
   });
 });
 

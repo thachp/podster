@@ -1377,10 +1377,10 @@ describe("step 11: a hostile result", () => {
     // Nothing hidden is left: every format, control (but the line feed) and separator character is a mark.
     expect(note).not.toMatch(/[\p{Cf}\p{Zl}\p{Zp}\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
     for (const cp of ["202E", "202C", "2066", "2069", "200B", "200D", "FEFF", "00AD", "061C", "E006D", "2028"]) expect(note).toContain(`⟨U+${cp}⟩`);
-    expect(note).toContain("| - src/⟨U+202E⟩build.ts");
+    expect(note).toContain("- `src/⟨U+202E⟩build.ts`");
     expect(note).not.toContain(KEY);
     // The forged pull request stays inside the agent's fenced words; a room with no repository submits none.
-    expect(note.split("--- the agent's words ---")[0]).not.toContain("999");
+    expect(note.split("### Agent's words (unverified)")[0]).not.toContain("999");
     expect(Object.keys(sent[0].arguments).sort()).toEqual(["idempotency_key", "note", "task_id", "version", "workspace_id"]);
   });
 });

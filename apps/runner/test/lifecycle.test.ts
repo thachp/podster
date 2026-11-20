@@ -1153,8 +1153,10 @@ describe("step 10: the repository path in the lifecycle", () => {
     const sent = t.commands("submit_task")[0]?.arguments;
     expect(sent).toMatchObject({ task_id: "tsk_repo", version: 2, commit_sha: t.repo.commit, pr_number: 12, artifacts: [{ uri: "https://github.com/podsterdev/todo-app/pull/12", label: "Pull request" }] });
     expect(Object.keys(sent).sort()).toEqual(["artifacts", "commit_sha", "idempotency_key", "note", "pr_number", "task_id", "version", "workspace_id"]);
-    const [fixed, words] = String(sent.note).split("--- the agent's words ---");
-    expect(fixed).toContain(`#12 in podsterdev/todo-app, from podster/tsk_repo at commit ${t.repo.commit}`);
+    const [fixed, words] = String(sent.note).split("### Agent's words (unverified)");
+    expect(fixed).toContain("- Pull request: [#12 in podsterdev/todo-app](https://github.com/podsterdev/todo-app/pull/12).");
+    expect(fixed).toContain("- Branch: `podster/tsk_repo`");
+    expect(fixed).toContain(`- Commit: \`${t.repo.commit}\``);
     expect(fixed).not.toMatch(/999|evil\.test|dddd/);
     expect(words).toContain("#999");
     expect(t.prompter.reviewed[0]?.pull_request).toEqual({ full_name: "podsterdev/todo-app", number: 12, branch: "podster/tsk_repo", commit: t.repo.commit });
@@ -1193,7 +1195,7 @@ describe("step 11: results", () => {
     const note = String(sent[0].arguments.note);
     expect(note).toContain("Repository: none in this room");
     expect(note).toContain("Tests: not run by Runner");
-    expect(note).toContain(`--- the agent's words ---\n| ${RESULT.summary}\n--- files the agent named ---\n| - src/build.ts\n--- end of the agent's words ---`);
+    expect(note.endsWith(`### Agent's words (unverified)\n\n\`\`\`text\n${RESULT.summary}\n\`\`\`\n\n### Files the agent named\n\n- \`src/build.ts\``)).toBe(true);
     expect(JSON.parse(onDisk).entries[`${ROOM}/tsk_one`].submission.key).toBe(sent[0].arguments.idempotency_key);
     expect(t.entry("tsk_one")).toMatchObject({ phase: "finished", outcome: "submitted", submission: { state: "submitted", sharing: "share" } });
     // No progress message for a result that may be shared, and no owner's review.
@@ -1353,9 +1355,11 @@ describe("step 11: results", () => {
     const view = t.prompter.reviewed[0];
     expect(view.summary).toContain("⟨cut by Runner⟩");
     const note = String(t.commands("submit_task")[0]?.arguments.note);
-    const section = note.slice(note.indexOf("--- the agent's words ---\n") + 26, note.lastIndexOf("\n--- end of the agent's words ---")).split("\n");
-    const fenced = section.filter((l) => l !== "--- files the agent named ---").map((l) => l.replace(/^\| /, ""));
-    expect(fenced).toEqual([...view.summary.split("\n"), ...view.files.map((f) => `- ${f}`)]);
+    const opening = "### Agent's words (unverified)\n\n```text\n";
+    const section = note.slice(note.indexOf(opening) + opening.length);
+    const [said, named = ""] = section.split("\n```\n\n### Files the agent named\n\n");
+    expect(said.replace(/\n```$/, "")).toBe(view.summary);
+    expect(named === "" ? [] : named.split("\n")).toEqual(view.files.map((f) => `- \`${f}\``));
   });
 
   it("submits nothing once the task is another agent's, at the same version and inputs (review 5 on #465)", async () => {

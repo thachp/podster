@@ -417,6 +417,9 @@ jobs:
       # Each suite's API build and its stamp: a build with other features, or changed since, fails the suite by name.
       - run: node scripts/build-api-worker.mjs --self-test
       - run: scripts/test/staging-probes-selftest
+      # The Runner test pre-release's script: every refusal, both stages with stand-ins for gh and npm, and the version edit
+      # on the real Runner files in a scratch repository. It pushes, dispatches and approves nothing outside that folder.
+      - run: scripts/test/release-runner-test-selftest
       - run: node run-local.mjs
         working-directory: e2e
       # Staging's setup and the test sign-up, with nothing remote.

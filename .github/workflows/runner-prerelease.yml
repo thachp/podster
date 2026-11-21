@@ -89,17 +89,17 @@ jobs:
             echo "Test pre-releases are versioned 0.0.x-test.N, not $actual."
             exit 1
           fi
-      # No package's install script runs, as in CI's runner job. The shipped npm-shrinkwrap.json is what it installs.
+      # No package's install script runs, as in CI's runner job.
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - run: npm pack --dry-run
+      # scripts/pack.mjs packs from a fresh copy whose production tree, installed from package-lock.json with
+      # `npm ci --omit=dev --omit=optional`, is bundled: no dev tool, no Claude Code binary and no npm-shrinkwrap.json.
       - name: Pack the .tgz and print its SHA-256
         id: pack
         run: |
-          mkdir -p "$RUNNER_TEMP/pack"
-          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/pack"
+          node scripts/pack.mjs --out "$RUNNER_TEMP/pack"
           cd "$RUNNER_TEMP/pack"
           file=$(ls ./*.tgz)
           test "$(ls ./*.tgz | wc -l)" -eq 1
@@ -108,6 +108,11 @@ jobs:
           echo "$sha  $file"
           echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+      # That file, installed as `npx podster@test` installs it, holds no Claude Code binary and no dev tool, fits the size
+      # budget, and its SDK starts only the container's binary. Scripts off; nothing is published.
+      - run: node scripts/install-check.mjs "$RUNNER_TEMP/pack/$FILE"
+        env:
+          FILE: ${{ steps.pack.outputs.file }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: podster-${{ inputs.version }}

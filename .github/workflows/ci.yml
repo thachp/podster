@@ -277,6 +277,14 @@ jobs:
         working-directory: apps/runner
       - run: npm run build
         working-directory: apps/runner
+      # The package as users get it: packed by scripts/pack.mjs (production tree bundled, no shrinkwrap), then installed the
+      # way `npx podster@test` does, from a registry on 127.0.0.1 that passes other packages through to npm's, scripts off.
+      # It fails if any Claude Code binary lands (Runner runs Claude Code only in its container), or any dev tool, if the
+      # install passes 60 MB, or if the installed SDK, given Runner's options, starts anything but the container's binary.
+      - run: node scripts/pack.mjs --out "$RUNNER_TEMP/pack"
+        working-directory: apps/runner
+      - run: node scripts/install-check.mjs "$RUNNER_TEMP/pack/podster-$(node -p "require('./package.json').version").tgz"
+        working-directory: apps/runner
       # S-47: Runner's Linux path (also Windows through WSL2) on this runner's real Docker Engine. It builds Runner's two
       # images, starts the task container, Claude Code's container and the Unix-socket relay, and proves the provider key
       # is in none of them, the relay refuses a request without the per-run token, and teardown leaves no container or

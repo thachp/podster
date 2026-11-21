@@ -16,18 +16,19 @@ nothing is pushed, dispatched or approved. Both stages refuse, before changing a
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked.
     A fetch that fails on a ref lock (another fetch running beside it) is tried again, up to five
     times, 2, 4, 8 and 16 seconds apart; any other fetch error is refused at once
+  - main's tip has no apps/runner/npm-shrinkwrap.json: Runner bundles its dependencies and ships no
+    shrinkwrap (npm installs a dependency's shrinkwrap whole, every platform and dev entry)
   - the version matches ^0\.0\.1-test\.[0-9]+$, with no leading zero and N at most nine digits, and isn't on npm yet, and its N is above both main's
     and the highest 0.0.1-test.N npm lists, so versions only go up
 
 bump      Sets apps/runner/package.json's version, and the package's own two version fields in
-          package-lock.json and npm-shrinkwrap.json, to <version> (main's N plus one when it's left
-          out). Nothing else in those files may change, and it's checked. It commits that on a
+          package-lock.json, to <version> (main's N plus one when it's left out). Nothing else in those files may change, and it's checked. It commits that on a
           detached worktree of main's tip in a scratch folder, so no checkout's branch is switched,
           pushes it as chore/runner-test-N (refused if that branch, or a pull request from it,
           already exists) and opens a pull request titled "chore: version Runner <version>". It never
           merges: that's scripts/merge-gate's, at the reviewed sha.
 
-publish   Also refuses unless main's tip has <version> in all three files, ci.yml's run on main for that
+publish   Also refuses unless main's tip has <version> in both files, ci.yml's run on main for that
           sha has completed as success, and no Runner pre-release run is still under way. --tag takes
           only "test", the one dist-tag the workflow publishes under; it never touches latest. Then:
             1. gh workflow run runner-prerelease.yml --ref main -f version=<version> -f dry_run=false
@@ -53,7 +54,9 @@ EOF
 PACKAGE=podster
 WORKFLOW=runner-prerelease.yml
 ENVIRONMENT=npm-test-prerelease
-FILES="apps/runner/package.json apps/runner/package-lock.json apps/runner/npm-shrinkwrap.json"
+FILES="apps/runner/package.json apps/runner/package-lock.json"
+# Runner ships no shrinkwrap since #504; one at main's tip would be a file this script doesn't version.
+SHRINKWRAP=apps/runner/npm-shrinkwrap.json
 
 stage=
 version=
@@ -144,7 +147,7 @@ if [ "$here" != "$main" ]; then refuse "the checkout is at $here, and origin/mai
 if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
 ok "the checkout is clean and detached at origin/main's tip, $main"
 
-# The package's own version fields in each file, at a commit: package.json has one, the two lock files two each.
+# The package's own version fields in each file, at a commit: package.json has one, package-lock.json two.
 versions_at() { # versions_at SHA: one line per field, "FILE FIELD VERSION"
   local file
   for file in $FILES; do
@@ -154,16 +157,20 @@ versions_at() { # versions_at SHA: one line per field, "FILE FIELD VERSION"
       | join(" ")' || return 1
   done
 }
+if git cat-file -e "$main:$SHRINKWRAP" 2> /dev/null; then
+  refuse "$SHRINKWRAP is back at $main. Runner ships no shrinkwrap; see apps/runner/scripts/pack.mjs"
+fi
+ok "main's tip has no $SHRINKWRAP"
 fields=$(versions_at "$main") || refuse "could not read the Runner's version fields at $main"
 current=$(printf '%s\n' "$fields" | awk '{ print $3 }' | sort -u)
-if [ "$(printf '%s\n' "$fields" | wc -l | tr -d ' ')" -ne 5 ]; then
-  refuse "expected five version fields at $main, found: $(printf '%s' "$fields" | tr '\n' ';')"
+if [ "$(printf '%s\n' "$fields" | wc -l | tr -d ' ')" -ne 3 ]; then
+  refuse "expected three version fields at $main, found: $(printf '%s' "$fields" | tr '\n' ';')"
 fi
 if [ "$(printf '%s\n' "$current" | wc -l | tr -d ' ')" -ne 1 ]; then
-  refuse "the three files disagree on the version at $main: $(printf '%s' "$fields" | tr '\n' ';')"
+  refuse "the two files disagree on the version at $main: $(printf '%s' "$fields" | tr '\n' ';')"
 fi
 if ! [[ "$current" =~ ^0\.0\.1-test\.(0|[1-9][0-9]{0,8})$ ]]; then refuse "main's version is '$current', not 0.0.1-test.N"; fi
-ok "main's Runner version is $current, in all three files"
+ok "main's Runner version is $current, in both files"
 
 # What npm lists. --prefer-online so a cached packument can't hide a version.
 listed=$(npm view --prefer-online "$PACKAGE" versions --json 2> /dev/null) || refuse "could not read $PACKAGE's versions from npm"
@@ -203,7 +210,7 @@ if [ "$stage" = bump ]; then
   cleanup() { git worktree remove --force "$scratch/wt" > /dev/null 2>&1 || true; rm -rf "$scratch"; }
   trap cleanup EXIT
   git worktree add --quiet --detach "$scratch/wt" "$main" || refuse "could not make a scratch worktree of $main"
-  # The top-level "version" line, and in the lock files the first "version" line inside packages[""]. Nothing else.
+  # The top-level "version" line, and in the lock file the first "version" line inside packages[""]. Nothing else.
   for file in $FILES; do
     awk -v old="$current" -v new="$version" '
       BEGIN { top = "  \"version\": \"" old "\","; own = "      \"version\": \"" old "\"," }
@@ -226,9 +233,9 @@ if [ "$stage" = bump ]; then
   done | sort -u)
   [ "$got" = "$version" ] || refuse "after the edit the version fields read '$(printf '%s' "$got" | tr '\n' ' ')', not $version"
   changed=$(git -C "$scratch/wt" diff --numstat | awk '{ printf "%s %s %s;", $1, $2, $3 }')
-  expected="2 2 apps/runner/npm-shrinkwrap.json;2 2 apps/runner/package-lock.json;1 1 apps/runner/package.json;"
-  [ "$changed" = "$expected" ] || refuse "the edit changed '$changed', not five version lines"
-  ok "the edit changes exactly the five version lines, to $version"
+  expected="2 2 apps/runner/package-lock.json;1 1 apps/runner/package.json;"
+  [ "$changed" = "$expected" ] || refuse "the edit changed '$changed', not three version lines"
+  ok "the edit changes exactly the three version lines, to $version"
 
   title="chore: version Runner $version"
   if [ "$go" != true ]; then
@@ -241,7 +248,7 @@ if [ "$stage" = bump ]; then
   echo "committed $commit on $main"
   git -C "$scratch/wt" push --quiet origin "HEAD:refs/heads/$branch" || refuse "could not push $branch (nothing reached origin, or check with: git ls-remote origin $branch)"
   echo "pushed $branch at $commit"
-  body="Bumps Runner to $version for a test pre-release. Only the package's own version fields change, in apps/runner/package.json, package-lock.json and npm-shrinkwrap.json; scripts/release-runner-test bump checked that nothing else in those files changed. CI runs the Runner suite. Merge with scripts/merge-gate, then publish with scripts/release-runner-test publish $version."
+  body="Bumps Runner to $version for a test pre-release. Only the package's own version fields change, in apps/runner/package.json and package-lock.json; scripts/release-runner-test bump checked that nothing else in those files changed. CI runs the Runner suite. Merge with scripts/merge-gate, then publish with scripts/release-runner-test publish $version."
   url=$(gh pr create --base main --head "$branch" --title "$title" --body "$body") \
     || failed "$branch is pushed at $commit, but the pull request wasn't opened. Open it with: gh pr create --base main --head $branch --title \"$title\""
   echo "opened $url"
@@ -252,7 +259,7 @@ fi
 # ---------------------------------------------------------------------------------------------------------------------
 # publish
 [ "$current" = "$version" ] || refuse "main's tip, $main, has $current, not $version. Merge the bump first"
-ok "main's tip has $version in all three files"
+ok "main's tip has $version in both files"
 ci=$(gh run list --workflow ci.yml --branch main --event push --commit "$main" --limit 1 --json status,conclusion \
   --jq '.[] | [.status, (if (.conclusion // "") == "" then "none" else .conclusion end)] | @tsv') \
   || refuse "could not read ci.yml's run on main for $main"

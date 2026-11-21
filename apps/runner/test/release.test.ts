@@ -1,7 +1,7 @@
 // The test pre-release (the owner's decision of 2026-11-19, narrowing decision 26): Runner points at staging unless the
 // owner names another gateway, and a publish is refused anywhere but the pre-release workflow on main.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_GATEWAY, pairingGateway } from "../src/core/gateway.js";
@@ -32,7 +32,7 @@ describe("the package", () => {
     expect(pkg.publishConfig).toEqual({ access: "public", tag: "test", provenance: true });
     expect(pkg.bin).toEqual({ podster: "build/node/cli.js" });
     expect(pkg.files).toEqual(["build/", "git/credential-helper", "sandbox/Dockerfile", "claude-image/Dockerfile",
-      "proxy-image/Dockerfile", "toolchains/dotnet/Dockerfile", "toolchains/java/Dockerfile", "toolchains/python/Dockerfile", "toolchains/rust/Dockerfile", "npm-shrinkwrap.json", "README.md"]);
+      "proxy-image/Dockerfile", "toolchains/dotnet/Dockerfile", "toolchains/java/Dockerfile", "toolchains/python/Dockerfile", "toolchains/rust/Dockerfile", "README.md"]);
     expect(pkg.repository).toEqual({ type: "git", url: "git+https://github.com/thachp/podster.git", directory: "apps/runner" });
   });
 
@@ -41,34 +41,42 @@ describe("the package", () => {
   });
 });
 
-describe("the shipped lockfile", () => {
-  // npm-shrinkwrap.json is committed beside package-lock.json and checked here (security review M2 on #470), so an
-  // install of the package resolves exactly what CI tested.
+describe("the shipped dependencies", () => {
+  // Runner bundles its production tree, installed from package-lock.json by `npm ci` with integrity checked, so an install
+  // gets exactly what CI tested (security review M2 on #470), and no Claude Code binary. It doesn't ship npm-shrinkwrap.json: npm reads a dependency's
+  // shrinkwrap after its per-platform check, so 0.0.1-test.11 installed every entry, all eight Claude Code binaries and
+  // the dev tools, 3.8 GB. scripts/pack.mjs packs the bundle and scripts/install-check.mjs checks a real install.
   type Entry = { version?: string; resolved?: string; integrity?: string; dev?: boolean; hasInstallScript?: boolean };
-  const read = (file: string) => JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), "utf8")) as { name: string; version: string; lockfileVersion: number; packages: Record<string, Entry> };
-  const lock = read("package-lock.json");
-  const shrinkwrap = read("npm-shrinkwrap.json");
-  const production = (l: typeof lock) => Object.entries(l.packages).filter(([path, entry]) => path !== "" && !entry.dev);
+  const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as { name: string; version: string; packages: Record<string, Entry> };
+  const production = Object.entries(lock.packages).filter(([path, entry]) => path !== "" && !entry.dev);
+  const SDK = "@anthropic-ai/claude-agent-sdk";
 
-  it("names the package and version the lock does", () => {
-    expect([shrinkwrap.name, shrinkwrap.version, shrinkwrap.lockfileVersion]).toEqual([lock.name, lock.version, lock.lockfileVersion]);
-    expect(shrinkwrap.version).toBe(pkg.version);
+  it("ships no npm-shrinkwrap.json", () => {
+    expect(existsSync(new URL("../npm-shrinkwrap.json", import.meta.url))).toBe(false);
   });
 
-  it("resolves every production package to the lock's version, source and integrity, and no other", () => {
-    const want = production(lock);
-    expect(want.length).toBeGreaterThan(50);
-    for (const [path, entry] of want) {
+  it("bundles every production dependency, exactly pinned, and nothing else", () => {
+    expect(pkg.bundleDependencies).toEqual(Object.keys(pkg.dependencies));
+    for (const [name, spec] of Object.entries(pkg.dependencies as Record<string, string>)) expect([name, spec]).toEqual([name, expect.stringMatching(/^\d+\.\d+\.\d+$/)]);
+  });
+
+  it("names none of the SDK's per-platform Claude Code binaries: Runner runs Claude Code only in its container", () => {
+    expect(pkg.optionalDependencies).toBeUndefined();
+    const named = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies });
+    expect(named.filter((name) => name.startsWith(`${SDK}-`))).toEqual([]);
+  });
+
+  it("resolves every production package by integrity, from npm's registry", () => {
+    expect(production.length).toBeGreaterThan(50);
+    for (const [path, entry] of production) {
       expect([path, entry.integrity]).toEqual([path, expect.stringMatching(/^sha512-/)]);
-      expect([path, shrinkwrap.packages[path]?.version, shrinkwrap.packages[path]?.resolved, shrinkwrap.packages[path]?.integrity]).toEqual([path, entry.version, entry.resolved, entry.integrity]);
+      expect([path, entry.resolved]).toEqual([path, expect.stringMatching(/^https:\/\/registry\.npmjs\.org\//)]);
     }
-    expect(production(shrinkwrap).map(([path]) => path).sort()).toEqual(want.map(([path]) => path).sort());
-    // And the whole tree is the lock's, dev entries included, so the two can't drift.
-    expect(shrinkwrap.packages).toEqual(lock.packages);
+    expect([lock.name, lock.version]).toEqual([pkg.name, pkg.version]);
   });
 
   it("has no production package with an install script, so Runner installs with scripts off", () => {
-    expect(production(lock).filter(([, entry]) => entry.hasInstallScript).map(([path]) => path)).toEqual([]);
+    expect(production.filter(([, entry]) => entry.hasInstallScript).map(([path]) => path)).toEqual([]);
   });
 });
 

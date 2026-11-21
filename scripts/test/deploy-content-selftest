@@ -64,14 +64,20 @@ TOKEN=selftestFAKEtoken_0123456789abcdefghijklmnopqrstuv
 DOMAIN=content-selftest.example
 echo "$TOKEN" > "$fix/token-expected"
 
+# A stand-in that hangs (gh-hangs, deploy-hangs, probe-hangs) becomes one perl process that writes its marker and then
+# sleeps with SIGINT, SIGTERM and SIGHUP at their default action, so the signal the self-test sends kills it at once.
+# It used to be a bash loop around `sleep 0.1`, and bash keeps going after a SIGINT that arrives while it reaps a child
+# that exited normally (it takes the child to have handled the SIGINT itself). Under load that window is wide enough
+# that the loop sometimes survived the group's SIGINT, deploy-content waited on it for ever, and the case was killed at
+# the bound: "SIGINT while checking" failed this way in CI with the three self-tests running side by side.
+
 # --- stand-ins ---
 stub gh <<'EOF'
 #!/usr/bin/env bash
 fix="$(dirname "$0")/../fix"
 echo "gh $*" >> "$fix/calls"
 if [ -f "$fix/gh-hangs" ]; then
-  touch "$fix/checking"
-  while :; do sleep 0.1; done
+  exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/checking" # one process; see the note above the stand-ins
 fi
 case "$*" in
   "run list --workflow ci.yml --branch main --event push --commit "*)
@@ -116,8 +122,7 @@ if [ "$1" = deploy ] && [ "$2" = --config ] && [ "$4" = --env-file ]; then
   dirname "$3" > "$fix/work-dir"
   echo "Uploaded podster-content"
   if [ -f "$fix/deploy-hangs" ]; then
-    touch "$fix/deploying"
-    while :; do sleep 0.1; done
+    exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/deploying" # one process; see the note above the stand-ins
   fi
   [ -f "$fix/wrangler-leaks" ] && echo "debug: Authorization: Bearer $CLOUDFLARE_API_TOKEN"
   [ -f "$fix/wrangler-log-leaks" ] && echo "token $CLOUDFLARE_API_TOKEN" > "$WRANGLER_LOG_PATH/wrangler.log"
@@ -201,8 +206,7 @@ case "$url" in
     fi
     echo "probe $method $scheme://$which/${hostpath#*/} header=${extra:-none} host_ok=$([[ "$host" =~ ^([0-9a-f]{26}\.)?content-selftest\.example$ ]] && echo yes || echo no) q_first=$first env=$leaks" >> "$fix/calls"
     if [ -f "$fix/probe-hangs" ]; then
-      touch "$fix/probing"
-      while :; do sleep 0.1; done
+      exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/probing" # one process; see the note above the stand-ins
     fi
     status=$(cat "$fix/$key.status")
     if [ "$status" = unreachable ]; then printf 000; exit 6; fi

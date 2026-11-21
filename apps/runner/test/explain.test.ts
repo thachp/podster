@@ -85,15 +85,26 @@ describe("the terminal's line", () => {
     expect(FAILURE_OUTCOMES.has("started")).toBe(false);
   });
 
-  it("explains a brief network failure once, at its first try again, and the offline grace period passing", () => {
+  it("explains a try again at counts that are powers of two, so a long outage keeps saying why, and the grace period passing", () => {
     const lines: string[] = [];
     const log = explainingLogger((l) => void lines.push(l), "/h/logs/errors.jsonl");
-    log("runner.poll", "retry", { agent: "agt_one", status: 0, code: "network", count: 1 });
-    log("runner.poll", "retry", { agent: "agt_one", status: 0, code: "network", count: 2 });
+    for (let count = 1; count <= 9; count++) log("runner.poll", "retry", { agent: "agt_one", status: 0, code: "network", count });
     log("runner.offline", "grace_passed", { agent: "agt_one", code: "gateway_unreachable" });
-    expect(lines).toHaveLength(5);
-    expect(lines[1]).toMatch(/^  why: Runner couldn't reach Podster: .* tries again, .*\(code network; details: \/h\/logs\/errors\.jsonl\)$/);
-    expect(lines[2]).toBe('{"at":"runner.poll","outcome":"retry","agent":"agt_one","status":0,"code":"network","count":2}');
-    expect(lines[4]).toMatch(/^  why: Runner hasn't reached Podster for longer than its offline grace period/);
+    const why = lines.filter((l) => l.startsWith("  why:"));
+    // Counts 1, 2, 4 and 8, then the grace period.
+    expect(lines).toHaveLength(10 + 5);
+    expect(why.slice(0, 4).every((l) => /^  why: Runner couldn't reach Podster: .* tries again, .*\(code network; details: \/h\/logs\/errors\.jsonl\)$/.test(l))).toBe(true);
+    expect(lines[lines.indexOf('{"at":"runner.poll","outcome":"retry","agent":"agt_one","status":0,"code":"network","count":3}') + 1]).not.toMatch(/why/);
+    expect(why[4]).toMatch(/^  why: Runner hasn't reached Podster for longer than its offline grace period/);
+  });
+
+  it("says what discovery_failed and bad_answer really are: an answer that isn't Podster's, not a network failure", () => {
+    for (const code of ["discovery_failed", "bad_answer"]) {
+      const e = explain(code);
+      expect(e.what).not.toMatch(/failed on the network/);
+      expect(e.what).toMatch(/isn't Podster's|couldn't read/);
+      expect(e.todo).toMatch(/gateway address/);
+      expect(e.todo).toMatch(/access page/);
+    }
   });
 });

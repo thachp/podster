@@ -15,7 +15,10 @@ import type { Clock, Logger } from "./runtime.js";
 
 /** Longest wait between tries while the gateway can't be reached (Proposed). */
 export const LONGEST_BACKOFF_MS = 5 * 60 * 1000;
-/** A wait is cut by up to this share of itself, at random, so Runners that lost the gateway together don't return together (Proposed). */
+/**
+ * A wait is cut by up to this share of itself, at random, so Runners that lost the gateway together don't return together,
+ * but never below the first wait: an outage never makes Runner poll more often than its interval (Proposed).
+ */
 export const JITTER = 0.5;
 
 /** Status-0 codes that are the network's, not this machine's: a missing key or a refused origin isn't tried again. */
@@ -30,13 +33,14 @@ export function retryable(error: unknown): error is GatewayError {
 
 /**
  * The wait before try `failures + 1`: `firstMs` doubled for each failure after the first, capped at `LONGEST_BACKOFF_MS`,
- * then cut by up to `JITTER` of itself. `random` answers in [0, 1); 0 gives the whole wait.
+ * then cut by up to `JITTER` of itself, and never below `firstMs` (so an interval longer than the cap is kept as it is).
+ * `random` answers in [0, 1); 0 gives the whole wait.
  */
 export function backoffMs(failures: number, firstMs: number, random: () => number = Math.random): number {
   const full = Math.min(firstMs * 2 ** Math.min(Math.max(failures, 1) - 1, 20), LONGEST_BACKOFF_MS);
   const r = random();
   const share = Number.isFinite(r) ? Math.min(Math.max(r, 0), 1) : 0;
-  return Math.max(1, Math.round(full * (1 - JITTER * share)));
+  return Math.max(1, firstMs, Math.round(full * (1 - JITTER * share)));
 }
 
 export type RetryOptions = {

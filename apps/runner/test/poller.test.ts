@@ -175,13 +175,13 @@ describe("the inbox loop", () => {
     expect(retries).toEqual([1, 2, 3].map((count) => JSON.stringify({ at: "runner.poll", outcome: "retry", agent: AGENT, status: 0, code: "network", count })));
   });
 
-  it("jitters its backoff below the full wait, never past it", async () => {
+  it("jitters its backoff below the full wait, never past it, and never below the interval", async () => {
     const { gateway, deps } = await paired();
     const poller = await Poller.open({ ...deps, random: () => 0.999 });
     expect(await poller.pollOnce()).toBe("ok");
     gateway.executeScript = ["network", "network"];
     const first = await poller.pollOnce();
-    expect(poller.nextWaitMs(first)).toBe(5_005);
+    expect(poller.nextWaitMs(first)).toBe(10_000);
     const second = await poller.pollOnce();
     expect(poller.nextWaitMs(second)).toBe(10_010);
   });

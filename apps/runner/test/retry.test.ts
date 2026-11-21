@@ -24,19 +24,29 @@ describe("which failures are tried again", () => {
 });
 
 describe("the backoff", () => {
-  it("doubles from the first wait up to its cap, and jitter only shortens it, by at most half", () => {
+  it("doubles from the first wait up to its cap, and jitter only shortens it, by at most half and never below the first wait", () => {
     expect([1, 2, 3, 4].map((n) => backoffMs(n, 10_000, () => 0))).toEqual([10_000, 20_000, 40_000, 80_000]);
     expect(backoffMs(30, 10_000, () => 0)).toBe(LONGEST_BACKOFF_MS);
     expect(backoffMs(1_000, 10_000, () => 0)).toBe(LONGEST_BACKOFF_MS);
-    expect(backoffMs(1, 10_000, () => 0.5)).toBe(7_500);
-    for (let i = 0; i < 200; i++) {
-      const wait = backoffMs(3, 10_000);
-      expect(wait).toBeGreaterThan(20_000);
-      expect(wait).toBeLessThanOrEqual(40_000);
+    // The first wait is never cut: an outage never polls faster than the interval.
+    expect(backoffMs(1, 10_000, () => 0.999)).toBe(10_000);
+    expect(backoffMs(2, 10_000, () => 0.999)).toBe(10_010);
+    expect(backoffMs(3, 10_000, () => 0.5)).toBe(30_000);
+    expect(backoffMs(30, 10_000, () => 0.999)).toBe(150_150);
+    // An interval longer than the cap is kept.
+    expect(backoffMs(5, 30 * 60_000, () => 0.5)).toBe(30 * 60_000);
+    // A fixed spread of random answers, edges included: every wait lies between half the full wait (or the first) and the full wait.
+    for (const r of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 0.999_999]) {
+      for (const n of [1, 2, 3, 6, 12]) {
+        const full = Math.min(10_000 * 2 ** (n - 1), LONGEST_BACKOFF_MS);
+        const wait = backoffMs(n, 10_000, () => r);
+        expect([n, r, wait >= Math.max(10_000, full / 2) && wait <= full]).toEqual([n, r, true]);
+      }
     }
-    // A random source that answers out of range can't make the wait longer or negative.
-    expect(backoffMs(1, 10_000, () => 7)).toBe(5_000);
-    expect(backoffMs(1, 10_000, () => Number.NaN)).toBe(10_000);
+    // A random source that answers out of range can't make the wait longer, shorter than the first, or negative.
+    expect(backoffMs(2, 10_000, () => 7)).toBe(10_000);
+    expect(backoffMs(2, 10_000, () => -3)).toBe(20_000);
+    expect(backoffMs(2, 10_000, () => Number.NaN)).toBe(20_000);
   });
 });
 

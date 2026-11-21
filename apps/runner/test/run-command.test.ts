@@ -219,7 +219,7 @@ describe("run, with a run engine", () => {
     const e = engine();
     const outcome = await runInbox({ home: t.home, poller: t.poller, clock, log, signal: t.stop.signal, terminal: notATerminal(), engine: e.run, random: () => 0.2 });
     expect(outcome).toBe("stopped");
-    expect(waits).toEqual([9_000, 18_000, 36_000]);
+    expect(waits).toEqual([10_000, 18_000, 36_000]);
     expect(lines.filter((l) => l.includes('"outcome":"retry"'))).toEqual([1, 2, 3].map((count) => JSON.stringify({ at: "runner.start", outcome: "retry", agent: AGENT, status: 0, code: "network", count })));
     expect(t.commands("accept_task")).toHaveLength(1);
     expect(e.sessions).toHaveLength(1);

@@ -3,13 +3,15 @@
 // Runner bundles its production dependencies (`bundleDependencies`), installed from package-lock.json by `npm ci` with
 // integrity checked, so an install gets the exact bytes CI tested. It doesn't ship npm-shrinkwrap.json: npm reads a
 // dependency's shrinkwrap only after its per-platform check, so every entry installs, which put all eight Claude Code
-// binaries and the dev tools on every machine (3.8 GB). The Claude Agent SDK's per-platform packages are instead Runner's
-// own `optionalDependencies`, pinned to the SDK's version, which npm checks per platform, so only the host's installs.
+// binaries and the dev tools on every machine (3.8 GB). And it installs no Claude Code binary at all: Runner runs Claude
+// Code only in its own container (`claude-image/Dockerfile` fetches and checks it), and tells the SDK that binary's path,
+// so the SDK never looks for one on the host.
 //
-// So the bundle must hold exactly the production tree, with no dev tool and no platform binary. A plain `npm pack` in
-// this folder would bundle whatever the dev install holds, so this packs from a fresh copy instead: package.json,
-// package-lock.json and the `files`, installed with `npm ci --omit=dev --omit=optional`, scripts off. It prints the
-// file's name and SHA-256. scripts/install-check.mjs then installs it as npx would and checks what lands.
+// So the bundle must hold exactly the production tree, with no dev tool and none of the SDK's per-platform packages
+// (`@anthropic-ai/claude-agent-sdk-*`). A plain `npm pack` in this folder would bundle whatever the dev install holds, so
+// this packs from a fresh copy instead: package.json, package-lock.json and the `files`, installed with
+// `npm ci --omit=dev --omit=optional`, scripts off. It refuses a platform package anywhere in package.json or the bundle.
+// It prints the file's name and SHA-256. scripts/install-check.mjs then installs it as npx would and checks what lands.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -35,6 +37,8 @@ const out = resolve(args[outAt + 1]);
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
 if (!existsSync(join(root, pkg.bin.podster))) usage(`${pkg.bin.podster} isn't built. Run \`npm run build\` first.`);
+const declared = Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies }).filter(isPlatformBinary);
+if (declared.length > 0) usage(`package.json names ${declared.join(", ")}. Runner installs no Claude Code binary; see this script's header.`);
 if (existsSync(join(root, "npm-shrinkwrap.json"))) usage("npm-shrinkwrap.json is back. Runner ships a bundle, not a shrinkwrap; see this script's header.");
 
 const run = (cwd, argv) => {

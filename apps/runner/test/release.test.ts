@@ -43,10 +43,10 @@ describe("the package", () => {
 
 describe("the shipped dependencies", () => {
   // Runner bundles its production tree, installed from package-lock.json by `npm ci` with integrity checked, so an install
-  // gets exactly what CI tested (security review M2 on #470). It doesn't ship npm-shrinkwrap.json: npm reads a dependency's
+  // gets exactly what CI tested (security review M2 on #470), and no Claude Code binary. It doesn't ship npm-shrinkwrap.json: npm reads a dependency's
   // shrinkwrap after its per-platform check, so 0.0.1-test.11 installed every entry, all eight Claude Code binaries and
   // the dev tools, 3.8 GB. scripts/pack.mjs packs the bundle and scripts/install-check.mjs checks a real install.
-  type Entry = { version?: string; resolved?: string; integrity?: string; dev?: boolean; optional?: boolean; hasInstallScript?: boolean; optionalDependencies?: Record<string, string> };
+  type Entry = { version?: string; resolved?: string; integrity?: string; dev?: boolean; hasInstallScript?: boolean };
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as { name: string; version: string; packages: Record<string, Entry> };
   const production = Object.entries(lock.packages).filter(([path, entry]) => path !== "" && !entry.dev);
   const SDK = "@anthropic-ai/claude-agent-sdk";
@@ -60,15 +60,10 @@ describe("the shipped dependencies", () => {
     for (const [name, spec] of Object.entries(pkg.dependencies as Record<string, string>)) expect([name, spec]).toEqual([name, expect.stringMatching(/^\d+\.\d+\.\d+$/)]);
   });
 
-  it("names the SDK's platform packages as its own optional dependencies, at the SDK's version, so npm picks the host's", () => {
-    const sdk = lock.packages[`node_modules/${SDK}`];
-    expect(sdk.version).toBe(pkg.dependencies[SDK]);
-    expect(pkg.optionalDependencies).toEqual(sdk.optionalDependencies);
-    expect(Object.keys(pkg.optionalDependencies).length).toBe(8);
-    for (const [name, version] of Object.entries(pkg.optionalDependencies as Record<string, string>)) {
-      expect([name, version]).toEqual([`${SDK}-${name.slice(SDK.length + 1)}`, sdk.version]);
-      expect([name, lock.packages[`node_modules/${name}`]?.optional]).toEqual([name, true]);
-    }
+  it("names none of the SDK's per-platform Claude Code binaries: Runner runs Claude Code only in its container", () => {
+    expect(pkg.optionalDependencies).toBeUndefined();
+    const named = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies, ...pkg.peerDependencies });
+    expect(named.filter((name) => name.startsWith(`${SDK}-`))).toEqual([]);
   });
 
   it("resolves every production package by integrity, from npm's registry", () => {

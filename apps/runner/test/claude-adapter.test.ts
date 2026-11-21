@@ -3,6 +3,7 @@
 // control, a fake `docker` and a fake upstream on loopback. Nothing reaches api.anthropic.com, runs Docker, reads a real
 // key or touches the keychain.
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { spawn as nodeSpawn } from "node:child_process";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -919,6 +920,53 @@ describe("the Claude Agent SDK driver", () => {
     expect(t.seen.options).toMatchObject({ permissionMode: "dontAsk", settingSources: [] });
     const o = claudeOptions({ session: s, cwd: "/c", env: {}, mcp: {} as never, hook: async () => ({}), spawn: () => ({}) as never, abortController: new AbortController() });
     expect(Object.isFrozen(o)).toBe(true);
+  });
+});
+
+// ---- No host Claude Code binary ----
+
+describe("Claude Code's binary", () => {
+  it("is named to the SDK as the one in Claude Code's container, and options without it are refused", () => {
+    const { s } = session();
+    const o = claudeOptions({ session: s, cwd: "/c", env: {}, mcp: {} as never, hook: async () => ({}), spawn: () => ({}) as never, abortController: new AbortController() });
+    expect(o.pathToClaudeCodeExecutable).toBe(CLAUDE_IN_CONTAINER);
+    const { pathToClaudeCodeExecutable: _omitted, ...without } = o;
+    expect(fixedOptionsRefusal(without as never)).toBe("executable");
+  });
+
+  it("is never looked for on the host by the real SDK: it starts that path, through Runner's spawn, which runs docker exec", async () => {
+    // The real SDK, Runner's real options. The SDK's own lookup of a host binary (its per-platform package) runs only
+    // when `pathToClaudeCodeExecutable` is unset; Runner's package installs none (scripts/install-check.mjs proves the
+    // installed tree has none and the SDK still starts). Here the stand-in process exits at once, so no model is called.
+    const sdk = await import("@anthropic-ai/claude-agent-sdk");
+    const { s } = session();
+    const commands: string[] = [];
+    const abort = new AbortController();
+    const spawn = (o: { command: string }) => {
+      commands.push(o.command);
+      return nodeSpawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }) as never;
+    };
+    const mcp = sdk.createSdkMcpServer({ name: "runner", version: "1.0.0", tools: [] });
+    const options = claudeOptions({ session: s, cwd: "/work", env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1" }, mcp, hook: async () => ({}), spawn, abortController: abort });
+    const q = sdk.query({ prompt: "x", options });
+    try {
+      for await (const _ of q) break;
+    } catch {
+      // The stand-in exits without speaking, which the SDK reports as an error, or as an end.
+    }
+    abort.abort();
+    expect(commands).toEqual([CLAUDE_IN_CONTAINER]);
+  });
+
+  it("isn't looked up or started on the host by any of Runner's own code", async () => {
+    const files = (await readdir(new URL("../src", import.meta.url), { recursive: true })).filter((f) => f.endsWith(".ts"));
+    expect(files.length).toBeGreaterThan(20);
+    for (const file of files) {
+      const text = await readFile(new URL(`../src/${file}`, import.meta.url), "utf8");
+      // No platform package, no PATH lookup of `claude`, no spawn of a `claude` command or a version probe of one.
+      expect([file, /claude-agent-sdk-(darwin|linux|win32)/.test(text)]).toEqual([file, false]);
+      expect([file, /\bwhich\s+claude\b|["'`]claude["'`]\s*,\s*\[|claude\s+--version/.test(text)]).toEqual([file, false]);
+    }
   });
 });
 

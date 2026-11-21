@@ -270,17 +270,21 @@ export function claudeOptions(p: { session: DriverSession; cwd: string; env: Rec
     includeHookEvents: true,
     hooks: { PreToolUse: [{ hooks: [p.hook], onFailure: "block" }] },
     spawnClaudeCodeProcess: p.spawn,
+    // Claude Code only ever runs in its container (`spawn` replaces the command with `docker exec`), so the SDK is told
+    // that binary's path and never looks for a host one: Runner's package installs no Claude Code binary.
+    pathToClaudeCodeExecutable: CLAUDE_IN_CONTAINER,
   } satisfies Options) as Options;
 }
 
 const ALLOWED_KEYS = new Set([
-  "model", "cwd", "env", "abortController", "systemPrompt", "tools", "mcpServers", "mcpServersDelivery", "strictMcpConfig", "settingSources", "persistSession", "verbatimPrompts", "permissionMode", "allowedTools", "maxTurns", "outputFormat", "includeHookEvents", "hooks", "spawnClaudeCodeProcess",
+  "model", "cwd", "env", "abortController", "systemPrompt", "tools", "mcpServers", "mcpServersDelivery", "strictMcpConfig", "settingSources", "persistSession", "verbatimPrompts", "permissionMode", "allowedTools", "maxTurns", "outputFormat", "includeHookEvents", "hooks", "spawnClaudeCodeProcess", "pathToClaudeCodeExecutable",
 ]);
 
 /** Why these options must not run, or null: every fixed setting as fixed, and nothing else set. */
 export function fixedOptionsRefusal(o: Options): string | null {
   const keys = Object.keys(o);
   if (keys.some((k) => !ALLOWED_KEYS.has(k))) return "option_not_allowed";
+  if (o.pathToClaudeCodeExecutable !== CLAUDE_IN_CONTAINER) return "executable";
   if (o.permissionMode !== "dontAsk") return "permission_mode";
   if (o.verbatimPrompts !== true) return "verbatim_prompts";
   if (!Array.isArray(o.settingSources) || o.settingSources.length !== 0) return "setting_sources";

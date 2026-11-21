@@ -19,7 +19,7 @@ Runner pairs your machine with one of your Podster agents, then polls that agent
 
 ## Commands
 
-Run it with install scripts off, as below: no dependency Runner uses needs one. Or set `npm_config_ignore_scripts=true` in your environment. The package bundles the dependencies Runner was tested with, so `npx` installs exactly those, plus the one Claude Code binary for your platform (about 400 MB in all).
+Run it with install scripts off, as below: no dependency Runner uses needs one. Or set `npm_config_ignore_scripts=true` in your environment. The package bundles the dependencies Runner was tested with, so `npx` installs exactly those, about 43 MB. It installs no Claude Code binary: Runner runs Claude Code only in its own container, built from `claude-image/Dockerfile`.
 
 Pair this machine with the agent a pairing in Podster started. Paste the code when asked: it's never an argument.
 

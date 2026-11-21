@@ -4,14 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { bundledNames, devOnlyNames, hostPlatformPackage, installedPackages, installProblems, tarballProblems, type Lock } from "../scripts/install-shape.mjs";
+import { bundledNames, devOnlyNames, installedPackages, installProblems, tarballProblems, type Lock } from "../scripts/install-shape.mjs";
 
 const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as Lock;
 const devOnly = devOnlyNames(lock);
 const SDK = "@anthropic-ai/claude-agent-sdk";
-const supported = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-arm64-musl", "linux-x64", "linux-x64-musl", "win32-arm64", "win32-x64"].map((p) => `${SDK}-${p}`);
-const host = `${SDK}-linux-x64`;
-const ok = { host, supported, devOnly, bytes: 400e6, budgetBytes: 500e6 };
+const ok = { devOnly, bytes: 43e6, budgetBytes: 60e6 };
 
 describe("the dev-only names", () => {
   it("are the build and test tools, and no production package", () => {
@@ -20,37 +18,23 @@ describe("the dev-only names", () => {
   });
 });
 
-describe("the host's platform package", () => {
-  it("is named as the SDK names it", () => {
-    expect(hostPlatformPackage("darwin", "arm64", false)).toBe(`${SDK}-darwin-arm64`);
-    expect(hostPlatformPackage("linux", "x64", false)).toBe(`${SDK}-linux-x64`);
-    expect(hostPlatformPackage("linux", "arm64", true)).toBe(`${SDK}-linux-arm64-musl`);
-    expect(hostPlatformPackage("win32", "x64", false)).toBe(`${SDK}-win32-x64`);
-  });
-});
-
 describe("an installed tree", () => {
   const pkgs = (...names: string[]) => names.map((name) => ({ name }));
 
-  it("passes with the production tree and only the host's binary", () => {
-    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, "zod", host) })).toEqual([]);
+  it("passes with the production tree and no Claude Code binary", () => {
+    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, "zod") })).toEqual([]);
   });
 
-  it("fails with another platform's binary, as 0.0.1-test.11 installed", () => {
-    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, host, `${SDK}-win32-x64`) })).toEqual([`installs other platforms' Claude Code binaries: ${SDK}-win32-x64`]);
-  });
-
-  it("fails without the host's binary, when the SDK ships one", () => {
-    expect(installProblems({ ...ok, packages: pkgs("podster", SDK) })).toEqual([`doesn't install this host's Claude Code binary, ${host}`]);
-    expect(installProblems({ ...ok, host: `${SDK}-freebsd-x64`, packages: pkgs("podster", SDK) })).toEqual([]);
+  it("fails with any Claude Code binary, the host's included, as 0.0.1-test.11 installed all eight", () => {
+    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, `${SDK}-linux-x64`, `${SDK}-win32-x64`) })).toEqual([`installs Claude Code binaries: ${SDK}-linux-x64, ${SDK}-win32-x64`]);
   });
 
   it("fails with a dev tool", () => {
-    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, host, "typescript", "@rolldown/binding-linux-x64-gnu") })).toEqual(["installs dev-only packages: @rolldown/binding-linux-x64-gnu, typescript"]);
+    expect(installProblems({ ...ok, packages: pkgs("podster", SDK, "typescript", "@rolldown/binding-linux-x64-gnu") })).toEqual(["installs dev-only packages: @rolldown/binding-linux-x64-gnu, typescript"]);
   });
 
   it("fails over the budget", () => {
-    expect(installProblems({ ...ok, bytes: 3958e6, packages: pkgs("podster", SDK, host) })).toEqual(["installs 3958.0 MB, over the 500.0 MB budget"]);
+    expect(installProblems({ ...ok, bytes: 397e6, packages: pkgs("podster", SDK) })).toEqual(["installs 397.0 MB, over the 60.0 MB budget"]);
   });
 });
 

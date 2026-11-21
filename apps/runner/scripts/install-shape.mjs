@@ -7,17 +7,6 @@ import { join } from "node:path";
 export const PLATFORM_PREFIX = "@anthropic-ai/claude-agent-sdk-";
 export const isPlatformBinary = (name) => name.startsWith(PLATFORM_PREFIX);
 
-/** The SDK's platform package for this host, as the SDK names them: `<platform>-<arch>`, and `-musl` on a musl Linux. */
-export function hostPlatformPackage(platform = process.platform, arch = process.arch, musl = isMusl()) {
-  return `${PLATFORM_PREFIX}${platform}-${arch}${platform === "linux" && musl ? "-musl" : ""}`;
-}
-
-function isMusl() {
-  if (process.platform !== "linux") return false;
-  const header = process.report?.getReport?.().header;
-  return !header?.glibcVersionRuntime;
-}
-
 /** Package names that only the dev tree uses (typecheck, tests, build), from package-lock.json. */
 export function devOnlyNames(lock) {
   const dev = new Set();
@@ -101,15 +90,13 @@ export function folderBytes(dir) {
 }
 
 /**
- * What's wrong with an installed tree: a platform binary that isn't the host's, the host's missing (when the SDK ships
- * one for it), a dev-only package, or more bytes than the budget. An empty list means it's right.
+ * What's wrong with an installed tree: any Claude Code binary (Runner runs Claude Code only in its own container), a
+ * dev-only package, or more bytes than the budget. An empty list means it's right.
  */
-export function installProblems({ packages, host, supported, devOnly, bytes, budgetBytes }) {
+export function installProblems({ packages, devOnly, bytes, budgetBytes }) {
   const problems = [];
   const binaries = [...new Set(packages.map((p) => p.name).filter(isPlatformBinary))].sort();
-  const foreign = binaries.filter((name) => name !== host);
-  if (foreign.length > 0) problems.push(`installs other platforms' Claude Code binaries: ${foreign.join(", ")}`);
-  if (supported.includes(host) && !binaries.includes(host)) problems.push(`doesn't install this host's Claude Code binary, ${host}`);
+  if (binaries.length > 0) problems.push(`installs Claude Code binaries: ${binaries.join(", ")}`);
   const dev = [...new Set(packages.map((p) => p.name).filter((name) => devOnly.has(name)))].sort();
   if (dev.length > 0) problems.push(`installs dev-only packages: ${dev.join(", ")}`);
   if (bytes > budgetBytes) problems.push(`installs ${mb(bytes)} MB, over the ${mb(budgetBytes)} MB budget`);

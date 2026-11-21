@@ -5,9 +5,11 @@
 // npm treats a package from a registry differently from a local .tgz: only a registry's package is installed through its
 // shipped npm-shrinkwrap.json, which is how 0.0.1-test.11 put 3.8 GB on disk. So this serves the .tgz from a registry on
 // 127.0.0.1, with the `_hasShrinkwrap` flag npm's registry sets, and passes every other request through to
-// registry.npmjs.org for the packages Runner's lock names. It installs `podster@<version>` into a fresh folder with scripts off and an empty npm config, then
-// fails unless only this host's Claude Code binary is there, no dev-only package is, the SDK finds its binary, and the
-// whole install fits the budget. It publishes nothing and sends no credential. It isn't packed.
+// registry.npmjs.org for the packages Runner's lock names. It installs `podster@<version>` into a fresh folder with scripts
+// off and an empty npm config, then fails if any Claude Code binary is there (Runner runs Claude Code only in its own
+// container, and tells the SDK so), or any dev-only package, or the install passes the budget, or the installed SDK,
+// given Runner's own options, starts anything but the container's binary. It publishes nothing and sends no credential.
+// It isn't packed.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -15,11 +17,11 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { childEnv, devOnlyNames, folderBytes, hostPlatformPackage, installedPackages, installProblems, isPlatformBinary, mb, PLATFORM_PREFIX, tarballProblems } from "./install-shape.mjs";
+import { childEnv, devOnlyNames, folderBytes, installedPackages, installProblems, mb, tarballProblems } from "./install-shape.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-/** The host's Claude Code binary is about 350 MB of it; the rest of the production tree is about 60 MB. */
-const DEFAULT_BUDGET_MB = 500;
+/** The production tree is about 43 MB, with no Claude Code binary (each is about 350 MB). */
+const DEFAULT_BUDGET_MB = 60;
 const UPSTREAM = "https://registry.npmjs.org";
 
 function usage(message) {
@@ -70,6 +72,29 @@ for (const known of [
 ]) {
   passThrough.set(`/${known}`, `${UPSTREAM}/${known.replaceAll("/", "%2f")}`);
 }
+
+/** Runs the installed package's own `claudeOptions` through its bundled SDK's `query`, recording each command spawned. */
+const START_PROBE = `
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const root = process.argv[2];
+const driver = await import(pathToFileURL(join(root, "build/node/claude-driver.js")).href);
+const sdk = await import(pathToFileURL(createRequire(join(root, "package.json")).resolve("@anthropic-ai/claude-agent-sdk")).href);
+const commands = [];
+const abort = new AbortController();
+const session = { frame: "probe", allowed_tools: ["StructuredOutput"], limits: { turns: 1 }, result_schema: { type: "object" } };
+const options = driver.claudeOptions({
+  session, cwd: "/work", env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1" },
+  mcp: sdk.createSdkMcpServer({ name: "runner", version: "1.0.0", tools: [] }), hook: async () => ({}), abortController: abort,
+  spawn: (o) => { commands.push(o.command); return spawn(process.execPath, ["-e", ""], { stdio: ["pipe", "pipe", "pipe"] }); },
+});
+try { for await (const _ of sdk.query({ prompt: "x", options })) break; } catch (e) { if (commands.length === 0) { console.error(String(e && e.message)); process.exit(1); } }
+abort.abort();
+console.log(JSON.stringify(commands));
+process.exit(0);
+`;
 
 const server = createServer(async (req, res) => {
   try {
@@ -130,36 +155,35 @@ try {
   const packages = installedPackages(nodeModules);
   const sdk = packages.find((p) => p.name === "@anthropic-ai/claude-agent-sdk");
   if (!sdk) throw new Error("the Claude Agent SDK isn't installed");
-  const supported = Object.keys(JSON.parse(readFileSync(join(sdk.dir, "package.json"), "utf8")).optionalDependencies ?? {});
-  const host = hostPlatformPackage();
   const total = folderBytes(nodeModules);
 
   // Where the bytes went, biggest first.
   const sizes = packages.map((p) => ({ ...p, bytes: folderBytes(p.dir) })).sort((a, b) => b.bytes - a.bytes);
   process.stdout.write(`\n${name}@${version} (${shipsShrinkwrap ? "ships" : "no"} npm-shrinkwrap.json) on ${process.platform}-${process.arch}\n`);
   process.stdout.write(`installed: ${packages.length} packages, ${mb(total)} MB (budget ${budgetMb} MB)\n`);
-  process.stdout.write(`Claude Code binaries: ${packages.filter((p) => isPlatformBinary(p.name)).map((p) => p.name.slice(PLATFORM_PREFIX.length)).join(", ") || "none"}\n`);
   for (const p of sizes.filter((p) => p.name !== name).slice(0, 5)) process.stdout.write(`  ${mb(p.bytes).padStart(8)} MB  ${p.name}@${p.version}\n`);
 
   // The .tgz itself first: packed on this host, a bundled binary could be this host's and pass the install's checks.
   const devOnly = devOnlyNames(lock);
   const problems = [
     ...tarballProblems({ paths: listing.out.split("\n").filter(Boolean), devOnly }),
-    ...installProblems({ packages, host, supported, devOnly, bytes: total, budgetBytes: budgetMb * 1e6 }),
+    ...installProblems({ packages, devOnly, bytes: total, budgetBytes: budgetMb * 1e6 }),
   ];
 
-  // The SDK must find this host's binary from where it's installed, as it does when Runner starts a run.
-  if (supported.includes(host)) {
-    const probe = `const { createRequire } = require("node:module"); createRequire(process.argv[1]).resolve(process.argv[2]);`;
-    const found = await run(process.execPath, ["-e", probe, join(sdk.dir, "package.json"), `${host}/package.json`], { cwd: project, env: childEnv() });
-    if (found.status !== 0) problems.push(`the SDK can't resolve ${host} from ${sdk.dir}`);
-  }
+  // With no binary installed, the installed SDK, given Runner's own options, must start only the container's binary,
+  // through Runner's spawn (a stand-in here that exits at once, so nothing runs and no model is called).
+  const installedRoot = join(nodeModules, ...name.split("/"));
+  const probe = join(work, "start-probe.mjs");
+  writeFileSync(probe, START_PROBE);
+  const started = await run(process.execPath, [probe, installedRoot], { cwd: project, env: childEnv() });
+  const commands = started.status === 0 ? JSON.parse(started.out.trim().split("\n").pop() ?? "null") : null;
+  process.stdout.write(`the installed SDK started: ${JSON.stringify(commands)}\n`);
+  if (!Array.isArray(commands) || commands.length !== 1 || commands[0] !== "/opt/claude/claude") problems.push("the installed SDK, given Runner's options, didn't start exactly /opt/claude/claude");
 
   // And Runner's modules that load the bundled SDK, MCP SDK and zod import from the installed package. Importing them
   // runs no command.
-  const installed = join(nodeModules, ...name.split("/"));
   for (const module of ["build/node/claude-engine.js", "build/node/claude-driver.js"]) {
-    const loaded = await run(process.execPath, ["--input-type=module", "-e", "await import(process.argv[1]);", join(installed, module)], { cwd: project, env: childEnv() });
+    const loaded = await run(process.execPath, ["--input-type=module", "-e", "await import(process.argv[1]);", join(installedRoot, module)], { cwd: project, env: childEnv() });
     if (loaded.status !== 0) problems.push(`the installed ${module} doesn't load`);
   }
 

@@ -108,8 +108,8 @@ jobs:
           echo "$sha  $file"
           echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
-      # That file, installed as `npx podster@test` installs it, holds only this host's Claude Code binary, no dev tool,
-      # and fits the size budget. Scripts off; nothing is published.
+      # That file, installed as `npx podster@test` installs it, holds no Claude Code binary and no dev tool, fits the size
+      # budget, and its SDK starts only the container's binary. Scripts off; nothing is published.
       - run: node scripts/install-check.mjs "$RUNNER_TEMP/pack/$FILE"
         env:
           FILE: ${{ steps.pack.outputs.file }}

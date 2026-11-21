@@ -467,6 +467,19 @@ The owner ruled against one large task image. The base task image (`apps/runner/
 - **One executor per agent:** proposed as one active Runner per agent, using a local lock. **This is best effort.** It can't detect a second machine, and a replaced Runner holding a current version can still commit until a server-side executor epoch is designed.
 - **Cancellation:** authenticate the requester and check scope. `cancel_task` commits in Podster immediately. Runner learns from its inbox or next authority check, stops the subprocess tree gracefully and then forcibly within a configured limit, and records partial work. Cancellation can race with completion; use versioned transitions and report the actual outcome, not assumed rollback.
 - **Offline:** keep durable inbox and history; display last-seen status rather than guaranteed online execution. Do not wake closed chat apps automatically. An offline Runner finds its work at next connection.
+- **Brief network failures (Proposed, 2026-11-21):** a brief outage never ends `run`. On 2026-11-21 a single network failure at start made Runner 0.0.1-test.11 exit with `gateway answered 0 network`. Opening the lifecycle there asks Podster who the agent is, and it was the one call outside any retry.
+  - **At start**, when opening the lifecycle, Runner tries again only on:
+    - a request that failed at the network (status 0: `network`);
+    - an answer that isn't Podster's or couldn't be read (`discovery_failed`, `bad_answer`), such as a proxy or Cloudflare Access page;
+    - a 5xx, or a 429.
+
+    Everything else ends `run` there and isn't tried again: an authority error, any other refusal, a run policy that can't be used, a missing local key and a refused origin.
+  - **In the poll loop**, the only failure that stops Runner is an authority error, which also retires the key. Every other failure of a poll is tried again after the backoff: the network, any refusal or status, a bad answer, even a local save that failed. Once the offline grace period passes, the loop starts nothing until it reaches Podster and reconciles again.
+  - **The wait** starts at the poll interval and doubles, up to 5 minutes (`LONGEST_BACKOFF_MS`, **Proposed**). Jitter then cuts it at random by up to half (`JITTER`, **Proposed**), so Runners that lost the gateway together don't come back together. The wait is never shorter than:
+    - the poll interval, so an outage never makes Runner poll more often (an interval longer than 5 minutes is kept as it is);
+    - a `Retry-After`.
+  - **What it logs.** Each try logs one ID-only line, such as `{"at":"runner.poll","outcome":"retry","agent":"agt_…","status":0,"code":"network","count":1}`; at start, `at` is `runner.start`. The poll loop's line was `unreachable` before. Tries whose count is a power of two (1, 2, 4, 8, …) get a `why:` line under them, so a long outage keeps saying why. The grace period passing gets one too (`gateway_unreachable`).
+  - **There is no upper bound on tries.** Past the grace period Runner already starts nothing, so waiting costs nothing. Giving up would leave an unattended Runner stopped until a person restarted it. The owner stops it with Ctrl-C or `stop`, which also ends a wait.
 - **Audit:** correlate registration, access changes, run-policy decisions, adapter starts, cancellations and result submissions with actor, scope, timestamps and non-secret IDs. Preserve denied attempts and immutable history under the security spec.
 
 ## Rejected option: task claiming

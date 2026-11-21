@@ -200,6 +200,58 @@ describe("run, with a run engine", () => {
     expect(e.sessions).toEqual([]);
   });
 
+  it("waits out fetch throwing on its first requests at start, then opens and runs (the 2026-11-21 report)", async () => {
+    const t = await setup();
+    await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+    const lines: string[] = [];
+    const waits: number[] = [];
+    // The startup's three waits pass at once; every wait after them is the test's usual clock's.
+    const clock: Clock = {
+      now: () => t.clock.now(),
+      idle: (ms, signal) => {
+        if (waits.length >= 3) return t.clock.idle(ms, signal);
+        waits.push(ms);
+        return Promise.resolve();
+      },
+    };
+    const log: PollerDeps["log"] = (at, outcome, fields) => void lines.push(JSON.stringify({ at, outcome, ...fields }));
+    t.gateway.executeScript = ["network", "network", "network"];
+    const e = engine();
+    const outcome = await runInbox({ home: t.home, poller: t.poller, clock, log, signal: t.stop.signal, terminal: notATerminal(), engine: e.run, random: () => 0.2 });
+    expect(outcome).toBe("stopped");
+    expect(waits).toEqual([10_000, 18_000, 36_000]);
+    expect(lines.filter((l) => l.includes('"outcome":"retry"'))).toEqual([1, 2, 3].map((count) => JSON.stringify({ at: "runner.start", outcome: "retry", agent: AGENT, status: 0, code: "network", count })));
+    expect(t.commands("accept_task")).toHaveLength(1);
+    expect(e.sessions).toHaveLength(1);
+  });
+
+  it("still ends at start on an authority error or a refusal, asking only once", async () => {
+    for (const fail of [(t: Awaited<ReturnType<typeof setup>>) => void (t.gateway.session = "revoked"), (t: Awaited<ReturnType<typeof setup>>) => void (t.gateway.executeScript = [403])]) {
+      const t = await setup();
+      await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+      fail(t);
+      const asked = t.commands("get_identity").length;
+      const e = engine();
+      await expect(runInbox({ home: t.home, poller: t.poller, clock: t.clock, log: t.log, signal: t.stop.signal, terminal: notATerminal(), engine: e.run, random: () => 0 })).rejects.toBeInstanceOf(Error);
+      expect(t.commands("get_identity")).toHaveLength(asked + 1);
+      expect(t.commands("accept_task")).toEqual([]);
+      expect(e.sessions).toEqual([]);
+    }
+  });
+
+  it("stops at start without opening when the owner stops it while it waits", async () => {
+    const t = await setup();
+    await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+    t.gateway.executeScript = Array(10).fill("network");
+    const stop = new AbortController();
+    const clock: Clock = { now: () => t.clock.now(), idle: async () => stop.abort() };
+    const e = engine();
+    expect(await runInbox({ home: t.home, poller: t.poller, clock, log: t.log, signal: stop.signal, terminal: notATerminal(), engine: e.run, random: () => 0 })).toBe("stopped");
+    expect(t.commands("accept_task")).toEqual([]);
+    // No run record: the lifecycle never opened. (`git-home` is the repository path's, made before it.)
+    expect((await readdir(t.home)).filter((name) => name !== "git-home")).toEqual([POLICY_FILE]);
+  });
+
   it("builds the interface the lifecycle is given from the engine", async () => {
     expect(new SupervisedAdapter({ ...engine().run, clock: new TestClock(), log: () => undefined })).toBeInstanceOf(SupervisedAdapter);
   });

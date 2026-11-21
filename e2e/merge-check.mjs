@@ -56,13 +56,19 @@ const where = () => ({ workspace_id: room, task_id: task });
 const change = async () => (await owner.must("GET", `/v1/workspaces/${room}/tasks/${task}`)).change;
 const grantNow = async (principal) => owner.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: principal.id, action: "merge" });
 const ask = (agent) => agent.call("merge_task", { ...where(), submission_no: 1, commit_sha: HEAD, idempotency_key: key() });
-const merges = async () => (await fake(`merge-calls?repo=${repo}`)).calls.filter((call) => call.method === "PUT");
+// Merge-shaped calls only: a pull request's merge. Setup's seeding of the default `.gitignore` is the fake's `seeds`.
+const merges = async () => (await fake(`merge-calls?repo=${repo}`)).calls.filter((call) => call.method === "PUT" && /^\/repositories\/\d+\/pulls\/\d+\/merge$/.test(call.path));
 
 await check("M5-S7-setup", "with no operator's approval, the owner asks, and the room's job creates and protects the repository through the fake", async () => {
   await owner.must("POST", `/v1/workspaces/${room}/repository`, { name: `e2e-merge-${key().slice(0, 8).toLowerCase()}`, visibility: "public" });
   const ready = await until(async () => (await owner.must("GET", `/v1/workspaces/${room}/repository`)), (read) => read.repository?.status === "ready" || read.request?.state === "failed", "the repository");
   eq(ready.repository?.status, "ready", `the repository's state (request: ${JSON.stringify(ready.request)})`);
   repo = ready.repository.provider_repo_id;
+  // Setup seeded the default `.gitignore` once, with the merge App's token cut down to contents and metadata.
+  const seeds = (await fake(`merge-calls?repo=${repo}`)).seeds;
+  const writes = seeds.filter((call) => call.method !== "GET");
+  eq(writes.map((call) => [call.method, call.path, call.status, call.permissions]), [["PUT", `/repositories/${repo}/contents/.gitignore`, 201, { contents: "write", metadata: "read" }]], "seeding writes");
+  eq((await fake(`merge-calls?repo=${repo}`)).calls, [], "merge calls during setup");
   // The agent-token App and the merge App know the repository, and it has one open pull request, as an agent would have made.
   await fake("agent-repo", { id: repo, pulls: { 7: { head_sha: HEAD, base_sha: BASE } } });
 });

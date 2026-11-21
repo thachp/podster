@@ -103,6 +103,8 @@ type AgentScript = {
 /** Commit statuses set on a test's repository, and every call a merge App token made about it. */
 const statuses = new Map<number, { sha: string; state: string; context: string }[]>();
 const mergeCalls: { repo: number; method: string; path: string; permissions: Record<string, string>; status: number; body: unknown }[] = [];
+/** Every call the merge App's seeding token made at setup (the default `.gitignore`), kept apart from its merge-shaped calls. */
+const seedCalls: typeof mergeCalls = [];
 /**
  * Repositories as provisioning left them, for the merge job's readiness read-back (M5 step 7b): Actions off, the two
  * rulesets, an initial commit. Each is one test's own, with its own script, and apart from the provisioning spec's
@@ -268,7 +270,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/merge-calls") {
       const repo = Number(url.searchParams.get("repo"));
-      return json({ calls: mergeCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), statuses: statuses.get(repo) ?? [], pulls: agentRepos.get(repo)?.pulls ?? {}, has: agentRepos.get(repo)?.has ?? [] });
+      return json({ calls: mergeCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), seeds: seedCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), statuses: statuses.get(repo) ?? [], pulls: agentRepos.get(repo)?.pulls ?? {}, has: agentRepos.get(repo)?.has ?? [] });
     }
     if (url.pathname === "/agent-gate") {
       return json({ waiting: gates.get(Number(url.searchParams.get("repo")))?.length ?? 0 });
@@ -478,7 +480,7 @@ async function agentMint(body: any, app: "agent" | "merge"): Promise<Response> {
  * The merge App reading or writing a file of a repository the provisioning spec made, as GitHub's contents API answers:
  * the file's text as base64, `404` for none, and a write without a `sha` refused (`422`) where a file is already there.
  * Once any ruleset is on, a write to the default branch is refused (`409`), as the rules refuse it. Each call is logged
- * with the merge App's others. Null for anything else.
+ * under `seeds`, apart from the merge App's merge-shaped calls. Null for anything else.
  */
 function seedCall(request: Request, path: string, bearer: string, body: any): Response | null {
   const asked = path.match(/^\/repositories\/(\d+)\/contents\/(.+)$/);
@@ -486,7 +488,7 @@ function seedCall(request: Request, path: string, bearer: string, body: any): Re
   const repo = asked ? repos.get(Number(asked[1])) : undefined;
   if (!asked || !repo || agentRepos.has(repo.id) || !held || !agentLive.has(bearer)) return null;
   const answer = (payload: unknown, status = 200) => {
-    mergeCalls.push({ repo: repo.id, method: request.method, path, permissions: held.permissions, status, body });
+    seedCalls.push({ repo: repo.id, method: request.method, path, permissions: held.permissions, status, body });
     return json(payload, status);
   };
   const reaches = held.repo === "all" || held.repo.includes(repo.id);

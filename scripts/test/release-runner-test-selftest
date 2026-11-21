@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks scripts/release-runner-test's refusals and both stages, with stand-ins for gh, npm and sleep, and no network.
 # git is real: each case runs against a scratch repository whose origin is a bare repository beside it, holding this
-# checkout's three Runner files, so the version edit is checked on their real layout. A git stand-in in front of it
+# checkout's two Runner files, so the version edit is checked on their real layout. A git stand-in in front of it
 # fails `git fetch` with a ref-lock error as many times as asked. Needs jq.
 #
 #   scripts/test/release-runner-test-selftest
@@ -107,11 +107,11 @@ EOF
 repo="$tmp/repo"
 origin="$tmp/origin.git"
 work="$tmp/work"
-files="apps/runner/package.json apps/runner/package-lock.json apps/runner/npm-shrinkwrap.json"
+files="apps/runner/package.json apps/runner/package-lock.json"
 g() { "$real_git" "$@"; }
 gw() { g -C "$work" "$@"; }
 
-# Sets every version field in the scratch work tree's three files with jq, as a fixture would want.
+# Sets every version field in the scratch work tree's two files with jq, as a fixture would want.
 set_version() { # set_version VERSION [FILE]
   local file
   for file in ${2:-$files}; do
@@ -212,11 +212,20 @@ check "  after one fetch and no wait" test "$(grep -c '^git fetch' "$fix/calls")
 
 # --- versions ---
 fresh 0.0.1-test.11
-set_version 0.0.1-test.10 apps/runner/npm-shrinkwrap.json
+set_version 0.0.1-test.10 apps/runner/package-lock.json
 gw commit --quiet -am drift && gw push --quiet origin main
 g -C "$repo" fetch --quiet origin && g -C "$repo" checkout --quiet --detach origin/main
 check "files that disagree on the version are refused, exit 1" run 1 "$(script)" bump
-check "  and says so" said 'REFUSE  the three files disagree'
+check "  and says so" said 'REFUSE  the two files disagree'
+fresh 0.0.1-test.11
+cp "$work/apps/runner/package-lock.json" "$work/apps/runner/npm-shrinkwrap.json"
+gw add -A && gw commit --quiet -m "shrinkwrap back" && gw push --quiet origin main
+g -C "$repo" fetch --quiet origin && g -C "$repo" checkout --quiet --detach origin/main
+check "an npm-shrinkwrap.json back in apps/runner is refused, exit 1" run 1 "$(script)" bump
+check "  and says so" said 'REFUSE  apps/runner/npm-shrinkwrap.json is back at'
+check "  and asks npm nothing" never_called '^npm '
+check "  publish refuses it too, exit 1" run 1 "$(script)" publish 0.0.1-test.11
+check "  and starts nothing" never_called 'gh workflow run|pending_deployments'
 fresh 0.0.1-test.11
 check "a version npm has is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.11
 check "  and says so" said 'REFUSE  podster@0.0.1-test.11 is already on npm'
@@ -257,7 +266,7 @@ check "the same refuses publish, exit 1" run 1 "$(script)" publish 0.0.1-test.12
 fresh 0.0.1-test.11
 check "bump with no version reports for main's N plus one, exit 0" run 0 "$(script)" bump
 check "  which is 0.0.1-test.12" said 'no version given, so 0.0.1-test.12'
-check "  and checks the edit" said '^ok +the edit changes exactly the five version lines, to 0.0.1-test.12'
+check "  and checks the edit" said '^ok +the edit changes exactly the three version lines, to 0.0.1-test.12'
 check "  and pushes, opens and dispatches nothing" never_called "$changes"
 check "  and origin has no new branch" test -z "$(g -C "$origin" branch --list 'chore/*')"
 check "  and the checkout is still clean and detached at main" \
@@ -288,11 +297,11 @@ pushed=$(g -C "$origin" rev-parse --verify --quiet refs/heads/chore/runner-test-
 check "  origin has chore/runner-test-12" test -n "$pushed"
 check "  one commit on main's tip" test "$(g -C "$origin" rev-parse "$pushed^")" = "$base"
 check "  titled for the version" test "$(g -C "$origin" log -1 --format=%s "$pushed")" = "chore: version Runner 0.0.1-test.12"
-check "  changing only the three files" \
-  test "$(g -C "$origin" diff --name-only "$base" "$pushed" | tr '\n' ' ')" = "apps/runner/npm-shrinkwrap.json apps/runner/package-lock.json apps/runner/package.json "
+check "  changing only the two files" \
+  test "$(g -C "$origin" diff --name-only "$base" "$pushed" | tr '\n' ' ')" = "apps/runner/package-lock.json apps/runner/package.json "
 got_lines=$(g -C "$origin" diff -U0 "$base" "$pushed" | grep -E '^[-+] ' | sed -E 's/^([-+]) +/\1/' | sort | uniq -c | awk '{ $1 = $1; print }' | tr '\n' ';')
-check "  five removed and five added, all the version field" \
-  test "$got_lines" = '5 +"version": "0.0.1-test.12",;5 -"version": "0.0.1-test.11",;'
+check "  three removed and three added, all the version field" \
+  test "$got_lines" = '3 +"version": "0.0.1-test.12",;3 -"version": "0.0.1-test.11",;'
 check "  every field at the new version, and npm's own fields kept" \
   test "$(for f in $files; do g -C "$origin" show "$pushed:$f" | jq -r '.version, (if .lockfileVersion then .packages[""].version else empty end)'; done | sort -u)" = 0.0.1-test.12
 check "  the pull request asked for with the conventional title" called '^gh pr create --base main --head chore/runner-test-12 --title chore: version Runner 0.0.1-test.12 '

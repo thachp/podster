@@ -1,0 +1,13 @@
+node_modules/
+work/
+# results/: only the run summaries and the spend ledger are committed; never the lock or temporary files.
+results/*
+!results/spend.json
+!results/traffic.json
+!results/bound.json
+!results/usage.json
+!results/read.json
+!results/edit.json
+!results/refuse.json
+!results/cancel.json
+!results/cap.json

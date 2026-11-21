@@ -1,0 +1,12 @@
+{
+  "name": "podster-spike-m7-openai",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test \"test/*.test.mjs\"" },
+  "dependencies": {
+    "@openai/agents-core": "0.22.0",
+    "@openai/agents-openai": "0.22.0",
+    "openai": "7.62.0"
+  }
+}

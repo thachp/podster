@@ -453,6 +453,9 @@ describe("Runner's own source", () => {
       "npm run typecheck",
       "npm test",
       "npm run build",
+      // The packed package, installed into a temp folder as `npx` would, to check only this host's Claude Code binary lands.
+      'node scripts/pack.mjs --out "$RUNNER_TEMP/pack"',
+      'node scripts/install-check.mjs "$RUNNER_TEMP/pack/podster-$(node -p "require(\'./package.json\').version").tgz"',
       // S-47's Linux Docker proof: on this runner's Docker, gated on all three of its tests having run and passed.
       "docker version --format '{{.Server.Version}}'",
       'npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"',

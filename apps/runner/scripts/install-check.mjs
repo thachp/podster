@@ -5,7 +5,7 @@
 // npm treats a package from a registry differently from a local .tgz: only a registry's package is installed through its
 // shipped npm-shrinkwrap.json, which is how 0.0.1-test.11 put 3.8 GB on disk. So this serves the .tgz from a registry on
 // 127.0.0.1, with the `_hasShrinkwrap` flag npm's registry sets, and passes every other request through to
-// registry.npmjs.org. It installs `podster@<version>` into a fresh folder with scripts off and an empty npm config, then
+// registry.npmjs.org for the packages Runner's lock names. It installs `podster@<version>` into a fresh folder with scripts off and an empty npm config, then
 // fails unless only this host's Claude Code binary is there, no dev-only package is, the SDK finds its binary, and the
 // whole install fits the budget. It publishes nothing and sends no credential. It isn't packed.
 import { spawn } from "node:child_process";
@@ -59,6 +59,18 @@ const manifest = JSON.parse((await run("tar", ["-xzOf", tarball, "package/packag
 const { name, version } = manifest;
 const file = basename(tarball);
 
+// The only other packages it passes through: the ones Runner's lock names, plus the package's own dependencies, each by
+// a fixed URL built from that list, never from the request. npm asks for nothing else here: the shrinkwrap's or bundle's
+// packages come by their recorded tarball URLs, straight from npm's registry.
+const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
+const passThrough = new Map();
+for (const known of [
+  ...Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }),
+  ...Object.entries(lock.packages).filter(([path]) => path !== "").map(([path, entry]) => entry.name ?? path.slice(path.lastIndexOf("node_modules/") + 13)),
+]) {
+  passThrough.set(`/${known}`, `${UPSTREAM}/${known.replace("/", "%2f")}`);
+}
+
 const server = createServer(async (req, res) => {
   try {
     if (req.method !== "GET") {
@@ -82,8 +94,13 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/octet-stream" }).end(bytes);
       return;
     }
-    // Anything else is the public registry's, passed through unchanged, with no credential.
-    const upstream = await fetch(`${UPSTREAM}${url.pathname}${url.search}`, { headers: { accept: req.headers.accept ?? "application/json" } });
+    // A package Runner names is the public registry's, passed through unchanged, with no credential. Anything else: 404.
+    const target = passThrough.get(decodeURIComponent(url.pathname));
+    if (!target) {
+      res.writeHead(404).end();
+      return;
+    }
+    const upstream = await fetch(target, { headers: { accept: req.headers.accept === "application/json" ? "application/json" : "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8" } });
     const body = Buffer.from(await upstream.arrayBuffer());
     res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/octet-stream" }).end(body);
   } catch {
@@ -111,7 +128,6 @@ try {
 
   const nodeModules = join(project, "node_modules");
   const packages = installedPackages(nodeModules);
-  const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
   const sdk = packages.find((p) => p.name === "@anthropic-ai/claude-agent-sdk");
   if (!sdk) throw new Error("the Claude Agent SDK isn't installed");
   const supported = Object.keys(JSON.parse(readFileSync(join(sdk.dir, "package.json"), "utf8")).optionalDependencies ?? {});

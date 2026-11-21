@@ -80,6 +80,11 @@ export const WORK_TREE_CACHES = [".cache", ".cargo", ".npm-global"] as const;
  * commits what an agent leaves behind:
  * - dependency folders that hold links: `node_modules/` and `.venv/` at any depth (a monorepo nests them);
  * - Python's `__pycache__/` and `.pytest_cache/` at any depth;
+ * - package managers' caches at any depth: npm's `.npm-cache/` and `.npm/`, Yarn's `.yarn/cache/` (led by `**` and a slash, so it isn't
+ *   anchored at the top, as a line with a `/` inside would be), pnpm's `.pnpm-store/`, and `.cache/` (2026-11-21: an
+ *   agent ran npm with its cache at `/work/.npm-cache`, and Runner's one commit held 524 cache files, about 140 MB, so the
+ *   push failed). `.cache/` at any depth also covers the top `.cache` that `WORK_TREE_CACHES` names, which holds the
+ *   task's `HOME`; both lines stay, the first anchored there whatever this list says;
  * - at the top only: cargo's build folder `/target/`, wrangler's local state `/.wrangler/`, and agents' scratch `/.tmp/`;
  * - `.DS_Store` at any depth;
  * - `.env` and `.env.*` at any depth, except `.env.example`, `.env.sample` and `.env.template`, so an agent-written
@@ -95,6 +100,11 @@ export const WORK_TREE_DEFAULT_IGNORE = [
   ".venv/",
   "__pycache__/",
   ".pytest_cache/",
+  ".npm-cache/",
+  ".npm/",
+  "**/.yarn/cache/",
+  ".pnpm-store/",
+  ".cache/",
   "/target/",
   "/.wrangler/",
   "/.tmp/",
@@ -110,6 +120,53 @@ export const WORK_TREE_DEFAULT_IGNORE = [
  * default ignore list (`WORK_TREE_DEFAULT_IGNORE`) as written there.
  */
 export const WORK_TREE_EXCLUDE = [...WORK_TREE_CACHES.map((name) => `/${name}/`), ...WORK_TREE_DEFAULT_IGNORE].map((line) => `${line}\n`).join("");
+
+/**
+ * The most one publish commits, checked after `git add --all` and before the commit (2026-11-21: a commit of npm's cache,
+ * 524 files and about 140 MB, made the push fail). All three are fixed here, in code:
+ * - `file_bytes`, 50 MiB for any one file: GitHub warns about a file over 50 MiB and refuses one over 100 MiB (GH001),
+ *   so this refuses before GitHub would, with room to spare (`work_tree_file_too_large`);
+ * - `bytes`, 50 MiB for all the files the commit adds or changes, as Git stores them uncompressed: a task's change is
+ *   source and a lock file, which is kilobytes to a few megabytes; a push of hundreds of megabytes is what fails over
+ *   HTTPS, and anything near this is almost always a cache, a build or a download the agent left (`work_tree_too_large`);
+ * - `files`, 5,000 paths added, changed or deleted, far past any hand-made change and under the 1 MB Runner reads of
+ *   Git's list of them (`work_tree_too_large`).
+ * A file over `file_bytes` is named by its own code even when the total is over too. **Proposed** figures.
+ */
+export const COMMIT_LIMITS = Object.freeze({ files: 5_000, bytes: 50 * 1024 * 1024, file_bytes: 50 * 1024 * 1024 });
+
+/** Changed paths in a commit-to-be, and the blobs it adds or changes, from `git diff --raw -z --no-abbrev`. */
+export type StagedChanges = { paths: number; blobs: string[] };
+
+const NO_OBJECT = /^0+$/;
+
+/**
+ * Reads `git diff --cached --raw -z --no-renames --no-abbrev` as bytes: each entry is `:<old mode> <new mode> <old id>
+ * <new id> <status>` then the path, NUL after each. Counts every path, and keeps each new blob ID the commit would add:
+ * none for a deletion, none for a submodule (mode 160000), which carries no content. Anything else shaped refuses.
+ */
+export function readStagedChanges(listing: Uint8Array): StagedChanges {
+  const parts = Buffer.from(listing.buffer, listing.byteOffset, listing.byteLength).toString("latin1").split("\0");
+  if (parts.at(-1) === "") parts.pop();
+  if (parts.length % 2 !== 0) throw new RepoPathError("commit_failed");
+  const blobs: string[] = [];
+  for (let at = 0; at < parts.length; at += 2) {
+    const head = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([0-9a-f]{40}|[0-9a-f]{64}) ([A-Z])$/.exec(parts[at]);
+    if (!head || parts[at + 1] === "") throw new RepoPathError("commit_failed");
+    const [, , mode, , id, status] = head;
+    if (status !== "D" && mode !== "160000" && !NO_OBJECT.test(id)) blobs.push(id);
+  }
+  return { paths: parts.length / 2, blobs };
+}
+
+/**
+ * Refuses a commit-to-be over `COMMIT_LIMITS`, given its path count and each added or changed blob's size, in bytes, as
+ * `git cat-file --batch-check=%(objectsize)` answers them: one file too large first, then too many paths or bytes.
+ */
+export function checkCommitSize(paths: number, sizes: readonly number[], limits: { files: number; bytes: number; file_bytes: number } = COMMIT_LIMITS): void {
+  if (sizes.some((size) => size > limits.file_bytes)) throw new RepoPathError("work_tree_file_too_large");
+  if (paths > limits.files || sizes.reduce((sum, size) => sum + size, 0) > limits.bytes) throw new RepoPathError("work_tree_too_large");
+}
 
 /** The prefix of every task branch. */
 export const BRANCH_PREFIX = "podster/";

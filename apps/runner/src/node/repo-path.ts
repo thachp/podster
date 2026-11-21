@@ -25,8 +25,10 @@ import { GatewayError, meaningOf } from "../core/errors.js";
 import type { Publication, PublishWords, RepoTask, RepositoryPath } from "../core/lifecycle.js";
 import { pullText } from "../core/pull-text.js";
 import {
+  checkCommitSize,
   checkProtected,
   COMMIT_IDENTITY,
+  COMMIT_LIMITS,
   WORK_TREE_EXCLUDE,
   fetchArgs,
   GITHUB,
@@ -38,6 +40,7 @@ import {
   readPullRequest,
   readRef,
   readRepository,
+  readStagedChanges,
   renewDue,
   RepoPathError,
   taskBranch,
@@ -143,6 +146,8 @@ export type RepoPathDeps = {
   app_origin?: string | null;
   /** How long Git may take to list the folders it ignores; `IGNORED_LIST_TIMEOUT_MS` unless a test sets it. */
   ignored_list_timeout_ms?: number;
+  /** The most one publish commits; `COMMIT_LIMITS` unless a test sets it. */
+  commit_limits?: { files: number; bytes: number; file_bytes: number };
 };
 
 /**
@@ -195,9 +200,9 @@ export class GitRepositoryPath implements RepositoryPath {
     return repo;
   }
 
-  private async git(task: RepoTask, args: string[], opts: { secret?: string; signal: AbortSignal; timeout_ms?: number }): Promise<GitResult> {
+  private async git(task: RepoTask, args: string[], opts: { secret?: string; signal: AbortSignal; timeout_ms?: number; input?: string }): Promise<GitResult> {
     const helper = opts.secret === undefined ? null : this.deps.helper;
-    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal, timeout_ms: opts.timeout_ms });
+    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal, timeout_ms: opts.timeout_ms, ...(opts.input === undefined ? {} : { input: opts.input }) });
   }
 
   /**
@@ -243,6 +248,29 @@ export class GitRepositoryPath implements RepositoryPath {
     if (listed.code === GIT_OUTPUT_CUT) throw new RepoPathError("work_tree_too_large");
     if (listed.code !== 0 || listed.stdout_bytes === undefined) throw new RepoPathError("commit_failed");
     if (touchesWorkflows(listed.stdout_bytes)) throw new RepoPathError("work_tree_workflow");
+  }
+
+  /**
+   * Refuses a commit-to-be over `COMMIT_LIMITS` (`work_tree_too_large`, `work_tree_file_too_large`), measured from the
+   * index after `git add --all`: every path it differs in from the pinned commit, and the size of each blob it adds or
+   * changes, read from Git's object store by ID (`cat-file --batch-check`), never from the work tree. A list past the
+   * 1 MB Runner reads is too many paths.
+   */
+  private async withinLimits(task: RepoTask & { base_commit: string }, signal: AbortSignal): Promise<void> {
+    const args = ["diff", "--cached", "--raw", "-z", "--no-renames", "--no-abbrev", "--no-ext-diff", "--no-textconv", "--end-of-options", task.base_commit, "--"];
+    const listed = await this.git(task, args, { signal });
+    if (listed.code === GIT_OUTPUT_CUT) throw new RepoPathError("work_tree_too_large");
+    if (listed.code !== 0 || listed.stdout_bytes === undefined) throw new RepoPathError("commit_failed");
+    const limits = this.deps.commit_limits ?? COMMIT_LIMITS;
+    const staged = readStagedChanges(listed.stdout_bytes);
+    if (staged.paths > limits.files) throw new RepoPathError("work_tree_too_large");
+    if (staged.blobs.length === 0) return;
+    const sized = await this.git(task, ["cat-file", "--batch-check=%(objectsize)"], { signal, input: staged.blobs.map((id) => `${id}\n`).join("") });
+    if (sized.code === GIT_OUTPUT_CUT) throw new RepoPathError("work_tree_too_large");
+    const lines = sized.stdout.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (sized.code !== 0 || lines.length !== staged.blobs.length || !lines.every((line) => /^(0|[1-9][0-9]{0,14})$/.test(line))) throw new RepoPathError("commit_failed");
+    checkCommitSize(staged.paths, lines.map(Number), limits);
   }
 
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
@@ -341,6 +369,7 @@ export class GitRepositoryPath implements RepositoryPath {
     // `:/` names the whole work tree from its top, whatever Git's working folder is.
     if ((await this.git(task, ["add", "--all", "--", ":/"], { signal })).code !== 0) throw new RepoPathError("commit_failed");
     await this.noWorkflowChange(task, signal);
+    await this.withinLimits(task, signal);
     if (before === task.base_commit) {
       if (await this.clean(task, signal)) return { kind: "no_changes" };
       const identity = ["-c", `user.name=${COMMIT_IDENTITY.name}`, "-c", `user.email=${COMMIT_IDENTITY.email}`];
@@ -389,15 +418,25 @@ export class GitRepositoryPath implements RepositoryPath {
     this.deps.broker.forget(workspace_id, task_id);
   }
 
-  /** A failed fetch or push, by a fixed code: a refused credential reads as a revoked token. Git's words are never kept. */
+  /**
+   * A failed fetch or push, by a fixed code: a refused credential reads as a revoked token, and a push GitHub or the way
+   * to it plainly refused for its size as `push_too_large`; a timeout or failed connection stays `github_unreachable`. Git's words are matched here and never kept or logged.
+   */
   private gitFailure(task: RepoTask, result: { stdout: string; stderr: string }, fallback: string): RepoPathError {
     const text = `${result.stdout}\n${result.stderr}`;
     if (/Authentication failed|could not read (Username|Password)|returned error: 40[13]|Invalid username or (password|token)/i.test(text)) {
       this.deps.broker.revoked(task.workspace_id, task.task_id);
       return new RepoPathError("token_revoked");
     }
+    // A timeout or a connection that failed is the network's, and tried again, whatever else Git said with it: `RPC
+    // failed; curl 28 Operation timed out` is one.
+    if (/Could not resolve host|Failed to connect|Connection timed out|Operation timed out|timed out|Connection reset/i.test(text)) return new RepoPathError("github_unreachable", true);
+    // A push GitHub or the way to it refused for its size, only on a clear sign of it: an HTTP 413, a pack over a limit,
+    // or GitHub's large-file refusal. Only for a push; checked before the plain rejection, since GH001 arrives as one. A
+    // bare `RPC failed` or `remote end hung up` says neither, and falls back to `push_failed`.
+    if (fallback === "push_failed" && /HTTP 413|returned error: 413|pack exceeds|GH001|exceeds GitHub's file size limit|this exceeds/i.test(text)) return new RepoPathError("push_too_large");
     if (/\[rejected\]|\[remote rejected\]|non-fast-forward|fetch first/.test(text)) return new RepoPathError("push_rejected");
-    if (/Could not resolve host|Failed to connect|Connection timed out|Operation timed out|unable to access/i.test(text)) return new RepoPathError("github_unreachable", true);
+    if (/unable to access/i.test(text)) return new RepoPathError("github_unreachable", true);
     return new RepoPathError(fallback);
   }
 }

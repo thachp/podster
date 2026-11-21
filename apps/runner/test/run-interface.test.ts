@@ -382,6 +382,12 @@ describe("the prompt and the container", () => {
     expect(spec).toMatchObject({ run_ref: "run_1", network: { kind: "none" }, mounts: [{ source: FACTS.task_folder, target: "/work" }], read_only_root: true, drop_capabilities: "all", user: "unprivileged" });
     expect(spec.env).toEqual(CONTAINER_ENV);
     expect(spec.env.WRANGLER_SEND_METRICS).toBe("false");
+    // npm's cache is pinned under the task's HOME, inside a folder never committed, and the spec check holds it exactly.
+    expect(spec.env.npm_config_cache).toBe("/work/.cache/home/.npm");
+    expect(spec.env.npm_config_cache.startsWith(`${TASK_HOME}/`)).toBe(true);
+    expect(checkContainerSpec({ ...spec, env: { ...spec.env, npm_config_cache: "/work/.npm-cache" } })).toBe("env_not_allowed");
+    const { npm_config_cache: _dropped, ...unpinned } = spec.env;
+    expect(checkContainerSpec({ ...spec, env: unpinned })).toBe("env_not_allowed");
     expect(containerSpec("run_1", { ...FACTS, network: ["registry.npmjs.org"] }).network).toEqual({ kind: "allowlist", hosts: ["registry.npmjs.org"] });
     expect(checkContainerSpec(spec)).toBeNull();
   });

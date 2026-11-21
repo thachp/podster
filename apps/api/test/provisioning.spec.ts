@@ -201,7 +201,7 @@ const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FRO
 const seedCalls = async (repo: number) => ((await (await fetch(`https://github-fake.example.com/merge-calls?repo=${repo}`)).json()) as { seeds: { method: string; path: string; permissions: Record<string, string>; status: number; body: any }[] }).seeds;
 const seedTokens = async (repo: number) => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${repo}`)).json()) as { live: boolean; permissions: Record<string, string>; asked: any }[];
 /** The default `.gitignore` every new repository starts with: Runner's own list (`crates/core/src/provisioning.rs`). */
-const DEFAULT_IGNORE = ["node_modules/", ".venv/", "__pycache__/", ".pytest_cache/", "/target/", "/.wrangler/", "/.tmp/", ".DS_Store", ".env", ".env.*", "!.env.example", "!.env.sample", "!.env.template"].map((line) => `${line}\n`).join("");
+const DEFAULT_IGNORE = ["node_modules/", ".venv/", "__pycache__/", ".pytest_cache/", ".npm-cache/", ".npm/", "**/.yarn/cache/", ".pnpm-store/", ".cache/", "/target/", "/.wrangler/", "/.tmp/", ".DS_Store", ".env", ".env.*", "!.env.example", "!.env.sample", "!.env.template"].map((line) => `${line}\n`).join("");
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {

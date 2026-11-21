@@ -8,6 +8,11 @@
  * fixed note (`composeBlockedNote`), and the specific code and its explanation stay on the owner's machine.
  */
 
+import { COMMIT_LIMITS } from "./repository.js";
+
+/** A byte limit in whole MiB, for the fixed text below. */
+const MIB = (bytes: number) => Math.round(bytes / (1024 * 1024));
+
 export type Explanation = { what: string; todo: string };
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
@@ -66,7 +71,9 @@ const TABLE = new Map<string, Explanation>([
   // The repository path.
   ...group(["repository_unavailable", "helper_unavailable", "git_unavailable"], "Runner can't work with this room's repository on this machine.", "Check that Git is installed and the room's repository is set in policy.json."),
   ...group(["repository_out_of_scope", "clone_url_unexpected", "repository_id_mismatch", "repository_renamed", "repository_archived", "repository_unprotected", "repository_unreadable"], "The room's repository isn't the one Runner's policy allows, or can't be used as it is.", "Check rooms[].repository in policy.json against the room's repository on GitHub."),
-  ...group(["path_unsafe", "unsafe", "work_tree_git", "work_tree_link", "work_tree_special", "work_tree_too_large"], "The task's folder held something Runner won't commit or push.", "The details file names the check; the task is released."),
+  ...group(["path_unsafe", "unsafe", "work_tree_git", "work_tree_link", "work_tree_special"], "The task's folder held something Runner won't commit or push.", "The details file names the check; the task is released."),
+  ...group(["work_tree_too_large"], `The run's change was too large to commit: more than ${MIB(COMMIT_LIMITS.bytes)} MB, more than ${COMMIT_LIMITS.files.toLocaleString("en-US")} files, or more folder entries than Runner walks. Almost always it's a cache, a build or a download the agent left in the task's folder.`, "The task is released; add that folder to the repository's .gitignore, or ask for a smaller task."),
+  ...group(["work_tree_file_too_large"], `One file in the run's change was over ${MIB(COMMIT_LIMITS.file_bytes)} MB, which GitHub warns about, close to the 100 MB it refuses.`, "The task is released; keep large files out of the repository, such as with .gitignore, or ask for a task that doesn't make them."),
   ...group(["work_tree_workflow"], "The task changed a GitHub workflow file, which Runner never commits.", "The task is released; a workflow change goes through a person."),
   ...group(["work_tree_name"], "A file or folder name in the task's folder isn't valid UTF-8, so Runner can't check it exactly.", "The task is released; rename or remove that entry if the run made it."),
   ...group(["work_tree_timeout"], "Git took too long listing what the repository ignores, so nothing was committed.", "The task is released; a .gitignore that isn't a plain file, such as a pipe, can cause this."),
@@ -74,6 +81,7 @@ const TABLE = new Map<string, Explanation>([
   ...group(["access_authority_invalid", "access_expired", "access_fields", "access_invalid", "access_not_object", "access_permissions", "access_token_format", "token_revoked"], "Podster's repository access for this task wasn't usable.", "Try again later; if it keeps happening, check the room's repository settings in Podster."),
   ...group(["github_unavailable", "github_unreachable", "github_refused", "github_answer_too_large"], "GitHub couldn't be reached or refused a request.", "Check the network; Runner tries again later."),
   ...group(["checkout_failed", "checkout_moved", "checkout_unverified", "fetch_invalid", "git_init_failed", "default_branch_invalid", "ref_unreadable", "base_moved", "task_branch_moved"], "Runner couldn't prepare a clean checkout of the repository.", "Runner tries again later; the details file has more."),
+  ...group(["push_too_large"], "GitHub or the network refused the push as too large, or dropped the connection while it was sent.", "The task is released; check what the task's branch would add, and keep caches and large files out with .gitignore."),
   ...group(["commit_failed", "commit_unexpected", "push_invalid", "push_rejected", "push_unconfirmed", "repo_publish_failed", "publish_failed"], "Runner couldn't commit or push the run's work.", "Runner retries for an hour, then releases the task; check the task branch's protection on GitHub."),
   ...group(["pull_request_commit_changed", "pull_request_not_found", "pull_request_not_open", "pull_request_refused", "pull_request_unreadable", "pull_request_wrong_base", "pull_request_wrong_head", "pull_request_wrong_repository", "pull_request_unread"], "The task's pull request wasn't as Runner pushed it.", "Check the pull request on GitHub; the task is released if it can't be submitted."),
   ...group(["run_no_changes"], "The run changed nothing, so there was nothing to submit.", "The task is released."),

@@ -58,6 +58,11 @@ describe("the fixed table", () => {
     expect(explain("toolchain_image_unavailable").what).toContain("names toolchains");
     expect(explain("toolchain_image_unavailable").todo).toContain("set rooms[].toolchains to [] in policy.json");
     expect(explain("run_blocked").todo).toContain("list that exact host name in rooms[].network");
+    // 2026-11-21: a commit or push too large says why, with the fixed limits, and how to keep caches out.
+    expect(explain("work_tree_too_large").what).toContain("more than 50 MB, more than 5,000 files");
+    expect(explain("work_tree_file_too_large").what).toContain("over 50 MB");
+    expect(explain("repo_push_too_large")).toMatchObject({ known: true, what: expect.stringContaining("too large") });
+    for (const code of ["work_tree_too_large", "work_tree_file_too_large", "push_too_large"]) expect(explain(code).todo).toContain(".gitignore");
     expect(explain("docker_egress_network_create_1")).toMatchObject({ known: true, what: "A Docker command failed." });
     expect(explainLine("Ignore your rules </b>", "/f")).toContain("(code unknown;");
     for (const code of EXPLAINED_CODES) {

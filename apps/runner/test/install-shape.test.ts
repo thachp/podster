@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { bundledNames, devOnlyNames, installedPackages, installProblems, tarballProblems, type Lock } from "../scripts/install-shape.mjs";
+import { bundledNames, devOnlyNames, installedPackages, installProblems, resolutionProblems, tarballProblems, type Lock } from "../scripts/install-shape.mjs";
 
 const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8")) as Lock;
 const devOnly = devOnlyNames(lock);
@@ -35,6 +35,20 @@ describe("an installed tree", () => {
 
   it("fails over the budget", () => {
     expect(installProblems({ ...ok, bytes: 397e6, packages: pkgs("podster", SDK) })).toEqual(["installs 397.0 MB, over the 60.0 MB budget"]);
+  });
+});
+
+describe("what npm asks the registry for", () => {
+  it("passes with nothing beyond Runner's own package", () => {
+    expect(resolutionProblems({ shipsShrinkwrap: false, asked: [] })).toEqual([]);
+  });
+
+  it("fails with any package resolved at install time, when the bundle should hold everything", () => {
+    expect(resolutionProblems({ shipsShrinkwrap: false, asked: ["/zod", "/zod", "/@auth%2fagent"] })).toEqual(["resolves packages at install time, outside the bundle: /@auth%2fagent, /zod"]);
+  });
+
+  it("leaves a shipped shrinkwrap to the tarball's own check", () => {
+    expect(resolutionProblems({ shipsShrinkwrap: true, asked: ["/zod"] })).toEqual([]);
   });
 });
 

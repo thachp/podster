@@ -103,6 +103,16 @@ export function installProblems({ packages, devOnly, bytes, budgetBytes }) {
   return problems;
 }
 
+/**
+ * What's wrong with what npm asked the local registry for, beyond Runner's own package: with no shrinkwrap shipped,
+ * everything Runner needs is in its bundle, so any other package npm asked for was resolved at install time, outside
+ * the lock's integrity. `asked` lists the request paths.
+ */
+export function resolutionProblems({ shipsShrinkwrap, asked }) {
+  if (shipsShrinkwrap || asked.length === 0) return [];
+  return [`resolves packages at install time, outside the bundle: ${[...new Set(asked)].sort().join(", ")}`];
+}
+
 export const mb = (bytes) => (bytes / 1e6).toFixed(1);
 
 /** The environment npm gets from these scripts: only what it needs to start, never our secrets. */

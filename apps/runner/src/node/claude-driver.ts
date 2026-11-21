@@ -284,6 +284,8 @@ const ALLOWED_KEYS = new Set([
 export function fixedOptionsRefusal(o: Options): string | null {
   const keys = Object.keys(o);
   if (keys.some((k) => !ALLOWED_KEYS.has(k))) return "option_not_allowed";
+  // Without Runner's spawn, the SDK would exec that path on the host: Claude Code runs only through `docker exec`.
+  if (typeof o.spawnClaudeCodeProcess !== "function") return "spawn";
   if (o.pathToClaudeCodeExecutable !== CLAUDE_IN_CONTAINER) return "executable";
   if (o.permissionMode !== "dontAsk") return "permission_mode";
   if (o.verbatimPrompts !== true) return "verbatim_prompts";

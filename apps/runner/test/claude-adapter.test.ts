@@ -934,6 +934,15 @@ describe("Claude Code's binary", () => {
     expect(fixedOptionsRefusal(without as never)).toBe("executable");
   });
 
+  it("is never started on the host: options without Runner's spawn are refused, whatever else they say", () => {
+    const { s } = session();
+    const o = claudeOptions({ session: s, cwd: "/c", env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1", CLAUDE_CODE_MAX_OUTPUT_TOKENS: "1" }, mcp: {} as never, hook: async () => ({}), spawn: () => ({}) as never, abortController: new AbortController() });
+    expect(fixedOptionsRefusal(o)).toBeNull();
+    const { spawnClaudeCodeProcess: _omitted, ...without } = o;
+    expect(fixedOptionsRefusal(without as never)).toBe("spawn");
+    for (const spawn of [undefined, null, "docker", {}, true]) expect([spawn, fixedOptionsRefusal({ ...o, spawnClaudeCodeProcess: spawn } as never)]).toEqual([spawn, "spawn"]);
+  });
+
   it("is never looked for on the host by the real SDK: it starts that path, through Runner's spawn, which runs docker exec", async () => {
     // The real SDK, Runner's real options. The SDK's own lookup of a host binary (its per-platform package) runs only
     // when `pathToClaudeCodeExecutable` is unset; Runner's package installs none (scripts/install-check.mjs proves the

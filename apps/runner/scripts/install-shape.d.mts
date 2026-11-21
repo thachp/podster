@@ -11,3 +11,4 @@ export function folderBytes(dir: string): number;
 export function installProblems(p: { packages: { name: string }[]; devOnly: Set<string>; bytes: number; budgetBytes: number }): string[];
 export function mb(bytes: number): string;
 export function childEnv(own?: Record<string, string>, from?: Record<string, string | undefined>): Record<string, string>;
+export function resolutionProblems(p: { shipsShrinkwrap: boolean; asked: string[] }): string[];

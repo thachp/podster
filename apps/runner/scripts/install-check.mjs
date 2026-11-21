@@ -8,7 +8,8 @@
 // registry.npmjs.org for the packages Runner's lock names. It installs `podster@<version>` into a fresh folder with scripts
 // off and an empty npm config, then fails if any Claude Code binary is there (Runner runs Claude Code only in its own
 // container, and tells the SDK so), or any dev-only package, or the install passes the budget, or the installed SDK,
-// given Runner's own options, starts anything but the container's binary. It publishes nothing and sends no credential.
+// given Runner's own options, starts anything but the container's binary, or npm asked the registry for any package but
+// Runner's (with no shrinkwrap, everything must come from the bundle). It publishes nothing and sends no credential.
 // It isn't packed.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,7 +18,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { childEnv, devOnlyNames, folderBytes, installedPackages, installProblems, mb, tarballProblems } from "./install-shape.mjs";
+import { childEnv, devOnlyNames, folderBytes, installedPackages, installProblems, mb, resolutionProblems, tarballProblems } from "./install-shape.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 /** The production tree is about 43 MB, with no Claude Code binary (each is about 350 MB). */
@@ -96,6 +97,9 @@ console.log(JSON.stringify(commands));
 process.exit(0);
 `;
 
+/** Every request npm made for anything but Runner's own package, forwarded or refused: with no shrinkwrap, there must be none. */
+const asked = [];
+
 const server = createServer(async (req, res) => {
   try {
     if (req.method !== "GET") {
@@ -120,6 +124,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     // A package Runner names is the public registry's, passed through unchanged, with no credential. Anything else: 404.
+    asked.push(url.pathname);
     const target = passThrough.get(decodeURIComponent(url.pathname));
     if (!target) {
       res.writeHead(404).end();
@@ -168,7 +173,9 @@ try {
   const problems = [
     ...tarballProblems({ paths: listing.out.split("\n").filter(Boolean), devOnly }),
     ...installProblems({ packages, devOnly, bytes: total, budgetBytes: budgetMb * 1e6 }),
+    ...resolutionProblems({ shipsShrinkwrap, asked }),
   ];
+  process.stdout.write(`requests beyond ${name} at the local registry: ${asked.length}\n`);
 
   // With no binary installed, the installed SDK, given Runner's own options, must start only the container's binary,
   // through Runner's spawn (a stand-in here that exits at once, so nothing runs and no model is called).

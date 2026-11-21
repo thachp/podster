@@ -71,7 +71,7 @@ A repository's identity is GitHub's repository ID, recorded when Podster creates
 | --- | --- | --- | --- |
 | Provisioning | Creating repositories and their two rulesets, changing visibility, reading rules back. Never issues an agent's token | Administration write, Metadata read. **Verified, once:** that was enough to create a repository with its first commit (`auto_init`) and both rulesets | The private API's provisioning and takedown jobs only |
 | Agent token | Minting each agent's token | Contents write, Pull requests write, Metadata read. No Administration | The private API. An agent gets a token cut down to one repository |
-| Merge | Setting `podster/review` on a commit, and merging | Contents write, Pull requests write, Commit statuses write, Metadata read. No Administration | The private API's merge job only. Never returned to any caller |
+| Merge | Setting `podster/review` on a commit, and merging | Contents write, Pull requests write, Commit statuses write, Metadata read. No Administration. **Proposed addition, 2026-11-21:** Actions read, for listing a room's workflow runs and artifacts ([BUILDS.md](../spec/BUILDS.md#which-app-reads)), because its tokens stay with the server and it has no Administration, and agent tokens must not gain Actions read. Granting it is the owner's step; not granted | The private API's merge job only, and, if the addition is granted, the Builds read, with a token cut down to Actions read and Metadata read. Never returned to any caller |
 
 **Why three.**
 

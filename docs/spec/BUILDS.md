@@ -1,0 +1,140 @@
+# Build artifacts from GitHub CI
+
+Status: **Proposed** by the architect on 2026-11-21, not approved, and nothing here is built. The owner chose on 2026-11-21 that a room's build artifacts come **from GitHub CI**, not from Runner uploading files ([decision 238](PRODUCT.md#decisions-needed)). That choice is the only settled part. Everything below is the architect's proposal for how to do it. Companions: [Product](PRODUCT.md#assets-outputs-and-releases) · [Design](DESIGN.md#workroom-page) · [Architecture](ARCHITECTURE.md#build-artifacts-from-github-actions-proposed) · [Access control](ACCESS-CONTROL.md) · [ADR 0009](../adr/0009-managed-repositories.md#three-apps)
+
+**It can't show anything yet.** Managed repositories are set up with GitHub Actions switched off, and a repository isn't ready unless it is off ([decision 188](PRODUCT.md#decisions-needed), `SetupStep::DisableActions` in `crates/core/src/provisioning.rs`). With Actions off there are no workflow runs, so there are no builds to list. Whether, and how, Actions are switched on in managed repositories is its own decision with its own security review, and it isn't made here. It's the first [open question](#open-questions).
+
+## What it is
+
+The workroom's **Artifacts** tab gets two views:
+
+- **Deliverables:** today's reviewed, versioned outputs, unchanged ([DESIGN.md](DESIGN.md#workroom-page), [decision 52](PRODUCT.md#decisions-needed)).
+- **Builds:** new. What GitHub Actions built on the room's linked repository, shown the way GitHub shows a workflow run's artifacts.
+
+Only a room with a linked, ready managed repository shows **Builds**. Other rooms show the Artifacts tab as it is today, with no second view.
+
+Builds is a window onto GitHub. **Podster stores no artifact bytes, runs no scan on them and hosts no copy.** A download comes from GitHub. Retention is GitHub's: the repository's artifact retention setting, 90 days by default. Podster shows GitHub's `expires_at` and never extends it.
+
+Builds never counts as review. A build artifact isn't a submission, can't be approved, and doesn't change a task's state or the **Approved** badge on a deliverable.
+
+## The Builds view
+
+Workflow runs on the room's linked repository, newest first, one group per run, 20 runs a page with **Load more** as elsewhere ([decision 61](PRODUCT.md#decisions-needed)). Each run shows:
+
+| Field | From GitHub | Shown as |
+| --- | --- | --- |
+| Workflow | `name` | Inert text |
+| Run | `run_number`, and `run_attempt` when above 1 | "#42", "#42, attempt 2" |
+| State | `status`, then `conclusion` once completed | **Queued**, **In progress**, **Succeeded**, **Failed**, **Canceled**, **Skipped**, **Timed out**, **Action required**. An icon and the word, never color alone ([DESIGN.md](DESIGN.md)) |
+| Commit | `head_sha` | The first 7 characters, the full sha on hover and copy |
+| Branch or pull request | `head_branch`, `pull_requests[].number` | Inert text, and "PR #12" when GitHub names one |
+| Task | `head_branch` when it is exactly `podster/<task_id>`, Runner's task branch | The task's title, opening the Task Sheet, only when that task is in this room and the viewer can see it. Otherwise the branch as text, with nothing about the task |
+| Started and duration | `run_started_at`, `updated_at` | "Started 10:42 · 3 min 10 s", or "Running for 2 min" |
+| Link | Built by Podster | **View on GitHub**, `https://github.com/<owner>/<repo>/actions/runs/<run_id>` from the room's own repository link and GitHub's numeric run ID, never GitHub's `html_url` |
+
+Under each run, its artifacts:
+
+| Field | From GitHub | Shown as |
+| --- | --- | --- |
+| Name | `name` | Inert text |
+| Size | `size_in_bytes` | "12.4 MB". GitHub's artifact is a zip of what the workflow uploaded |
+| Digest | `digest`, when GitHub gives one | "sha256:3f9a…", full value on copy. "Not given" when GitHub's answer has none, which older artifacts don't |
+| Expires | `expires_at`, `expired` | "Expires 20 Feb". An expired artifact shows **Expired** and no download |
+| Download | | **Download**, only for a viewer allowed to, and only while not expired |
+
+A task branch named in a run claims a task; it isn't evidence that the task's agent ran it, or that the build used the reviewed commit. The view says "Branch `podster/…`" beside the task and never marks a build as the task's verified output.
+
+**States of the view.** Each says what is true and never assumes success ([DESIGN.md](DESIGN.md)):
+
+- **Not configured:** the deployment can't read Actions yet, because the App's permission or its switch isn't set ([below](#which-app-reads)).
+- **GitHub Actions is off for this repository:** today's state of every managed repository.
+- **No workflow runs yet.**
+- **Last updated 3 min ago · GitHub didn't answer:** the last list Podster read, with its time, while GitHub is unreachable or rate-limited.
+- **Couldn't reach GitHub:** nothing read yet.
+
+**In the Task Sheet (Proposed).** The engineering details already show the linked pull request, branch, commit and required checks ([PRODUCT.md](PRODUCT.md#review-merge-and-optional-cloudflare-deployment)). They may also show the latest workflow runs on the task's branch, `podster/<task_id>`, with their artifacts, under the same rules as the Builds view. Whether to is an [open question](#open-questions).
+
+## Agent content is data
+
+Workflow names, run titles, branch names and artifact names come from files and branches that agents write. They are shown as inert text: no Markdown, no autolinking, no HTML, control characters removed, each capped in length (proposed: 200 characters, then an ellipsis). None of them becomes an instruction to an agent, a permission, a link or part of a URL. The only links are the fixed GitHub run URL and Podster's own download route, both built from numeric IDs and the room's own repository link.
+
+## Who sees Builds and who can download
+
+Decided in Rust from the room's current state on every read and every download. A cached list never decides. **Proposed, the stricter of the two readings, and an [open question](#open-questions):**
+
+| Viewer | Builds list | Download |
+| --- | --- | --- |
+| Workroom owner and admins (people) | All runs | Yes |
+| Someone with artifact scope `all` (Member, Coordinator) | All runs | Yes |
+| The assignee and the named reviewer of a task | Runs on that task's branch, `podster/<task_id>`, only | Yes, for those runs |
+| Anyone else in the room, Guest and Public participant included | Nothing: the Builds view isn't shown | No |
+| An organization admin overseeing their own agent | Nothing | No |
+| A public room's visitors, signed in or not | Nothing. Builds isn't part of the [public read surface](PRODUCT.md#public-and-private-participation) | No |
+
+This mirrors who can download a submitted file today: an artifact scope of `all`, its submitter and the task's named reviewer. Anyone who sees a run sees all of its artifacts' names, sizes and digests.
+
+**A public repository is still public on GitHub.** While managed repositories are public on GitHub's Free plan ([decision 181](PRODUCT.md#decisions-needed)), GitHub itself shows the repository's runs, and lets people signed in to GitHub download their artifacts. Podster's rule above limits Podster's view only. It doesn't make the builds private, and room setup must not imply it does.
+
+## How it's read
+
+Server side only, in the private Rust API. The browser never calls GitHub's API or the private Rust API, and the gateway only authenticates and passes the request on; it decides nothing ([CLAUDE.md](../../CLAUDE.md), [ARCHITECTURE.md](ARCHITECTURE.md#build-artifacts-from-github-actions-proposed)).
+
+1. The `Workspace` DO checks the viewer against the table above, from current state.
+2. If its cached list for the room is younger than **60 seconds**, it answers from that, filtered for the viewer.
+3. Otherwise it reserves two reads from the deployment's GitHub budget, mints a token (below) for the one repository, reads, revokes the token, stores the list with its time and answers. Two reads cover a page: `GET /repositories/{id}/actions/runs?per_page=20`, and `GET /repositories/{id}/actions/artifacts?per_page=100`, whose artifacts each name their `workflow_run.id`. A run on the page whose artifacts weren't in that answer gets its own `GET /repositories/{id}/actions/runs/{run_id}/artifacts` when its group is opened.
+
+The repository is always the room's own link, addressed by GitHub's numeric ID. Nothing a client sends names a repository, an owner or an installation.
+
+**The cache** is a read model in the DO: per room, the last list, when it was read, and GitHub's `ETag`, so a refresh can ask `If-None-Match` and a `304` costs no rate limit (GitHub's documentation). It holds no token and no download URL. One refresh runs at a time per room; viewers who arrive during it get the previous list or wait for the new one. It's never used to authorize, and it's dropped when the room's repository link changes or is removed.
+
+**Rate limits.** The installation's limit is shared across every room the App is installed for, and with its merge work. Each read is reserved from the deployment's budget before it's made, as the release read does (`apps/api/src/github/release_read.rs`), and Podster's existing handling reads GitHub's limit headers (`podster_core::rate_limit`). On a primary or secondary limit Podster stops asking until GitHub's reset or `retry-after`, and shows the last list with its time. Merging takes priority: proposed, Builds may use at most a fixed share of the budget (a figure for the build PR), and a refresh that doesn't fit serves the cached list.
+
+## Download
+
+**Proposed: a redirect, not a stream.** Podster never holds the bytes.
+
+1. The viewer opens Podster's download route for an artifact ID in the room.
+2. The DO checks the viewer may download, from current state, as for the list.
+3. The API mints a token for the one repository, reads `GET /repositories/{id}/actions/artifacts/{artifact_id}`, and refuses unless that artifact is in this repository, isn't expired, and its run is one the viewer may see.
+4. It calls `GET /repositories/{id}/actions/artifacts/{artifact_id}/zip` without following redirects. GitHub answers `302` with a `Location` that GitHub's documentation says expires after one minute.
+5. It revokes the token and answers the browser `302` to that `Location`, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. It checks only that the `Location` is an absolute `https` URL; it doesn't keep a list of GitHub's storage hosts, which GitHub doesn't promise.
+
+**Why a redirect.** Artifacts can be several gigabytes, and streaming them through a Worker would hold a request, spend its CPU and egress, and add nothing: Podster runs no scan on them, so proxying checks nothing a redirect doesn't. The URL GitHub signs reaches one artifact, carries no credential for anything else, lives about a minute, and is asked for only after Podster's check on that click. What it gives up: someone who has the URL can use it for that minute, and a download already started isn't cut off. Both are already true of a file once downloaded, and Deliverables downloads accept the second ([UPLOAD-POLICY.md](UPLOAD-POLICY.md#downloads)). The bytes are served from GitHub's storage host, never from a Podster origin, so they can't run on Podster's site.
+
+**Never cached, never logged.** The signed URL isn't stored, cached, put in an event, an error or a log line, and the gateway passes the redirect on without logging it. Logs carry the room, artifact and run IDs and an outcome code only. Each click asks GitHub afresh.
+
+Unlike an upload, which streams through Podster with no presigned URL because a presigned URL can't enforce a size or be revoked ([ARCHITECTURE.md](ARCHITECTURE.md#assets-and-versioned-artifacts-m2)), a download of bytes Podster doesn't hold has neither problem.
+
+## Which App reads
+
+**Proposed:** the **merge App**, `podster-staging-merge` on staging, gets the repository permission **Actions: read**. Its tokens are held only by the server and never returned to any caller, and it has no Administration. The provisioning App isn't used, because it holds Administration, and the agent-token App never gets Actions read, because agents' tokens must not gain it.
+
+The App's token for Builds is cut down to **Actions read and Metadata read** on the one repository, like the merge App's marking and observing tokens (`TokenPermissions::MARKER` and `OBSERVER` in `crates/core/src/repo_access.rs`), checked against GitHub's answer, and revoked when the read ends. It can't write, merge, set a status or read the repository's contents. Actions read also reaches run logs, which Builds doesn't read.
+
+**The owner's step.** Adding Actions read to the App is a change to the App in the GitHub organization, which is the owner's, not an agent's. As with the checks reader (`GITHUB_AGENT_APP_READS_CHECKS` in `apps/api/src/workspace/changes.rs`), the build adds a switch the owner sets once the permission is granted and the installation has accepted it. Until then the view says **Not configured** and nothing is asked of GitHub.
+
+## Out of scope
+
+- Runner uploading build files.
+- Previews of artifacts, or opening one in the browser.
+- Copying artifacts into Podster's storage, scanning them or keeping them past GitHub's expiry.
+- CI other than GitHub Actions, and repositories other than the room's managed one.
+- Logs, re-running, canceling or approving a workflow from Podster.
+- Turning GitHub Actions on in managed repositories, which this needs and doesn't decide.
+
+## What the owner does
+
+- Decide whether, and under what rules, GitHub Actions runs in managed repositories ([decision 188](PRODUCT.md#decisions-needed) has it off).
+- Grant the merge App **Actions: read** in the organization, and accept it on the installation.
+- Set the build's switch on staging once the permission is in place.
+
+## Open questions
+
+1. **Actions in managed repositories.** Which workflows may run, on which events, with what `GITHUB_TOKEN` permissions and secrets, and what happens with pull requests from forks while repositories are public. Without a yes, Builds stays empty.
+2. **Which runs count.** All branches; or only task branches (`podster/<task_id>`) and the default branch, hiding runs on other branches.
+3. **Who sees Builds.** The stricter table above, or the wider reading that a run's artifacts are like input assets and anyone who sees the whole room's tasks sees them all. And whether a Guest or Public participant sees runs on their own task's branch.
+4. **The Task Sheet.** Whether Builds also appear in the Task Sheet's engineering details, for the task's branch.
+5. **Agents.** Whether agents get the same list and download through a capability, and through A2A. A later contracts PR adds the route and capability; this proposal assumes the same rule as people.
+6. **Webhooks.** Whether a signed `workflow_run` webhook nudges the cache, as pull request webhooks nudge a task's change, instead of reading only on view.
+7. **Budget share.** The share of the installation's rate limit Builds may use, and the 60-second bound.
+8. **Digest.** Whether an artifact with no GitHub digest should be marked more strongly, and whether Podster should ever show a digest it computed itself, which would mean reading the bytes.

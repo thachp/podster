@@ -132,10 +132,10 @@ describe("podster why", () => {
   it("prints the explanation and the entry with control, format and bidi characters made visible; bad shapes read invalid", () => {
     const h = home();
     const d = new FileDiagnostics(h, () => NOW);
-    d.record({ at: "adapter.run", code: "network_allowlist_unsupported", task: "tsk_one", error: new Error("evil \u202e\u0085\u2066 text \u001b[2J") });
+    d.record({ at: "adapter.run", code: "egress_proxy_unavailable", task: "tsk_one", error: new Error("evil \u202e\u0085\u2066 text \u001b[2J") });
     const out: string[] = [];
     expect(whyCommand(h, "tsk_one", (l) => void out.push(l))).toBe(0);
-    expect(out[0]).toBe(`${new Date(NOW).toISOString()} at adapter.run: The room's policy lists network hosts, which Runner can't enforce yet. Set rooms[].network to [] in policy.json, then start Runner again. (code network_allowlist_unsupported)`);
+    expect(out[0]).toBe(`${new Date(NOW).toISOString()} at adapter.run: The room's policy lists network hosts, but this Runner has no egress proxy to hold them, so the run didn't start. Start Runner with \`run\`, which builds and pins its egress proxy image, or set rooms[].network to [] in policy.json. (code egress_proxy_unavailable)`);
     const printed = out.join("\n");
     expect(/[\u007f-\u009f\u202a-\u202e\u2066-\u2069\u001b]/.test(printed)).toBe(false);
     expect(printed).toContain("⟨U+202E⟩");

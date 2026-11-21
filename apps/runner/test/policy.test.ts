@@ -16,7 +16,9 @@ import {
   issueRunDecision,
   parsePolicyConfig,
   policyProblem,
-  NETWORK_UNSUPPORTED,
+  isHost,
+  NETWORK_HOST_DUPLICATE,
+  NETWORK_HOST_INVALID,
   RESULT_TOOL,
   type Decision,
   type RunBinding,
@@ -461,18 +463,76 @@ describe("property: no external, unknown or inactive author or requester ever yi
   });
 });
 
-describe("a room's network (no egress proxy yet)", () => {
-  it("refuses any listed host at load with network_allowlist_unsupported, and says only [] works", () => {
-    const parsed = parsePolicyConfig(config([room({ extra: { network: ["registry.npmjs.org"] } })]));
-    expect(parsed).toEqual({ ok: false, at: `rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}` });
-    const problem = policyProblem(`rooms[].network:${NETWORK_UNSUPPORTED}:${ROOM}`);
-    expect(problem).toContain('only "network": [] works');
-    expect(problem).toContain("network_allowlist_unsupported");
-    expect(problem).toContain(`the room ${ROOM} lists hosts`);
-    expect(policyProblem("caps.turns")).toBe("caps.turns is missing or out of range");
-    // Evaluated, it refuses as a configuration Runner can't use: nothing runs, nothing is reserved.
-    expect(decide({ config: config([room({ extra: { network: ["registry.npmjs.org"] } })]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
+describe("a room's network: exact host names, for Runner's egress proxy", () => {
+  it("accepts a list of exact lower-case host names, as the room's run fact, in the owner's order", () => {
+    const hosts = ["registry.npmjs.org", "api.github.com", "xn--bcher-kva.example.org"];
+    const parsed = parsePolicyConfig(config([room({ extra: { network: hosts } })]));
+    expect(parsed.ok).toBe(true);
+    const d = decide({ config: config([room({ extra: { network: hosts } })]) });
+    expect(d.outcome).toBe("run");
+    expect(d.facts?.network).toEqual(hosts);
     expect(parsePolicyConfig(config([room({ extra: { network: [] } })])).ok).toBe(true);
+  });
+
+  const invalid: [string, unknown][] = [
+    ["upper case", "Registry.npmjs.org"],
+    ["a scheme", "https://registry.npmjs.org"],
+    ["a port", "registry.npmjs.org:443"],
+    ["a path", "registry.npmjs.org/npm"],
+    ["a wildcard", "*.npmjs.org"],
+    ["a bare wildcard", "*"],
+    ["an IPv4 literal", "104.16.0.35"],
+    ["an IPv6 literal", "[2606:4700::6810:1023]"],
+    ["a bare IPv6 literal", "2606:4700::6810:1023"],
+    ["a trailing dot", "registry.npmjs.org."],
+    ["a single label", "registry"],
+    ["localhost", "localhost"],
+    ["a name under localhost", "api.localhost"],
+    ["Docker's host name", "host.docker.internal"],
+    ["an mDNS name", "printer.local"],
+    ["a reverse-DNS name", "1.0.0.127.in-addr.arpa"],
+    ["an onion name", "abc.onion"],
+    ["an empty label", "registry..npmjs.org"],
+    ["a label with a leading hyphen", "-x.npmjs.org"],
+    ["an underscore", "my_host.example.com"],
+    ["white space", " registry.npmjs.org"],
+    ["a control character", "registry.npmjs.org\n"],
+    ["user info", "user@registry.npmjs.org"],
+    ["a number", 443],
+    ["null", null],
+    ["a name longer than 253", `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}.com`],
+  ];
+
+  it.each(invalid)("refuses %s at load with network_host_invalid, naming the room and the entry's index, never its text", (_what, entry) => {
+    const parsed = parsePolicyConfig(config([room({ extra: { network: ["registry.npmjs.org", entry] } })]));
+    expect(parsed).toEqual({ ok: false, at: `rooms[].network:${NETWORK_HOST_INVALID}:${ROOM}:1` });
+    expect(isHost(entry)).toBe(false);
+    const problem = policyProblem(`rooms[].network:${NETWORK_HOST_INVALID}:${ROOM}:1`);
+    expect(problem).toContain(`entry 1 of the room ${ROOM}'s rooms[].network`);
+    expect(problem).toContain("network_host_invalid");
+    expect(problem).toContain("exact lower-case host names such as registry.npmjs.org");
+    expect(problem).not.toContain("network_allowlist_unsupported");
+    // Evaluated, it refuses as a configuration Runner can't use: nothing runs, nothing is reserved.
+    expect(decide({ config: config([room({ extra: { network: [entry] } })]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
+  });
+
+  it("refuses a host listed twice with network_host_duplicate, and a list that isn't one or is too long", () => {
+    expect(parsePolicyConfig(config([room({ extra: { network: ["registry.npmjs.org", "registry.npmjs.org"] } })]))).toEqual({ ok: false, at: `rooms[].network:${NETWORK_HOST_DUPLICATE}:${ROOM}:1` });
+    expect(policyProblem(`rooms[].network:${NETWORK_HOST_DUPLICATE}:${ROOM}:1`)).toContain("repeats a host already listed (network_host_duplicate)");
+    expect(parsePolicyConfig(config([room({ extra: { network: "registry.npmjs.org" } })]))).toEqual({ ok: false, at: "rooms[].network" });
+    const many = Array.from({ length: 51 }, (_, i) => `h${i}.example.com`);
+    expect(parsePolicyConfig(config([room({ extra: { network: many } })]))).toEqual({ ok: false, at: "rooms[].network" });
+    expect(parsePolicyConfig(config([room({ extra: { network: many.slice(0, 50) } })])).ok).toBe(true);
+    expect(policyProblem("caps.turns")).toBe("caps.turns is missing or out of range");
+  });
+
+  it("keeps each room's list to that room", () => {
+    const other = { ...room({ extra: { network: [] } }), room_id: "room_2" };
+    const cfg = config([room({ extra: { network: ["registry.npmjs.org"] } }), other]);
+    expect(decide({ config: cfg }).facts?.network).toEqual(["registry.npmjs.org"]);
+    const second = decide({ config: cfg, task: { id: TASK, workspace_id: "room_2" } });
+    expect(second.outcome).toBe("run");
+    expect(second.facts?.network).toEqual([]);
   });
 });
 
@@ -594,6 +654,7 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
       ["run time raised", config([room()], { caps: { ...CAPS, run_time_ms: CAPS.run_time_ms + 1 } })],
       ["output tokens raised", config([room()], { caps: { ...CAPS, output_tokens: 50_001 } })],
       ["outputs shared", config([room({ extra: { outputs: "share" } })])],
+      ["a network host added", config([room({ extra: { network: ["registry.npmjs.org"] } })])],
       ["workspace root moved", config([room()], { workspace_root: "/Users/owner/elsewhere" })],
     ];
     for (const [what, cfg] of widened) {

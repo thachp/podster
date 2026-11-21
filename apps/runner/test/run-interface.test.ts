@@ -354,7 +354,8 @@ describe("the run's frame names its limits", () => {
     const open = runFrame({ ...FACTS, tools: ["read", "shell"], shell: true, network: ["registry.npmjs.org"] });
     expect(open).toContain("Your tools in this run: read, shell, and the structured result.");
     expect(open).not.toContain("There is no shell");
-    expect(open).toContain("Network: only these hosts: registry.npmjs.org.");
+    expect(open).toContain("Network: only HTTPS, on port 443, to exactly these hosts: registry.npmjs.org.");
+    expect(open).toContain("no plain HTTP, no other port and no IP address");
     // Shell listed without the policy's shell flag isn't offered.
     expect(runFrame({ ...FACTS, tools: ["read", "shell"], shell: false, network: [] })).toContain("Your tools in this run: read, and the structured result. There is no shell");
   });
@@ -714,12 +715,12 @@ describe("a refused result names the rule it broke (the owner's report of 2026-1
 describe("a run that fails to start keeps its cause, as a code only", () => {
   it("names the sandbox's code in the error and the log line; a message that isn't a code reads as unknown", async () => {
     const t = setup(async () => RESULT);
-    t.sandbox.openThrows = "network_allowlist_unsupported";
-    await expect(t.start()).rejects.toThrow("start_failed:network_allowlist_unsupported");
+    t.sandbox.openThrows = "egress_proxy_unavailable";
+    await expect(t.start()).rejects.toThrow("start_failed:egress_proxy_unavailable");
     // The raw error goes to the local diagnostics file, keyed by the run.
-    expect(t.diagnosed[0]).toMatchObject({ at: "adapter.run", code: "network_allowlist_unsupported", run_ref: "run_1", task: "tsk_one" });
-    expect((t.diagnosed[0].error as Error).message).toBe("network_allowlist_unsupported");
-    expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "start_failed", fields: { workspace: "ws_room_one", task: "tsk_one", code: "network_allowlist_unsupported" } });
+    expect(t.diagnosed[0]).toMatchObject({ at: "adapter.run", code: "egress_proxy_unavailable", run_ref: "run_1", task: "tsk_one" });
+    expect((t.diagnosed[0].error as Error).message).toBe("egress_proxy_unavailable");
+    expect(t.logged).toContainEqual({ at: "adapter.run", outcome: "start_failed", fields: { workspace: "ws_room_one", task: "tsk_one", code: "egress_proxy_unavailable" } });
     const u = setup(async () => RESULT);
     u.sandbox.openThrows = "docker: Error response from daemon: secret /Users/owner path";
     await expect(u.start("run_2")).rejects.toThrow("start_failed:unknown");

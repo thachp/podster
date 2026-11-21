@@ -130,10 +130,17 @@ export function markUntrusted(bytes: Uint8Array): UntrustedPrompt | null {
 export const TASK_HOME_IN_FOLDER = [".cache", "home"] as const;
 export const TASK_HOME = `${TASK_FOLDER_IN_CONTAINER}/${TASK_HOME_IN_FOLDER.join("/")}`;
 /**
- * The container's whole environment: fixed, nothing inherited, nothing shaped like a secret. `WRANGLER_SEND_METRICS`
- * keeps wrangler from calling its metrics host (sparrow.cloudflare.com); it's set here in code, never from the task.
+ * npm's cache, under the task's `HOME` and so under a folder Runner excludes from a repository room's commit. The task
+ * image's npmrc puts it in /tmp, a 64 MB tmpfs an install can fill; on 2026-11-21 an agent moved it to
+ * `/work/.npm-cache` instead, and Runner committed it. Pinned here, in code, it lands where nothing is committed.
  */
-export const CONTAINER_ENV: Readonly<Record<string, string>> = Object.freeze({ HOME: TASK_HOME, PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", WRANGLER_SEND_METRICS: "false" });
+export const TASK_NPM_CACHE = `${TASK_HOME}/.npm`;
+/**
+ * The container's whole environment: fixed, nothing inherited, nothing shaped like a secret. `WRANGLER_SEND_METRICS`
+ * keeps wrangler from calling its metrics host (sparrow.cloudflare.com), and `npm_config_cache` pins npm's cache
+ * (`TASK_NPM_CACHE`); both are set here in code, never from the task.
+ */
+export const CONTAINER_ENV: Readonly<Record<string, string>> = Object.freeze({ HOME: TASK_HOME, PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", WRANGLER_SEND_METRICS: "false", npm_config_cache: TASK_NPM_CACHE });
 export const CONTAINER_WORKDIR = TASK_FOLDER_IN_CONTAINER;
 /** The egress proxy's name on a run's internal network, and its port (`egress-proxy.ts`). */
 export const EGRESS_ALIAS = "egress";

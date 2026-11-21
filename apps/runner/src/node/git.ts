@@ -32,7 +32,7 @@ export type GitResult = { code: number; stdout: string; stderr: string; stdout_b
 export const GIT_OUTPUT_CUT = 125;
 export const GIT_TIMED_OUT = 124;
 /** Runs one Git command. `secret` goes to the child's descriptor 3 and nowhere else. */
-export type GitExec = (args: string[], opts: { secret?: string; signal?: AbortSignal; timeout_ms?: number }) => Promise<GitResult>;
+export type GitExec = (args: string[], opts: { secret?: string; signal?: AbortSignal; timeout_ms?: number; input?: string }) => Promise<GitResult>;
 
 /** The most Runner reads of either stream; more is cut and the command fails. */
 export const MAX_GIT_OUTPUT = 1024 * 1024;
@@ -108,7 +108,7 @@ export function gitCli(program: string, home: string, from: NodeJS.ProcessEnv = 
   }
   return (args, opts) =>
     new Promise((resolve, reject) => {
-      const child = spawn(resolved, args, { cwd: home, env, stdio: ["ignore", "pipe", "pipe", opts.secret === undefined ? "ignore" : "pipe"], signal: opts.signal, timeout: opts.timeout_ms ?? GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
+      const child = spawn(resolved, args, { cwd: home, env, stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe", opts.secret === undefined ? "ignore" : "pipe"], signal: opts.signal, timeout: opts.timeout_ms ?? GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       let size = 0;
@@ -129,6 +129,11 @@ export function gitCli(program: string, home: string, from: NodeJS.ProcessEnv = 
         // A Git command that never asks for the credential leaves it unread; the pipe closes when the command ends.
         pipe.on("error", () => undefined);
         pipe.end(`${opts.secret}\n`);
+      }
+      if (opts.input !== undefined && child.stdin) {
+        // Only Runner's own fixed-shape input (object IDs); a command that ends early leaves the rest unread.
+        child.stdin.on("error", () => undefined);
+        child.stdin.end(opts.input);
       }
       child.on("error", () => reject(new RepoPathError("git_unavailable", true)));
       child.on("close", (code, signal) => {

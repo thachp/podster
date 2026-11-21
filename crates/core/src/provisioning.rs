@@ -469,6 +469,11 @@ pub const DEFAULT_IGNORE: &[&str] = &[
     ".venv/",
     "__pycache__/",
     ".pytest_cache/",
+    ".npm-cache/",
+    ".npm/",
+    "**/.yarn/cache/",
+    ".pnpm-store/",
+    ".cache/",
     "/target/",
     "/.wrangler/",
     "/.tmp/",
@@ -1034,7 +1039,7 @@ mod tests {
         assert_eq!(DEFAULT_IGNORE_PATH, ".gitignore");
         assert_eq!(
             default_ignore_file(),
-            "node_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n"
+            "node_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n.npm-cache/\n.npm/\n**/.yarn/cache/\n.pnpm-store/\n.cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n"
         );
     }
 

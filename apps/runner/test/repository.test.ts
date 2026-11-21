@@ -10,8 +10,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GatewayError } from "../src/core/errors.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, pinRunBase, repositoryOf, type Decision, type RunBinding } from "../src/core/policy.js";
 import {
+  checkCommitSize,
   checkProtected,
   cloneUrl,
+  COMMIT_LIMITS,
   fetchArgs,
   GITHUB,
   hardening,
@@ -22,9 +24,11 @@ import {
   readAccess,
   readPullRequest,
   readRepository,
+  readStagedChanges,
   renewDue,
   RENEW_BEFORE_MS,
   RepoPathError,
+  WORK_TREE_DEFAULT_IGNORE,
   type GitHubRequest,
 } from "../src/core/repository.js";
 import { pullText } from "../src/core/pull-text.js";
@@ -493,7 +497,7 @@ const RAW_NAMES = await (async () => {
 const sh = (cwd: string, ...args: string[]) => execFileSync(realGit as string, args, { cwd, env: { PATH: "/usr/bin:/bin", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString().trim();
 
 /** A "GitHub": a local bare repository with `main`, and an API answering for it. */
-async function world(opts: { ignored_list_timeout_ms?: number } = {}) {
+async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: { files: number; bytes: number; file_bytes: number } } = {}) {
   const root = await temp();
   const home = join(root, "home");
   await mkdir(home, { mode: 0o700 });
@@ -757,7 +761,7 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     sh(w.seed, "push", "--quiet", w.remote, "main:main");
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
     // Runner's own exclude, in its Git folder, where no container reaches.
-    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n");
+    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n.npm-cache/\n.npm/\n**/.yarn/cache/\n.pnpm-store/\n.cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n");
     // What a run leaves: cargo's registry beside the tracked config, uv's cache with its links, npm's global prefix
     // with a bin link, the task's HOME with tools' dot folders in it (a Maven wrapper's ~/.m2, java.util.prefs' ~/.java,
     // .NET's ~/.dotnet), NuGet's packages, and the task's real change.
@@ -919,6 +923,113 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     const gitDir = join(w.home, "git", ROOM, TASK);
     const index = sh(w.root, `--git-dir=${gitDir}`, `--work-tree=${w.taskFolder}`, "ls-files", "--cached", "-z").split("\0");
     expect(index.filter((p) => /(^|\/)\.env(\.local)?$/.test(p))).toEqual([]);
+  });
+
+  it("2026-11-21: keeps package managers' caches out of the commit at any depth, so an npm cache in the task's folder publishes only the real files", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    const put = async (path: string, text = "x\n") => {
+      await mkdir(join(w.taskFolder, path, ".."), { recursive: true });
+      await writeFile(join(w.taskFolder, path), text);
+    };
+    // What the run on staging left: npm's cache at /work/.npm-cache, with its content index and logs.
+    for (let i = 0; i < 40; i++) await put(`.npm-cache/_cacache/content-v2/sha512/${String(i).padStart(2, "0")}/blob`, "y".repeat(1024));
+    await put(".npm-cache/_cacache/index-v5/aa/bb/entry");
+    await put(".npm-cache/_logs/2026-11-21T10_00_00_000Z-debug-0.log");
+    await symlink("/etc", join(w.taskFolder, ".npm-cache", "_cacache", "tmp-link"));
+    // The other caches, at the top and nested.
+    await put(".npm/_cacache/index-v5/x");
+    await put("apps/web/.npm-cache/_cacache/x");
+    await put("apps/web/.npm/_logs/x.log");
+    await put(".yarn/cache/left-pad-npm-1.3.0.zip");
+    await put("apps/web/.yarn/cache/left-pad-npm-1.3.0.zip");
+    await put(".pnpm-store/v3/files/00/abc");
+    await put("apps/web/.pnpm-store/v3/files/00/abc");
+    await put("pkg/.cache/tool/state");
+    await put(".cache/home/.npm/_cacache/x");
+    // The real change, and Yarn's own files beside its cache, which are still committed.
+    await put("README.md", "hello, todo\n");
+    await put("package.json", "{}\n");
+    await put("package-lock.json", "{}\n");
+    await put(".yarn/releases/yarn-4.js");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".yarn/releases/yarn-4.js", "README.md", "package-lock.json", "package.json"]);
+  });
+
+  it("still refuses a `.git` look-alike among a skipped cache folder's own entries, and a cache folder that is a link", async () => {
+    for (const make of [
+      async (folder: string) => {
+        await mkdir(join(folder, ".npm-cache"), { recursive: true });
+        await writeFile(join(folder, ".npm-cache", ".git"), "gitdir: /elsewhere\n");
+        return "work_tree_git";
+      },
+      async (folder: string) => {
+        await mkdir(join(folder, "apps"), { recursive: true });
+        await symlink("/tmp", join(folder, "apps", ".pnpm-store"));
+        return "work_tree_link";
+      },
+    ]) {
+      const w = await world();
+      const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+      const code = await make(w.taskFolder);
+      await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+      await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code });
+    }
+  });
+
+  it("refuses a commit over its limits before anything is committed or pushed: one file too large, too many bytes, too many files", async () => {
+    const w = await world({ commit_limits: { files: 3, bytes: 1000, file_bytes: 600 } });
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    const gitDir = join(w.home, "git", ROOM, TASK);
+    const commits = () => sh(w.root, `--git-dir=${gitDir}`, "rev-list", "--count", "HEAD");
+    const pushes = () => w.gitCalls.filter((c) => c.args.includes("push")).length;
+    // One file over the per-file limit, though the total is within it too.
+    await writeFile(join(w.taskFolder, "big.bin"), "b".repeat(601));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_file_too_large" });
+    // Every file within the per-file limit, the total over.
+    await rm(join(w.taskFolder, "big.bin"));
+    for (const name of ["a", "b", "c"]) await writeFile(join(w.taskFolder, `${name}.txt`), "c".repeat(400));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_too_large" });
+    // Small files, but more paths than allowed; a deletion counts as a path.
+    for (const name of ["a", "b", "c"]) await writeFile(join(w.taskFolder, `${name}.txt`), "c");
+    await rm(join(w.taskFolder, "README.md"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_too_large" });
+    expect([commits(), pushes()]).toEqual(["1", 0]);
+    // Within all three, it publishes: sizes are read by object ID, on standard input, never as arguments.
+    await rm(join(w.taskFolder, "c.txt"));
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual(["a.txt", "b.txt"]);
+    const sized = w.gitCalls.filter((c) => c.args.includes("cat-file"));
+    expect(sized.length).toBeGreaterThan(0);
+    for (const call of sized) expect(call.args.slice(call.args.indexOf("cat-file"))).toEqual(["cat-file", "--batch-check=%(objectsize)"]);
+  });
+
+  it("reads a push GitHub or the way to it found too large as `push_too_large`, and keeps none of Git's words", async () => {
+    const answers = [
+      "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n",
+      "remote: error: GH001: Large files detected. You may want to try Git Large File Storage.\nremote: error: File big.bin is 140.00 MB; this exceeds GitHub's file size limit of 100.00 MB\n ! [remote rejected] podster/task_1 -> podster/task_1 (pre-receive hook declined)\n",
+      "remote: fatal: pack exceeds maximum allowed size\nerror: failed to push some refs\n",
+      "fatal: the remote end hung up unexpectedly\n",
+    ];
+    for (const stderr of answers) {
+      const w = await world();
+      const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+      await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+      w.fakes.push = { code: 1, stdout: "", stderr };
+      await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_too_large", transient: false });
+      expect(w.broker.size).toBe(1);
+      expect(w.logged.join("\n")).not.toMatch(/RPC|GH001|hung up|pack exceeds|big\.bin/);
+    }
+    // A plain rejection is still `push_rejected`, and an unknown failure still the fallback.
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.fakes.push = { code: 1, stdout: "", stderr: " ! [rejected]        podster/task_1 -> podster/task_1 (non-fast-forward)\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_rejected" });
+    w.fakes.push = { code: 1, stdout: "", stderr: "something else\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_failed" });
   });
 
   it("walks a folder whose only entries are ignored, so an ignored link or a .git look-alike below it still refuses (the review of #508)", async () => {
@@ -1297,6 +1408,53 @@ describe("GitHub's API, as Runner reaches it", () => {
     expect(seen.length).toBe(before);
     expect(() => githubApi(fetch, { NODE_TLS_REJECT_UNAUTHORIZED: "0" }, [])).toThrow();
     expect(() => githubApi(fetch, { NODE_USE_ENV_PROXY: "1" }, [])).toThrow();
+  });
+});
+
+describe("the commit's limits (2026-11-21)", () => {
+  const ID = (c: string) => c.repeat(40);
+  const entry = (from: string, to: string, old: string, now: string, status: string, path: string) => `:${from} ${to} ${old} ${now} ${status}\0${path}\0`;
+
+  it("are fixed in code: 50 MiB in all, 50 MiB for one file (GitHub warns past it and refuses past 100 MiB), 5,000 paths", () => {
+    expect(COMMIT_LIMITS).toEqual({ files: 5_000, bytes: 50 * 1024 * 1024, file_bytes: 50 * 1024 * 1024 });
+    expect(Object.isFrozen(COMMIT_LIMITS)).toBe(true);
+    expect(COMMIT_LIMITS.file_bytes).toBeLessThan(100 * 1024 * 1024);
+  });
+
+  it("counts every changed path and keeps only the blobs a commit adds or changes: none for a deletion or a submodule", () => {
+    const listing = Buffer.from(
+      entry("000000", "100644", ID("0"), ID("a"), "A", "new.txt") +
+        entry("100644", "100644", ID("b"), ID("c"), "M", "dir/changed é.txt") +
+        entry("100644", "000000", ID("d"), ID("0"), "D", "gone.txt") +
+        entry("000000", "160000", ID("0"), ID("e"), "A", "vendor/sub") +
+        entry("100644", "120000", ID("f"), ID("1"), "T", "now-a-link"),
+      "utf8",
+    );
+    expect(readStagedChanges(listing)).toEqual({ paths: 5, blobs: [ID("a"), ID("c"), ID("1")] });
+    expect(readStagedChanges(new Uint8Array())).toEqual({ paths: 0, blobs: [] });
+    // SHA-256 repositories' 64-character IDs too.
+    expect(readStagedChanges(Buffer.from(entry("000000", "100644", "0".repeat(64), "a".repeat(64), "A", "x")))).toEqual({ paths: 1, blobs: ["a".repeat(64)] });
+  });
+
+  it("refuses a listing it can't read exactly", () => {
+    for (const bad of [":100644 100644 abc def M\0x\0", entry("000000", "100644", ID("0"), ID("a"), "A", "x").slice(0, -3), `${entry("000000", "100644", ID("0"), ID("a"), "A", "")}`, "x\0y\0"])
+      expect(() => readStagedChanges(Buffer.from(bad))).toThrow(expect.objectContaining({ code: "commit_failed" }));
+  });
+
+  it("names one file too large first, then too many bytes or paths", () => {
+    const limits = { files: 3, bytes: 100, file_bytes: 60 };
+    expect(() => checkCommitSize(3, [60, 40], limits)).not.toThrow();
+    expect(() => checkCommitSize(1, [61], limits)).toThrow(expect.objectContaining({ code: "work_tree_file_too_large" }));
+    expect(() => checkCommitSize(9, [61], limits)).toThrow(expect.objectContaining({ code: "work_tree_file_too_large" }));
+    expect(() => checkCommitSize(3, [60, 41], limits)).toThrow(expect.objectContaining({ code: "work_tree_too_large" }));
+    expect(() => checkCommitSize(4, [], limits)).toThrow(expect.objectContaining({ code: "work_tree_too_large" }));
+    // The run on staging: 524 files, about 140 MB.
+    expect(() => checkCommitSize(524, Array.from({ length: 524 }, () => Math.ceil((140 * 1024 * 1024) / 524)))).toThrow(expect.objectContaining({ code: "work_tree_too_large" }));
+  });
+
+  it("ignores package managers' caches at any depth, Yarn's by a `**/` line, since a `/` inside a line anchors it at the top", () => {
+    for (const line of [".npm-cache/", ".npm/", "**/.yarn/cache/", ".pnpm-store/", ".cache/"]) expect(WORK_TREE_DEFAULT_IGNORE).toContain(line);
+    for (const line of WORK_TREE_DEFAULT_IGNORE.filter((l) => !l.startsWith("/") && !l.startsWith("**/"))) expect([line, line.slice(0, -1).includes("/")]).toEqual([line, false]);
   });
 });
 

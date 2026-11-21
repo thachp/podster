@@ -390,6 +390,9 @@ jobs:
       - name: Run the merge-gate, deploy-staging and deploy-content self-tests side by side
         shell: bash
         run: |
+          # Job control on: without it, bash starts a background job with SIGINT ignored, and the self-tests' SIGINT cases
+          # would hang instead of being caught.
+          set -m
           logs=$(mktemp -d)
           tests=(merge-gate-selftest deploy-staging-selftest deploy-content-selftest)
           pids=()

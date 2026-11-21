@@ -1,0 +1,101 @@
+{
+  "scenario": "cancel",
+  "task": "edit",
+  "at": "2026-11-21T22:12:38.786Z",
+  "versions": {
+    "@openai/agents-core": "0.22.0",
+    "@openai/agents-openai": "0.22.0",
+    "openai": "7.62.0"
+  },
+  "tracing": {
+    "lockedDown": true,
+    "noopTrace": true
+  },
+  "caps": {
+    "spend_micro_usd": 200000,
+    "turns": 20,
+    "output_tokens": 60000,
+    "max_tokens": 4096
+  },
+  "run": {
+    "ms": 2124,
+    "tool_uses": [
+      {
+        "seq": 1,
+        "name": "shell"
+      }
+    ],
+    "decisions": [
+      {
+        "seq": 1,
+        "name": "shell",
+        "allow": false,
+        "rule": "command_not_listed"
+      }
+    ],
+    "executions": 0,
+    "fetch_refusals": [],
+    "error": {
+      "name": "Error",
+      "code": null
+    },
+    "result": null,
+    "stop": {
+      "kind": "cancelled",
+      "after_start_ms": 1994
+    }
+  },
+  "broker": {
+    "requests": 2,
+    "sent": 2,
+    "refused": {},
+    "stopped": "cancelled",
+    "spent_micro_usd": 2908,
+    "over_cap_micro_usd": 0,
+    "cut_in_flight": 1,
+    "records": [
+      {
+        "request": 1,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 2032,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2814,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 372,
+          "output_tokens": 19,
+          "total_tokens": 391,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 47,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 2,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 2404,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2861,
+        "status": null,
+        "terminal": "error",
+        "incomplete_reason": null,
+        "usage": null,
+        "missing_usage_fields": [],
+        "charged_micro_usd": 2861,
+        "charged_worst": true,
+        "output_over_bound": null
+      }
+    ],
+    "output_over_bound": 0
+  },
+  "pre_send": [],
+  "sockets": null
+}

@@ -1,6 +1,6 @@
 # Spike (M7): the OpenAI Agents SDK under Runner's control
 
-**Prepared 2026-11-21, not yet run against OpenAI.** A throwaway spike for [Runner's OpenAI adapter](../../docs/spec/RUNNER-OPENAI.md), following its [spike plan](../../docs/spec/RUNNER-OPENAI.md#spike-plan). It answers whether the Agents SDK's loop can run in Runner's own process with every model request going through Runner's broker, every tool call going through Runner's decision point, and nothing else leaving the machine. Nothing in `apps/` changed, and nothing builds on this code.
+**Prepared 2026-11-21, and run against OpenAI the same day: 0.006 USD of the 2.00 USD approved, no stop condition hit; see [RESULTS.md](RESULTS.md).** A throwaway spike for [Runner's OpenAI adapter](../../docs/spec/RUNNER-OPENAI.md), following its [spike plan](../../docs/spec/RUNNER-OPENAI.md#spike-plan). It answers whether the Agents SDK's loop can run in Runner's own process with every model request going through Runner's broker, every tool call going through Runner's decision point, and nothing else leaving the machine. Nothing in `apps/` changed, and nothing builds on this code.
 
 Step 1 of the plan (no network at all) is the test suite and is done. Steps 2 to 6 are `spike.mjs`'s scenarios. They need the owner's key and are not run yet.
 

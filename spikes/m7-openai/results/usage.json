@@ -1,0 +1,150 @@
+{
+  "scenario": "usage",
+  "task": "usage",
+  "at": "2026-11-21T22:11:40.502Z",
+  "versions": {
+    "@openai/agents-core": "0.22.0",
+    "@openai/agents-openai": "0.22.0",
+    "openai": "7.62.0"
+  },
+  "tracing": {
+    "lockedDown": true,
+    "noopTrace": true
+  },
+  "caps": {
+    "spend_micro_usd": 200000,
+    "turns": 20,
+    "output_tokens": 60000,
+    "max_tokens": 4096
+  },
+  "run": {
+    "ms": 4497,
+    "tool_uses": [
+      {
+        "seq": 1,
+        "name": "read_file"
+      },
+      {
+        "seq": 2,
+        "name": "read_file"
+      },
+      {
+        "seq": 3,
+        "name": "StructuredOutput"
+      }
+    ],
+    "decisions": [
+      {
+        "seq": 1,
+        "name": "read_file",
+        "allow": true,
+        "rule": "path"
+      },
+      {
+        "seq": 2,
+        "name": "read_file",
+        "allow": true,
+        "rule": "path"
+      },
+      {
+        "seq": 3,
+        "name": "StructuredOutput",
+        "allow": true,
+        "rule": "result"
+      }
+    ],
+    "executions": 2,
+    "fetch_refusals": [],
+    "error": null,
+    "result": {
+      "status": "done",
+      "files": 0,
+      "bound_ok": true,
+      "problems": []
+    },
+    "stop": null
+  },
+  "broker": {
+    "requests": 3,
+    "sent": 3,
+    "refused": {},
+    "stopped": null,
+    "spent_micro_usd": 1186,
+    "over_cap_micro_usd": 0,
+    "cut_in_flight": 0,
+    "records": [
+      {
+        "request": 1,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 1399,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2735,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 287,
+          "output_tokens": 19,
+          "total_tokens": 306,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 39,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 2,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 8821,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 3663,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 2117,
+          "output_tokens": 19,
+          "total_tokens": 2136,
+          "cached_tokens": 0,
+          "cache_write_tokens": 2114,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 486,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 3,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 16243,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 4591,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 3947,
+          "output_tokens": 31,
+          "total_tokens": 3978,
+          "cached_tokens": 2114,
+          "cache_write_tokens": 1830,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 661,
+        "charged_worst": false,
+        "output_over_bound": false
+      }
+    ],
+    "output_over_bound": 0
+  },
+  "pre_send": [],
+  "sockets": null
+}

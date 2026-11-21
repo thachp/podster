@@ -1,0 +1,188 @@
+{
+  "scenario": "cap",
+  "task": "loop",
+  "at": "2026-11-21T22:12:48.160Z",
+  "versions": {
+    "@openai/agents-core": "0.22.0",
+    "@openai/agents-openai": "0.22.0",
+    "openai": "7.62.0"
+  },
+  "tracing": {
+    "lockedDown": true,
+    "noopTrace": true
+  },
+  "caps": {
+    "spend_micro_usd": 3000,
+    "turns": 20,
+    "output_tokens": 60000,
+    "max_tokens": 4096
+  },
+  "run": {
+    "ms": 4397,
+    "tool_uses": [
+      {
+        "seq": 1,
+        "name": "shell"
+      },
+      {
+        "seq": 2,
+        "name": "shell"
+      },
+      {
+        "seq": 3,
+        "name": "shell"
+      },
+      {
+        "seq": 4,
+        "name": "shell"
+      }
+    ],
+    "decisions": [
+      {
+        "seq": 1,
+        "name": "shell",
+        "allow": true,
+        "rule": "command_listed"
+      },
+      {
+        "seq": 2,
+        "name": "shell",
+        "allow": true,
+        "rule": "command_listed"
+      },
+      {
+        "seq": 3,
+        "name": "shell",
+        "allow": true,
+        "rule": "command_listed"
+      },
+      {
+        "seq": 4,
+        "name": "shell",
+        "allow": true,
+        "rule": "command_listed"
+      }
+    ],
+    "executions": 4,
+    "fetch_refusals": [
+      "spend_cap"
+    ],
+    "error": {
+      "name": "Error",
+      "code": null
+    },
+    "result": null,
+    "stop": {
+      "kind": "spend_cap",
+      "after_start_ms": 4285
+    }
+  },
+  "broker": {
+    "requests": 4,
+    "sent": 4,
+    "refused": {
+      "spend_cap": 1
+    },
+    "stopped": "spend_cap",
+    "spent_micro_usd": 176,
+    "over_cap_micro_usd": 0,
+    "cut_in_flight": 0,
+    "records": [
+      {
+        "request": 1,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 1420,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2738,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 291,
+          "output_tokens": 18,
+          "total_tokens": 309,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 39,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 2,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 1765,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2781,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 326,
+          "output_tokens": 18,
+          "total_tokens": 344,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 42,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 3,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 2110,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2824,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 361,
+          "output_tokens": 18,
+          "total_tokens": 379,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 46,
+        "charged_worst": false,
+        "output_over_bound": false
+      },
+      {
+        "request": 4,
+        "model": "gpt-6-luna",
+        "stream": false,
+        "body_bytes": 2455,
+        "max_output_tokens": 4096,
+        "worst_micro_usd": 2867,
+        "status": 200,
+        "terminal": "completed",
+        "incomplete_reason": null,
+        "usage": {
+          "input_tokens": 396,
+          "output_tokens": 18,
+          "total_tokens": 414,
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0
+        },
+        "missing_usage_fields": [],
+        "charged_micro_usd": 49,
+        "charged_worst": false,
+        "output_over_bound": false
+      }
+    ],
+    "output_over_bound": 0
+  },
+  "pre_send": [],
+  "sockets": null
+}

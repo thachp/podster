@@ -547,6 +547,20 @@ The [one-agent pairing proof of concept](RUNNER.md#proposed-one-agent-pairing-pr
 
 The [Runner GitHub access proposal](RUNNER.md#proposed-github-access-and-reviewer-handoff) extends M5's `get_repo_access` idea with task-bound, repository-scoped, short-lived installation tokens and protected delivery to a local credential broker. The one-time pairing code never supplies repository access, and the App private key stays server-side. Permission selection, delivery, revocation and the no-merge boundary are unresolved. A token able to push may also merge, so short lifetime and a separate merge App are not sufficient evidence of least privilege. No credential is provisioned by this proposal.
 
+### Build artifacts from GitHub Actions (proposed)
+
+**Proposed** on 2026-11-21; only the source, GitHub CI, is decided ([decision 238](PRODUCT.md#decisions-needed)). The design is in [Build artifacts from GitHub CI](BUILDS.md). The read path:
+
+```
+build_cache(fetched_at, etag?, runs_json)     -- read model in the Workspace DO, per room; no token, no URL; never authorizes
+```
+
+- **Who decides.** The `Workspace` DO, from current state, on every list and every download, before any cached list is used. The gateway authenticates and passes on; the browser reaches neither GitHub's API nor this API directly.
+- **Reads.** On view, at most once per 60 seconds per room, with one refresh at a time: the room's linked repository's workflow runs and its artifacts, by numeric repository ID, with a token from the merge App cut down to Actions read and Metadata read on that one repository and revoked after the read. Each read is reserved from the deployment's GitHub budget first, and GitHub's limit headers stop further reads until reset; the view then shows the cached list with its time.
+- **Download.** After the DO's check, the API asks GitHub for the artifact's zip without following the redirect and answers the browser with GitHub's short-lived `302`. It holds no bytes, and never stores, caches or logs the signed URL.
+- **Not a command.** A refresh changes no state that authorizes anything and commits no event, so it needs no outbox or idempotency record, like a webhook nudge.
+- **Shows nothing yet.** Provisioning switches Actions off in every managed repository ([decision 188](PRODUCT.md#decisions-needed)). **Proposed amendment, 2026-11-21, not in force:** behind a deployment switch that defaults off, provisioning's `DisableActions` step becomes a configure step that enables Actions on a public repository with a read-only default token, workflows (written by people) that declare no write scope and use only `push`, same-repository `pull_request` and person-started `workflow_dispatch`, an allow-list of sha-pinned actions, approval for every outside contributor's fork run and a set artifact retention, and readiness reads each back and fails closed. Private repositories keep Actions off. The rules and the spike they need are in [BUILDS.md](BUILDS.md#turning-actions-on-proposed-rules).
+
 ## Repo layout
 
 ```

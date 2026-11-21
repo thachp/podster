@@ -9,11 +9,18 @@
 // - an unlisted host, plain HTTP to a listed host, and a listed host on another port are refused by the proxy;
 // - there is no direct route: a TCP connection to a public address fails, and Docker's resolver answers no outside name;
 // - the proxy listens only on the run's internal network: a container on its outbound network can't reach it;
+// - nothing on the machine is reachable from the internal network: it has no gateway and (on Linux) its bridge has no
+//   host address, and ports 22, 80, 443, 3128, 5432 and a port this test listens on, on all of the host's addresses,
+//   fail at every host address Docker gives its networks; on Linux a control shows that listener is reachable from an
+//   ordinary network, so the probe isn't blind;
+// - the task's resolver forwards outside names only to an address that is never routed (192.0.2.1);
 // then that the proxy logged the decisions, and that `kill` leaves no container or network of the home.
-// The first two checks use the proxy's image as the task image, for its `node` (Node 18, with --use-bundled-ca since
-// it has no system trust store). The third opens a run on Runner's real task image and runs `npm install` from
+// The first checks use the proxy's image as the task image, for its `node` (the official Node 22 binary, with its
+// bundled CA certificates). The third opens a run on Runner's real task image and runs `npm install` from
 // registry.npmjs.org through the proxy.
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +38,7 @@ const REF = "egress-check-1";
 const LISTED = "registry.npmjs.org";
 const apps = new URL("../", import.meta.url).pathname;
 
-/** Runs in the task's container with Node 18, reading only Runner's fixed HTTPS_PROXY. Prints one `key=value` line. */
+/** Runs in the task's container with Node 22, reading only Runner's fixed HTTPS_PROXY. Prints one `key=value` line. */
 const CLIENT = `
 import net from "node:net";
 import tls from "node:tls";
@@ -71,6 +78,15 @@ if (mode === "tls") {
   s.setTimeout(5000, () => done("result=timeout"));
   s.on("connect", () => done("result=connected"));
   s.on("error", (e) => done("result=error:" + e.code));
+} else if (mode === "probe") {
+  const tries = host.split(",").flatMap((h) => port.split(",").map((p) => [h, Number(p)]));
+  const out = await Promise.all(tries.map(([h, p]) => new Promise((res) => {
+    const s = net.connect({ host: h, port: p });
+    s.setTimeout(3000, () => (s.destroy(), res(h + ":" + p + "=timeout")));
+    s.on("connect", () => (s.destroy(), res(h + ":" + p + "=connected")));
+    s.on("error", (e) => res(h + ":" + p + "=" + e.code));
+  })));
+  done("result=" + out.join(","));
 } else if (mode === "dns") {
   try { done("result=" + (await dns.lookup(host)).address); } catch (e) { done("result=error:" + e.code); }
 }
@@ -162,6 +178,50 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
     expect(outIp).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
     const probe = await run(["run", "--rm", "--network", names.out, "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--pull", "never", image, "node", "-e", `const s=require("net").connect(3128,"${outIp}");s.setTimeout(5000,()=>{console.log("timeout");process.exit(0)});s.on("connect",()=>{console.log("connected");process.exit(0)});s.on("error",e=>{console.log(e.code);process.exit(0)})`]);
     expect(probe.stdout.trim()).toMatch(/^(ECONNREFUSED|timeout|EHOSTUNREACH)$/);
+  }, 5 * 60_000);
+
+  it("reaches nothing on the machine through the internal network, and forwards no DNS query anywhere routed", async () => {
+    const names = egressNames(REF);
+    const fmt = (net: string, f: string) => run(["network", "inspect", "--format", f, net]).then((r) => r.stdout.trim());
+    // No gateway on the internal network, and on Linux no host address on its bridge.
+    expect(await fmt(names.network, "{{range .IPAM.Config}}{{.Gateway}}{{end}}")).toBe("");
+    expect(await fmt(names.network, '{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}')).toBe("true");
+    if (process.platform === "linux") {
+      const id = (await fmt(names.network, "{{.Id}}")).slice(0, 12);
+      expect(execFileSync("ip", ["-4", "-o", "addr", "show", "dev", `br-${id}`], { encoding: "utf8" }).trim()).toBe("");
+    }
+    // A service on all of the host's addresses, on a port of this test's own.
+    const listener = createServer((c) => c.end("host\n"));
+    listener.listen(0, "0.0.0.0");
+    await new Promise((r) => listener.once("listening", r));
+    const high = (listener.address() as AddressInfo).port;
+    try {
+      // Every host address Docker gives: the outbound network's gateway and the default bridge's, and any the internal
+      // network's subnet has left free at .1.
+      const gateways = [await fmt(names.out, "{{range .IPAM.Config}}{{.Gateway}}{{end}}"), await fmt("bridge", "{{range .IPAM.Config}}{{.Gateway}}{{end}}")].filter((g) => /^\d+\.\d+\.\d+\.\d+$/.test(g));
+      expect(gateways.length).toBeGreaterThan(0);
+      const held = (await fmt(names.network, "{{range .Containers}}{{.IPv4Address}} {{end}}")).split(/\s+/).map((a) => a.split("/")[0]);
+      const first = (await fmt(names.network, "{{range .IPAM.Config}}{{.Subnet}}{{end}}")).replace(/\.\d+\/\d+$/, ".1");
+      const targets = [...gateways, ...(held.includes(first) ? [] : [first])];
+      const ports = [22, 80, 443, 3128, 5432, high];
+      const result = await inTask(`probe ${targets.join(",")} ${ports.join(",")}`);
+      const outcomes = result.split(",");
+      expect(outcomes).toHaveLength(targets.length * ports.length);
+      for (const o of outcomes) expect(o).toMatch(/=(timeout|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)$/);
+      // The probe isn't blind: on Linux, from an ordinary network, the same listener answers at that network's gateway.
+      if (process.platform === "linux") {
+        const control = await run(["run", "--rm", "--network", names.out, "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--pull", "never", image, "node", "-e", `const s=require("net").connect(${high},"${gateways[0]}");s.setTimeout(5000,()=>{console.log("timeout");process.exit(0)});s.on("data",d=>{console.log(String(d).trim());process.exit(0)});s.on("error",e=>{console.log(e.code);process.exit(0)})`]);
+        expect(control.stdout.trim()).toBe("host");
+      }
+    } finally {
+      listener.close();
+    }
+    // The task's resolver answers only the internal network's names, and its only upstream is never routed.
+    const conf = await sandbox.exec(REF, { call_id: "c", tool: "shell", command: "cat /etc/resolv.conf" }, signal);
+    expect(conf.text).toMatch(/^nameserver 127\.0\.0\.11$/m);
+    expect(conf.text).toMatch(/ExtServers: \[192\.0\.2\.1\]/);
+    expect(conf.text).not.toMatch(/^nameserver (?!127\.0\.0\.11$)/m);
+    expect(await inTask("dns exfil-check-podster.example.com")).toMatch(/^error:/);
   }, 5 * 60_000);
 
   it("logs the proxy's decisions by host and code when the run ends, and leaves no container or network of the home", async () => {

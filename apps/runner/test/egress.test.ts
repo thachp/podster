@@ -269,7 +269,8 @@ describe("the task container's network and environment", () => {
     const args = runArgs(spec, { image: IMAGE, uid: 501, gid: 20, home_label: "h" });
     const flag = (name: string) => args.filter((_, i) => args[i - 1] === name);
     expect(flag("--network")).toEqual(["podster-egress-net-run-1"]);
-    expect(flag("--dns")).toEqual(["127.0.0.1"]);
+    // An upstream resolver that is never routed and isn't loopback (TEST-NET-1).
+    expect(flag("--dns")).toEqual(["192.0.2.1"]);
     expect(flag("--env").sort()).toEqual([
       "HOME=/work", "HTTPS_PROXY=http://egress:3128", "HTTP_PROXY=http://egress:3128", "LANG=C.UTF-8", "NO_PROXY=localhost,127.0.0.1,::1", "PATH=/usr/local/bin:/usr/bin:/bin",
       "http_proxy=http://egress:3128", "https_proxy=http://egress:3128", "no_proxy=localhost,127.0.0.1,::1",
@@ -294,6 +295,9 @@ describe("the proxy's container", () => {
     expect(flag("--label")).toEqual([`${LABEL_RUN}=run-1`, `${LABEL_HOME}=h`, `${LABEL_ROLE}=egress`]);
     expect(flag("--env")).toEqual([]);
     expect(args.join(" ")).not.toMatch(/--mount|--volume|-v |docker\.sock|--publish|-p |--cap-add|--privileged|--network host/);
+    // Its log is bounded on the host's disk.
+    expect(flag("--log-driver")).toEqual(["json-file"]);
+    expect(flag("--log-opt")).toEqual(["max-size=1m", "max-file=2"]);
     expect(args.slice(args.indexOf(PROXY_IMAGE))).toEqual([PROXY_IMAGE, "timeout", "660", "node", "--input-type=module", "-e", base.program, "172.18.0.0/16", "registry.npmjs.org"]);
   });
 
@@ -341,7 +345,7 @@ describe("the proxy's container", () => {
 });
 
 /** A fake docker for the sandbox's egress steps: containers and networks by name and labels, as Docker 28 behaves. */
-function fakeDocker(opts: { fail?: string; logs?: string } = {}) {
+function fakeDocker(opts: { fail?: string; logs?: string; version?: string; taskRmFails?: boolean } = {}) {
   type C = { id: string; name: string; labels: string[]; networks: Set<string> };
   const containers: C[] = [];
   const networks = new Map<string, string[]>();
@@ -354,6 +358,7 @@ function fakeDocker(opts: { fail?: string; logs?: string } = {}) {
     calls.push(args);
     const step = `${args[0]} ${args[1] ?? ""}`;
     if (opts.fail && step.startsWith(opts.fail)) return ok("", 1);
+    if (args[0] === "version") return ok(`${opts.version ?? "28.5.1"}\n`);
     const filters = args.filter((_, i) => args[i - 1] === "--filter");
     if (args[0] === "run") {
       const net = args[args.indexOf("--network") + 1];
@@ -363,12 +368,15 @@ function fakeDocker(opts: { fail?: string; logs?: string } = {}) {
     if (args[0] === "exec") return ok(args.join(" ").includes("/proc/1/task/1/children") ? "7\n" : "");
     if (args[0] === "logs") return ok(opts.logs ?? '{"e":"ready"}\n');
     if (args[0] === "ps") return ok(containers.filter((c) => match(c.labels, c.name, filters)).map((c) => c.id).join("\n"));
+    if (args[0] === "rm" && opts.taskRmFails && args.slice(2).some((id) => containers.find((c) => c.id === id)?.name.startsWith("podster-run-"))) return ok("", 125);
     if (args[0] === "rm") {
       for (const id of args.slice(2)) containers.splice(containers.findIndex((c) => c.id === id), 1);
       return ok();
     }
     if (step === "network create") return networks.set(args.at(-1) as string, labelsOf(args)), ok();
+    if (step === "network inspect" && args.includes("{{range .Containers}}{{.Name}} {{end}}")) return ok(containers.filter((c) => c.networks.has(args.at(-1) as string)).map((c) => c.name).join(" "));
     if (step === "network inspect") return ok("172.18.0.0/16 ");
+    if (step === "network disconnect") return containers.find((c) => c.name === args.at(-1))?.networks.delete(args.at(-2) as string), ok();
     if (step === "network connect") return containers.find((c) => c.name === args.at(-1))?.networks.add(args.at(-2) as string), ok();
     if (step === "network ls") return ok([...networks].filter(([n, l]) => match(l, n, filters)).map(([n]) => n).join("\n"));
     if (step === "network rm") {
@@ -392,15 +400,16 @@ describe("the sandbox with a room that lists hosts", () => {
     await sandbox.open(containerSpec("run-1", facts(await temp(), ["registry.npmjs.org"])), new AbortController().signal);
     const names = egressNames("run-1");
     const steps = d.calls.map((c) => (c[0] === "network" ? `network ${c[1]}` : c[0]));
-    expect(steps.slice(0, 7)).toEqual(["network create", "network create", "network inspect", "run", "logs", "network connect", "run"]);
+    expect(steps.slice(0, 8)).toEqual(["version", "network create", "network create", "network inspect", "run", "logs", "network connect", "run"]);
     const labelled = ["--label", `${LABEL_RUN}=run-1`, "--label", `${LABEL_HOME}=${homeLabel("/h")}`, "--label", `${LABEL_ROLE}=egress-network`];
-    expect(d.calls[0]).toEqual(["network", "create", "--internal", ...labelled, names.network]);
-    expect(d.calls[1]).toEqual(["network", "create", ...labelled, names.out]);
-    expect(d.calls[2]).toEqual(["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", names.network]);
-    expect(d.calls[3]).toContain(names.proxy);
-    expect(d.calls[5]).toEqual(["network", "connect", names.out, names.proxy]);
+    // The internal network has no address on the host, so no gateway to reach the machine through.
+    expect(d.calls[1]).toEqual(["network", "create", "--internal", "--opt", "com.docker.network.bridge.inhibit_ipv4=true", ...labelled, names.network]);
+    expect(d.calls[2]).toEqual(["network", "create", ...labelled, names.out]);
+    expect(d.calls[3]).toEqual(["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", names.network]);
+    expect(d.calls[4]).toContain(names.proxy);
+    expect(d.calls[6]).toEqual(["network", "connect", names.out, names.proxy]);
     // Never Docker's default bridge or the host's network.
-    expect(d.calls.flat().join(" ")).not.toMatch(/\bbridge\b|--network host/);
+    expect(d.calls.flat().filter((a) => a === "bridge" || a === "host")).toEqual([]);
     const task = d.containers.find((c) => c.name === "podster-run-run-1");
     expect([...(task?.networks ?? [])]).toEqual([names.network]);
     expect([...(d.containers.find((c) => c.name === names.proxy)?.networks ?? [])]).toEqual([names.network, names.out]);
@@ -429,6 +438,35 @@ describe("the sandbox with a room that lists hosts", () => {
     expect(d.containers).toEqual([]);
     expect(d.networks.size).toBe(0);
     expect(d.calls.some((c) => c[0] === "run" && c.includes("podster-run-run-1"))).toBe(false);
+  });
+
+  it("refuses every allowlist run on a Docker Engine older than 26, before making anything, and checks once per process", async () => {
+    for (const version of ["25.0.5", "20.10.24"]) {
+      const d = fakeDocker({ version });
+      await expect(sandboxOf(d).open(containerSpec("run-1", facts(await temp(), ["registry.npmjs.org"])), new AbortController().signal)).rejects.toThrow(/^docker_engine_too_old$/);
+      expect(d.calls).toEqual([["version", "--format", "{{.Server.Version}}"]]);
+    }
+    const bad = fakeDocker({ version: "dev" });
+    await expect(sandboxOf(bad).open(containerSpec("run-1", facts(await temp(), ["registry.npmjs.org"])), new AbortController().signal)).rejects.toThrow(/^docker_version_0$/);
+    const d = fakeDocker({ version: "26.0.0" });
+    const sandbox = sandboxOf(d);
+    for (const ref of ["run-1", "run-2"]) await sandbox.open(containerSpec(ref, facts(await temp(), ["registry.npmjs.org"])), new AbortController().signal);
+    expect(d.calls.filter((c) => c[0] === "version")).toHaveLength(1);
+    // A room with no hosts never asks.
+    const none = fakeDocker({ version: "20.10.0" });
+    await sandboxOf(none).open(containerSpec("run-3", facts(await temp())), new AbortController().signal);
+    expect(none.calls.some((c) => c[0] === "version")).toBe(false);
+  });
+
+  it("removes the proxy and both networks even when the task container's removal fails, then reports that failure", async () => {
+    const d = fakeDocker({ taskRmFails: true });
+    const sandbox = sandboxOf(d);
+    await sandbox.open(containerSpec("run-1", facts(await temp(), ["registry.npmjs.org"])), new AbortController().signal);
+    await expect(sandbox.kill("run-1")).rejects.toThrow(/^docker_rm_125$/);
+    expect(d.containers.map((c) => c.name)).toEqual(["podster-run-run-1"]);
+    // Both networks went too: removing one with the task still attached disconnects it first.
+    expect(d.networks.size).toBe(0);
+    expect(await sandbox.gone("run-1")).toBe(false);
   });
 
   it("gives up with egress_proxy_not_ready when the proxy never says it's listening, and cleans up", async () => {

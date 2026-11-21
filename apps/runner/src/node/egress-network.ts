@@ -3,8 +3,8 @@
  * room's run policy lists (the owner's approval of 2026-11-20). `DockerSandbox` opens them before the task's container
  * when the run's network is an allowlist, and removes them with it.
  *
- * - **Two networks, per run.** The internal one is `--internal`, so Docker gives it no route out; its only containers
- *   are the task's and the proxy. The outbound one is an ordinary bridge network of the run's own, whose only container
+ * - **Two networks, per run.** The internal one is `--internal`, so Docker gives it no route out, and its bridge has no
+ *   address on the host (`inhibit_ipv4`), so no gateway either; its only containers are the task's and the proxy. The outbound one is an ordinary bridge network of the run's own, whose only container
  *   is the proxy, so no other container on the machine shares the proxy's route out (not Docker's default bridge), and
  *   Docker's resolver forwards the proxy's lookups. Both carry the run's and home's labels and the role
  *   `egress-network`, so the stray sweep at startup finds them, and Claude Code's driver, which removes its own role
@@ -35,14 +35,18 @@ export function egressNames(ref: string) {
 }
 
 /** The proxy's own limits: smaller than the task container's. **Proposed** figures. */
-export const PROXY_CONTAINER = Object.freeze({ pids: 64, memory: "256m", cpus: "1", ready_checks: 40, ready_check_ms: 250, log_bytes: 256 * 1024, log_entries: 100 });
+export const PROXY_CONTAINER = Object.freeze({ pids: 64, memory: "256m", cpus: "1", ready_checks: 40, ready_check_ms: 250, log_bytes: 256 * 1024, log_entries: 100, log_max_size: "1m", log_max_files: "2" });
 
 const labels = (ref: string, home_label: string, role: string) => ["--label", `${LABEL_RUN}=${ref}`, "--label", `${LABEL_HOME}=${home_label}`, "--label", `${LABEL_ROLE}=${role}`];
 
 /** `docker network create` for the run's internal network, or its outbound one (the proxy's alone). */
 export function egressNetworkArgs(ref: string, home_label: string, which: "internal" | "out"): string[] {
   const names = egressNames(ref);
-  return which === "internal" ? ["network", "create", "--internal", ...labels(ref, home_label, ROLE_NETWORK), names.network] : ["network", "create", ...labels(ref, home_label, ROLE_NETWORK), names.out];
+  // The internal network's bridge gets no address on the host (`inhibit_ipv4`), so it has no gateway: a task can reach
+  // the proxy and nothing on the machine, not even a service listening on all of the host's addresses.
+  return which === "internal"
+    ? ["network", "create", "--internal", "--opt", "com.docker.network.bridge.inhibit_ipv4=true", ...labels(ref, home_label, ROLE_NETWORK), names.network]
+    : ["network", "create", ...labels(ref, home_label, ROLE_NETWORK), names.out];
 }
 
 /** The one IPv4 subnet `docker network inspect` printed for the run's network, or null. */
@@ -75,6 +79,10 @@ export function proxyRunArgs(o: { ref: string; image: string; uid: number; gid: 
     "--ulimit", "nofile=1024:1024",
     "--ulimit", "core=0",
     "--ipc", "none",
+    // Its decision log is bounded on the host's disk, whatever a flood of refused connections writes.
+    "--log-driver", "json-file",
+    "--log-opt", `max-size=${PROXY_CONTAINER.log_max_size}`,
+    "--log-opt", `max-file=${PROXY_CONTAINER.log_max_files}`,
     "--network", names.network,
     "--network-alias", EGRESS_ALIAS,
     "--init",

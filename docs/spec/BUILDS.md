@@ -111,7 +111,7 @@ Unlike an upload, which streams through Podster with no presigned URL because a 
 
 The App's token for Builds is cut down to **Actions read and Metadata read** on the one repository, like the merge App's marking and observing tokens (`TokenPermissions::MARKER` and `OBSERVER` in `crates/core/src/repo_access.rs`), checked against GitHub's answer, and revoked when the read ends. It can't write, merge, set a status or read the repository's contents. Actions read also reaches run logs, which Builds doesn't read.
 
-**The owner's step.** Adding Actions read to the App is a change to the App in the GitHub organization, which is the owner's, not an agent's. As with the checks reader (`GITHUB_AGENT_APP_READS_CHECKS` in `apps/api/src/workspace/changes.rs`), the build adds a switch the owner sets once the permission is granted and the installation has accepted it. Until then the view says **Not configured** and nothing is asked of GitHub.
+**Owner granted 2026-11-21; installation checked the same day.** Adding Actions read to the App is a change in the GitHub organization, which is the owner's, not an agent's. On 2026-11-21 the owner granted it, and the architect checked the same day, through the organization's installations list, that the `podster-staging-merge` installation on `podsterdev` shows Actions read, Contents write, Metadata read, Pull requests write and Commit statuses write. **Not done:** a live read of runs or artifacts with the App's token. Its key isn't on the architect's machine; the API Worker would hold it. So the App's actual reach with Actions read is unverified. As with the checks reader (`GITHUB_AGENT_APP_READS_CHECKS` in `apps/api/src/workspace/changes.rs`), the build adds a switch the owner sets once the build is in place, with the permission already granted. Until then the view says **Not configured** and nothing is asked of GitHub.
 
 ## Out of scope
 
@@ -125,7 +125,7 @@ The App's token for Builds is cut down to **Actions read and Metadata read** on 
 ## What the owner does
 
 - Decide whether, and under what rules, GitHub Actions runs in managed repositories ([decision 188](PRODUCT.md#decisions-needed) has it off).
-- Grant the merge App **Actions: read** in the organization, and accept it on the installation.
+- Done: the merge App's **Actions: read**. Owner granted 2026-11-21; installation checked the same day.
 - Set the build's switch on staging once the permission is in place.
 
 ## Open questions

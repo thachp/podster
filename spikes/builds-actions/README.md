@@ -24,7 +24,7 @@ Tokens minted, each scoped to the one repository except the one that creates it:
 | agent, repo | contents write, pull_requests write | contents write, metadata read, pull_requests write |
 | merge, repo | actions read, metadata read | actions read, metadata read |
 
-Every minted token was revoked at the end: five `DELETE /installation/token`, five `204`.
+Every minted token was revoked at the end: five `DELETE /installation/token`, five `204`, across both results files (four in the run's file, one in the cleanup file).
 
 `git push` runs in an isolated environment: no system or global git config, the credential helper emptied, and the token passed as an `http.extraheader` through `GIT_CONFIG_*` variables, never in argv or a URL. The clone lives in a temporary folder that is deleted afterwards.
 
@@ -53,11 +53,11 @@ All 2026-11-21, seen once.
 | (f) | Agent token: create release `spike-rel1` | `201` | The `on: release: [published, created]` workflow ran twice (event `release`), and the release's new tag also ran the tag workflow (head_branch `spike-rel1`) |
 | read | Merge token (actions + metadata read): list runs | `200` | 9 runs, each with `head_branch`, `head_sha`, `status: completed`, `conclusion: success`. Creating the task branch by the API also triggered the push workflows, so each push workflow ran twice |
 | read | List run artifacts | `200` | Each artifact has `digest` in the form `sha256:<64 hex>`, `expires_at`, and `workflow_run.head_branch` / `head_sha` |
-| read | Artifact zip, redirect not followed | `302` | `Location` host `productionresults<n>.blob.core.windows.net` (n varied: 6, 14, 18, 31), with an `se` expiry parameter. The expiry's length wasn't recorded |
+| read | Artifact zip, redirect not followed | `302` | `Location` host `productionresultssa<n>.blob.core.windows.net` (n varied: 6, 14, 18, 31), with an `se` expiry parameter. The expiry's length wasn't recorded |
 | read | Job logs, redirect not followed | `302` | Same kind of host, with `se` |
 | read | List runs with `If-None-Match` | `304` | `X-RateLimit-Remaining` 4953 on the plain `200`, still 4953 on the `304`; the next plain `200` made it 4952, and the `304` after it left it at 4952. A `304` didn't count |
 | billing | `GET …/actions/runs/{id}/timing` for all 9 runs | `200` | `billable.UBUNTU.total_ms: 0` for every run; runners `ubuntu-latest`, group "GitHub Actions" |
-| cleanup | Provision token: `DELETE /repos/podsterdev/builds-spike-20261121142858` | `204` | `gh api orgs/podsterdev/repos` afterwards listed only `e2e-m5-202611120015-ae33`, `e2e-m5-202611120015-ae33-7c9b19` and `hello-world` |
+| cleanup | Provision token: `DELETE /repos/podsterdev/builds-spike-20261121142858` | `204` | Recorded in the cleanup file. Separately, a by-hand `gh api orgs/podsterdev/repos` check afterwards (not in a results file; re-checked by the architect on 2026-11-21) listed only `e2e-m5-202611120015-ae33`, `e2e-m5-202611120015-ae33-7c9b19` and `hello-world` |
 
 ## What this says about BUILDS.md's proposed rules
 

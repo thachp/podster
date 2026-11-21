@@ -1,0 +1,1073 @@
+[
+  {
+    "check": "pre",
+    "name": "provision App installation",
+    "status": 200,
+    "permissions": {
+      "metadata": "read",
+      "administration": "write"
+    },
+    "repository_selection": "all"
+  },
+  {
+    "check": "pre",
+    "name": "agent App installation",
+    "status": 200,
+    "permissions": {
+      "contents": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "repository_selection": "all"
+  },
+  {
+    "check": "pre",
+    "name": "merge App installation",
+    "status": 200,
+    "permissions": {
+      "actions": "read",
+      "contents": "write",
+      "metadata": "read",
+      "statuses": "write",
+      "pull_requests": "write"
+    },
+    "repository_selection": "all"
+  },
+  {
+    "check": "pre",
+    "name": "mint provision, unscoped (create repository)",
+    "status": 201,
+    "message": null,
+    "granted": {
+      "administration": "write",
+      "metadata": "read"
+    },
+    "repositories": "all"
+  },
+  {
+    "check": "setup",
+    "name": "create public repository",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "pre",
+    "name": "mint provision, repo-scoped administration:write",
+    "status": 201,
+    "message": null,
+    "granted": {
+      "administration": "write",
+      "metadata": "read"
+    },
+    "repositories": [
+      "builds-spike-20261121142858"
+    ]
+  },
+  {
+    "check": "pre",
+    "name": "mint agent, repo-scoped contents+pull_requests write",
+    "status": 201,
+    "message": null,
+    "granted": {
+      "contents": "write",
+      "metadata": "read",
+      "pull_requests": "write"
+    },
+    "repositories": [
+      "builds-spike-20261121142858"
+    ]
+  },
+  {
+    "check": "pre",
+    "name": "mint merge, repo-scoped actions+metadata read",
+    "status": 201,
+    "message": null,
+    "granted": {
+      "actions": "read",
+      "metadata": "read"
+    },
+    "repositories": [
+      "builds-spike-20261121142858"
+    ]
+  },
+  {
+    "check": "d",
+    "name": "Actions on, allowed actions selected, sha pinning required",
+    "get_before": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "enabled": true,
+        "allowed_actions": "all",
+        "sha_pinning_required": false
+      }
+    },
+    "put": {
+      "status": 204,
+      "message": null,
+      "sent": {
+        "enabled": true,
+        "allowed_actions": "selected",
+        "sha_pinning_required": true
+      }
+    },
+    "get_after": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "enabled": true,
+        "allowed_actions": "selected",
+        "selected_actions_url": "https://api.github.com/repositories/1466625329/actions/permissions/selected-actions",
+        "sha_pinning_required": true
+      }
+    }
+  },
+  {
+    "check": "d",
+    "name": "selected actions: GitHub-owned plus explicit list",
+    "get_before": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "github_owned_allowed": true,
+        "patterns_allowed": [],
+        "verified_allowed": false
+      }
+    },
+    "put": {
+      "status": 204,
+      "message": null,
+      "sent": {
+        "github_owned_allowed": true,
+        "verified_allowed": false,
+        "patterns_allowed": [
+          "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+        ]
+      }
+    },
+    "get_after": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "github_owned_allowed": true,
+        "patterns_allowed": [
+          "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+        ],
+        "verified_allowed": false
+      }
+    }
+  },
+  {
+    "check": "d",
+    "name": "default workflow permissions read, no PR approvals",
+    "get_before": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      }
+    },
+    "put": {
+      "status": 204,
+      "message": null,
+      "sent": {
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      }
+    },
+    "get_after": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      }
+    }
+  },
+  {
+    "check": "d",
+    "name": "fork PR approval: all external contributors",
+    "get_before": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "approval_policy": "first_time_contributors"
+      }
+    },
+    "put": {
+      "status": 204,
+      "message": null,
+      "sent": {
+        "approval_policy": "all_external_contributors"
+      }
+    },
+    "get_after": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "approval_policy": "all_external_contributors"
+      }
+    }
+  },
+  {
+    "check": "d",
+    "name": "artifact and log retention 30 days",
+    "get_before": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "days": 90,
+        "maximum_allowed_days": 90
+      }
+    },
+    "put": {
+      "status": 204,
+      "message": null,
+      "sent": {
+        "days": 30
+      }
+    },
+    "get_after": {
+      "status": 200,
+      "message": null,
+      "body": {
+        "days": 30,
+        "maximum_allowed_days": 90
+      }
+    }
+  },
+  {
+    "check": "d",
+    "name": "workflow access from other repositories (read only)",
+    "status": 422,
+    "message": "Access policy only applies to internal and private repositories.",
+    "body": null
+  },
+  {
+    "check": "b",
+    "name": "person adds .github/workflows/default-perms.yml on main",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "b",
+    "name": "person adds .github/workflows/raised-perms.yml on main",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "b",
+    "name": "person adds .github/workflows/dispatch.yml on main",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "b",
+    "name": "person adds .github/workflows/tag-push.yml on main",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "b",
+    "name": "person adds .github/workflows/release.yml on main",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "a",
+    "name": "agent creates task branch",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "a",
+    "name": "agent creates .github/workflows/x.yml (contents API)",
+    "status": 403,
+    "message": "Resource not accessible by integration"
+  },
+  {
+    "check": "a",
+    "name": "agent modifies .github/workflows/default-perms.yml (contents API)",
+    "status": 403,
+    "message": "Resource not accessible by integration"
+  },
+  {
+    "check": "a",
+    "name": "git clone of task branch",
+    "exit": 0,
+    "stderr": []
+  },
+  {
+    "check": "a",
+    "name": "git push adding .github/workflows/y.yml",
+    "exit": 1,
+    "stderr": [
+      " ! [remote rejected] HEAD -> podster/tsk_spike20261121142858 (refusing to allow a GitHub App to create or update workflow `.github/workflows/y.yml` without `workflows` permission)",
+      "error: failed to push some refs to 'https://github.com/podsterdev/builds-spike-20261121142858.git'"
+    ]
+  },
+  {
+    "check": "a",
+    "name": "git push modifying .github/workflows/default-perms.yml",
+    "exit": 1,
+    "stderr": [
+      " ! [remote rejected] HEAD -> podster/tsk_spike20261121142858 (refusing to allow a GitHub App to create or update workflow `.github/workflows/default-perms.yml` without `workflows` permission)",
+      "error: failed to push some refs to 'https://github.com/podsterdev/builds-spike-20261121142858.git'"
+    ]
+  },
+  {
+    "check": "a",
+    "name": "git push of a normal code change (control; triggers runs)",
+    "exit": 0,
+    "stderr": [
+      "   d2736b1..1ea4daa  HEAD -> podster/tsk_spike20261121142858"
+    ]
+  },
+  {
+    "check": "e",
+    "name": "agent POST /dispatches",
+    "status": 204,
+    "message": null
+  },
+  {
+    "check": "f",
+    "name": "agent creates tag spike-tag1 (git refs)",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "f",
+    "name": "agent creates release spike-rel1",
+    "status": 201,
+    "message": null
+  },
+  {
+    "check": "read",
+    "name": "list workflow runs (merge App, actions:read)",
+    "seconds_waited": 93,
+    "runs": [
+      {
+        "id": 44914188127,
+        "name": "dispatch",
+        "event": "repository_dispatch",
+        "head_branch": "main",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914187038,
+        "name": "release",
+        "event": "release",
+        "head_branch": "spike-rel1",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914186709,
+        "name": "release",
+        "event": "release",
+        "head_branch": "spike-rel1",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914186325,
+        "name": "tag-push",
+        "event": "push",
+        "head_branch": "spike-rel1",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914186157,
+        "name": "tag-push",
+        "event": "push",
+        "head_branch": "spike-tag1",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914184270,
+        "name": "raised-perms",
+        "event": "push",
+        "head_branch": "podster/tsk_spike20261121142858",
+        "head_sha": "1ea4daae76e92dfd4335d52dec99b78b8d98b6cd",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914184261,
+        "name": "default-perms",
+        "event": "push",
+        "head_branch": "podster/tsk_spike20261121142858",
+        "head_sha": "1ea4daae76e92dfd4335d52dec99b78b8d98b6cd",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914175304,
+        "name": "default-perms",
+        "event": "push",
+        "head_branch": "podster/tsk_spike20261121142858",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "id": 44914175258,
+        "name": "raised-perms",
+        "event": "push",
+        "head_branch": "podster/tsk_spike20261121142858",
+        "head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+        "status": "completed",
+        "conclusion": "success"
+      }
+    ]
+  },
+  {
+    "check": "read",
+    "name": "dispatch",
+    "run": 44914188127,
+    "event": "repository_dispatch",
+    "head_branch": "main",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876177178,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa9.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read"
+        },
+        "spike": {
+          "event": "repository_dispatch"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": []
+    }
+  },
+  {
+    "check": "read",
+    "name": "release",
+    "run": 44914187038,
+    "event": "release",
+    "head_branch": "spike-rel1",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876173220,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa9.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read"
+        },
+        "spike": {
+          "event": "release"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": []
+    }
+  },
+  {
+    "check": "read",
+    "name": "release",
+    "run": 44914186709,
+    "event": "release",
+    "head_branch": "spike-rel1",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876172015,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa19.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read"
+        },
+        "spike": {
+          "event": "release"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": []
+    }
+  },
+  {
+    "check": "read",
+    "name": "tag-push",
+    "run": 44914186325,
+    "event": "push",
+    "head_branch": "spike-rel1",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876170506,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa10.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read"
+        },
+        "spike": {
+          "event": "push"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": []
+    }
+  },
+  {
+    "check": "read",
+    "name": "tag-push",
+    "run": 44914186157,
+    "event": "push",
+    "head_branch": "spike-tag1",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876170161,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa16.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read"
+        },
+        "spike": {
+          "event": "push"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": []
+    }
+  },
+  {
+    "check": "read",
+    "name": "raised-perms",
+    "run": 44914184270,
+    "event": "push",
+    "head_branch": "podster/tsk_spike20261121142858",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876163600,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa6.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "write",
+          "Metadata": "read"
+        },
+        "spike": {
+          "status_write": "403",
+          "ref_write": "201"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": [
+        {
+          "name": "probe-result",
+          "size_in_bytes": 168,
+          "has_digest_field": true,
+          "digest_form": "sha256:<64 hex>",
+          "expires_at": "2026-11-22T14:29:32Z",
+          "workflow_run_head_branch": "podster/tsk_spike20261121142858",
+          "workflow_run_head_sha": "1ea4daae76e92dfd4335d52dec99b78b8d98b6cd",
+          "zip": {
+            "status": 302,
+            "message": null,
+            "location": {
+              "host": "productionresultssa6.blob.core.windows.net",
+              "has_expiry": true,
+              "expiry_params": [
+                "se"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "check": "read",
+    "name": "default-perms",
+    "run": 44914184261,
+    "event": "push",
+    "head_branch": "podster/tsk_spike20261121142858",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876163562,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa31.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read",
+          "Packages": "read"
+        },
+        "spike": {
+          "status_write": "403",
+          "ref_write": "403"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": [
+        {
+          "name": "probe-result",
+          "size_in_bytes": 166,
+          "has_digest_field": true,
+          "digest_form": "sha256:<64 hex>",
+          "expires_at": "2026-11-22T14:29:32Z",
+          "workflow_run_head_branch": "podster/tsk_spike20261121142858",
+          "workflow_run_head_sha": "1ea4daae76e92dfd4335d52dec99b78b8d98b6cd",
+          "zip": {
+            "status": 302,
+            "message": null,
+            "location": {
+              "host": "productionresultssa31.blob.core.windows.net",
+              "has_expiry": true,
+              "expiry_params": [
+                "se"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "check": "read",
+    "name": "default-perms",
+    "run": 44914175304,
+    "event": "push",
+    "head_branch": "podster/tsk_spike20261121142858",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876135204,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa18.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "read",
+          "Metadata": "read",
+          "Packages": "read"
+        },
+        "spike": {
+          "status_write": "403",
+          "ref_write": "403"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": [
+        {
+          "name": "probe-result",
+          "size_in_bytes": 166,
+          "has_digest_field": true,
+          "digest_form": "sha256:<64 hex>",
+          "expires_at": "2026-11-22T14:29:30Z",
+          "workflow_run_head_branch": "podster/tsk_spike20261121142858",
+          "workflow_run_head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+          "zip": {
+            "status": 302,
+            "message": null,
+            "location": {
+              "host": "productionresultssa18.blob.core.windows.net",
+              "has_expiry": true,
+              "expiry_params": [
+                "se"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "check": "read",
+    "name": "raised-perms",
+    "run": 44914175258,
+    "event": "push",
+    "head_branch": "podster/tsk_spike20261121142858",
+    "conclusion": "success",
+    "timing": {
+      "status": 200,
+      "billable": {
+        "UBUNTU": {
+          "total_ms": 0,
+          "jobs": 1,
+          "job_runs": [
+            {
+              "job_id": 136876135236,
+              "duration_ms": 0
+            }
+          ]
+        }
+      },
+      "message": null
+    },
+    "jobs": [
+      {
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "runner_group_name": "GitHub Actions",
+        "conclusion": "success",
+        "logs": {
+          "status": 302,
+          "location": {
+            "host": "productionresultssa14.blob.core.windows.net",
+            "has_expiry": true,
+            "expiry_params": [
+              "se"
+            ]
+          }
+        },
+        "token_permissions": {
+          "Contents": "write",
+          "Metadata": "read"
+        },
+        "spike": {
+          "status_write": "403",
+          "ref_write": "201"
+        }
+      }
+    ],
+    "artifacts": {
+      "status": 200,
+      "message": null,
+      "items": [
+        {
+          "name": "probe-result",
+          "size_in_bytes": 168,
+          "has_digest_field": true,
+          "digest_form": "sha256:<64 hex>",
+          "expires_at": "2026-11-22T14:29:27Z",
+          "workflow_run_head_branch": "podster/tsk_spike20261121142858",
+          "workflow_run_head_sha": "d2736b1438673c55023f7d1abc5b71074abea97c",
+          "zip": {
+            "status": 302,
+            "message": null,
+            "location": {
+              "host": "productionresultssa14.blob.core.windows.net",
+              "has_expiry": true,
+              "expiry_params": [
+                "se"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "check": "read",
+    "name": "list runs with If-None-Match",
+    "etag_present": true,
+    "plain": {
+      "status": 200,
+      "remaining": "4953",
+      "used": "47",
+      "resource": "core"
+    },
+    "conditional": {
+      "status": 304,
+      "remaining": "4953",
+      "used": "47",
+      "resource": "core"
+    },
+    "plain_again": {
+      "status": 200,
+      "remaining": "4952",
+      "used": "48",
+      "resource": "core"
+    },
+    "conditional_again": {
+      "status": 304,
+      "remaining": "4952",
+      "used": "48",
+      "resource": "core"
+    },
+    "rate_limit_endpoint_core_remaining": 4952
+  },
+  {
+    "check": "end",
+    "name": "tokens revoked",
+    "minted": 4,
+    "statuses": [
+      {
+        "token": "provision, unscoped (create repository)",
+        "status": 204
+      },
+      {
+        "token": "provision, repo-scoped administration:write",
+        "status": 204
+      },
+      {
+        "token": "agent, repo-scoped contents+pull_requests write",
+        "status": 204
+      },
+      {
+        "token": "merge, repo-scoped actions+metadata read",
+        "status": 204
+      }
+    ]
+  }
+]

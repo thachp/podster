@@ -138,6 +138,7 @@ describe.runIf(ON)("S-47: the two-container placement on a real Linux Docker Eng
       run_ref: ref,
       prompt: { trust: "untrusted", origin: "podster_task", text: "ci" },
       frame: UNTRUSTED_FRAME,
+      toolchains: [],
       allowed_tools: ["read", "StructuredOutput"],
       result_schema: RESULT_SCHEMA,
       limits: { turns: 1, max_tokens: 1, output_tokens: 1, run_time_ms: 240_000 },

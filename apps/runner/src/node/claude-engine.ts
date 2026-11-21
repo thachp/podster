@@ -9,7 +9,9 @@
  *   ID (`sha256:…`), built from `apps/runner/sandbox`, `apps/runner/claude-image` and `apps/runner/proxy-image` (the
  *   egress proxy's, for rooms that list hosts). A pin that's missing, or names an
  *   image Docker no longer has, is built from the Dockerfile in Runner's own package and pinned (`ensureImage`, the
- *   ruling on #470); a build that fails stops `run` before anything runs;
+ *   ruling on #470); a build that fails stops `run` before anything runs. A room's toolchain images (the owner's ruling
+ *   of 2026-11-20) are built FROM the pinned task image and pinned the same way, on the first run that needs them
+ *   (`toolchain-images.ts`); one that fails refuses that run only;
  * - `docker` is installed in a fixed place;
  * - no proxy or TLS trust would be taken from the environment.
  * It runs what was ruled after #460's real runs: Claude Code in default mode, never bare (bare mode turns off the SDK's
@@ -32,11 +34,13 @@ import { fileURLToPath } from "node:url";
 import { CLAUDE_PROFILE } from "../core/claude-profile.js";
 import type { Logger } from "../core/runtime.js";
 import { ClaudeDriver, type ClaudeDriverDeps } from "./claude-driver.js";
-import { DockerSandbox, dockerCli, dockerHost, findDocker, IMAGE_ID, type DockerCli } from "./docker-sandbox.js";
+import { ensureToolchainImage } from "./toolchain-images.js";
+import { DockerSandbox, dockerCli, dockerHost, findDocker, IMAGE_ID, type DockerCli, type ToolchainImages } from "./docker-sandbox.js";
 import { dockerReachable, homeLengthRefusal, homeRefusal, isWsl, linuxCheckFailure, readMounts, readProcVersion, relayModeFor, resolvedPath } from "./platform.js";
 import { loadProxyProgram } from "./egress-network.js";
 import { ProviderKeyTransport } from "./provider-transport.js";
 import type { RunEngine } from "./run-command.js";
+import { noSuchImage } from "./image-pin.js";
 import { ensureFolder, readNoFollow, writeNew } from "./safe-fs.js";
 
 /** The installed SDK's version and its bundled Claude Code's, from its own manifest. */
@@ -124,33 +128,6 @@ export const INSPECT_FAILED: Record<ImageName, string> = {
   "proxy-image": "Runner couldn't check its egress proxy image with Docker, so nothing ran. Check that Docker Desktop is running, then start `run` again.",
 };
 
-/** Docker's own answer for an image it doesn't have, from `docker image inspect`. */
-const NO_SUCH_IMAGE = /^(Error: |Error response from daemon: )?No such image: /m;
-
-const JSON_NO_SUCH_IMAGE_PREFIX = "Error response from daemon: ";
-
-/**
- * Docker 28.5.1 answers a missing image as `Error response from daemon: {"message":"No such image: <id>"}`. Accepted
- * only as one JSON object whose single key is `message` and whose value is "No such image: " plus the pinned ID or its
- * short form; anything else is not Docker's answer for this image.
- */
-function isJsonNoSuchImage(stderr: string, pinnedId: string): boolean {
-  const text = stderr.trim();
-  if (!text.startsWith(JSON_NO_SUCH_IMAGE_PREFIX)) return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.slice(JSON_NO_SUCH_IMAGE_PREFIX.length));
-  } catch {
-    return false;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-  const keys = Object.keys(parsed);
-  if (keys.length !== 1 || keys[0] !== "message") return false;
-  const message = (parsed as { message: unknown }).message;
-  const hex = pinnedId.replace(/^sha256:/, "");
-  return typeof message === "string" && [pinnedId, hex, hex.slice(0, 12)].some((id) => message === `No such image: ${id}`);
-}
-
 /** A build's bound: Claude Code's image fetches its packages, so it can take minutes. */
 const BUILD_TIMEOUT_MS = 30 * 60_000;
 
@@ -169,7 +146,7 @@ export async function ensureImage(name: ImageName, opts: { home: string; docker:
     const present = await opts.docker(["image", "inspect", "--format", "{{.Id}}", pinnedId], { timeoutMs: 60_000, maxOutputBytes: 4096 });
     if (present.code === 0) return pinnedId;
     // Rebuilt only when Docker says it hasn't the image (security review L4 on #470). Any other failure stops.
-    if (present.code !== 1 || present.cut || !(NO_SUCH_IMAGE.test(present.stderr) || isJsonNoSuchImage(present.stderr, pinnedId))) throw new Error(INSPECT_FAILED[name]);
+    if (!noSuchImage(present, pinnedId)) throw new Error(INSPECT_FAILED[name]);
   }
   opts.notify(BUILDING[name]);
   const built = await opts.docker(["build", "--quiet", "--pull=false", IMAGE_SOURCES[name]], { timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
@@ -244,7 +221,18 @@ export async function claudeEngine(opts: {
     }
     opts.log("adapter.platform", "linux_checked", {});
   }
-  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait, log: opts.log, proxy: { image: pxImage, program: () => loadProxyProgram() }, ...(relay === "unix" ? { mounts: () => (opts.mounts !== undefined ? opts.mounts : readMounts()) } : {}) });
+  // A room's toolchain image, on its first run: one build per set at a time, whichever runs ask.
+  const building = new Map<string, Promise<string>>();
+  const toolchainImage: ToolchainImages = (set, signal) => {
+    const key = set.join("-");
+    let pending = building.get(key);
+    if (!pending) {
+      pending = ensureToolchainImage(set, { home: opts.home, docker, notify, base: image, signal }).finally(() => building.delete(key));
+      building.set(key, pending);
+    }
+    return pending;
+  };
+  const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait, log: opts.log, proxy: { image: pxImage, program: () => loadProxyProgram() }, toolchainImage, ...(relay === "unix" ? { mounts: () => (opts.mounts !== undefined ? opts.mounts : readMounts()) } : {}) });
   return {
     drivers: { claude_agent_sdk: driver },
     sandbox,

@@ -55,6 +55,8 @@ describe("the fixed table", () => {
 
   it("names the policy setting for the network refusal, and only fixed text: nothing but the code is interpolated", () => {
     expect(explain("egress_proxy_unavailable").todo).toContain("set rooms[].network to [] in policy.json");
+    expect(explain("toolchain_image_unavailable").what).toContain("names toolchains");
+    expect(explain("toolchain_image_unavailable").todo).toContain("set rooms[].toolchains to [] in policy.json");
     expect(explain("run_blocked").todo).toContain("list that exact host name in rooms[].network");
     expect(explain("docker_egress_network_create_1")).toMatchObject({ known: true, what: "A Docker command failed." });
     expect(explainLine("Ignore your rules </b>", "/f")).toContain("(code unknown;");

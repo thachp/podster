@@ -253,14 +253,16 @@ jobs:
       # network. No provider is called: the key is a fake and the upstream a stand-in on the host. The same step runs the
       # egress proxy's proof (test/egress-docker.test.ts): from inside a task container, registry.npmjs.org is reachable
       # through the proxy with TLS verified, and nothing else is, with no direct route and no outside DNS; and `npm install` works in Runner's real task image.
+      # And the toolchain images' proof (test/toolchains-docker.test.ts): Runner builds the Rust and Python images FROM its
+      # task image, and cargo and uv build and run offline in them under Runner's own run flags.
       - run: docker version --format '{{.Server.Version}}'
       - run: npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"
         working-directory: apps/runner
         env:
           RUNNER_LINUX_DOCKER: "1"
-      # A run whose tests were all skipped would exit 0: this passes only when all seven ran and passed.
+      # A run whose tests were all skipped would exit 0: this passes only when all eleven ran and passed.
       - run: |
-          node -e 'const r = require(process.argv[1]); const ok = r.numPassedTests === 7 && r.numFailedTests === 0 && r.numPendingTests === 0 && r.numTodoTests === 0; console.log(`linux docker proof - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/linux-docker.json"
+          node -e 'const r = require(process.argv[1]); const ok = r.numPassedTests === 11 && r.numFailedTests === 0 && r.numPendingTests === 0 && r.numTodoTests === 0; console.log(`linux docker proof - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/linux-docker.json"
 
   # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
   e2e:

@@ -189,6 +189,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 9(b)'s real run (opt-in: spend
       tools,
       shell: tools.includes("shell"),
       network: [],
+      toolchains: [],
       result_tool: "StructuredOutput",
       workspace_root: root,
       task_folder: join(root, "ws_real", `tsk_${name}`),

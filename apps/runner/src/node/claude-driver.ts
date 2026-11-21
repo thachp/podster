@@ -52,6 +52,7 @@ import { CLAUDE_MODEL, CLAUDE_MODELS, CLAUDE_PROFILE, PINNED_CLAUDE_CODE_VERSION
 import { RESULT_TOOL } from "../core/policy.js";
 import { refusalText, TASK_FOLDER_IN_CONTAINER } from "../core/tool-policy.js";
 import type { AgentDriver, DriverOutcome, DriverRun, DriverSession } from "../core/run-interface.js";
+import { shellDescription } from "../core/toolchains.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { forbidden } from "./child-env.js";
 import { startBrokerListener, type BrokerListener, type ListenerDeps } from "./broker-listener.js";
@@ -304,7 +305,7 @@ const TOOL_SHAPES = {
   search: { description: "Search the task's folder, or a folder in it given by a relative path, for a regular expression.", shape: { pattern: z.string(), path: z.string().optional() } },
   write: { description: "Write a whole file in the task's folder. Its path is relative to the folder, such as notes.txt.", shape: { path: z.string(), content: z.string() } },
   edit: { description: "Replace one exact piece of text, which must appear once, in a file in the task's folder. Its path is relative to the folder.", shape: { path: z.string(), old: z.string(), new: z.string() } },
-  shell: { description: "Run a shell command in the task's container, in its folder. It reaches no network but the hosts the run's instructions name, if any.", shape: { command: z.string() } },
+  shell: { description: shellDescription([]), shape: { command: z.string() } },
 } as const;
 
 /** The same input, written the same way, whatever its key order. */
@@ -609,7 +610,7 @@ export class ClaudeDriver implements AgentDriver {
     const mcp = this.sdk.createSdkMcpServer({
       name: MCP_SERVER,
       version: "1.0.0",
-      tools: allowedTools.map((name) => this.sdk.tool(name, TOOL_SHAPES[name].description, TOOL_SHAPES[name].shape as Record<string, z.ZodType>, handler(name)) as SdkMcpToolDefinition),
+      tools: allowedTools.map((name) => this.sdk.tool(name, name === "shell" ? shellDescription(session.toolchains) : TOOL_SHAPES[name].description, TOOL_SHAPES[name].shape as Record<string, z.ZodType>, handler(name)) as SdkMcpToolDefinition),
     });
 
     // Claude Code starts in its own container: the SDK's command is replaced by Claude Code's Linux binary there.

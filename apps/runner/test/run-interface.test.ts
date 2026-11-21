@@ -29,6 +29,7 @@ import {
   type ProviderTransport,
   type TaskSandbox,
 } from "../src/core/run-interface.js";
+import { shellDescription, TOOLCHAIN_ENV, TOOLCHAIN_INFO, toolchainLine } from "../src/core/toolchains.js";
 import { decideToolCall, MAX_SUMMARY_CHARS, parseRunResult, refusalText, RESULT_RULE_TEXT, RESULT_RULES, taskPath, type AllowedCall, type ResultRule } from "../src/core/tool-policy.js";
 
 const enc = new TextEncoder();
@@ -48,6 +49,7 @@ const FACTS: RunFacts = {
   tools: ["read", "search", "write", "edit"],
   shell: false,
   network: [],
+  toolchains: [],
   result_tool: "StructuredOutput",
   workspace_root: "/work/podster",
   task_folder: "/work/podster/ws_room_one/tsk_one",
@@ -386,6 +388,64 @@ describe("the prompt and the container", () => {
     expect(checkContainerSpec({ ...spec, env: { ...spec.env, NOTES: KEY } })).toBe("env_not_allowed");
     for (const source of ["/Users/owner", "/var/run/docker.sock", "/run/user/501/bus", "/work/podster", "/work/podster/ws_room_one/tsk_two"])
       expect([source, checkContainerSpec({ ...spec, mounts: [...spec.mounts, { source, target: "/extra" }] })]).toEqual([source, "mount_not_allowed"]);
+  });
+});
+
+describe("a room's toolchains in the run (the owner's ruling of 2026-11-20)", () => {
+  const SHELL: RunFacts = { ...FACTS, tools: ["read", "shell"], shell: true };
+
+  it("adds each toolchain's fixed environment to the container's, and nothing for a room without them", () => {
+    expect(containerSpec("run_1", FACTS)).toMatchObject({ toolchains: [], env: CONTAINER_ENV });
+    expect(TOOLCHAIN_ENV.rust).toEqual({ CARGO_HOME: "/work/.cargo" });
+    expect(TOOLCHAIN_ENV.python).toEqual({ UV_CACHE_DIR: "/work/.cache/uv", UV_PYTHON_INSTALL_DIR: "/opt/uv/python", UV_PYTHON_PREFERENCE: "only-managed", UV_PYTHON_DOWNLOADS: "never" });
+    const rust = containerSpec("run_1", { ...SHELL, toolchains: ["rust"] });
+    expect(rust.env).toEqual({ ...CONTAINER_ENV, CARGO_HOME: "/work/.cargo" });
+    expect(checkContainerSpec(rust)).toBeNull();
+    const both = containerSpec("run_1", { ...SHELL, toolchains: ["python", "rust"], network: ["index.crates.io", "static.crates.io"] });
+    expect(both.toolchains).toEqual(["python", "rust"]);
+    expect(Object.keys(both.env).sort()).toEqual([...Object.keys(CONTAINER_ENV), "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "CARGO_HOME", ...Object.keys(TOOLCHAIN_ENV.python)].sort());
+    expect(checkContainerSpec(both)).toBeNull();
+    // Every value is a fixed path or word: no caches in the noexec /tmp, nothing shaped like a secret.
+    for (const env of Object.values(TOOLCHAIN_ENV)) for (const value of Object.values(env)) expect(value).toMatch(/^(\/work\/|\/opt\/|only-managed$|never$)/);
+  });
+
+  it("refuses a spec whose toolchains or environment don't match each other exactly", () => {
+    const rust = containerSpec("run_1", { ...SHELL, toolchains: ["rust"] });
+    expect(checkContainerSpec({ ...rust, env: { ...CONTAINER_ENV } })).toBe("env_not_allowed");
+    expect(checkContainerSpec({ ...rust, env: { ...rust.env, CARGO_HOME: "/tmp/cargo" } })).toBe("env_not_allowed");
+    expect(checkContainerSpec({ ...rust, env: { ...rust.env, UV_CACHE_DIR: "/work/.cache/uv" } })).toBe("env_not_allowed");
+    expect(checkContainerSpec({ ...rust, toolchains: [] })).toBe("env_not_allowed");
+    const both = containerSpec("run_1", { ...SHELL, toolchains: ["python", "rust"] });
+    expect(checkContainerSpec({ ...both, toolchains: ["rust", "python"] })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: ["rust", "rust"] as never })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: ["dotnet"] as never })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: undefined as never })).toBe("spec_invalid");
+  });
+
+  it("names the toolchains in the frame and the shell tool's description, and changes neither for a room without them", () => {
+    const plain = runFrame(SHELL);
+    expect(runFrame({ ...SHELL, toolchains: [] })).toBe(plain);
+    expect(plain).not.toContain("Toolchains");
+    const frame = runFrame({ ...SHELL, toolchains: ["python", "rust"] });
+    expect(frame).toContain("Toolchains in the task's container, for the shell: Python 3.14.10 (python, python3) and uv 0.13.9; Rust 1.100.0 (cargo, rustc, rustfmt, clippy) with gcc 12 as its linker.");
+    expect(frame).toContain("/tmp can't run programs");
+    expect(frame).toContain("only from registry hosts the run's network lists");
+    // Before the limits guidance, after the network line.
+    expect(frame.indexOf("Toolchains")).toBeGreaterThan(frame.indexOf("Network:"));
+    expect(frame.indexOf("Toolchains")).toBeLessThan(frame.indexOf(LIMITS_GUIDANCE));
+    expect(toolchainLine(["rust"], false)).toBeNull();
+    expect(shellDescription([])).toBe("Run a shell command in the task's container, in its folder. It reaches no network but the hosts the run's instructions name, if any.");
+    expect(shellDescription(["rust"])).toBe(`${shellDescription([])} Toolchains here: ${TOOLCHAIN_INFO.rust.versions}.`);
+  });
+
+  it("hands the driver the room's toolchains and opens the container with them", async () => {
+    const facts: RunFacts = { ...SHELL, toolchains: ["rust"] };
+    const t = setup(async () => RESULT, facts);
+    const handle = await t.start();
+    await handle.done;
+    expect(t.driver.sessions[0].toolchains).toEqual(["rust"]);
+    expect(t.driver.sessions[0].frame).toContain("Rust 1.100.0");
+    expect(t.sandbox.specs[0]).toMatchObject({ toolchains: ["rust"], env: { ...CONTAINER_ENV, CARGO_HOME: "/work/.cargo" } });
   });
 });
 

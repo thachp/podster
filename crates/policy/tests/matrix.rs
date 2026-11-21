@@ -1262,7 +1262,7 @@ fn an_agent_limited_to_its_own_tasks_sees_notices_about_itself_and_nobody_elses(
 }
 
 #[test]
-fn only_a_person_who_runs_the_room_sets_the_plan_start() {
+fn a_person_who_runs_the_room_sets_the_plan_start_and_a_plain_member_or_any_guest_does_not() {
     for (kind, role, allowed) in [
         (Person, Role::Owner, true),
         (Person, Role::Admin, true),

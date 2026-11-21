@@ -168,7 +168,7 @@ describe("the Docker task container", () => {
     expect(flag("--pull")).toEqual(["never"]);
     expect(flag("--label")).toEqual([`${LABEL_RUN}=run-1`, `${LABEL_HOME}=h`, `${LABEL_ROLE}=task`]);
     expect(flag("--mount")).toEqual([`type=bind,source=${spec.task_folder},target=/work`]);
-    expect(flag("--env").sort()).toEqual(["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"]);
+    expect(flag("--env").sort()).toEqual(["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "WRANGLER_SEND_METRICS=false"]);
     // No socket, device, privilege, host namespace or other mount.
     expect(args.join(" ")).not.toMatch(/docker\.sock|--device|--privileged|--volume|-v |--pid host|--network host|--cap-add/);
     expect(args.slice(-3)).toEqual([IMAGE, "sleep", "660"]);
@@ -246,7 +246,7 @@ describe("the Docker task container", () => {
     expect(flag("--tmpfs")).toEqual(["/tmp:rw,nosuid,nodev,noexec,size=256m"]);
     expect(flag("--network")).toEqual(["none"]);
     expect(args).toContain("--read-only");
-    expect(flag("--env").sort()).toEqual(["CARGO_HOME=/work/.cargo", "HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "UV_CACHE_DIR=/work/.cache/uv", "UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_INSTALL_DIR=/opt/uv/python", "UV_PYTHON_PREFERENCE=only-managed"]);
+    expect(flag("--env").sort()).toEqual(["CARGO_HOME=/work/.cargo", "HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "UV_CACHE_DIR=/work/.cache/uv", "UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_INSTALL_DIR=/opt/uv/python", "UV_PYTHON_PREFERENCE=only-managed", "WRANGLER_SEND_METRICS=false"]);
     expect(args.slice(-3)[0]).toBe(TOOLCHAIN);
 
     // Open asks for the set's image and runs it; a tool call gets the longer bound.
@@ -279,7 +279,7 @@ describe("the Docker task container", () => {
       const args = runArgs(containerSpec("run-1", facts(root, { ...shellFacts, toolchains })), { image: IMAGE, uid: 501, gid: 20, home_label: "h" });
       return args.filter((_, i) => args[i - 1] === "--env").sort();
     };
-    const base = ["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"];
+    const base = ["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "WRANGLER_SEND_METRICS=false"];
     const dotnet = [
       "DOTNET_CLI_HOME=/work/.cache/dotnet",
       "DOTNET_CLI_TELEMETRY_OPTOUT=1",

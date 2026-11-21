@@ -31,7 +31,7 @@ import { pullText } from "../src/core/pull-text.js";
 import { lineLogger } from "../src/core/runtime.js";
 import { checkedHelper, findGit, GIT_OUTPUT_CUT, GIT_TIMED_OUT, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec, type GitResult } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
-import { checkWorkTree, GitRepositoryPath, IGNORED_LIST_TIMEOUT_MS, nameOf, RepoBroker, wholeFolders } from "../src/node/repo-path.js";
+import { checkWorkTree, GitRepositoryPath, IGNORED_LIST_TIMEOUT_MS, nameOf, RepoBroker, touchesWorkflows, wholeFolders } from "../src/node/repo-path.js";
 
 const OWNER = "org_owner";
 const ROOM = "room_1";
@@ -675,6 +675,57 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     const second = await w.path.publish({ ...w.task, base_commit: first.commit }, w.signal);
     expect(second).toMatchObject({ kind: "published", pr_number: 12 });
     if (second.kind === "published") expect(sh(w.remote, "rev-parse", `${second.commit}^`)).toBe(first.commit);
+  });
+
+  it("refuses a change that adds, changes, deletes or renames anything under `.github/workflows/`, and nothing else in `.github`", async () => {
+    /** A world whose default branch tracks a workflow, CODEOWNERS and a top-level `build.yml`, prepared for a task. */
+    const tracked = async () => {
+      const w = await world();
+      sh(w.seed, "checkout", "--quiet", "main");
+      await mkdir(join(w.seed, ".github", "workflows"), { recursive: true });
+      await writeFile(join(w.seed, ".github", "workflows", "ci.yml"), "on: push\n");
+      await writeFile(join(w.seed, ".github", "CODEOWNERS"), "* @owner\n");
+      await writeFile(join(w.seed, "build.yml"), "on: push\n");
+      sh(w.seed, "add", "--all");
+      sh(w.seed, "commit", "--quiet", "-m", "workflows");
+      sh(w.seed, "push", "--quiet", w.remote, "main:main");
+      const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+      return { w, base, at: (...parts: string[]) => join(w.taskFolder, ...parts) };
+    };
+    const changes: [string, (at: (...parts: string[]) => string) => Promise<void>][] = [
+      ["add", async (at) => writeFile(at(".github", "workflows", "new.yml"), "on: push\n")],
+      ["modify", async (at) => writeFile(at(".github", "workflows", "ci.yml"), "on: [push, pull_request]\n")],
+      ["delete", async (at) => rm(at(".github", "workflows", "ci.yml"))],
+      ["rename into", async (at) => { await writeFile(at(".github", "workflows", "build.yml"), await readFile(at("build.yml"))); await rm(at("build.yml")); }],
+      ["rename out", async (at) => { await writeFile(at("ci.yml"), await readFile(at(".github", "workflows", "ci.yml"))); await rm(at(".github", "workflows", "ci.yml")); }],
+      // A new folder on a case-sensitive file system; the tracked one on a case-insensitive one: refused either way.
+      ["mixed case", async (at) => { await mkdir(at(".GitHub", "Workflows"), { recursive: true }); await writeFile(at(".GitHub", "Workflows", "x.yml"), "on: push\n"); }],
+    ];
+    for (const [name, change] of changes) {
+      const { w, base, at } = await tracked();
+      await writeFile(at("README.md"), "changed\n");
+      await change(at);
+      await expect([name, await w.path.publish({ ...w.task, base_commit: base }, w.signal).catch((e: { code: string }) => e.code)]).toEqual([name, "work_tree_workflow"]);
+      expect(w.gitCalls.some((c) => c.args.includes("push"))).toBe(false);
+      expect(w.gitCalls.some((c) => c.args.includes("commit"))).toBe(false);
+    }
+    // A tracked workflow the task left alone, beside changes elsewhere in `.github`, publishes as usual.
+    const { w, base, at } = await tracked();
+    await writeFile(at(".github", "CODEOWNERS"), "* @someone\n");
+    await writeFile(at(".github", "dependabot.yml"), "version: 2\n");
+    await writeFile(at("README.md"), "changed\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    expect(published.kind).toBe("published");
+    expect(sh(w.remote, "show", `podster/task_1:.github/workflows/ci.yml`)).toBe("on: push");
+  });
+
+  it("reads changed paths for `.github/workflows/` at the top only, each part folded as a file system might", () => {
+    const list = (...paths: string[]) => Buffer.from(paths.map((p) => `${p}\0`).join(""));
+    for (const path of [".github/workflows/ci.yml", ".GitHub/Workflows/x.yml", ".GITHUB/WORKFLOWS/a/b.yaml", ".git\u200bhub/workflows/x.yml", "\uFF0Egithub/workflows/x.yml", ".github/workflows"])
+      expect([path, touchesWorkflows(list("README.md", path))]).toEqual([path, true]);
+    for (const path of [".github/CODEOWNERS", ".github/dependabot.yml", ".github/workflowsx/a.yml", "sub/.github/workflows/x.yml", "workflows/x.yml", ".githubx/workflows/x.yml"])
+      expect([path, touchesWorkflows(list("README.md", path))]).toEqual([path, false]);
+    expect(touchesWorkflows(Buffer.alloc(0))).toBe(false);
   });
 
   it("never builds on a task branch someone else moved, and publishes nothing for a run that changed nothing", async () => {

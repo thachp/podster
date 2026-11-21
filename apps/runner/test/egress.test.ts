@@ -140,7 +140,17 @@ async function proxy(opts: { hosts: string[]; answers: Record<string, string[]>;
   servers.push(server);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  return { port: (server.address() as AddressInfo).port, events, dialed };
+  return { port: (server.address() as AddressInfo).port, events, dialed, server };
+}
+
+/** Waits until the server holds exactly `n` connections, at most 3 seconds. */
+async function waitConnections(server: Server, n: number) {
+  for (let i = 0; i < 150; i++) {
+    const count = await new Promise<number>((r) => server.getConnections((_e, c) => r(c)));
+    if (count === n) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error(`connections never reached ${n}`);
 }
 
 /** Sends `head`, and reads what comes back until the proxy closes or `until` matches. */
@@ -148,6 +158,8 @@ function ask(port: number, head: string, then?: (s: Socket) => void, until?: Reg
   return new Promise((resolve) => {
     const s = connect({ host: "127.0.0.1", port });
     let text = "";
+    // Never longer than this: what arrived is the answer, and a hang reads as a mismatch, not a timeout.
+    setTimeout(() => (s.destroy(), resolve(text)), 4_000).unref();
     s.on("data", (d) => {
       text += d.toString();
       if (text.includes("\r\n\r\n") && then) {
@@ -210,9 +222,11 @@ describe("the proxy, end to end on loopback", () => {
     const up = await upstream();
     const p = await proxy({ hosts: ["registry.npmjs.org"], answers: { "registry.npmjs.org": ["104.16.0.35"] }, to: up.port, limits: { tunnels: 1 } });
     expect(await ask(p.port, `CONNECT registry.npmjs.org:443 HTTP/1.1\r\nX: ${"a".repeat(9000)}`)).toMatch(/^HTTP\/1\.1 431 /);
+    // The refused connection is gone on the proxy's side before the next is counted.
+    await waitConnections(p.server, 0);
     const held = connect({ host: "127.0.0.1", port: p.port });
     await once(held, "connect");
-    await new Promise((r) => setTimeout(r, 50));
+    await waitConnections(p.server, 1);
     expect(await ask(p.port, "CONNECT registry.npmjs.org:443 HTTP/1.1\r\n\r\n")).toMatch(/^HTTP\/1\.1 503 /);
     held.destroy();
     expect(p.events.map((e) => e.e === "refused" && e.code)).toEqual(["head_too_large", "too_many_tunnels"]);

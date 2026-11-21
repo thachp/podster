@@ -210,7 +210,11 @@ export function createEgressProxy(deps: ProxyDeps): Server {
   const refuse = (client: Socket, code: ProxyRefusal, host: string | null) => {
     log(host ? { e: "refused", code, host } : { e: "refused", code });
     client.end(`HTTP/1.1 ${STATUS[code]}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
-    // Nothing more is read from a refused client; it goes even if it never closes its side.
+    // Whatever else the client sends is read and dropped, so its side ends and the socket closes; a socket never read
+    // from would wait unread. It goes after a second even if the client never closes its side.
+    client.removeAllListeners("data");
+    client.on("data", () => undefined);
+    client.resume();
     setTimeout(() => client.destroy(), 1_000).unref();
   };
 

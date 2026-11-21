@@ -12,6 +12,7 @@ import type { DockerCli } from "../src/node/docker-sandbox.js";
 const OLD = `sha256:${"a".repeat(64)}`;
 const NEW = `sha256:${"b".repeat(64)}`;
 const NEW_CLAUDE = `sha256:${"c".repeat(64)}`;
+const NEW_PROXY = `sha256:${"d".repeat(64)}`;
 const KEY = "sk-ant-test-0123456789abcdefghij-the-owners-key";
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 
@@ -36,9 +37,10 @@ function fakeDocker(answer: (args: string[]) => Answer = () => ({})) {
 }
 
 describe("the packaged Dockerfiles", () => {
-  it("are the package's own sandbox and claude-image folders, each with its Dockerfile", () => {
+  it("are the package's own sandbox, claude-image and proxy-image folders, each with its Dockerfile", () => {
     expect(IMAGE_SOURCES["task-image"]).toBe(join(PACKAGE, "sandbox"));
     expect(IMAGE_SOURCES["claude-image"]).toBe(join(PACKAGE, "claude-image"));
+    expect(IMAGE_SOURCES["proxy-image"]).toBe(join(PACKAGE, "proxy-image"));
     for (const folder of Object.values(IMAGE_SOURCES)) expect(existsSync(join(folder, "Dockerfile"))).toBe(true);
   });
 
@@ -62,7 +64,7 @@ describe("ensureImage", () => {
   });
 
   it("builds a missing pin from the packaged Dockerfile, says so first, and pins what it built", async () => {
-    for (const name of ["task-image", "claude-image"] as const) {
+    for (const name of ["task-image", "claude-image", "proxy-image"] as const) {
       const home = await temp();
       const said: string[] = [];
       const { calls, docker } = fakeDocker((args) => (args[0] === "build" ? { stdout: `${NEW}\n` } : {}));
@@ -181,17 +183,19 @@ describe("claudeEngine with no images pinned", () => {
     return { home, keyFile };
   }
 
-  it("builds both from the package, saying so before each, then builds the engine", async () => {
+  it("builds all three from the package, saying so before each, then builds the engine", async () => {
     const { claudeEngine } = await import("../src/node/claude-engine.js");
     const { home, keyFile } = await setup();
     const said: string[] = [];
-    const { calls, docker } = fakeDocker((args) => (args[0] === "build" ? { stdout: args[3] === IMAGE_SOURCES["task-image"] ? NEW : NEW_CLAUDE } : args[0] === "ps" ? { stdout: "" } : {}));
+    const built = (folder: string) => (folder === IMAGE_SOURCES["task-image"] ? NEW : folder === IMAGE_SOURCES["claude-image"] ? NEW_CLAUDE : NEW_PROXY);
+    const { calls, docker } = fakeDocker((args) => (args[0] === "build" ? { stdout: built(args[3]) } : args[0] === "ps" ? { stdout: "" } : {}));
     const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, notify: (l) => said.push(l), docker, dockerProgram: "/usr/local/bin/docker", env: {}, execArgv: [], platform: "darwin" });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
-    expect(said).toEqual([BUILDING["task-image"], BUILDING["claude-image"]]);
-    expect(calls.filter((c) => c.args[0] === "build").map((c) => c.args[3])).toEqual([IMAGE_SOURCES["task-image"], IMAGE_SOURCES["claude-image"]]);
+    expect(said).toEqual([BUILDING["task-image"], BUILDING["claude-image"], BUILDING["proxy-image"]]);
+    expect(calls.filter((c) => c.args[0] === "build").map((c) => c.args[3])).toEqual([IMAGE_SOURCES["task-image"], IMAGE_SOURCES["claude-image"], IMAGE_SOURCES["proxy-image"]]);
     expect((await readFile(join(home, "task-image"), "utf8")).trim()).toBe(NEW);
     expect((await readFile(join(home, "claude-image"), "utf8")).trim()).toBe(NEW_CLAUDE);
+    expect((await readFile(join(home, "proxy-image"), "utf8")).trim()).toBe(NEW_PROXY);
   });
 
   it("stops on a failed build with the fixed message, before anything runs", async () => {

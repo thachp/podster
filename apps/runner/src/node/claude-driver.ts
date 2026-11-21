@@ -100,6 +100,11 @@ export const RELAY_SOCKET_IN_CONTAINER = "/relay/runner.sock";
 /** The listener socket's name in the run's folder. Short, so the whole path fits a socket's limit. */
 export const SOCKET_NAME = "r.sock";
 export { LABEL_ROLE };
+/**
+ * The driver's own network, by role: never the run's egress network, which the task sandbox opens and removes with the
+ * task's container, so the two never remove one network at once.
+ */
+const OWN_NETWORK = `label=${LABEL_ROLE}=network`;
 /** How long Claude Code's containers may outlive a run's time cap, as the task container may. */
 const CONTAINER_MARGIN_S = 60;
 
@@ -299,7 +304,7 @@ const TOOL_SHAPES = {
   search: { description: "Search the task's folder, or a folder in it given by a relative path, for a regular expression.", shape: { pattern: z.string(), path: z.string().optional() } },
   write: { description: "Write a whole file in the task's folder. Its path is relative to the folder, such as notes.txt.", shape: { path: z.string(), content: z.string() } },
   edit: { description: "Replace one exact piece of text, which must appear once, in a file in the task's folder. Its path is relative to the folder.", shape: { path: z.string(), old: z.string(), new: z.string() } },
-  shell: { description: "Run a shell command in the task's container, in its folder, with no network.", shape: { command: z.string() } },
+  shell: { description: "Run a shell command in the task's container, in its folder. It reaches no network but the hosts the run's instructions name, if any.", shape: { command: z.string() } },
 } as const;
 
 /** The same input, written the same way, whatever its key order. */
@@ -463,7 +468,7 @@ export class ClaudeDriver implements AgentDriver {
     if (!REF.test(ref)) throw new Error("run_ref_invalid");
     const run = [`label=${LABEL_RUN}=${ref}`];
     await removeContainers(this.deps.docker, await this.own(run), () => this.own(run), this.wait);
-    await this.removeNetworks(run);
+    await this.removeNetworks([...run, OWN_NETWORK]);
   }
 
   /** Each network matching `filters`: attached containers disconnected, removed, then confirmed gone. */
@@ -713,7 +718,7 @@ export class ClaudeDriver implements AgentDriver {
     if (child && !exitedOf(child)) return false;
     try {
       if ((await this.own([`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;
-      if ((await this.list("network", [`label=${LABEL_RUN}=${run_ref}`])).length > 0) return false;
+      if ((await this.list("network", [`label=${LABEL_RUN}=${run_ref}`, OWN_NETWORK])).length > 0) return false;
     } catch {
       return false;
     }
@@ -733,7 +738,7 @@ export class ClaudeDriver implements AgentDriver {
   async reapAll(): Promise<void> {
     const home = [`label=${LABEL_HOME}=${this.homeLabel}`];
     await removeContainers(this.deps.docker, await this.own(home), () => this.own(home), this.wait);
-    await this.removeNetworks(home);
+    await this.removeNetworks([...home, OWN_NETWORK]);
   }
 }
 

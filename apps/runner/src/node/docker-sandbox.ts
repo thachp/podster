@@ -6,9 +6,16 @@
  *   non-root UID (the owner's, so the task folder Runner made 0700 stays theirs); `--cap-drop ALL`;
  *   `no-new-privileges`; a read-only root; `/tmp` a bounded tmpfs; PID, memory, swap and CPU limits; a disk bound (a
  *   per-file size limit, a bounded tmpfs and a host-side size check of the task folder after every tool that writes);
- *   `--network none`; no Docker socket, no device and no other mount than the task's folder; a fixed environment; and
- *   labels naming the run and this Runner's home, so a stop or a restart finds it.
- * - **Network:** none. A policy that lists hosts is refused until an egress proxy exists.
+ *   `--network none` unless the room lists hosts; no Docker socket, no device and no other mount than the task's folder;
+ *   a fixed environment; and labels naming the run and this Runner's home, so a stop or a restart finds it.
+ * - **Network:** none, unless the room's run policy lists hosts (the owner's approval of 2026-11-20). Then the container
+ *   joins only the run's internal network, whose one other peer is the run's egress proxy (`egress-network.ts`,
+ *   `egress-proxy.ts`), gets the proxy's address in its fixed environment, and a resolver that answers nothing outside
+ *   that network: Docker 26 and later answer no outside name on an internal network, older Engines are refused
+ *   (`docker_engine_too_old`), and its upstream resolver is an address that is never routed (`BLACKHOLE_DNS`). The
+ *   internal network has no host address (`inhibit_ipv4`), so nothing on the machine is reachable from it. The proxy allows HTTPS `CONNECT`
+ *   to port 443 of exactly the listed hosts, at public addresses only. Without a pinned proxy image, such a run is
+ *   refused (`egress_proxy_unavailable`), never widened.
  * - **The disk bound for the whole run** (M2 on #460): the folder's size is checked on a timer, every
  *   `LIMITS.watch_ms`, independent of tool calls, so a process left running can't fill the disk between them, and a
  *   breach the timer finds halts the run too (re-review item 5); and after each shell call every process in the
@@ -25,8 +32,9 @@
  *   reads, replaces one exact match in Runner, and writes the same way. Only the `shell` tool, when the policy names it,
  *   runs `/bin/sh -c`, which is what that tool is.
  * - **Stop:** `kill` removes every container carrying the run's label (killing a `docker exec` client leaves its process
- *   running, so the container goes). At startup `reapAll` removes every container of this Runner's home, since one
- *   Runner holds the home at a time and anything left is a previous process's.
+ *   running, so the container goes), then the run's egress proxy and network, after logging the proxy's decisions. At
+ *   startup `reapAll` removes every container and egress network of this Runner's home, since one Runner holds the home
+ *   at a time and anything left is a previous process's.
  *
  * The `docker` program is a seam (`DockerCli`), so tests run no Docker. It gets the allow-listed environment plus its
  * own settings: a throwaway `DOCKER_CONFIG`, and the daemon's address. Logs carry IDs and codes only.
@@ -37,7 +45,9 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { silentLogger, type Logger } from "../core/runtime.js";
+import { egressNames, logProxyDecisions, openEgress, removeNetworks, ROLE_NETWORK, ROLE_PROXY, type EgressOpts } from "./egress-network.js";
 import { onWindowsDrive } from "../core/policy.js";
 import { onWindowsFilesystem } from "./platform.js";
 import type { AllowedCall } from "../core/tool-policy.js";
@@ -136,7 +146,10 @@ export const homeLabel = (home: string) => createHash("sha256").update(home).dig
 
 /** `docker run`'s arguments for a spec: the whole hardening list, and nothing from the task. */
 export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number; gid: number; home_label: string }): string[] {
-  const env = Object.entries(CONTAINER_ENV).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+  const allowlist = spec.network.kind === "allowlist";
+  const env = Object.entries(allowlist ? { ...CONTAINER_ENV, ...EGRESS_ENV } : CONTAINER_ENV).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+  // Only the run's internal network, never a route out; its resolver answers only that network's names.
+  const network = allowlist ? ["--network", egressNames(spec.run_ref).network, "--dns", BLACKHOLE_DNS] : ["--network", "none"];
   return [
     "run",
     "--detach",
@@ -173,8 +186,7 @@ export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number;
     "nofile=1024:1024",
     "--ulimit",
     "core=0",
-    "--network",
-    "none",
+    ...network,
     "--ipc",
     "none",
     ...env,
@@ -203,7 +215,27 @@ export function toolArgv(call: AllowedCall): string[] | null {
   }
 }
 
-const REFUSED_NETWORK = "network_allowlist_unsupported";
+/** A run whose room lists hosts, on a Runner with no pinned egress proxy: refused, never widened to the internet. */
+export const EGRESS_UNAVAILABLE = "egress_proxy_unavailable";
+/** A run whose room lists hosts, on a Docker Engine older than `MIN_EGRESS_ENGINE`: refused. */
+export const ENGINE_TOO_OLD = "docker_engine_too_old";
+/**
+ * The oldest Docker Engine an allowlist runs on: 26.0, whose resolver no longer forwards a container's lookups outside
+ * an internal network. An older one could carry a task's DNS queries out, a channel past the proxy.
+ */
+export const MIN_EGRESS_ENGINE = 26;
+/**
+ * The task container's upstream resolver when its room lists hosts: an address of TEST-NET-1 (RFC 5737), which is never
+ * routed, isn't loopback (Docker forwards to a loopback resolver from the host's own namespace), and is outside every
+ * network the container is on. So even an engine that forwarded outside names would send them nowhere.
+ */
+export const BLACKHOLE_DNS = "192.0.2.1";
+
+/** The Engine's major version from `docker version --format {{.Server.Version}}`, or null. */
+export function engineMajor(stdout: string): number | null {
+  const m = stdout.trim().match(/^(\d{1,4})\.\d{1,4}/);
+  return m ? Number(m[1]) : null;
+}
 
 type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void; events: SandboxEvents | null };
 
@@ -231,9 +263,27 @@ export class DockerSandbox implements TaskSandbox {
 
   private readonly wait: (ms: number) => Promise<void>;
   private readonly mounts: () => string | null;
+  private readonly egress: EgressOpts | null;
+  private engineChecked = false;
+  private readonly log: Logger;
 
-  constructor(opts: { docker: DockerCli; image: string; uid: number; gid: number; home: string; workspaceRoot?: (spec: ContainerSpec) => string; every?: Every; limits?: Partial<Limits>; wait?: (ms: number) => Promise<void>; mounts?: () => string | null }) {
+  constructor(opts: {
+    docker: DockerCli;
+    image: string;
+    uid: number;
+    gid: number;
+    home: string;
+    workspaceRoot?: (spec: ContainerSpec) => string;
+    every?: Every;
+    limits?: Partial<Limits>;
+    wait?: (ms: number) => Promise<void>;
+    mounts?: () => string | null;
+    /** The egress proxy's pinned image and Runner's built program for it; without them a room listing hosts can't run. */
+    proxy?: { image: string; program: () => Promise<string> };
+    log?: Logger;
+  }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
+    if (opts.proxy && !IMAGE_ID.test(opts.proxy.image)) throw new Error("Runner's egress proxy image must be pinned by its sha256 image ID");
     if (!Number.isSafeInteger(opts.uid) || !Number.isSafeInteger(opts.gid) || opts.uid <= 0 || opts.gid < 0) throw new Error("Runner won't run a task container as root");
     this.docker = opts.docker;
     this.image = opts.image;
@@ -246,6 +296,8 @@ export class DockerSandbox implements TaskSandbox {
     // The system's mounts, read at each open; none (no check by type) where there's no /proc, as on a Mac.
     this.mounts = opts.mounts ?? (() => null);
     this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
+    this.log = opts.log ?? silentLogger;
+    this.egress = opts.proxy ? { docker: opts.docker, image: opts.proxy.image, program: opts.proxy.program, uid: opts.uid, gid: opts.gid, home_label: this.homeLabel, wait: this.wait } : null;
   }
 
   private async overBound(opened: Opened): Promise<boolean> {
@@ -257,8 +309,8 @@ export class DockerSandbox implements TaskSandbox {
     if (checkContainerSpec(spec) !== null) throw new Error("container_invalid");
     // Never the Windows file system under WSL2, where modes aren't enforced (S-47); the run policy refuses it first.
     if (onWindowsDrive(spec.task_folder)) throw new Error("workspace_on_windows_drive");
-    // No allowlist without an egress proxy to hold it (step 9(b)'s ruling): refused, never widened to the internet.
-    if (spec.network.kind !== "none") throw new Error(REFUSED_NETWORK);
+    // No allowlist without an egress proxy to hold it: refused, never widened to the internet.
+    if (spec.network.kind !== "none" && !this.egress) throw new Error(EGRESS_UNAVAILABLE);
     // Runner makes the task's folder itself, mode 0700, checking every segment for links (L3).
     await ensureFolder(this.workspaceRoot(spec), spec.task_folder, { makeRoot: true });
     // By its real path and its mount's type too (L1 on #471's review): a link, or a drive mounted somewhere other than
@@ -266,6 +318,24 @@ export class DockerSandbox implements TaskSandbox {
     const real = await realpath(spec.task_folder);
     if (onWindowsDrive(real) || onWindowsFilesystem(real, this.mounts())) throw new Error("workspace_on_windows_drive");
     if (signal.aborted) throw new Error("halted");
+    if (spec.network.kind === "allowlist" && this.egress) {
+      // Once per process: an Engine too old to keep DNS inside an internal network refuses every allowlist run.
+      if (!this.engineChecked) {
+        const v = await this.docker(["version", "--format", "{{.Server.Version}}"], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
+        const major = v.code === 0 && !v.cut ? engineMajor(v.stdout) : null;
+        if (major === null) throw dockerFailure("version", v.code);
+        if (major < MIN_EGRESS_ENGINE) throw new Error(ENGINE_TOO_OLD);
+        this.engineChecked = true;
+      }
+      // Recorded first, so a kill reaches a network or proxy a failed step still made.
+      this.opened.set(spec.run_ref, { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null });
+      try {
+        await openEgress(this.egress, spec.run_ref, spec.network.hosts, spec.max_seconds, signal);
+      } catch (error) {
+        await this.kill(spec.run_ref).catch(() => undefined);
+        throw error;
+      }
+    }
     const run = await this.docker(runArgs(spec, { image: this.image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
     const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
@@ -386,13 +456,37 @@ export class DockerSandbox implements TaskSandbox {
     this.opened.get(run_ref)?.unwatch();
     // By labels and by name, resolved to IDs and each named once, then confirmed gone.
     const left = async () => [...new Set([...(await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`])), ...(await this.list([`name=^/${containerName(run_ref)}$`]))])];
-    await removeContainers(this.docker, await left(), left, this.wait);
+    // Each step is tried even if one before it threw, so a task container Docker won't remove never leaves the proxy
+    // and networks behind; the first failure is thrown at the end, so the stop is never taken as done.
+    const failures: unknown[] = [];
+    const attempt = async (step: () => Promise<void>) => {
+      try {
+        await step();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    await attempt(async () => removeContainers(this.docker, await left(), left, this.wait));
+    // Then the run's egress proxy, its decisions logged first, and its two networks.
+    const proxies = async () => [...new Set([...(await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=${ROLE_PROXY}`])), ...(await this.list([`name=^/${egressNames(run_ref).proxy}$`]))])];
+    await attempt(async () => {
+      const found = await proxies();
+      if (found.length > 0) await logProxyDecisions(this.docker, run_ref, this.log).catch(() => undefined);
+      await removeContainers(this.docker, found, proxies, this.wait);
+    });
+    await attempt(() => removeNetworks(this.docker, [`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=${ROLE_NETWORK}`], this.wait));
+    if (failures.length > 0) throw failures[0];
   }
 
-  /** Nothing of the run's task container is listed, by its labels or by its name (Docker names carry a leading slash). */
+  /** Nothing of the run's task container or egress is listed, by labels or by name (Docker names carry a leading slash). */
   async gone(run_ref: string): Promise<boolean> {
     if (!REF.test(run_ref)) throw new Error("run_ref_invalid");
-    const left = (await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`])).length === 0 && (await this.list([`name=^/${containerName(run_ref)}$`])).length === 0;
+    const left =
+      (await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=task`])).length === 0 &&
+      (await this.list([`name=^/${containerName(run_ref)}$`])).length === 0 &&
+      (await this.list([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=${ROLE_PROXY}`])).length === 0 &&
+      (await this.list([`name=^/${egressNames(run_ref).proxy}$`])).length === 0 &&
+      (await this.listNetworks([`label=${LABEL_RUN}=${run_ref}`, `label=${LABEL_ROLE}=${ROLE_NETWORK}`])).length === 0;
     if (left) {
       this.opened.get(run_ref)?.unwatch();
       this.opened.delete(run_ref);
@@ -400,12 +494,21 @@ export class DockerSandbox implements TaskSandbox {
     return left;
   }
 
-  /** At startup, before any stop is confirmed (M4 on #459): every container of this home goes. */
+  /** At startup, before any stop is confirmed (M4 on #459): every container of this home goes, then its egress networks. */
   async reapAll(): Promise<number> {
     const ids = await this.list([`label=${LABEL_HOME}=${this.homeLabel}`]);
-    if (ids.length === 0) return 0;
-    await removeContainers(this.docker, ids, () => this.list([`label=${LABEL_HOME}=${this.homeLabel}`]), this.wait);
+    if (ids.length > 0) await removeContainers(this.docker, ids, () => this.list([`label=${LABEL_HOME}=${this.homeLabel}`]), this.wait);
+    await removeNetworks(this.docker, [`label=${LABEL_HOME}=${this.homeLabel}`, `label=${LABEL_ROLE}=${ROLE_NETWORK}`], this.wait);
     return ids.length;
+  }
+
+  private async listNetworks(filters: string[]): Promise<string[]> {
+    const r = await this.docker(["network", "ls", "--quiet", "--no-trunc", ...filters.flatMap((f) => ["--filter", f])], { timeoutMs: LIMITS.docker_ms, maxOutputBytes: 64 * 1024 });
+    if (r.code !== 0) throw dockerFailure("network_ls", r.code);
+    if (r.cut) throw new Error("docker_network_ls_cut");
+    const ids = r.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    if (!ids.every((id) => /^[A-Za-z0-9_.-]{1,128}$/.test(id))) throw new Error("docker_network_ls_output");
+    return ids;
   }
 
   private async list(filters: string[]): Promise<string[]> {

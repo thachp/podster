@@ -171,12 +171,13 @@ describe("the Docker task container", () => {
     expect(args.slice(-3)).toEqual([IMAGE, "sleep", "660"]);
   });
 
-  it("refuses a network allowlist until an egress proxy exists, an unpinned image, and root", async () => {
+  it("refuses a network allowlist without a pinned egress proxy, an unpinned image, and root", async () => {
     const root = join(await temp(), "w");
     const { calls, docker } = fakeDocker();
     const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
-    await expect(sandbox.open(containerSpec("run-1", facts(root, { network: ["registry.npmjs.org"] })), new AbortController().signal)).rejects.toThrow(/network_allowlist_unsupported/);
+    await expect(sandbox.open(containerSpec("run-1", facts(root, { network: ["registry.npmjs.org"] })), new AbortController().signal)).rejects.toThrow(/^egress_proxy_unavailable$/);
     expect(calls).toEqual([]);
+    expect(() => new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", proxy: { image: "node:18", program: async () => "" } })).toThrow(/egress proxy image must be pinned/);
     expect(() => new DockerSandbox({ docker, image: "node:22", uid: 501, gid: 20, home: "/h" })).toThrow(/pinned/);
     expect(() => new DockerSandbox({ docker, image: "node@sha256:abc", uid: 501, gid: 20, home: "/h" })).toThrow(/pinned/);
     expect(() => new DockerSandbox({ docker, image: IMAGE, uid: 0, gid: 0, home: "/h" })).toThrow(/root/);
@@ -526,6 +527,7 @@ function fakeProcesses() {
 
 const DOCKER_PROGRAM = "/usr/local/bin/docker";
 const CLAUDE_IMAGE = `sha256:${"c".repeat(64)}`;
+const PROXY_IMAGE = `sha256:${"e".repeat(64)}`;
 
 /** A fake `docker` for the driver: containers and networks it was asked to make, by name, and their labels. */
 function fakeDriverDocker() {
@@ -1282,6 +1284,7 @@ describe("the reviewer's untested paths", () => {
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    await writeFile(join(home, "proxy-image"), PROXY_IMAGE);
     // A container and a network a previous process left, listed until removed.
     let containerLeft = true;
     let networkLeft = true;
@@ -1295,8 +1298,8 @@ describe("the reviewer's untested paths", () => {
     const engine = await claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "darwin", wait: async () => undefined });
     expect(Object.keys(engine.drivers)).toEqual(["claude_agent_sdk"]);
     expect(Object.keys(engine.transports)).toEqual(["anthropic"]);
-    // Building the engine only checked that Docker has both pinned images (the ruling on #470); the reap comes after.
-    expect(calls.splice(0).map((c) => c.args.slice(0, 2))).toEqual([["image", "inspect"], ["image", "inspect"]]);
+    // Building the engine only checked that Docker has its three pinned images (the ruling on #470); the reap comes after.
+    expect(calls.splice(0).map((c) => c.args.slice(0, 2))).toEqual([["image", "inspect"], ["image", "inspect"], ["image", "inspect"]]);
     await engine.reap();
     expect(calls[0].args).toEqual(["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=${LABEL_HOME}=${homeLabel(home)}`]);
     expect(calls[1].args).toEqual(["rm", "--force", "c".repeat(64)]);
@@ -1541,6 +1544,7 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    await writeFile(join(home, "proxy-image"), PROXY_IMAGE);
     const { docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
     return claudeEngine({ home, key_file: keyFile, log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform });
   }
@@ -1564,6 +1568,7 @@ describe("production: the two-container placement everywhere, bare mode, no sand
     await writeFile(join(home, "fake.key"), KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    await writeFile(join(home, "proxy-image"), PROXY_IMAGE);
     const { docker } = fakeDocker();
     await expect(claudeEngine({ home, key_file: join(home, "fake.key"), log: () => undefined, docker, dockerProgram: DOCKER_PROGRAM, env: {}, execArgv: [], platform: "linux", mounts: "", procVersion: null })).rejects.toThrow(/^linux_check_failed: Docker isn't reachable/);
   });
@@ -2167,7 +2172,14 @@ describe("confirmStopped and the task container's removal", () => {
     const { calls, docker } = fakeDocker((args) => (args[0] === "ps" ? { stdout: "" } : {}));
     const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
     expect(await sandbox.gone("run-1")).toBe(true);
-    expect(calls.map((c) => c.args.filter((_, i) => c.args[i - 1] === "--filter"))).toEqual([[`label=${LABEL_RUN}=run-1`, `label=${LABEL_ROLE}=task`], ["name=^/podster-run-run-1$"]]);
+    expect(calls.map((c) => c.args.filter((_, i) => c.args[i - 1] === "--filter"))).toEqual([
+      [`label=${LABEL_RUN}=run-1`, `label=${LABEL_ROLE}=task`],
+      ["name=^/podster-run-run-1$"],
+      // And the run's egress proxy and network, by role: never Claude Code's container, the relay or its network.
+      [`label=${LABEL_RUN}=run-1`, `label=${LABEL_ROLE}=egress`],
+      ["name=^/podster-egress-run-1$"],
+      [`label=${LABEL_RUN}=run-1`, `label=${LABEL_ROLE}=egress-network`],
+    ]);
   });
 });
 

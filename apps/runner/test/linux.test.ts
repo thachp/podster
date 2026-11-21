@@ -25,6 +25,7 @@ const enc = new TextEncoder();
 const KEY = "sk-ant-test-0123456789abcdefghij-the-owners-key";
 const IMAGE = `sha256:${"a".repeat(64)}`;
 const CLAUDE_IMAGE = `sha256:${"c".repeat(64)}`;
+const PROXY_IMAGE = `sha256:${"e".repeat(64)}`;
 const DOCKER_PROGRAM = "/usr/bin/docker";
 
 const temps: string[] = [];
@@ -291,6 +292,7 @@ describe("the engine on Linux", () => {
     await writeFile(keyFile, KEY, { mode: 0o600 });
     await writeFile(join(home, "task-image"), IMAGE);
     await writeFile(join(home, "claude-image"), CLAUDE_IMAGE);
+    await writeFile(join(home, "proxy-image"), PROXY_IMAGE);
     return { home, keyFile };
   }
   const build = async (home: string, keyFile: string, docker: DockerCli, extra: Record<string, unknown> = {}) => {
@@ -327,7 +329,7 @@ describe("the engine on Linux", () => {
     const { home, keyFile } = await engineHome();
     const deep = join(home, "x".repeat(60));
     await mkdir(deep, { mode: 0o700 });
-    for (const f of ["task-image", "claude-image"]) await writeFile(join(deep, f), await readFile(join(home, f)));
+    for (const f of ["task-image", "claude-image", "proxy-image"]) await writeFile(join(deep, f), await readFile(join(home, f)));
     const dk = fakeLinuxDocker();
     await expect(build(deep, keyFile, dk.docker)).rejects.toThrow(/^linux_home_too_long: .*--home.*\d+ bytes/);
     expect(dk.calls).toEqual([]);

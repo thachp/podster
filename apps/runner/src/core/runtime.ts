@@ -35,6 +35,10 @@ export type LogFields = {
   task?: string;
   /** An A2A attempt's ID, from a nudge (M7 step 14), so Runner's log lines up with Podster's audit. */
   attempt_id?: string;
+  /** A run's reference, as the task's containers are labelled. */
+  run?: string;
+  /** A host name the egress proxy allowed or refused: a lower-case DNS name, never a URL, path or address. */
+  host?: string;
   seq?: number;
   count?: number;
   status?: number;
@@ -55,9 +59,11 @@ const ID_VALUE = /^[A-Za-z0-9_-]{1,128}$/;
 const CODE_VALUE = /^[a-z][a-z0-9_]{0,63}$/;
 const NAMES_VALUE = /^[a-z_?]{1,40}(,[a-z_?]{1,40}){0,9}$/;
 const PREFIX_VALUE = /^(yes|no)$/;
+/** A lower-case DNS name of two or more labels whose last starts with a letter, so never an IP address. */
+const HOST_VALUE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const TYPE_VALUE = /^(null|array|object|string|number|boolean|undefined|bigint|symbol|function)$/;
 const NUMBER_FIELDS = new Set(["seq", "count", "status", "length"]);
-const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id"]);
+const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id", "run"]);
 
 /** The line a logger writes, with everything that isn't allowed dropped. */
 export function logLine(at: string, outcome: string, fields: LogFields = {}): string {
@@ -66,6 +72,7 @@ export function logLine(at: string, outcome: string, fields: LogFields = {}): st
     if (NUMBER_FIELDS.has(name) && typeof value === "number" && Number.isSafeInteger(value)) line[name] = value;
     else if (ID_FIELDS.has(name) && typeof value === "string" && ID_VALUE.test(value)) line[name] = value;
     else if (name === "names" && typeof value === "string" && NAMES_VALUE.test(value)) line[name] = value;
+    else if (name === "host" && typeof value === "string" && HOST_VALUE.test(value)) line[name] = value;
     else if (name === "prefix" && typeof value === "string" && PREFIX_VALUE.test(value)) line[name] = value;
     else if (name === "type" && typeof value === "string" && TYPE_VALUE.test(value)) line[name] = value;
     else if (name === "code" && typeof value === "string" && CODE_VALUE.test(value)) line[name] = value;

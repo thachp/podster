@@ -20,6 +20,7 @@ import { policyFile } from "./policy-file.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
 import { appOriginFor } from "../core/pull-text.js";
 import { hostRepositoryPath } from "./repo-path.js";
+import { retryTransient, STOPPED } from "../core/retry.js";
 
 /** What runs tasks: a driver per agent SDK, the task container, and the provider transports that hold the keys. */
 export type RunEngine = Pick<SupervisedDeps, "drivers" | "sandbox" | "transports">;
@@ -45,6 +46,8 @@ export type RunInboxDeps = {
   repository?: RepositoryPath | null;
   /** The inbound nudge's bell (M7 step 14), only when the owner switched it on: it ends a wait early, nothing more. */
   bell?: NudgeBell;
+  /** For the startup backoff's jitter: answers in [0, 1). `Math.random` when left out. */
+  random?: () => number;
 };
 
 /** A run's progress, as a log line: IDs, a fixed kind, a code and the turn count. */
@@ -56,18 +59,26 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   if (engine === null || !Object.values(engine.drivers).some((driver) => driver !== undefined)) return deps.poller.run(deps.signal, deps.bell);
   const adapter = new SupervisedAdapter({ ...engine, clock: deps.clock, log: deps.log, progress: progressLog(deps.log), ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}) });
   const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log, { app_origin: appOriginFor(deps.poller.origin) });
-  const lifecycle = await Lifecycle.open({
-    poller: deps.poller,
-    runs: new FileRunStore(deps.home),
-    config: policyFile(deps.home),
-    adapter,
-    home: deps.home,
-    ...(repository ? { repository } : {}),
-    prompter: new TerminalPrompter(deps.terminal),
-    clock: deps.clock,
-    log: deps.log,
-    ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}),
-  });
+  // Opening asks Podster who this agent is. A brief network failure, a server failure or a rate limit there is waited
+  // out like the poll loop's own, never a reason to exit (the 2026-11-21 report); an authority error, a refusal or a
+  // policy problem still ends `run` here. The open changes nothing until that answer is in, so trying it again is safe.
+  const lifecycle = await retryTransient(
+    () =>
+      Lifecycle.open({
+        poller: deps.poller,
+        runs: new FileRunStore(deps.home),
+        config: policyFile(deps.home),
+        adapter,
+        home: deps.home,
+        ...(repository ? { repository } : {}),
+        prompter: new TerminalPrompter(deps.terminal),
+        clock: deps.clock,
+        log: deps.log,
+        ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}),
+      }),
+    { at: "runner.start", agent: deps.poller.agentId, clock: deps.clock, log: deps.log, signal: deps.signal, firstMs: deps.poller.intervalMs, ...(deps.random ? { random: deps.random } : {}) },
+  );
+  if (lifecycle === STOPPED) return "stopped";
   return runWithLifecycle(deps.poller, lifecycle, deps.clock, deps.signal, deps.bell);
 }
 

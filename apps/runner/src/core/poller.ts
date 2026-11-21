@@ -24,6 +24,7 @@ import { Connection } from "./connection.js";
 import type { NudgeBell } from "./nudge.js";
 import { GatewayError, meaningOf } from "./errors.js";
 import { retire } from "./pairing.js";
+import { backoffMs } from "./retry.js";
 import { applyEvents, applyListing, readEvents, readTask, type ListedTask } from "./record.js";
 import type { Clock, Logger } from "./runtime.js";
 import { isId, type RunnerState, type StateStore } from "./state.js";
@@ -37,8 +38,6 @@ export const DEFAULT_INTERVAL_MS = 30_000;
 export const MIN_GRACE_MS = 60_000;
 export const MAX_GRACE_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_GRACE_MS = 15 * 60 * 1000;
-/** Longest wait between tries while the gateway can't be reached. */
-const LONGEST_BACKOFF_MS = 5 * 60 * 1000;
 const PAGE = 50;
 /** Pages read in one poll before waiting for the next. */
 const PAGES_PER_POLL = 20;
@@ -54,6 +53,8 @@ export type PollerDeps = {
   log: Logger;
   intervalMs?: number;
   graceMs?: number;
+  /** For the backoff's jitter: answers in [0, 1). `Math.random` when left out; tests pass a fixed one. */
+  random?: () => number;
 };
 
 export type LoopOutcome =
@@ -247,7 +248,8 @@ export class Poller {
       }
       this.failures++;
       const failure = error instanceof GatewayError ? error : new GatewayError(0, "unknown");
-      this.deps.log("runner.poll", "unreachable", { agent: this.state.agent_id ?? undefined, status: failure.status, code: failure.code });
+      // Tried again after the backoff, however long the gateway stays away (RUNNER.md, "Brief network failures").
+      this.deps.log("runner.poll", "retry", { agent: this.state.agent_id ?? undefined, status: failure.status, code: failure.code, count: this.failures });
       if (failure.retryAfter !== null) this.retryAfterMs = failure.retryAfter * 1000;
       return "unreachable";
     }
@@ -256,7 +258,8 @@ export class Poller {
   /** How long to wait before the next poll. */
   nextWaitMs(result: PollResult): number {
     if (result === "ok") return this.intervalMs;
-    const backoff = Math.min(this.intervalMs * 2 ** Math.min(this.failures - 1, 10), LONGEST_BACKOFF_MS);
+    // Capped exponential backoff with jitter, from the interval up (`retry.ts`).
+    const backoff = backoffMs(this.failures, this.intervalMs, this.deps.random);
     const asked = this.retryAfterMs;
     this.retryAfterMs = null;
     return Math.max(backoff, asked ?? 0);
@@ -271,7 +274,7 @@ export class Poller {
       if (result === "ok") toldOffline = false;
       else if (!toldOffline && !this.authorityFresh() && this.offlinePastGrace()) {
         toldOffline = true;
-        this.deps.log("runner.offline", "grace_passed", { agent: this.state.agent_id ?? undefined });
+        this.deps.log("runner.offline", "grace_passed", { agent: this.state.agent_id ?? undefined, code: "gateway_unreachable" });
       }
       await waitForNext(this.deps.clock, this.nextWaitMs(result), result, signal, bell);
     }

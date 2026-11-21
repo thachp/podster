@@ -159,7 +159,8 @@ export class Person {
 
   /** A dashboard call: `/api` + path, with this person's session, from our own origin. */
   /** `timeoutMs`, when given, bounds this one request, its 429 waits included: it isn't retried, and it's aborted after that. */
-  async dash(method, path, body, { idempotencyKey, org, headers = {}, timeoutMs } = {}) {
+  /** `retry: false` gives a 429 back at once, for a check that expects one: waiting out a limit that lasts a day gains nothing. */
+  async dash(method, path, body, { idempotencyKey, org, headers = {}, timeoutMs, retry = true } = {}) {
     const hasBody = !["GET", "HEAD"].includes(method);
     const res = await this.target.http(`/api${path}`, {
       method,
@@ -171,6 +172,7 @@ export class Person {
         ...headers,
       },
       body: hasBody ? JSON.stringify(body ?? {}) : undefined,
+      retry,
       ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs), retry: false } : {}),
     });
     const text = await res.text();

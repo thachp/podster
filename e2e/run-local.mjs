@@ -11,13 +11,14 @@
 // After the journey, which runs with managed repositories off in both Workers as every deployment has them,
 // managed-off-check.mjs shows the off state. Then a second throwaway stack runs with them on in both, for
 // repo-access-check.mjs (M5 step 6) and merge-check.mjs (M5 step 7b). That stack's API is built again with its
-// `rehearsal` feature, which sends GitHub's calls to fake-github-server.mjs on this machine, and the plain release build
-// is put back afterwards. `--skip-managed` leaves all of that out.
+// `rehearsal` feature, which sends GitHub's calls to fake-github-server.mjs on this machine, into e2e/.local/api-rehearsal,
+// so apps/api/build keeps the plain release build throughout and nothing has to be built again to put it back. That
+// folder goes with the rest of e2e/.local. `--skip-managed` leaves all of that out.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { localCertificate } from "./local-cert.mjs";
 import { freePort, groupGone, local, prepareStack, repo, run, startGateway } from "./stack.mjs";
@@ -118,9 +119,8 @@ function child(script, args, env = {}, nodeArgs = []) {
 }
 
 let code = 1;
-/** The fake GitHub's process, and whether the API's build is the rehearsal one, to undo both on the way out. */
+/** The fake GitHub's process, to stop on the way out. */
 let fakeGithub;
-let rehearsalBuild = false;
 try {
   await waitForStack(base);
   console.log(`local stack is up at ${base}\n`);
@@ -170,9 +170,6 @@ try {
     }
     const fake = JSON.parse(readFileSync(keysFile, "utf8"));
     rmSync(keysFile, { force: true });
-    // The API again, with GitHub's address fixed to the fake's. The plain release build comes back in `finally`.
-    rehearsalBuild = true;
-    run("worker-build", ["--release", "--features", "rehearsal"], join(repo, "apps/api"), { PODSTER_REHEARSAL_GITHUB_URL: github });
     const apiVars = {
       MANAGED_REPOSITORIES: "true",
       GITHUB_ORG_LOGIN: fake.ids.orgLogin,
@@ -188,7 +185,12 @@ try {
       GITHUB_MERGE_APP_KEY: fake.mergeKey,
       REPO_TOKEN_KEY: randomBytes(32).toString("hex"),
     };
-    const on = prepareStack({ skipBuild: true, apiVars });
+    // The API again, with GitHub's address fixed to the fake's, in its own folder under e2e/.local, which prepareStack
+    // has just emptied. apps/api/build is never touched, so a later run or a deploy can only find the plain build there.
+    const rehearsalBuild = join(local, "api-rehearsal");
+    const on = prepareStack({ skipBuild: true, apiVars, apiBuild: rehearsalBuild });
+    // worker-build's own options come before --features, which it hands on to cargo with what follows.
+    run("worker-build", ["--release", "--out-dir", relative(join(repo, "apps/api"), rehearsalBuild), "--features", "rehearsal"], join(repo, "apps/api"), { PODSTER_REHEARSAL_GITHUB_URL: github });
     const onPort = await freePort();
     const onBase = `http://localhost:${onPort}`;
     // Its own assertion key pair too, which prepareStack just made: the API checks against the new public half.
@@ -231,14 +233,5 @@ try {
 } finally {
   stop();
   fakeGithub?.kill();
-  // Never leave the rehearsal build where a later run or a deploy would find it.
-  if (rehearsalBuild) {
-    try {
-      run("worker-build", ["--release"], join(repo, "apps/api"));
-    } catch (error) {
-      console.error("The API's plain release build couldn't be put back. Rebuild it before anything else uses apps/api/build.", error);
-      code = 1;
-    }
-  }
 }
 process.exit(code);

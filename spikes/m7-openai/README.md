@@ -2,7 +2,7 @@
 
 **Prepared 2026-11-21, and run against OpenAI the same day: 0.006 USD of the 2.00 USD approved, no stop condition hit; see [RESULTS.md](RESULTS.md).** A throwaway spike for [Runner's OpenAI adapter](../../docs/spec/RUNNER-OPENAI.md), following its [spike plan](../../docs/spec/RUNNER-OPENAI.md#spike-plan). It answers whether the Agents SDK's loop can run in Runner's own process with every model request going through Runner's broker, every tool call going through Runner's decision point, and nothing else leaving the machine. Nothing in `apps/` changed, and nothing builds on this code.
 
-Step 1 of the plan (no network at all) is the test suite and is done. Steps 2 to 6 are `spike.mjs`'s scenarios. They need the owner's key and are not run yet.
+Step 1 of the plan (no network at all) is the test suite and is done. Steps 2 to 6 are `spike.mjs`'s scenarios. They need the owner's key, and all of them ran on 2026-11-21; see [RESULTS.md](RESULTS.md).
 
 **Pins.** `@openai/agents-core` 0.22.0, `@openai/agents-openai` 0.22.0 and `openai` 7.62.0, exactly, with npm's `sha512` integrity in `package-lock.json`, installed with `npm install --ignore-scripts`. The `@openai/agents` umbrella and `@openai/agents-realtime` are not installed. Model `gpt-6-luna` only. Node 22 or later (`openai` needs it).
 
@@ -59,7 +59,7 @@ Run `gpt-6.1-terra` only if the owner allows it; that is a reviewed profile chan
 | `spike.mjs` | Steps 2 to 6, the synthetic tasks and room |
 | `test/` | Step 1 and the checks below, against `test/fake-upstream.mjs`, an in-process fake Responses upstream |
 
-## Scenarios (not yet run)
+## Scenarios (run 2026-11-21; results in [RESULTS.md](RESULTS.md))
 
 | Scenario | Plan step | What it records |
 | --- | --- | --- |
@@ -94,4 +94,4 @@ Result files hold IDs, tool names, rule names, counts, bounds, usage counts and 
 
 ## Not verified
 
-Everything that needs OpenAI: the real traffic, whether `gpt-6-luna` accepts `reasoning` and `include: ["reasoning.encrypted_content"]` with `store: false`, the usage nesting, whether usage carries `cache_write_tokens` at all (if it doesn't, every request is charged its worst case and runs stop early, which is the safe side), billing against `max_output_tokens`, `gpt-6-luna`'s coding ability, and whether the project budget is a hard stop. The socket check doesn't see DNS lookups or child processes (the docker CLI). `lib/sandbox.mjs` and `spike.mjs`'s real path have not run; no Docker command was run while building. Streaming is tested at the broker; the driver runs non-streamed.
+The run of 2026-11-21 settled the traffic, the refused-key checks, the output bound, the usage nesting (cached and cache-write tokens inside `input_tokens`, reasoning inside `output_tokens`; `cache_write_tokens` is present), `reasoning` with `store: false` on `gpt-6-luna`, the three tasks, cancel and the cap stop, and ran `lib/sandbox.mjs` and `spike.mjs`'s real path for the first time. Still not verified: the project's usage page against `results/usage.json` (the owner's to compare), billing against `max_output_tokens` and for a cut request, whether the project budget is a hard stop, encrypted reasoning items being sent back on later turns, `gpt-6-luna`'s coding ability beyond one small fix, DNS and child-process traffic (the socket check doesn't see them), and streaming against the real API (the driver runs non-streamed). [RESULTS.md](RESULTS.md) has the details.

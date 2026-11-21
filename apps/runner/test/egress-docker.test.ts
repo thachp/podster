@@ -10,7 +10,9 @@
 // - there is no direct route: a TCP connection to a public address fails, and Docker's resolver answers no outside name;
 // - the proxy listens only on the run's internal network: a container on its outbound network can't reach it;
 // then that the proxy logged the decisions, and that `kill` leaves no container or network of the home.
-// The task image here is the proxy's image, for its `node`: Runner's task image has no Node yet.
+// The first two checks use the proxy's image as the task image, for its `node` (Node 18, with --use-bundled-ca since
+// it has no system trust store). The third opens a run on Runner's real task image and runs `npm install` from
+// registry.npmjs.org through the proxy.
 import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -80,6 +82,8 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
   let docker: DockerCli;
   let image = "";
   let sandbox: DockerSandbox;
+  let programFile = "";
+  let facts: RunFacts;
   const logged: [string, string, LogFields | undefined][] = [];
   const uid = process.getuid?.() ?? -1;
   const gid = process.getgid?.() ?? -1;
@@ -104,7 +108,7 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
     expect(image).toMatch(IMAGE_ID);
     // Runner's built program when the package is built (CI builds it first); else this source with its types stripped.
     const builtProgram = join(apps, "build", "node", "egress-proxy.js");
-    let programFile = builtProgram;
+    programFile = builtProgram;
     if (!existsSync(builtProgram)) {
       const source = await readFile(join(apps, "src", "node", "egress-proxy.ts"), "utf8");
       programFile = join(home, "egress-proxy.js");
@@ -112,7 +116,7 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
       await writeFile(programFile, stripTypeScriptTypes(source));
     }
     sandbox = new DockerSandbox({ docker, image, uid, gid, home, proxy: { image, program: () => loadProxyProgram(programFile) }, log: (at, outcome, fields) => void logged.push([at, outcome, fields]) });
-    const facts = {
+    facts = {
       adapter: "claude_agent_sdk",
       tools: ["read", "search", "write", "edit", "shell"],
       shell: true,
@@ -173,4 +177,25 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
     expect((await run(["ps", "--all", "--quiet", "--filter", label])).stdout.trim()).toBe("");
     expect((await run(["network", "ls", "--quiet", "--filter", label])).stdout.trim()).toBe("");
   }, 5 * 60_000);
+
+  it("runs `npm install` of a pinned package from registry.npmjs.org in Runner's real task image, through the proxy", async () => {
+    const built = await docker(["build", "-q", join(apps, "sandbox")], { timeoutMs: 15 * 60_000, maxOutputBytes: 64 * 1024 });
+    expect(built.code).toBe(0);
+    const taskImage = built.stdout.trim();
+    expect(taskImage).toMatch(IMAGE_ID);
+    const ref = "egress-npm-1";
+    const npmSandbox = new DockerSandbox({ docker, image: taskImage, uid, gid, home, proxy: { image, program: () => loadProxyProgram(programFile) } });
+    const npmFacts = { ...facts, task_folder: join(work, "ws_room", "tsk_npm") } as RunFacts;
+    try {
+      await npmSandbox.open(containerSpec(ref, npmFacts), signal);
+      const manifest = JSON.stringify({ name: "egress-check", version: "1.0.0", private: true, dependencies: { "is-number": "7.0.0" } });
+      expect((await npmSandbox.exec(ref, { call_id: "c", tool: "write", path: "package.json", content: manifest }, signal)).ok).toBe(true);
+      const install = await npmSandbox.exec(ref, { call_id: "c", tool: "shell", command: "npm install --no-package-lock --loglevel=error && node -e 'console.log(\"is-number=\" + require(\"is-number\")(7))'" }, signal);
+      expect(install.text).toContain("is-number=true");
+      expect(install.ok).toBe(true);
+    } finally {
+      await npmSandbox.kill(ref);
+    }
+    expect(await npmSandbox.gone(ref)).toBe(true);
+  }, 20 * 60_000);
 });

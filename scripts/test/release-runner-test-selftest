@@ -24,6 +24,7 @@ export GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.invalid
 export GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.invalid
 t=$'\t'
 env_id=27874616476
+never_said() { ! grep -q -i -E -- "$1" "$tmp/out"; }
 packed=69370dddc7299188dcd0b7c21875f3e3ed9feff2
 
 stub sleep <<'EOF'
@@ -82,8 +83,9 @@ case "$*" in
   "api -X POST repos/{owner}/{repo}/actions/runs/"*"/pending_deployments "*) answer approve ;;
   "run view "*" --json status,conclusion --jq "*) answer early-state ;;
   "run view "*" --json status,conclusion,headSha --jq "*) turns state ;;
-  "run view "*" --json jobs --jq "*) answer job ;;
-  "run view "*" --log --job "*) answer log ;;
+  "run view "*" --json jobs --jq "*steps*) answer publish-step ;;
+  "run view "*" --json jobs --jq "*) turns job ;;
+  "run view "*" --log --job "*) turns log ;;
   *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
 esac
 EOF
@@ -93,11 +95,13 @@ stub npm <<'EOF'
 fix="$(dirname "$0")/../fix"
 echo "npm $*" >> "$fix/calls"
 case "$*" in
-  "view --prefer-online podster versions --json") cat "$fix/npm-versions" ;;
-  "view --prefer-online podster dist-tags --json") cat "$fix/npm-tags" ;;
-  "view --prefer-online podster@"*" dist.shasum") cat "$fix/npm-shasum" ;;
+  "view --prefer-online podster versions --json") key=npm-versions ;;
+  "view --prefer-online podster dist-tags --json") key=npm-tags ;;
+  "view --prefer-online podster@"*" dist.shasum") key=npm-shasum ;;
   *) echo "stand-in npm: unexpected: npm $*" >&2; exit 97 ;;
 esac
+if [ "$(cat "$fix/$key")" = npm-fails ]; then echo "npm error code ECONNREFUSED" >&2; exit 1; fi
+cat "$fix/$key"
 EOF
 
 repo="$tmp/repo"
@@ -154,7 +158,7 @@ fresh 0.0.1-test.11
 check "no arguments is refused, exit 2" run 2 "$(script)"
 check "an unknown stage is refused, exit 2" run 2 "$(script)" release 0.0.1-test.12
 check "publish with no version is refused, exit 2" run 2 "$(script)" publish
-for bad in 0.0.1 0.0.1-test 0.0.2-test.12 1.0.0-test.12 0.0.1-test.12a 0.0.1-test.012 0.0.1-beta.12 v0.0.1-test.12 0.0.1-test.-1; do
+for bad in 0.0.1-test.9223372036854775808 0.0.1-test.1000000000 0.0.1 0.0.1-test 0.0.2-test.12 1.0.0-test.12 0.0.1-test.12a 0.0.1-test.012 0.0.1-beta.12 v0.0.1-test.12 0.0.1-test.-1; do
   check "version $bad is refused, exit 2" run 2 "$(script)" publish "$bad"
 done
 for tag in latest beta next ""; do
@@ -202,6 +206,8 @@ check "  and asks nothing else" never_called '^(gh|npm) '
 fresh 0.0.1-test.11
 touch "$fix/fetch-error"
 check "a fetch that fails another way is refused at once, exit 1" run 1 "$(script)" bump
+check "  without echoing git's words" never_said 'resolve host|github.invalid'
+check "  saying its exit code" said 'git fetch failed with exit 128, not on a ref lock'
 check "  after one fetch and no wait" test "$(grep -c '^git fetch' "$fix/calls")$(grep -c '^sleep' "$fix/calls" || true)" = 10
 
 # --- versions ---
@@ -231,12 +237,21 @@ stub npm <<'EOF'
 fix="$(dirname "$0")/../fix"
 echo "npm $*" >> "$fix/calls"
 case "$*" in
-  "view --prefer-online podster versions --json") cat "$fix/npm-versions" ;;
-  "view --prefer-online podster dist-tags --json") cat "$fix/npm-tags" ;;
-  "view --prefer-online podster@"*" dist.shasum") cat "$fix/npm-shasum" ;;
+  "view --prefer-online podster versions --json") key=npm-versions ;;
+  "view --prefer-online podster dist-tags --json") key=npm-tags ;;
+  "view --prefer-online podster@"*" dist.shasum") key=npm-shasum ;;
   *) echo "stand-in npm: unexpected: npm $*" >&2; exit 97 ;;
 esac
+if [ "$(cat "$fix/$key")" = npm-fails ]; then echo "npm error code ECONNREFUSED" >&2; exit 1; fi
+cat "$fix/$key"
 EOF
+
+fresh 0.0.1-test.11
+printf '["0.0.1-test.11","0.0.1-test.9223372036854775808"]\n' > "$fix/npm-versions"
+check "a test number on npm too large to compare is refused, not passed, exit 1" run 1 "$(script)" bump 0.0.1-test.12
+check "  and says it can't compare" said "REFUSE  can't compare test numbers '12' and '9223372036854775808'"
+check "  and never says it's above" never_said 'is above the highest'
+check "the same refuses publish, exit 1" run 1 "$(script)" publish 0.0.1-test.12
 
 # --- bump ---
 fresh 0.0.1-test.11
@@ -310,8 +325,9 @@ ready() {
   : > "$fix/approve"
   printf 'in_progress\tnone\t%s\n' "$sha" > "$fix/state.1"
   printf 'completed\tsuccess\t%s\n' "$sha" > "$fix/state.2"
-  echo 136757581011 > "$fix/job"
-  printf 'publish\tUNKNOWN STEP\t2026-11-21T06:19:55Z \033[36;1mecho "packed file shasum: $local_sha"\033[0m\npublish\tUNKNOWN STEP\t2026-11-21T06:21:48Z packed file shasum: %s\n' "$packed" > "$fix/log"
+  echo 136757581011 > "$fix/job.1"
+  echo success > "$fix/publish-step"
+  printf 'publish\tUNKNOWN STEP\t2026-11-21T06:19:55Z \033[36;1mecho "packed file shasum: $local_sha"\033[0m\npublish\tUNKNOWN STEP\t2026-11-21T06:21:48Z packed file shasum: %s\n' "$packed" > "$fix/log.1"
   echo "$packed" > "$fix/npm-shasum"
   printf '{"latest":"0.0.1-test.1","test":"0.0.1-test.12"}\n' > "$fix/npm-tags"
 }
@@ -379,6 +395,7 @@ sha=$(main_sha)
 printf '902\t%s\t%s\n903\t%s\t%s\n' "$sha" "$(date -u +%s)" "$sha" "$(date -u +%s)" > "$fix/runs.2"
 check "two new runs at main's sha: nothing approved, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
 check "  and says why" said 'more than one new runner-prerelease.yml run'
+check "  and names both to approve or cancel" said 'runs since the dispatch: 902 903\.'
 check "  and approves nothing" never_called 'pending_deployments -F'
 ready
 sha=$(main_sha)
@@ -389,6 +406,8 @@ ready
 sha=$(main_sha)
 printf '902\t%s\t1795000000\n' "$sha" > "$fix/runs.2"
 check "a new run created well before the dispatch is not taken: exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and names it, saying to approve or cancel it" said 'new runner-prerelease.yml runs since the dispatch: 902. Each may wait for npm-test-prerelease: approve or cancel it'
+
 check "  and approves nothing" never_called 'pending_deployments -F'
 ready
 sha=$(main_sha)
@@ -418,27 +437,77 @@ check "a run that fails before asking for the environment, exit 3" run 3 "$(scri
 check "  and nothing is approved" never_called 'pending_deployments -F'
 ready
 echo gh-fails > "$fix/approve"
-check "an approval that fails, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+check "an approval that fails or whose answer is lost: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and says it may be approved, naming the run" said 'UNKNOWN the approval .* for run 902 failed or its answer was lost, so it may be approved'
+check "  and waits for no run" never_called '^gh run view 902 --json status,conclusion,headSha'
+
 ready
 printf 'completed\tfailure\t%s\n' "$(main_sha)" > "$fix/state.2"
-check "a run that fails after approval, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
-check "  and says nothing is rerun" said 'ended as failure. Nothing is rerun'
+echo failure > "$fix/publish-step"
+check "a run whose publish step failed, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+check "  and says nothing reached npm and nothing is rerun" said 'publish step as failure, so nothing reached npm. Nothing is rerun'
 check "  and reruns nothing" never_called 'gh run rerun'
+for step in cancelled skipped; do
+  echo "$step" > "$fix/publish-step"
+  rm -f "$fix"/*.n
+  check "a run whose publish step was $step, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+done
+ready
+printf 'completed\tfailure\t%s\n' "$(main_sha)" > "$fix/state.2"
+check "a run that failed after its publish step, with npm holding the packed file: exit 4, never 3" run 4 "$(script)" publish 0.0.1-test.12 --go
+check "  having checked npm" said "^ok +npm's shasum for 0.0.1-test.12 is the packed file's"
+check "  and says the run failed after publishing" said 'ended as failure after publishing \(exit 4\)'
+ready
+printf 'completed\tfailure\t%s\n' "$(main_sha)" > "$fix/state.2"
+echo 0000000000000000000000000000000000000000 > "$fix/npm-shasum"
+check "a run that failed after publishing a different file: exit 4" run 4 "$(script)" publish 0.0.1-test.12 --go
+ready
+printf 'completed\tfailure\t%s\n' "$(main_sha)" > "$fix/state.2"
+echo gh-fails > "$fix/publish-step"
+: > "$fix/npm-shasum"
+check "a failed run whose publish step can't be read, and npm not showing the version: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  having asked npm" called '^npm view --prefer-online podster@0.0.1-test.12 dist.shasum'
 ready
 printf 'in_progress\tnone\t%s\n' "$(main_sha)" > "$fix/state.2"
 check "a run that never finishes: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
 ready
 echo 0000000000000000000000000000000000000000 > "$fix/npm-shasum"
 check "npm's shasum not the packed one, exit 4" run 4 "$(script)" publish 0.0.1-test.12 --go
-check "  and says so" said "WRONG   npm's shasum for 0.0.1-test.12 is '0{40}', not $packed"
+check "  and says so" said "WRONG   npm's shasum for 0.0.1-test.12 is 0{40}, not $packed"
 ready
 printf '{"latest":"0.0.1-test.1","test":"0.0.1-test.11"}\n' > "$fix/npm-tags"
 check "the test tag not at the version, exit 4" run 4 "$(script)" publish 0.0.1-test.12 --go
 check "  and says so" said 'WRONG   dist-tag test is 0.0.1-test.11, not 0.0.1-test.12'
 check "  and moves no tag" never_called 'npm dist-tag'
 ready
-printf 'publish\tx\tpacked file shasum: %s\npublish\tx\tpacked file shasum: %s\n' "$packed" 1111111111111111111111111111111111111111 > "$fix/log"
-check "a log with two packed shasums, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+printf 'publish\tx\tpacked file shasum: %s\npublish\tx\tpacked file shasum: %s\n' "$packed" 1111111111111111111111111111111111111111 > "$fix/log.1"
+check "a log with two packed shasums, every read: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+
+ready
+echo gh-fails > "$fix/job.1"
+check "a publish job that can't be found after a successful run: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  after four tries" test "$(grep -c -- '--json jobs --jq .jobs' "$fix/calls")" -eq 4
+ready
+echo gh-fails > "$fix/log.1"
+check "a log that can't be read: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo gh-fails > "$fix/log.1"
+cp "$fix/log.1" "$fix/log.2"
+printf 'publish\tx\tpacked file shasum: %s\n' "$packed" > "$fix/log.3"
+check "a log read on the third try passes, exit 0" run 0 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo npm-fails > "$fix/npm-shasum"
+check "npm unreachable for the shasum: unknown, exit 5, not 4" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and says to check later" said "UNKNOWN npm didn't show podster@0.0.1-test.12's shasum"
+ready
+: > "$fix/npm-shasum"
+check "the version not visible on npm: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo npm-fails > "$fix/npm-tags"
+check "npm's dist-tags unreadable: unknown, exit 5, not 4" run 5 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo '"not an object"' > "$fix/npm-tags"
+check "npm's dist-tags not an object: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
 
 # --- what the script can't do at all ---
 target="$scripts/release-runner-test"

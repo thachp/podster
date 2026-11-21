@@ -2,7 +2,7 @@
 // provider transport and the loopback listener. Everything here runs against stand-ins: a fake SDK, fake process
 // control, a fake `docker` and a fake upstream on loopback. Nothing reaches api.anthropic.com, runs Docker, reads a real
 // key or touches the keychain.
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { costOf as costOfUsage, RunBroker, upstreamUrl, worstCaseOf, type BrokerRequest, type Forward } from "../src/core/broker.js";
 import { CLAUDE_MODEL, CLAUDE_MODELS, CLAUDE_PROFILE, PINNED_CLAUDE_CODE_VERSION, PINNED_SDK_VERSION, versionRefusal } from "../src/core/claude-profile.js";
 import type { RunFacts } from "../src/core/policy.js";
-import { containerSpec, PLACEHOLDER_KEY, RESULT_SCHEMA, UNTRUSTED_FRAME, type DriverSession, type ModelAnswer } from "../src/core/run-interface.js";
+import { containerSpec, EGRESS_ENV, PLACEHOLDER_KEY, RESULT_SCHEMA, UNTRUSTED_FRAME, type DriverSession, type ModelAnswer } from "../src/core/run-interface.js";
+import { TOOLCHAIN_ENV } from "../src/core/toolchains.js";
 import { decideToolCall } from "../src/core/tool-policy.js";
 import { startBrokerListener, tokenMatches } from "../src/node/broker-listener.js";
 import { claudeEnv, ClaudeDriver, claudeExecArgs, claudeNames, claudeOptions, claudeRunArgs, CLAUDE_IN_CONTAINER, CONTAINER_CONFIG, CONTAINER_HOME, fixedOptionsRefusal, PLUGIN_ALLOWLIST, QUIET, relayRunArgs, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
@@ -166,7 +167,7 @@ describe("the Docker task container", () => {
     expect(flag("--pull")).toEqual(["never"]);
     expect(flag("--label")).toEqual([`${LABEL_RUN}=run-1`, `${LABEL_HOME}=h`, `${LABEL_ROLE}=task`]);
     expect(flag("--mount")).toEqual([`type=bind,source=${spec.task_folder},target=/work`]);
-    expect(flag("--env").sort()).toEqual(["HOME=/work", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"]);
+    expect(flag("--env").sort()).toEqual(["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"]);
     // No socket, device, privilege, host namespace or other mount.
     expect(args.join(" ")).not.toMatch(/docker\.sock|--device|--privileged|--volume|-v |--pid host|--network host|--cap-add/);
     expect(args.slice(-3)).toEqual([IMAGE, "sleep", "660"]);
@@ -192,6 +193,38 @@ describe("the Docker task container", () => {
     await sandbox.open(spec, new AbortController().signal);
     expect((await stat(spec.task_folder)).mode & 0o777).toBe(0o700);
     expect(calls[0].args[0]).toBe("run");
+    // And the task's HOME inside it, .cache/home, a plain folder of its own, before the container starts.
+    const made = await lstat(join(spec.task_folder, ".cache", "home"));
+    expect([made.isDirectory(), made.mode & 0o777, made.uid]).toEqual([true, 0o700, process.getuid?.()]);
+    expect(spec.env.HOME).toBe("/work/.cache/home");
+  });
+
+  it("refuses a task folder whose .cache or .cache/home is a link or a file, before any container, and keeps an existing .cache", async () => {
+    const outside = await temp();
+    for (const plant of [
+      async (f: string) => symlink(outside, join(f, ".cache")),
+      async (f: string) => writeFile(join(f, ".cache"), "x"),
+      async (f: string) => (await mkdir(join(f, ".cache")), symlink(outside, join(f, ".cache", "home"))),
+      async (f: string) => (await mkdir(join(f, ".cache")), writeFile(join(f, ".cache", "home"), "x")),
+    ]) {
+      const root = join(await temp(), "w");
+      const spec = containerSpec("run-1", facts(root));
+      await mkdir(spec.task_folder, { recursive: true, mode: 0o700 });
+      await plant(spec.task_folder);
+      const { calls, docker } = fakeDocker();
+      const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" });
+      await expect(sandbox.open(spec, new AbortController().signal)).rejects.toThrow(/^task_home_invalid$/);
+      expect(calls).toEqual([]);
+    }
+    expect(await readdir(outside)).toEqual([]);
+    // A repository's own .cache folder, with its files, is kept and used.
+    const root = join(await temp(), "w");
+    const spec = containerSpec("run-1", facts(root));
+    await mkdir(join(spec.task_folder, ".cache"), { recursive: true, mode: 0o700 });
+    await writeFile(join(spec.task_folder, ".cache", "tracked.txt"), "x");
+    const { docker } = fakeDocker();
+    await new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h" }).open(spec, new AbortController().signal);
+    expect((await readdir(join(spec.task_folder, ".cache"))).sort()).toEqual(["home", "tracked.txt"]);
   });
 
   it("a room's toolchains: their image, their fixed environment and the larger bounds builds need; none, as before", async () => {
@@ -212,7 +245,7 @@ describe("the Docker task container", () => {
     expect(flag("--tmpfs")).toEqual(["/tmp:rw,nosuid,nodev,noexec,size=256m"]);
     expect(flag("--network")).toEqual(["none"]);
     expect(args).toContain("--read-only");
-    expect(flag("--env").sort()).toEqual(["CARGO_HOME=/work/.cargo", "HOME=/work", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "UV_CACHE_DIR=/work/.cache/uv", "UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_INSTALL_DIR=/opt/uv/python", "UV_PYTHON_PREFERENCE=only-managed"]);
+    expect(flag("--env").sort()).toEqual(["CARGO_HOME=/work/.cargo", "HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "UV_CACHE_DIR=/work/.cache/uv", "UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_INSTALL_DIR=/opt/uv/python", "UV_PYTHON_PREFERENCE=only-managed"]);
     expect(args.slice(-3)[0]).toBe(TOOLCHAIN);
 
     // Open asks for the set's image and runs it; a tool call gets the longer bound.
@@ -236,6 +269,48 @@ describe("the Docker task container", () => {
     timeouts.length = 0;
     await plain.exec("run-2", { call_id: "c", tool: "shell", command: "ls" }, new AbortController().signal);
     expect(timeouts[0]).toBe(LIMITS.tool_ms);
+  });
+
+  it(".NET's and Java's fixed environments, exactly, only in rooms that name them, and with the others' when combined", async () => {
+    const root = join(await temp(), "w");
+    const shellFacts = { tools: ["read", "shell"] as RunFacts["tools"], shell: true };
+    const envOf = (toolchains: RunFacts["toolchains"]) => {
+      const args = runArgs(containerSpec("run-1", facts(root, { ...shellFacts, toolchains })), { image: IMAGE, uid: 501, gid: 20, home_label: "h" });
+      return args.filter((_, i) => args[i - 1] === "--env").sort();
+    };
+    const base = ["HOME=/work/.cache/home", "LANG=C.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin"];
+    const dotnet = [
+      "DOTNET_CLI_HOME=/work/.cache/dotnet",
+      "DOTNET_CLI_TELEMETRY_OPTOUT=1",
+      "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE=1",
+      "DOTNET_GENERATE_ASPNET_CERTIFICATE=false",
+      "DOTNET_NOLOGO=1",
+      "DOTNET_ROOT=/opt/dotnet",
+      "DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1",
+      "MSBUILDDISABLENODEREUSE=1",
+      "NUGET_PACKAGES=/work/.cache/nuget/packages",
+      "UseSharedCompilation=false",
+    ];
+    const java = [
+      "GRADLE_OPTS=-Dhttps.proxyHost=egress -Dhttps.proxyPort=3128 -Dhttp.proxyHost=egress -Dhttp.proxyPort=3128 -Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process",
+      "GRADLE_USER_HOME=/work/.cache/gradle",
+      "JAVA_HOME=/opt/java/jdk",
+      "MAVEN_OPTS=-Dmaven.repo.local=/work/.cache/m2/repository",
+    ];
+    expect(envOf(["dotnet"])).toEqual([...base, ...dotnet].sort());
+    expect(envOf(["java"])).toEqual([...base, ...java].sort());
+    expect(envOf(["dotnet", "java"])).toEqual([...base, ...dotnet, ...java].sort());
+    expect(envOf(["dotnet", "java", "python", "rust"])).toEqual([...base, ...dotnet, ...java, "CARGO_HOME=/work/.cargo", "UV_CACHE_DIR=/work/.cache/uv", "UV_PYTHON_DOWNLOADS=never", "UV_PYTHON_INSTALL_DIR=/opt/uv/python", "UV_PYTHON_PREFERENCE=only-managed"].sort());
+    // Gradle's proxy names Runner's egress proxy exactly as EGRESS_ENV does.
+    expect(EGRESS_ENV.HTTPS_PROXY).toBe("http://egress:3128");
+    // No variable is set by two toolchains, so a combined room's environment is each one's, unchanged.
+    const names = Object.values(TOOLCHAIN_ENV).flatMap((env) => Object.keys(env));
+    expect(new Set(names).size).toBe(names.length);
+    // A room naming neither gets none of theirs.
+    for (const toolchains of [[], ["python"], ["rust"]] as RunFacts["toolchains"][]) expect(envOf(toolchains).join(" ")).not.toMatch(/DOTNET|NUGET|MSBUILD|UseShared|XDG_|JAVA|MAVEN|GRADLE/);
+    // The larger bounds builds need, and no others: TOOLCHAIN_LIMITS, unchanged.
+    expect(limitsFor(containerSpec("run-1", facts(root, { ...shellFacts, toolchains: ["dotnet"] })))).toBe(TOOLCHAIN_LIMITS);
+    expect(limitsFor(containerSpec("run-1", facts(root, { ...shellFacts, toolchains: ["java"] })))).toBe(TOOLCHAIN_LIMITS);
   });
 
   it("refuses a room's toolchains with no toolchain image to be had, never running another image", async () => {

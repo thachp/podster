@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WORK_TREE_CACHES } from "../src/core/repository.js";
 import { TOOLCHAIN_ENV, TOOLCHAINS, type Toolchain } from "../src/core/toolchains.js";
 import type { DockerCli } from "../src/node/docker-sandbox.js";
-import { BASE_TAG, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES } from "../src/node/toolchain-images.js";
+import { EGRESS_ALIAS, EGRESS_PORT } from "../src/core/run-interface.js";
+import { ARCHES, BASE_TAG, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_ARCH, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES } from "../src/node/toolchain-images.js";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const id = (c: string) => `sha256:${c.repeat(64)}`;
@@ -33,11 +34,21 @@ const code = (text: string) => text.split("\n").filter((line) => !line.startsWit
 
 describe("the caches tools keep in the work tree", () => {
   it("are each under a folder Runner excludes from a repository room's commit", async () => {
-    const inWork = Object.values(TOOLCHAIN_ENV).flatMap((env) => Object.values(env)).filter((v) => v.startsWith("/work/"));
+    // Every /work path anywhere in a value, such as Maven's inside MAVEN_OPTS, not only values that are a path.
+    const inWork = Object.values(TOOLCHAIN_ENV).flatMap((env) => Object.values(env)).flatMap((v) => v.match(/\/work(?:\/[^\s"'=:]*)?/g) ?? []);
     // npm's global prefix, from the task image's npmrc.
     const npmrc = (await readFile(join(PACKAGE, "sandbox", "Dockerfile"), "utf8")).match(/prefix=(\/work\/[^\\]+)\\n/);
     expect(npmrc?.[1]).toBe("/work/.npm-global");
-    expect([...inWork, npmrc?.[1]].sort()).toEqual(["/work/.cache/uv", "/work/.cargo", "/work/.npm-global"]);
+    expect([...inWork, npmrc?.[1]].sort()).toEqual([
+      "/work/.cache/dotnet",
+      "/work/.cache/gradle",
+      "/work/.cache/m2/repository",
+      "/work/.cache/nuget/packages",
+      "/work/.cache/uv",
+      "/work/.cargo",
+      "/work/.npm-global",
+    ]);
+    expect(WORK_TREE_CACHES).toEqual([".cache", ".cargo", ".npm-global"]);
     for (const path of [...inWork, npmrc?.[1] as string]) expect([path, WORK_TREE_CACHES.some((name) => path === `/work/${name}` || path.startsWith(`/work/${name}/`))]).toEqual([path, true]);
   });
 });
@@ -62,14 +73,18 @@ describe("the toolchain Dockerfiles", () => {
     // Never a checksum file fetched during the build, a BuildKit-only feature or a floating source.
     expect(code(text)).not.toMatch(/SHASUMS|SHA256SUMS|\.sha256\b|--checksum|TARGETARCH|rustup|curl |wget |latest/);
     expect(text).not.toMatch(/# syntax=/);
-    expect(code(text)).toMatch(/sha256sum -c sums/);
+    expect(code(text)).toMatch(/sha(256|512)sum -c sums/);
     // The build stops unless ARCH is one it has sums for and matches the image's own architecture.
     expect(code(text)).toContain('case "$ARCH/$(dpkg --print-architecture)" in');
+    // ARCH in this toolchain's own spelling (TOOLCHAIN_ARCH), for Docker's arm64 and amd64.
+    const arm = TOOLCHAIN_ARCH[name][ARCHES.arm64];
+    const amd = TOOLCHAIN_ARCH[name][ARCHES.amd64];
     // Checked in the FROM ${BASE} stage too, against the base image's own architecture, before anything is installed.
     const final = code(text).slice(code(text).indexOf("FROM ${BASE}"));
-    expect(final).toMatch(/^FROM \$\{BASE\}\nARG ARCH\nRUN case "\$ARCH\/\$\(dpkg --print-architecture\)" in aarch64\/arm64\|x86_64\/amd64\) ;; \*\) exit 1 ;; esac \\\n/);
-    expect(code(text)).toMatch(/aarch64\/arm64\)/);
-    expect(code(text)).toMatch(/x86_64\/amd64\)/);
+    expect(final.startsWith(`FROM \${BASE}\nARG ARCH\nRUN case "$ARCH/$(dpkg --print-architecture)" in ${arm}/arm64|${amd}/amd64) ;; *) exit 1 ;; esac`)).toBe(true);
+    expect(final).toMatch(/^.*\n.*\n.*esac( \\)?\n/);
+    expect(code(text)).toContain(`${arm}/arm64)`);
+    expect(code(text)).toContain(`${amd}/amd64)`);
     expect(code(text)).toMatch(/\*\) exit 1 ;;/);
     // Debian packages only from the base image's snapshot, at exact versions.
     expect(code(text)).not.toMatch(/deb\.debian\.org/);
@@ -116,6 +131,48 @@ describe("the toolchain Dockerfiles", () => {
     expect(text).toContain("uv python install --no-bin --no-registry 3.14.10");
     expect(text).toContain("ca-certificates=20230311+deb12u1");
     expect(text).toContain("ln -s /opt/uv/python/current/bin/python3.14 /usr/local/bin/python3 ");
+  });
+
+  it("dotnet: the .NET SDK 10.0.404 from builds.dotnet.microsoft.com, with the SHA-512s from Microsoft's release metadata", async () => {
+    const text = await dockerfile("dotnet");
+    expect(text).toContain("ADD https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-${ARCH}.tar.gz /fetch/dotnet.tar.gz");
+    for (const [arch, sum] of [
+      ["arm64", "3533a3869da219cac45c567aadac3d8e96cdf1c6a04fe1c1d5fdeefea5d45af8424488f0144730d11b4a751f7ad546fb11e4c2b2725cd8401efee726711f8f11"],
+      ["x64", "577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50"],
+    ])
+      expect(text).toMatch(new RegExp(`${arch}/\\w+\\) printf '%s  %s\\\\n' \\\\\\n +${sum} dotnet\\.tar\\.gz > sums ;;`));
+    expect(code(text)).toContain("sha512sum -c sums");
+    expect(code(text)).toContain("test -d /opt/dotnet/sdk/10.0.404");
+    expect(code(text)).toContain("test -d /opt/dotnet/shared/Microsoft.NETCore.App/10.0.15");
+    // ICU and OpenSSL for the runtime, at exact versions from the base's snapshot; not invariant globalization.
+    expect(text).toContain("libicu72=72.1-3+deb12u1 libssl3=3.0.20-1~deb12u2 openssl=3.0.20-1~deb12u2 ca-certificates=20230311+deb12u1");
+    expect(code(text)).not.toContain("INVARIANT");
+    // Workloads are user-local, under the CLI's home in /work, so the read-only SDK is never written to.
+    expect(code(text)).toContain("touch /opt/dotnet/metadata/workloads/10.0.400/userlocal");
+    expect(code(text)).toContain("ln -s /opt/dotnet/dotnet /usr/local/bin/dotnet");
+  });
+
+  it("java: Temurin JDK 25.0.5.1+2 from Adoptium's GitHub release and Maven 3.10.1 from archive.apache.org, with their checked sums", async () => {
+    const text = await dockerfile("java");
+    expect(text).toContain("ADD https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_${ARCH}_linux_hotspot_25.0.5.1_2.tar.gz /fetch/jdk.tar.gz");
+    expect(text).toContain("ADD https://archive.apache.org/dist/maven/maven-3/3.10.1/binaries/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz");
+    expect(text).toMatch(/aarch64\/arm64\) printf '%s  %s\\n' \\\n +c37879e0d08eeb1baa69fcbb7758cd455b7b1c0ceab1e2a136ccb1713c530984 jdk\.tar\.gz > sums ;;/);
+    expect(text).toMatch(/x64\/amd64\) printf '%s  %s\\n' \\\n +760f91b22c3efc9bd1b64ff950598231be82928cc807e30691a0e7a2995a62c0 jdk\.tar\.gz > sums ;;/);
+    expect(text).toContain("8af2fcc48ee6b8f8fc0b21054226e14404b88500df6483cdeb3ae603408f6de27b1397ac591a9fb0d98fee64f4f624fee1383efd25b8998786cda1598fb9ea39 maven.tar.gz > sums512");
+    expect(code(text)).toContain("sha256sum -c sums");
+    expect(code(text)).toContain("sha512sum -c sums512");
+    // The keys the signatures were checked against, named in the header.
+    expect(text).toContain("3B04 D753 C905 0D9A 5D34 3F39 843C 48A5 65F8 F04B");
+    expect(text).toContain("88BE 34F9 4BDB 2B53 5704 4E2E 3A38 7D43 9641 43E3");
+    // No Gradle installed, and no Debian package: Temurin carries its own CA certificates.
+    expect(code(text)).not.toMatch(/gradle|apt-get/i);
+    // The JDK and Maven reach the network only through Runner's egress proxy, which resolves only in a run that lists hosts.
+    expect(code(text)).toContain(`'http.proxyHost=${EGRESS_ALIAS}' 'http.proxyPort=${EGRESS_PORT}' 'https.proxyHost=${EGRESS_ALIAS}' 'https.proxyPort=${EGRESS_PORT}' >> /opt/java/jdk/conf/net.properties`);
+    for (const protocol of ["https", "http"])
+      expect(code(text)).toContain(`<protocol>${protocol}</protocol><host>${EGRESS_ALIAS}</host><port>${EGRESS_PORT}</port><nonProxyHosts>localhost|127.*|::1|[::1]</nonProxyHosts>`);
+    expect(code(text)).toContain("> /opt/java/maven/conf/settings.xml");
+    expect(code(text)).toContain("ln -s /opt/java/jdk/bin/* /usr/local/bin/");
+    expect(code(text)).toContain("ln -s /opt/java/maven/bin/mvn /usr/local/bin/mvn");
   });
 });
 
@@ -256,6 +313,20 @@ describe("ensureToolchainImage", () => {
     const amd = fakeDocker(baseImages(), { arch: "amd64" });
     await ensureToolchainImage(["rust"], { home: await temp(), docker: amd.docker, notify: () => undefined, base: BASE });
     expect(amd.calls.find((c) => c[0] === "build")).toContain("ARCH=x86_64");
+    // .NET's and Temurin's tarballs name them otherwise, so each gets its own spelling.
+    expect(TOOLCHAIN_ARCH).toEqual({
+      dotnet: { aarch64: "arm64", x86_64: "x64" },
+      java: { aarch64: "aarch64", x86_64: "x64" },
+      python: { aarch64: "aarch64", x86_64: "x86_64" },
+      rust: { aarch64: "aarch64", x86_64: "x86_64" },
+    });
+    for (const [arch, name, spelled] of [["amd64", "dotnet", "x64"], ["arm64", "dotnet", "arm64"], ["amd64", "java", "x64"], ["arm64", "java", "aarch64"], ["arm64", "python", "aarch64"]] as const) {
+      const engine = fakeDocker(baseImages(), { arch });
+      await ensureToolchainImage([name], { home: await temp(), docker: engine.docker, notify: () => undefined, base: BASE });
+      const build = engine.calls.find((c) => c[0] === "build") ?? [];
+      expect(build.filter((a) => a.startsWith("ARCH="))).toEqual([`ARCH=${spelled}`]);
+      expect(build.at(-1)).toBe(TOOLCHAIN_SOURCES[name]);
+    }
     for (const arch of ["s390x", "riscv64", "arm", ""]) {
       const { calls, docker } = fakeDocker(baseImages(), { arch });
       await expect(ensureToolchainImage(["rust"], { home: await temp(), docker, notify: () => undefined, base: BASE })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
@@ -289,7 +360,7 @@ describe("ensureToolchainImage", () => {
 
   it("refuses a set that isn't sorted, known and non-empty, or a base that isn't an image ID", async () => {
     const { calls, docker } = fakeDocker(baseImages());
-    for (const set of [[], ["rust", "python"], ["rust", "rust"], ["dotnet"]] as Toolchain[][])
+    for (const set of [[], ["rust", "python"], ["java", "dotnet"], ["rust", "rust"], ["gradle"]] as Toolchain[][])
       await expect(ensureToolchainImage(set, { home: await temp(), docker, notify: () => undefined, base: BASE })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
     await expect(ensureToolchainImage(["rust"], { home: await temp(), docker, notify: () => undefined, base: "debian:latest" })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
     expect(calls).toEqual([]);

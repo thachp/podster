@@ -483,7 +483,8 @@ describe("a nudge in the poll loop", () => {
 
   it("never shortens a wait after a failed poll, so a nudge can't push past the gateway's backoff", async () => {
     const { clock, gateway, deps } = await paired();
-    const poller = await Poller.open(deps);
+    // No jitter, so the backoff is exactly the interval.
+    const poller = await Poller.open({ ...deps, random: () => 0 });
     const bell = new NudgeBell();
     const stop = new AbortController();
     clock.idles = [];

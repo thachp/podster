@@ -84,4 +84,16 @@ describe("the terminal's line", () => {
     ]);
     expect(FAILURE_OUTCOMES.has("started")).toBe(false);
   });
+
+  it("explains a brief network failure once, at its first try again, and the offline grace period passing", () => {
+    const lines: string[] = [];
+    const log = explainingLogger((l) => void lines.push(l), "/h/logs/errors.jsonl");
+    log("runner.poll", "retry", { agent: "agt_one", status: 0, code: "network", count: 1 });
+    log("runner.poll", "retry", { agent: "agt_one", status: 0, code: "network", count: 2 });
+    log("runner.offline", "grace_passed", { agent: "agt_one", code: "gateway_unreachable" });
+    expect(lines).toHaveLength(5);
+    expect(lines[1]).toMatch(/^  why: Runner couldn't reach Podster: .* tries again, .*\(code network; details: \/h\/logs\/errors\.jsonl\)$/);
+    expect(lines[2]).toBe('{"at":"runner.poll","outcome":"retry","agent":"agt_one","status":0,"code":"network","count":2}');
+    expect(lines[4]).toMatch(/^  why: Runner hasn't reached Podster for longer than its offline grace period/);
+  });
 });

@@ -79,7 +79,9 @@ const TABLE = new Map<string, Explanation>([
   ...group(["record_invalid", "repo_record_invalid", "result_record_invalid"], "Runner's own record of this run was incomplete.", SUPPORT),
   // Podster's answers.
   ...group(["version_conflict", "invalid_transition", "commit_changed", "not_allowed", "not_found", "task_not_found", "idempotency_mismatch"], "Podster refused the call: the task had changed, or wasn't this agent's to act on.", "Nothing to do; the task is read again."),
-  ...group(["accept_unexpected", "unknown", "unexpected", "network", "too_large", "not_data", "bad_answer", "unreadable", "request_invalid"], "Runner got an answer it didn't expect.", SUPPORT),
+  ...group(["network", "discovery_failed"], "Runner couldn't reach Podster: the request failed on the network before any answer came back.", "Nothing to do for a brief failure: Runner tries again, with longer waits between tries. If it goes on, check this machine's network, VPN or proxy."),
+  ...group(["gateway_unreachable"], "Runner hasn't reached Podster for longer than its offline grace period, so it starts nothing new until it does.", "Check this machine's network, VPN or proxy; Runner keeps trying and checks this agent's access again once Podster answers. Stop it with Ctrl-C or `stop`."),
+  ...group(["accept_unexpected", "unknown", "unexpected", "too_large", "not_data", "bad_answer", "unreadable", "request_invalid"], "Runner got an answer it didn't expect.", SUPPORT),
   // Runner's own state.
   ...group(["accept_without_decision", "start_without_decision", "reservation_invalid", "docker_rm_lingers", "docker_network_lingers", "docker_exec_ls_cut", "docker_ps_cut", "docker_ps_output", "diagnostics_folder_unsafe", "diagnostics_file_unsafe"], "Runner's own bookkeeping or cleanup didn't go as expected.", RESTART),
 ]);
@@ -127,7 +129,16 @@ export const FAILURE_OUTCOMES = new Set([
   "halted",
   "held",
   "waiting",
+  "grace_passed",
 ]);
+
+/**
+ * Whether a log line gets a plain-English line under it: a failure, or the first try again after a brief failure, so the
+ * owner reads once why Runner is waiting rather than under every try.
+ */
+export function explained(outcome: string, count: number | undefined): boolean {
+  return FAILURE_OUTCOMES.has(outcome) || (outcome === "retry" && count === 1);
+}
 
 /** The terminal's line under a failure: what happened and what to do, the code, and where the details are. */
 export function explainLine(code: string, diagnosticsFile: string): string {

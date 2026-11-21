@@ -27,7 +27,7 @@ async function paired() {
   expect(result.outcome).toBe("connected");
   clock.onIdle = null;
   gateway.calls = [];
-  const deps: PollerDeps = { origin: ORIGIN, fetch: gateway.fetch, secrets, state, clock, log, intervalMs: 10_000, graceMs: 120_000 };
+  const deps: PollerDeps = { origin: ORIGIN, fetch: gateway.fetch, secrets, state, clock, log, intervalMs: 10_000, graceMs: 120_000, random: () => 0 };
   return { clock, gateway, secrets, state, logged, deps };
 }
 
@@ -154,6 +154,36 @@ describe("the inbox loop", () => {
     expect(await poller.pollOnce()).toBe("ok");
     expect(gateway.calls.slice(calls).map((c) => c.capability).slice(0, 2)).toEqual(["get_identity", "list_workspaces"]);
     expect(poller.authorityFresh()).toBe(true);
+  });
+
+  it("keeps polling through fetch throwing on its first polls, logging one ID-only line per try, then records the offer", async () => {
+    const { gateway, deps, clock, logged, state } = await paired();
+    gateway.workspaces = [ROOM];
+    gateway.offer(ROOM, "tsk_one");
+    const poller = await Poller.open(deps);
+    // The 2026-11-21 report: the very first request failed at the network.
+    gateway.executeScript = ["network", "network", "network"];
+    const stop = new AbortController();
+    const waited = clock.idles.length;
+    clock.onIdle = () => {
+      if (gateway.acked > 0) stop.abort();
+    };
+    expect(await poller.run(stop.signal)).toBe("stopped");
+    expect(Object.keys((await state.load()).offers)).toEqual([`${ROOM}/tsk_one`]);
+    expect(clock.idles.slice(waited, waited + 4)).toEqual([10_000, 20_000, 40_000, 10_000]);
+    const retries = logged.filter((l) => l.includes('"outcome":"retry"'));
+    expect(retries).toEqual([1, 2, 3].map((count) => JSON.stringify({ at: "runner.poll", outcome: "retry", agent: AGENT, status: 0, code: "network", count })));
+  });
+
+  it("jitters its backoff below the full wait, never past it", async () => {
+    const { gateway, deps } = await paired();
+    const poller = await Poller.open({ ...deps, random: () => 0.999 });
+    expect(await poller.pollOnce()).toBe("ok");
+    gateway.executeScript = ["network", "network"];
+    const first = await poller.pollOnce();
+    expect(poller.nextWaitMs(first)).toBe(5_005);
+    const second = await poller.pollOnce();
+    expect(poller.nextWaitMs(second)).toBe(10_010);
   });
 
   it("waits as long as a 429 asks, and never less than its backoff", async () => {

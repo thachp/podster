@@ -4,7 +4,7 @@
  * happened and what to do, from the fixed table in `explain.ts`, and names the local diagnostics file. Nothing but the
  * validated code reaches the explanation, so no task text, error message or secret can.
  */
-import { explainLine, FAILURE_OUTCOMES } from "../core/explain.js";
+import { explained, explainLine } from "../core/explain.js";
 import { logLine, type Logger } from "../core/runtime.js";
 import { FileDiagnostics } from "./diagnostics.js";
 
@@ -12,8 +12,8 @@ export function explainingLogger(write: (line: string) => void, diagnosticsFile:
   return (at, outcome, fields = {}) => {
     const line = logLine(at, outcome, fields);
     write(line);
-    const code = (JSON.parse(line) as { code?: string }).code;
-    if (FAILURE_OUTCOMES.has(outcome) && code !== undefined) write(explainLine(code, diagnosticsFile));
+    const { code, count } = JSON.parse(line) as { code?: string; count?: number };
+    if (explained(outcome, count) && code !== undefined) write(explainLine(code, diagnosticsFile));
   };
 }
 

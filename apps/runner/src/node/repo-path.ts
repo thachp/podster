@@ -201,8 +201,10 @@ export class GitRepositoryPath implements RepositoryPath {
   }
 
   /**
-   * Runner's own `info/exclude` in the task's Git folder: the tools' cache folders (`WORK_TREE_CACHES`), so they are
-   * never committed. Written at checkout, and again before a publish if it isn't exactly that.
+   * Runner's own `info/exclude` in the task's Git folder: the tools' cache folders (`WORK_TREE_CACHES`) and the default
+   * ignore list (`WORK_TREE_DEFAULT_IGNORE`: dependency folders, build output, scratch, `.DS_Store` and `.env` files), so
+   * nothing untracked there is ever committed, and `ignoredFolders` names the folders so the work tree check skips them.
+   * A tracked file under one is still committed. Written at checkout, and again before a publish if it isn't exactly that.
    */
   private async excludeCaches(task: RepoTask): Promise<void> {
     const gitDir = this.gitDir(task.workspace_id, task.task_id);
@@ -409,18 +411,32 @@ export function nameOf(bytes: Uint8Array): string {
  * The folders in `git ls-files -z --others --ignored --directory`'s answer, read as bytes, relative to the work tree's
  * top: only entries Git names with a trailing `/`, which it does for a folder it ignores whole. Any entry that isn't
  * valid UTF-8 refuses. An ignored file, a link Git ignores (Git names a link as a file), and anything with an empty,
- * `.` or `..` part are left out, so they are walked.
+ * `.` or `..` part are left out, so they are walked. A folder with any other listed entry beneath it is left out too
+ * (the review of #508): when everything in a folder is ignored, Git lists the folder and also the ignored entries in
+ * it (`f/` and `f/.env`, `x/` and `x/node_modules/`), so skipping `f` would never `lstat` a link `f/.env`, and skipping
+ * `x` would never read the entries of `x/node_modules`, where a `.git` look-alike must refuse. Such a parent is walked
+ * as usual, and only the deepest listed folders are skipped.
  */
 export function wholeFolders(listing: Uint8Array): Set<string> {
-  const folders = new Set<string>();
+  const entries: string[] = [];
   const bytes = Buffer.from(listing.buffer, listing.byteOffset, listing.byteLength);
   for (let at = 0; at < bytes.length; ) {
     const end = bytes.indexOf(0, at);
-    const entry = nameOf(bytes.subarray(at, end === -1 ? bytes.length : end));
+    entries.push(nameOf(bytes.subarray(at, end === -1 ? bytes.length : end)));
     at = end === -1 ? bytes.length : end + 1;
+  }
+  // Every folder some listed entry lies beneath, whatever that entry is.
+  const parents = new Set<string>();
+  for (const entry of entries) {
+    const trimmed = entry.endsWith("/") ? entry.slice(0, -1) : entry;
+    for (let slash = trimmed.indexOf("/"); slash !== -1; slash = trimmed.indexOf("/", slash + 1)) parents.add(trimmed.slice(0, slash));
+  }
+  const folders = new Set<string>();
+  for (const entry of entries) {
     if (!entry.endsWith("/")) continue;
     const parts = entry.slice(0, -1).split("/");
-    if (parts.every((part) => part !== "" && part !== "." && part !== "..")) folders.add(parts.join("/"));
+    const name = parts.join("/");
+    if (parts.every((part) => part !== "" && part !== "." && part !== "..") && !parents.has(name)) folders.add(name);
   }
   return folders;
 }

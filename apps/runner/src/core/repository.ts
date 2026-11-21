@@ -65,6 +65,17 @@ export const REQUIRED_RULES = ["pull_request", "required_status_checks", "update
  * a new token, minted after that full recheck (#462's review, item 9).
  */
 export const RENEW_BEFORE_MS = 4 * 60 * 1000;
+/**
+ * The folders at the top of the work tree where tools in the task's container keep caches and installs (`/work` is
+ * both `HOME` and the work tree): npm's global prefix (the task image's npmrc), cargo's home and uv's cache
+ * (`TOOLCHAIN_ENV`), and anything else under `~/.cache`. Runner writes them into the `info/exclude` of its own Git folder,
+ * which no container can reach, so they are never committed, whatever the repository's own `.gitignore` says. A file the
+ * repository tracks under one of them is still committed as usual: an exclude applies only to untracked files.
+ */
+export const WORK_TREE_CACHES = [".cache", ".cargo", ".npm-global"] as const;
+/** The `info/exclude` Runner writes: each cache folder, anchored at the work tree's top, as a folder only. */
+export const WORK_TREE_EXCLUDE = WORK_TREE_CACHES.map((name) => `/${name}/\n`).join("");
+
 /** The prefix of every task branch. */
 export const BRANCH_PREFIX = "podster/";
 /** The fixed identity of a commit Runner makes, so no name or address from anywhere else is ever used. */

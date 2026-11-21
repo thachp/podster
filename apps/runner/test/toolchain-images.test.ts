@@ -7,9 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { TOOLCHAINS, type Toolchain } from "../src/core/toolchains.js";
+import { WORK_TREE_CACHES } from "../src/core/repository.js";
+import { TOOLCHAIN_ENV, TOOLCHAINS, type Toolchain } from "../src/core/toolchains.js";
 import type { DockerCli } from "../src/node/docker-sandbox.js";
-import { BASE_TAG, buildingLine, builtOn, ensureToolchainImage, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES } from "../src/node/toolchain-images.js";
+import { BASE_TAG, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES } from "../src/node/toolchain-images.js";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const id = (c: string) => `sha256:${c.repeat(64)}`;
@@ -29,6 +30,17 @@ afterEach(async () => {
 const dockerfile = (name: Toolchain) => readFile(join(TOOLCHAIN_SOURCES[name], "Dockerfile"), "utf8");
 /** The Dockerfile's instructions, its comments left out. */
 const code = (text: string) => text.split("\n").filter((line) => !line.startsWith("#")).join("\n");
+
+describe("the caches tools keep in the work tree", () => {
+  it("are each under a folder Runner excludes from a repository room's commit", async () => {
+    const inWork = Object.values(TOOLCHAIN_ENV).flatMap((env) => Object.values(env)).filter((v) => v.startsWith("/work/"));
+    // npm's global prefix, from the task image's npmrc.
+    const npmrc = (await readFile(join(PACKAGE, "sandbox", "Dockerfile"), "utf8")).match(/prefix=(\/work\/[^\\]+)\\n/);
+    expect(npmrc?.[1]).toBe("/work/.npm-global");
+    expect([...inWork, npmrc?.[1]].sort()).toEqual(["/work/.cache/uv", "/work/.cargo", "/work/.npm-global"]);
+    for (const path of [...inWork, npmrc?.[1] as string]) expect([path, WORK_TREE_CACHES.some((name) => path === `/work/${name}` || path.startsWith(`/work/${name}/`))]).toEqual([path, true]);
+  });
+});
 
 describe("the toolchain Dockerfiles", () => {
   it("are the package's own toolchains/<name> folders, one per toolchain, each shipped in the package", async () => {
@@ -53,6 +65,9 @@ describe("the toolchain Dockerfiles", () => {
     expect(code(text)).toMatch(/sha256sum -c sums/);
     // The build stops unless ARCH is one it has sums for and matches the image's own architecture.
     expect(code(text)).toContain('case "$ARCH/$(dpkg --print-architecture)" in');
+    // Checked in the FROM ${BASE} stage too, against the base image's own architecture, before anything is installed.
+    const final = code(text).slice(code(text).indexOf("FROM ${BASE}"));
+    expect(final).toMatch(/^FROM \$\{BASE\}\nARG ARCH\nRUN case "\$ARCH\/\$\(dpkg --print-architecture\)" in aarch64\/arm64\|x86_64\/amd64\) ;; \*\) exit 1 ;; esac \\\n/);
     expect(code(text)).toMatch(/aarch64\/arm64\)/);
     expect(code(text)).toMatch(/x86_64\/amd64\)/);
     expect(code(text)).toMatch(/\*\) exit 1 ;;/);
@@ -108,12 +123,14 @@ type Answer = Partial<{ code: number; stdout: string; stderr: string; cut: boole
 type Image = { labels: Record<string, string> | null; layers: string[] };
 
 /** A Docker with images in memory: inspect answers from them; a build adds one, its layers the parent's plus one. */
-function fakeDocker(images: Map<string, Image>, opts: { arch?: string; build?: (args: string[]) => Answer | null; nextId?: () => string } = {}) {
+function fakeDocker(images: Map<string, Image>, opts: { arch?: string; build?: (args: string[]) => Answer | null; nextId?: () => string; hold?: (args: string[], signal: AbortSignal | undefined) => Promise<void> } = {}) {
   const calls: string[][] = [];
   const tags = new Map<string, string>();
   let n = 0;
-  const docker: DockerCli = async (args) => {
+  const docker: DockerCli = async (args, o) => {
     calls.push(args);
+    if (args[0] === "build" && opts.hold) await opts.hold(args, o.signal);
+    if (o.signal?.aborted) return { code: 137, stdout: "", stderr: "killed", cut: false };
     const ok = (stdout = ""): Required<Answer> => ({ code: 0, stdout, stderr: "", cut: false });
     if (args[0] === "version") return ok(`${opts.arch ?? "arm64"}\n`);
     if (args[0] === "tag") {
@@ -285,5 +302,118 @@ describe("ensureToolchainImage", () => {
     expect(await recipeOf(BASE, "python")).not.toBe(a);
     expect(await recipeOf(BASE, "rust", async () => Buffer.from(`${await dockerfile("rust")} `))).not.toBe(a);
     expect(await recipeOf(BASE, "rust", async () => Buffer.from(await dockerfile("rust")))).toBe(a);
+  });
+});
+
+describe("toolchain builds shared between runs (review items 2 and 3 on #497)", () => {
+  /** A build held open until released, recording whether its signal was aborted. */
+  function held() {
+    const builds: { args: string[]; signal: AbortSignal | undefined; release: () => void }[] = [];
+    const hold = (args: string[], signal: AbortSignal | undefined) =>
+      new Promise<void>((resolve) => {
+        builds.push({ args, signal, release: resolve });
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+    return { builds, hold };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 5));
+  async function untilBuilds(builds: unknown[], count: number) {
+    for (let i = 0; i < 200 && builds.length < count; i++) await flush();
+    expect(builds.length).toBe(count);
+  }
+
+  it("a halted run leaves the build another run waits on running, and that run gets its image", async () => {
+    const home = await temp();
+    const { builds, hold } = held();
+    const { calls, docker } = fakeDocker(baseImages(), { hold });
+    const images = toolchainImages({ home, docker, notify: () => undefined, base: BASE });
+    const a = new AbortController();
+    const b = new AbortController();
+    const runA = images(["rust"], a.signal);
+    const runB = images(["rust"], b.signal);
+    await untilBuilds(builds, 1);
+    a.abort();
+    await expect(runA).rejects.toThrow("halted");
+    expect(builds[0].signal?.aborted).toBe(false);
+    builds[0].release();
+    const image = await runB;
+    expect(image).toMatch(/^sha256:/);
+    expect((await readFile(join(home, pinName(["rust"])), "utf8")).trim()).toBe(image);
+    expect(calls.filter((c) => c[0] === "build")).toHaveLength(1);
+  });
+
+  it("ends a build only when every run waiting on it has halted, and the next ask starts afresh", async () => {
+    const home = await temp();
+    const { builds, hold } = held();
+    const { calls, docker } = fakeDocker(baseImages(), { hold });
+    const images = toolchainImages({ home, docker, notify: () => undefined, base: BASE });
+    const a = new AbortController();
+    const b = new AbortController();
+    const runA = images(["rust"], a.signal);
+    const runB = images(["rust"], b.signal);
+    await untilBuilds(builds, 1);
+    a.abort();
+    await expect(runA).rejects.toThrow("halted");
+    expect(builds[0].signal?.aborted).toBe(false);
+    b.abort();
+    await expect(runB).rejects.toThrow("halted");
+    expect(builds[0].signal?.aborted).toBe(true);
+    expect(existsSync(join(home, pinName(["rust"])))).toBe(false);
+    const c = images(["rust"], new AbortController().signal);
+    await untilBuilds(builds, 2);
+    builds[1].release();
+    expect(await c).toMatch(/^sha256:/);
+    expect(calls.filter((x) => x[0] === "build")).toHaveLength(2);
+  });
+
+  it("builds and pins a step two sets share once, when both ask at the same time", async () => {
+    const home = await temp();
+    const { builds, hold } = held();
+    const { calls, docker } = fakeDocker(baseImages(), { hold });
+    const said: string[] = [];
+    const images = toolchainImages({ home, docker, notify: (l) => said.push(l), base: BASE });
+    const python = images(["python"], new AbortController().signal);
+    const both = images(["python", "rust"], new AbortController().signal);
+    await untilBuilds(builds, 1);
+    await flush();
+    // Only Python's step builds while both wait on it.
+    expect(builds).toHaveLength(1);
+    builds[0].release();
+    const pythonImage = await python;
+    await untilBuilds(builds, 2);
+    builds[1].release();
+    const bothImage = await both;
+    expect(calls.filter((c) => c[0] === "build").map((c) => c.at(-1))).toEqual([TOOLCHAIN_SOURCES.python, TOOLCHAIN_SOURCES.rust]);
+    expect((await readFile(join(home, pinName(["python"])), "utf8")).trim()).toBe(pythonImage);
+    expect((await readFile(join(home, pinName(["python", "rust"])), "utf8")).trim()).toBe(bothImage);
+    expect(said).toEqual([buildingLine(["python"]), buildingLine(["python", "rust"])]);
+  });
+
+  it("SharedBuilds: one build per key, a waiter's own abort ends only its wait, and a finished key can run again", async () => {
+    const shared = new SharedBuilds();
+    let started = 0;
+    let release: (v: string) => void = () => undefined;
+    let buildSignal: AbortSignal | null = null;
+    const start = (signal: AbortSignal) => {
+      started += 1;
+      buildSignal = signal;
+      return new Promise<string>((r) => (release = r));
+    };
+    const a = new AbortController();
+    const one = shared.join("k", start, a.signal);
+    const two = shared.join("k", start);
+    expect(started).toBe(1);
+    a.abort();
+    await expect(one).rejects.toThrow("halted");
+    expect((buildSignal as AbortSignal | null)?.aborted).toBe(false);
+    release("done");
+    expect(await two).toBe("done");
+    await flush();
+    expect(shared.size).toBe(0);
+    await expect(shared.join("k", async () => "again")).resolves.toBe("again");
+    expect(started).toBe(1);
+    const gone = new AbortController();
+    gone.abort();
+    await expect(shared.join("k", start, gone.signal)).rejects.toThrow("halted");
   });
 });

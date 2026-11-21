@@ -117,6 +117,8 @@ async function engineArch(docker: DockerCli, signal?: AbortSignal): Promise<stri
 }
 
 type Opts = { home: string; docker: DockerCli; notify: (line: string) => void; base: string; signal?: AbortSignal; readSource?: (name: Toolchain) => Promise<Buffer> };
+/** How a step runs: `run` with the signal its build should end on. The default runs it at once, on the caller's signal. */
+export type StepGate = (pin: string, run: (signal: AbortSignal | undefined) => Promise<string>) => Promise<string>;
 
 /** One step: the image for `set`, built FROM `parent` with `set`'s last toolchain added. */
 async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise<string> {
@@ -151,9 +153,79 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
  * The image for a room's toolchains (sorted, each once, at least one), on the pinned base task image `base`: each
  * prefix of the set built and pinned in turn, so `["python", "rust"]` reuses `["python"]`'s image.
  */
-export async function ensureToolchainImage(set: readonly Toolchain[], opts: Opts): Promise<string> {
+export async function ensureToolchainImage(set: readonly Toolchain[], opts: Opts & { gate?: StepGate }): Promise<string> {
   if (!isToolchainList(set) || set.length === 0 || !IMAGE_ID.test(opts.base)) throw new Error(TOOLCHAIN_BUILD_FAILED);
+  const gate: StepGate = opts.gate ?? ((_pin, run) => run(opts.signal));
   let parent = opts.base;
-  for (let i = 1; i <= set.length; i++) parent = await ensureStep(set.slice(0, i), parent, opts);
+  for (let i = 1; i <= set.length; i++) {
+    const step = set.slice(0, i);
+    const from = parent;
+    parent = await gate(pinName(step), (signal) => ensureStep(step, from, { ...opts, signal }));
+  }
   return parent;
+}
+
+/**
+ * Builds shared by everyone waiting on them, one per key (a pin name), so two sets sharing a step, such as `["python"]`
+ * and `["python", "rust"]`, never build or pin `toolchain-image-python` at once (review item 3 on #497). Each waiter's own
+ * signal ends only its own wait; the build goes on while anyone still waits, bounded by its own time limit, and is
+ * aborted only when the last waiter leaves (review item 2 on #497), so a halted run never fails another.
+ */
+export class SharedBuilds {
+  private readonly running = new Map<string, { promise: Promise<string>; controller: AbortController; waiters: number }>();
+
+  join(key: string, start: (signal: AbortSignal) => Promise<string>, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) return Promise.reject(new Error("halted"));
+    let entry = this.running.get(key);
+    if (!entry) {
+      const controller = new AbortController();
+      const made: { promise: Promise<string>; controller: AbortController; waiters: number } = { promise: Promise.resolve(""), controller, waiters: 0 };
+      made.promise = start(controller.signal).finally(() => {
+        if (this.running.get(key) === made) this.running.delete(key);
+      });
+      made.promise.catch(() => undefined);
+      this.running.set(key, made);
+      entry = made;
+    }
+    const joined = entry;
+    joined.waiters += 1;
+    return new Promise<string>((resolve, reject) => {
+      let left = false;
+      const leave = () => {
+        if (left) return false;
+        left = true;
+        signal?.removeEventListener("abort", onAbort);
+        joined.waiters -= 1;
+        return true;
+      };
+      const onAbort = () => {
+        if (!leave()) return;
+        // The last waiter gone: the build ends, and a later ask starts afresh rather than joining one being stopped.
+        if (joined.waiters === 0) {
+          if (this.running.get(key) === joined) this.running.delete(key);
+          joined.controller.abort();
+        }
+        reject(new Error("halted"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      joined.promise.then(
+        (value) => leave() && resolve(value),
+        (error: unknown) => leave() && reject(error),
+      );
+    });
+  }
+
+  /** How many builds are running, for tests. */
+  get size(): number {
+    return this.running.size;
+  }
+}
+
+/**
+ * Runner's source of toolchain images for its sandbox: each step built once at a time through `SharedBuilds`, on the
+ * pinned base task image.
+ */
+export function toolchainImages(opts: Omit<Opts, "signal">): (set: readonly Toolchain[], signal: AbortSignal) => Promise<string> {
+  const builds = new SharedBuilds();
+  return (set, signal) => ensureToolchainImage(set, { ...opts, signal, gate: (pin, run) => builds.join(pin, run, signal) });
 }

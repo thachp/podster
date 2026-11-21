@@ -12,7 +12,8 @@
 # build time from python-build-standalone's release 20261110 (the build uv 0.13.9 itself names for 3.14.10), fetched
 # here and handed to uv as a local mirror, so uv downloads nothing. Runner passes ARCH, the Docker Engine's architecture
 # as these releases name it (aarch64 or x86_64), so only that architecture's tarballs are fetched, with either of
-# Docker's builders; the build stops unless it matches the image's own architecture. Each tarball's SHA-256 is written
+# Docker's builders; the build stops unless it matches both the fetch stage's architecture and the base image's,
+# checked in each stage. Each tarball's SHA-256 is written
 # here and checked with `sha256sum -c`; the build never trusts a checksum file it fetches, and uv checks the Python
 # tarball against its own built-in SHA-256 as well. The sums were read 2026-11-20 from the downloaded files after GitHub's build-provenance
 # attestation for each was verified (`gh attestation verify --repo astral-sh/uv` and
@@ -52,7 +53,9 @@ RUN cd /fetch \
  && ln -s /opt/uv/python/cpython-3.14.10-linux-*-gnu /opt/uv/python/current
 
 FROM ${BASE}
-RUN apt-get -o Acquire::Check-Valid-Until=false update \
+ARG ARCH
+RUN case "$ARCH/$(dpkg --print-architecture)" in aarch64/arm64|x86_64/amd64) ;; *) exit 1 ;; esac \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
  && apt-get install -y --no-install-recommends ca-certificates=20230311+deb12u1 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /opt/uv /opt/uv

@@ -20,7 +20,8 @@
 # libc6-dev come from the same snapshot.debian.org timestamp as the base image, at exact versions, with
 # ca-certificates so cargo can verify crates.io over TLS when a room's network lists it. Runner passes ARCH, the Docker
 # Engine's architecture as Rust names it (aarch64 or x86_64), so only that architecture's tarballs are fetched, with
-# either of Docker's builders; the build stops unless it matches the image's own architecture.
+# either of Docker's builders; the build stops unless it matches both the fetch stage's architecture and the base
+# image's, checked in each stage.
 #
 # At run time Runner's fixed environment for a Rust room sets CARGO_HOME=/work/.cargo, so cargo's registry cache and
 # `cargo install` land in the task's folder. Builds go to cargo's default target folder inside the crate, under /work,
@@ -59,7 +60,9 @@ RUN cd /fetch \
  && rm -rf /opt/rust/share/doc /opt/rust/share/man /opt/rust/lib/rustlib/uninstall.sh /opt/rust/lib/rustlib/install.log
 
 FROM ${BASE}
-RUN apt-get -o Acquire::Check-Valid-Until=false update \
+ARG ARCH
+RUN case "$ARCH/$(dpkg --print-architecture)" in aarch64/arm64|x86_64/amd64) ;; *) exit 1 ;; esac \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
  && apt-get install -y --no-install-recommends gcc=4:12.2.0-3 gcc-12=12.2.0-14+deb12u1 libc6-dev=2.36-9+deb12u14 binutils=2.40-2 ca-certificates=20230311+deb12u1 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /opt/rust /opt/rust

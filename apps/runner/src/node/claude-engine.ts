@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url";
 import { CLAUDE_PROFILE } from "../core/claude-profile.js";
 import type { Logger } from "../core/runtime.js";
 import { ClaudeDriver, type ClaudeDriverDeps } from "./claude-driver.js";
-import { ensureToolchainImage } from "./toolchain-images.js";
+import { toolchainImages } from "./toolchain-images.js";
 import { DockerSandbox, dockerCli, dockerHost, findDocker, IMAGE_ID, type DockerCli, type ToolchainImages } from "./docker-sandbox.js";
 import { dockerReachable, homeLengthRefusal, homeRefusal, isWsl, linuxCheckFailure, readMounts, readProcVersion, relayModeFor, resolvedPath } from "./platform.js";
 import { loadProxyProgram } from "./egress-network.js";
@@ -221,17 +221,9 @@ export async function claudeEngine(opts: {
     }
     opts.log("adapter.platform", "linux_checked", {});
   }
-  // A room's toolchain image, on its first run: one build per set at a time, whichever runs ask.
-  const building = new Map<string, Promise<string>>();
-  const toolchainImage: ToolchainImages = (set, signal) => {
-    const key = set.join("-");
-    let pending = building.get(key);
-    if (!pending) {
-      pending = ensureToolchainImage(set, { home: opts.home, docker, notify, base: image, signal }).finally(() => building.delete(key));
-      building.set(key, pending);
-    }
-    return pending;
-  };
+  // A room's toolchain image, on its first run: each step built once at a time, whichever runs ask, and never ended by
+  // one run's halt while another still waits for it.
+  const toolchainImage: ToolchainImages = toolchainImages({ home: opts.home, docker, notify, base: image });
   const sandbox = new DockerSandbox({ docker, image, uid, gid, home: opts.home, wait: opts.wait, log: opts.log, proxy: { image: pxImage, program: () => loadProxyProgram() }, toolchainImage, ...(relay === "unix" ? { mounts: () => (opts.mounts !== undefined ? opts.mounts : readMounts()) } : {}) });
   return {
     drivers: { claude_agent_sdk: driver },

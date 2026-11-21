@@ -189,7 +189,8 @@ try {
     // has just emptied. apps/api/build is never touched, so a later run or a deploy can only find the plain build there.
     const rehearsalBuild = join(local, "api-rehearsal");
     const on = prepareStack({ skipBuild: true, apiVars, apiBuild: rehearsalBuild });
-    run("worker-build", ["--release", "--features", "rehearsal", "--out-dir", relative(join(repo, "apps/api"), rehearsalBuild)], join(repo, "apps/api"), { PODSTER_REHEARSAL_GITHUB_URL: github });
+    // worker-build's own options come before --features, which it hands on to cargo with what follows.
+    run("worker-build", ["--release", "--out-dir", relative(join(repo, "apps/api"), rehearsalBuild), "--features", "rehearsal"], join(repo, "apps/api"), { PODSTER_REHEARSAL_GITHUB_URL: github });
     const onPort = await freePort();
     const onBase = `http://localhost:${onPort}`;
     // Its own assertion key pair too, which prepareStack just made: the API checks against the new public half.

@@ -29,9 +29,9 @@ import {
 } from "../src/core/repository.js";
 import { pullText } from "../src/core/pull-text.js";
 import { lineLogger } from "../src/core/runtime.js";
-import { checkedHelper, findGit, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec } from "../src/node/git.js";
+import { checkedHelper, findGit, GIT_OUTPUT_CUT, GIT_TIMED_OUT, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec, type GitResult } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
-import { checkWorkTree, GitRepositoryPath, RepoBroker, wholeFolders } from "../src/node/repo-path.js";
+import { checkWorkTree, GitRepositoryPath, IGNORED_LIST_TIMEOUT_MS, nameOf, RepoBroker, wholeFolders } from "../src/node/repo-path.js";
 
 const OWNER = "org_owner";
 const ROOM = "room_1";
@@ -476,10 +476,24 @@ describe("Git as Runner runs it", () => {
 // ---- The repository path, end to end on real Git against a local bare repository, with a fake GitHub API ----
 
 const realGit = findGit();
+/** A path whose last part is the given bytes, which need not be UTF-8. */
+const rawPath = (folder: string, name: number[]) => Buffer.concat([Buffer.from(`${folder}/`), Buffer.from(name)]);
+/** Whether this file system takes a name that isn't UTF-8: Linux's do, APFS refuses it with EILSEQ. */
+const RAW_NAMES = await (async () => {
+  const dir = await mkdtemp(join(tmpdir(), "runner-raw-"));
+  try {
+    await mkdir(rawPath(dir, [0xff]));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+})();
 const sh = (cwd: string, ...args: string[]) => execFileSync(realGit as string, args, { cwd, env: { PATH: "/usr/bin:/bin", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString().trim();
 
 /** A "GitHub": a local bare repository with `main`, and an API answering for it. */
-async function world() {
+async function world(opts: { ignored_list_timeout_ms?: number } = {}) {
   const root = await temp();
   const home = join(root, "home");
   await mkdir(home, { mode: 0o700 });
@@ -522,11 +536,12 @@ async function world() {
   const real = gitCli(realGit as string, gitHome, { PATH: "/usr/bin:/bin" });
   const gitCalls: { args: string[]; secret: boolean }[] = [];
   /** What the next push answers instead of pushing, as Git prints a refused credential. */
-  const fakes: { push: { code: number; stdout: string; stderr: string } | null; extraCommit: boolean } = { push: null, extraCommit: false };
+  const fakes: { push: { code: number; stdout: string; stderr: string } | null; extraCommit: boolean; list: GitResult | null } = { push: null, extraCommit: false, list: null };
   const git: GitExec = async (args, opts) => {
     gitCalls.push({ args, secret: opts.secret !== undefined });
     expect(args.join(" ")).not.toContain(TOKEN);
     if (args.includes("push") && fakes.push) return fakes.push;
+    if (args.includes("ls-files") && args.includes("--ignored") && fakes.list) return fakes.list;
     if (args.includes("commit") && fakes.extraCommit) {
       // Something other than Runner's one commit lands first: what the `HEAD^` check is there for.
       fakes.extraCommit = false;
@@ -545,7 +560,7 @@ async function world() {
   const logged: string[] = [];
   const clock = { now: () => NOW, idle: async () => undefined };
   const broker = new RepoBroker(request, clock, lineLogger((l) => logged.push(l)));
-  const path = new GitRepositoryPath({ home, broker, git, github, helper: HELPER_PATH, log: lineLogger((l) => logged.push(l)), wait: async () => undefined });
+  const path = new GitRepositoryPath({ home, broker, git, github, helper: HELPER_PATH, log: lineLogger((l) => logged.push(l)), wait: async () => undefined, ...opts });
   const task = { workspace_id: ROOM, task_id: TASK, task_folder: taskFolder, repository: { ...SCOPE, branch: "podster/task_1" } };
   return { root, home, remote, seed, taskFolder, calls, api, gitCalls, fakes, tokens, logged, broker, path, task, signal: new AbortController().signal, head: (b: string) => sh(remote, "rev-parse", `refs/heads/${b}`) };
 }
@@ -851,6 +866,62 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".gitignore", "README.md", "node_modules/patched.js"]);
   });
 
+  it("gives up listing ignored folders after a short time, so a .gitignore that is a pipe can't hold the lifecycle", async () => {
+    expect(IGNORED_LIST_TIMEOUT_MS).toBe(30_000);
+    const w = await world({ ignored_list_timeout_ms: 500 });
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await mkdir(join(w.taskFolder, "sub"));
+    // Git opens each .gitignore it reaches; opening a pipe waits for a writer that never comes.
+    execFileSync("/usr/bin/mkfifo", [join(w.taskFolder, "sub", ".gitignore")]);
+    const started = Date.now();
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_timeout" });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  it("refuses by its own code when Git's list of ignored paths passes the output cap, or the list times out", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
+    w.fakes.list = { code: GIT_OUTPUT_CUT, stdout: "", stderr: "" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_ignored_too_many" });
+    w.fakes.list = { code: GIT_TIMED_OUT, stdout: "", stderr: "" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_timeout" });
+    // A list with no bytes to read names nothing exactly: refused, never read as empty.
+    w.fakes.list = { code: 0, stdout: "", stderr: "" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "commit_failed" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  // Names that aren't UTF-8: Linux file systems take any bytes; APFS refuses them (EILSEQ), so these run on Linux CI only.
+  it.skipIf(!RAW_NAMES)("refuses a name that isn't UTF-8 beside a real `\uFFFD` folder, so the walk can't check one twice and miss the other", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    const raw = rawPath(w.taskFolder, [0xff]);
+    await mkdir(raw);
+    await symlink("/etc/passwd", Buffer.concat([raw, Buffer.from("/passwd")]));
+    await mkdir(join(w.taskFolder, "\uFFFD"));
+    await writeFile(join(w.taskFolder, "\uFFFD", "ok.txt"), "x\n");
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_name" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  it.skipIf(!RAW_NAMES)("refuses when the repository ignores a name that isn't UTF-8, so the real `\uFFFD` folder is never skipped for it", async () => {
+    const w = await world();
+    sh(w.seed, "checkout", "--quiet", "main");
+    await writeFile(join(w.seed, ".gitignore"), Buffer.concat([Buffer.from([0xff]), Buffer.from("/\n")]));
+    sh(w.seed, "add", ".gitignore");
+    sh(w.seed, "commit", "--quiet", "-m", "ignore");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await mkdir(rawPath(w.taskFolder, [0xff]));
+    await writeFile(Buffer.concat([rawPath(w.taskFolder, [0xff]), Buffer.from("/x")]), "x");
+    await mkdir(join(w.taskFolder, "\uFFFD"));
+    await symlink("/etc/passwd", join(w.taskFolder, "\uFFFD", "passwd"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_name" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
   it("never skips a folder only a global excludes file ignores: Runner's Git reads none", async () => {
     const w = await world();
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
@@ -1030,7 +1101,13 @@ describe("the work tree check", () => {
   });
 
   it("takes only Git's whole folders, with no empty, `.` or `..` part, and counts a skipped folder's own entries only", async () => {
-    expect([...wholeFolders("node_modules/\0a.log\0packages/web/.venv/\0../x/\0a//b/\0./y/\0\0")]).toEqual(["node_modules", "packages/web/.venv"]);
+    expect([...wholeFolders(Buffer.from("node_modules/\0a.log\0packages/web/.venv/\0../x/\0a//b/\0./y/\0\0"))]).toEqual(["node_modules", "packages/web/.venv"]);
+    // Read as bytes: an entry that isn't UTF-8 refuses rather than turning into U+FFFD.
+    expect(() => wholeFolders(Buffer.concat([Buffer.from("ok/\0"), Buffer.from([0xff, 0x2f, 0])]))).toThrow(/work_tree_name/);
+    expect(() => nameOf(Buffer.from([0xc0, 0xaf]))).toThrow(/work_tree_name/);
+    // A byte-order mark is a name's own bytes, kept and not stripped.
+    expect(nameOf(Buffer.from([0xef, 0xbb, 0xbf, 0x61]))).toBe("\uFEFFa");
+    expect(nameOf(Buffer.from("caf\u00e9"))).toBe("caf\u00e9");
     const dir = await temp();
     await mkdir(join(dir, "deps", "a", "b"), { recursive: true });
     await symlink("/etc/passwd", join(dir, "deps", "a", "b", "link"));

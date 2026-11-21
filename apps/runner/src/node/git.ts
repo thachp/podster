@@ -22,7 +22,15 @@ import { fileURLToPath } from "node:url";
 import { isPlainPath, RepoPathError } from "../core/repository.js";
 import { childEnv } from "./child-env.js";
 
-export type GitResult = { code: number; stdout: string; stderr: string };
+/**
+ * One Git command's outcome. `stdout_bytes` is stdout as Git wrote it, for a caller that must read names byte for byte
+ * (a decoded string turns bytes that aren't UTF-8 into U+FFFD). `code` is 125 when output passed `MAX_GIT_OUTPUT` and
+ * 124 when the command ran past its time; both kill the command.
+ */
+export type GitResult = { code: number; stdout: string; stderr: string; stdout_bytes?: Buffer };
+/** The code of a command cut at `MAX_GIT_OUTPUT`, and of one killed at its time limit. */
+export const GIT_OUTPUT_CUT = 125;
+export const GIT_TIMED_OUT = 124;
 /** Runs one Git command. `secret` goes to the child's descriptor 3 and nowhere else. */
 export type GitExec = (args: string[], opts: { secret?: string; signal?: AbortSignal; timeout_ms?: number }) => Promise<GitResult>;
 
@@ -123,9 +131,12 @@ export function gitCli(program: string, home: string, from: NodeJS.ProcessEnv = 
         pipe.end(`${opts.secret}\n`);
       }
       child.on("error", () => reject(new RepoPathError("git_unavailable", true)));
-      child.on("close", (code) => {
-        if (cut) return resolve({ code: 125, stdout: "", stderr: "" });
-        resolve({ code: code ?? 128, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
+      child.on("close", (code, signal) => {
+        if (cut) return resolve({ code: GIT_OUTPUT_CUT, stdout: "", stderr: "" });
+        // Killed by spawn's own timeout (an abort rejects above, before this).
+        if (signal === "SIGKILL" && !opts.signal?.aborted) return resolve({ code: GIT_TIMED_OUT, stdout: "", stderr: "" });
+        const stdout = Buffer.concat(out);
+        resolve({ code: code ?? 128, stdout: stdout.toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), stdout_bytes: stdout });
       });
     });
 }

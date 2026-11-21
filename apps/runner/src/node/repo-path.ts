@@ -47,7 +47,7 @@ import {
 } from "../core/repository.js";
 import type { Clock, Logger } from "../core/runtime.js";
 import { foldedSegment } from "../core/tool-policy.js";
-import { checkedHelper, findGit, gitCli, type GitExec } from "./git.js";
+import { checkedHelper, findGit, GIT_OUTPUT_CUT, GIT_TIMED_OUT, gitCli, type GitExec, type GitResult } from "./git.js";
 import { githubApi, type GitHubCall } from "./github-api.js";
 import { ensureFolder, MAX_FOLDER_ENTRIES, readNoFollow, removeOwnFolder, writeNew } from "./safe-fs.js";
 
@@ -141,7 +141,16 @@ export type RepoPathDeps = {
   wait?: (ms: number) => Promise<void>;
   /** The web app's origin for the task's page link, from `appOriginFor`'s fixed table; null leaves the link out. */
   app_origin?: string | null;
+  /** How long Git may take to list the folders it ignores; `IGNORED_LIST_TIMEOUT_MS` unless a test sets it. */
+  ignored_list_timeout_ms?: number;
 };
+
+/**
+ * How long listing the ignored folders may take before the publish refuses (`work_tree_timeout`). It runs before the
+ * walk, over a tree the task wrote, and the lifecycle runs one task at a time: a `.gitignore` that is a pipe would
+ * otherwise hold every task for `GIT_TIMEOUT_MS`. **Proposed** figure.
+ */
+export const IGNORED_LIST_TIMEOUT_MS = 30_000;
 
 /** Reads of a pull request whose head still shows the commit before the push, and the wait between them. */
 export const PR_READS = 5;
@@ -186,9 +195,9 @@ export class GitRepositoryPath implements RepositoryPath {
     return repo;
   }
 
-  private async git(task: RepoTask, args: string[], opts: { secret?: string; signal: AbortSignal }): Promise<{ code: number; stdout: string; stderr: string }> {
+  private async git(task: RepoTask, args: string[], opts: { secret?: string; signal: AbortSignal; timeout_ms?: number }): Promise<GitResult> {
     const helper = opts.secret === undefined ? null : this.deps.helper;
-    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal });
+    return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal, timeout_ms: opts.timeout_ms });
   }
 
   /**
@@ -212,9 +221,12 @@ export class GitRepositoryPath implements RepositoryPath {
    * else (`core.excludesFile=/dev/null` in `hardening`, and no global or system configuration in `gitEnv`).
    */
   private async ignoredFolders(task: RepoTask, signal: AbortSignal): Promise<Set<string>> {
-    const listed = await this.git(task, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ":/"], { signal });
-    if (listed.code !== 0) throw new RepoPathError("commit_failed");
-    return wholeFolders(listed.stdout);
+    const args = ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ":/"];
+    const listed = await this.git(task, args, { signal, timeout_ms: this.deps.ignored_list_timeout_ms ?? IGNORED_LIST_TIMEOUT_MS });
+    if (listed.code === GIT_TIMED_OUT) throw new RepoPathError("work_tree_timeout");
+    if (listed.code === GIT_OUTPUT_CUT) throw new RepoPathError("work_tree_ignored_too_many");
+    if (listed.code !== 0 || listed.stdout_bytes === undefined) throw new RepoPathError("commit_failed");
+    return wholeFolders(listed.stdout_bytes);
   }
 
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
@@ -375,14 +387,37 @@ export class GitRepositoryPath implements RepositoryPath {
 
 const scopeOf = (task: RepoTask): RepoScope => ({ full_name: task.repository.full_name, provider_repo_id: task.repository.provider_repo_id });
 
+const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
 /**
- * The folders in `git ls-files -z --others --ignored --directory`'s answer, relative to the work tree's top: only
- * entries Git names with a trailing `/`, which it does for a folder it ignores whole. An ignored file, a link Git
- * ignores (Git names a link as a file), and anything with an empty, `.` or `..` part are left out, so they are walked.
+ * A name read as bytes, as text only when it is valid UTF-8 that encodes back to the same bytes; otherwise the publish
+ * refuses (`work_tree_name`). Node reads a name that isn't UTF-8 as one with U+FFFD in it, which could name another
+ * entry: the walk would check that one twice and never the real one, and Git's list could skip the wrong folder.
  */
-export function wholeFolders(listing: string): Set<string> {
+export function nameOf(bytes: Uint8Array): string {
+  let name: string;
+  try {
+    name = UTF8.decode(bytes);
+  } catch {
+    throw new RepoPathError("work_tree_name");
+  }
+  if (!Buffer.from(name, "utf8").equals(bytes)) throw new RepoPathError("work_tree_name");
+  return name;
+}
+
+/**
+ * The folders in `git ls-files -z --others --ignored --directory`'s answer, read as bytes, relative to the work tree's
+ * top: only entries Git names with a trailing `/`, which it does for a folder it ignores whole. Any entry that isn't
+ * valid UTF-8 refuses. An ignored file, a link Git ignores (Git names a link as a file), and anything with an empty,
+ * `.` or `..` part are left out, so they are walked.
+ */
+export function wholeFolders(listing: Uint8Array): Set<string> {
   const folders = new Set<string>();
-  for (const entry of listing.split("\0")) {
+  const bytes = Buffer.from(listing.buffer, listing.byteOffset, listing.byteLength);
+  for (let at = 0; at < bytes.length; ) {
+    const end = bytes.indexOf(0, at);
+    const entry = nameOf(bytes.subarray(at, end === -1 ? bytes.length : end));
+    at = end === -1 ? bytes.length : end + 1;
     if (!entry.endsWith("/")) continue;
     const parts = entry.slice(0, -1).split("/");
     if (parts.every((part) => part !== "" && part !== "." && part !== "..")) folders.add(parts.join("/"));
@@ -395,7 +430,7 @@ export function wholeFolders(listing: string): Set<string> {
  * kind, nothing named `.git` or folding to it at any depth (a nested repository would be read by host Git), and no more
  * entries than the folder bound allows. `ignored` names folders Git ignores whole (`ignoredFolders`), relative to the
  * top. One is skipped only when the walk reaches it, so a link on the way to it refuses first, and only when it is
- * itself a real folder, not a link. Its own entries are still read and counted against the bound, so that no `.git`
+ * itself a real folder, not a link. Every name is read as bytes and must be valid UTF-8 (`nameOf`). Its own entries are still read and counted against the bound, so that no `.git`
  * look-alike sits where host Git looks for a nested repository; nothing below them is walked or counted, since nothing
  * in it is ever committed (`node_modules/.bin`, a virtual environment and uv's cache hold links of their own). A link
  * Git ignores as a file still refuses.
@@ -413,11 +448,15 @@ export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTR
       continue;
     }
     const skipped = skip.has(at);
-    const dir = await opendir(at);
+    // Names as bytes (Node's types don't list "buffer" here, though it takes it), each checked before it is used.
+    const dir = await opendir(at, { encoding: "buffer" as BufferEncoding });
     for await (const entry of dir) {
       if (++entries > maxEntries) throw new RepoPathError("work_tree_too_large");
-      if (foldedSegment(entry.name) === ".git") throw new RepoPathError("work_tree_git");
-      if (!skipped) stack.push(join(at, entry.name));
+      const raw: unknown = entry.name;
+      if (!Buffer.isBuffer(raw)) throw new RepoPathError("work_tree_name");
+      const name = nameOf(raw);
+      if (foldedSegment(name) === ".git") throw new RepoPathError("work_tree_git");
+      if (!skipped) stack.push(join(at, name));
     }
   }
 }

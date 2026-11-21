@@ -1,6 +1,7 @@
 // The task container, as Runner's is: the SDK never runs anything; allowed tool calls run here. One container per
 // task: user 1000, all capabilities dropped, no-new-privileges, read-only root, no network, the task folder at /work,
-// no home, key or Docker socket mounted. The docker CLI is a third-party program, so it gets the allow-listed
+// no home, key or Docker socket mounted. The image is never pulled at run time (`--pull never`); pull it first.
+// The docker CLI is a third-party program, so it gets the allow-listed
 // environment from e2e/child-env.mjs plus a throwaway DOCKER_CONFIG holding `{}`.
 //
 // Used only by spike.mjs's real scenarios; the tests use an in-memory session instead.
@@ -30,7 +31,7 @@ function docker(env, args, { allowFail = false } = {}) {
 export function startTaskContainer(env, { name, taskDir }) {
   docker(env, ["rm", "-f", name], { allowFail: true });
   docker(env, [
-    "run", "-d", "--rm", "--name", name, "--network", "none", "--user", "1000:1000", "--cap-drop", "ALL",
+    "run", "-d", "--rm", "--pull", "never", "--name", name, "--network", "none", "--user", "1000:1000", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,size=64m", "--pids-limit", "128",
     "--memory", "512m", "-e", "HOME=/tmp", "-v", `${taskDir}:/work`, "-w", "/work", IMAGE, "sleep", "infinity",
   ]);

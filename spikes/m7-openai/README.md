@@ -13,12 +13,14 @@ The owner approved **2.00 USD in total** on 2026-11-21. `spike.mjs` enforces:
 | Cap | Figure | Where |
 | --- | --- | --- |
 | Per run | 0.20 USD (`spend_micro_usd: 200_000`) | The broker's reservation: a request whose worst case would pass the cap is refused before it is sent |
-| Per day | 2.00 USD (`2_000_000` micro-USD) | `results/spend.json`; a run's cap is lowered to what is left |
+| Per day | 2.00 USD (`2_000_000` micro-USD) | `results/spend.json` (`lib/ledger.mjs`); a run's cap is lowered to what is left |
 | In total | 2.00 USD | `results/spend.json`; no run starts with less than 0.02 USD left |
 | Model | `gpt-6-luna` only | The profile's price table; any other model is refused by the broker |
 | Turns, output | 20 requests a run; 60,000 output tokens a run; 4,096 per request | The broker; the SDK's `maxTurns` is a second lock |
 
 The OpenAI project's own budget is the owner's to set (RUNNER-OPENAI.md question 4). The `cap` scenario sets its run cap to 0.003 USD on purpose.
+
+**The ledger can't be outrun.** Only one spike process runs at a time: it takes `results/spend.lock` with `O_EXCL` and a second process is refused. Each run's whole cap is written into `results/spend.json` as spent before the run starts, and replaced with the real figure (spent plus anything still reserved that never settled) only when it ends. A run that is killed or crashes stays charged its whole cap, and leaves the lock behind. To clear a stale lock: make sure no `node spike.mjs` is running, check `results/spend.json` (the crashed run shows `"settled": false` and is charged its cap), then delete `results/spend.lock`.
 
 ## How to run
 
@@ -28,7 +30,7 @@ The owner creates a dedicated OpenAI project and a project key for it (Runner an
 cd spikes/m7-openai
 npm ci --ignore-scripts
 npm test                                   # step 1: free, no network
-docker pull node:22-bookworm-slim          # the task image; Docker must be running
+docker pull node:22-bookworm-slim          # the task image; runs use --pull never, so pull it first
 node spike.mjs --help                      # lists the scenarios and caps
 node spike.mjs traffic                     # step 2
 node spike.mjs bound                       # step 3
@@ -37,7 +39,7 @@ node spike.mjs read edit refuse            # step 5
 node spike.mjs cancel cap                  # step 6
 ```
 
-`M7O_KEY_FILE` names another key file; `M7O_SCRATCH` another scratch folder (default `work/`, ignored by git). Each run prints one line of counts and writes `results/<scenario>.json`; `results/spend.json` keeps the running spend. Commit the results with the write-up.
+`M7O_KEY_FILE` names another key file. `M7O_SCRATCH` names a scratch folder, which must be inside the spike's `work/` folder (the default, ignored by git); anything else is refused. Each run prints one line of counts and writes `results/<scenario>.json`; `results/spend.json` keeps the running spend. Commit those with the write-up; git ignores everything else under `results/`, the lock and temporary files included.
 
 Run `gpt-6.1-terra` only if the owner allows it; that is a reviewed profile change, not a flag.
 
@@ -52,8 +54,9 @@ Run `gpt-6.1-terra` only if the owner allows it; that is a reviewed profile chan
 | `lib/driver.mjs` | The stand-in `openai_agents` driver: `OpenAIResponsesModel` over an `OpenAI` client whose `fetch` is `brokerFetch` and whose key is a placeholder; one strict function tool per allowed tool, each asking the decision point before it runs; `StructuredOutput` stops the loop; tracing off three ways; a model provider that refuses every lookup |
 | `lib/policy.mjs` | The stand-in run policy, tool schemas, the result schema and Runner's own bound on the result. Pure |
 | `lib/sockets.mjs` | The socket check: `net.client.socket` and undici's `beforeConnect` diagnostics channels, recorded by host and port only |
-| `lib/sandbox.mjs` | The task container for the real scenarios: user 1000, all capabilities dropped, `no-new-privileges`, read-only root, `--network none`, the task folder at `/work`. The docker CLI gets `e2e/child-env.mjs`'s environment |
-| `spike.mjs` | Steps 2 to 6, the synthetic tasks and room, the spend ledger |
+| `lib/sandbox.mjs` | The task container for the real scenarios: user 1000, all capabilities dropped, `no-new-privileges`, read-only root, `--network none`, `--pull never`, the task folder at `/work`. The docker CLI gets `e2e/child-env.mjs`'s environment |
+| `lib/ledger.mjs` | The spend ledger: the `O_EXCL` lock, each run's cap charged before it starts and settled after, and the `M7O_SCRATCH` check |
+| `spike.mjs` | Steps 2 to 6, the synthetic tasks and room |
 | `test/` | Step 1 and the checks below, against `test/fake-upstream.mjs`, an in-process fake Responses upstream |
 
 ## Scenarios (not yet run)
@@ -71,7 +74,7 @@ Result files hold IDs, tool names, rule names, counts, bounds, usage counts and 
 
 ## What the tests show (step 1, run 2026-11-21)
 
-`npm test`: 54 tests, 54 pass, against the real SDK packages with an in-process fake upstream and no network.
+`npm test`: 60 tests, 60 pass, against the real SDK packages with an in-process fake upstream and no network.
 
 - **The loop and decision point.** The SDK's loop calls Runner's function tools; each asks `decide` first; a refused call isn't run and the model gets the fixed refusal text; a tool not allowed isn't offered; `StructuredOutput` ends the loop with the result.
 - **Model traffic.** Every request reaches the fake upstream only through the broker and transport, with the test key added by the transport alone; `store` is `false`, `max_output_tokens` is the bound, `parallel_tool_calls` is `false`, `truncation` is `disabled`, and only function tools are sent. `brokerFetch` refuses any other URL, method or path, including `/v1/traces/ingest`, `/v1/conversations` and `wss://`.
@@ -80,6 +83,7 @@ Result files hold IDs, tool names, rule names, counts, bounds, usage counts and 
 - **Caps.** Turn, output-token and spend caps stop the run; the reservation refuses the request whose worst case would pass the cap, so spend stays under it; cancel cuts the request in flight.
 - **Tracing (S-53).** A trace processor registered before the driver starts receives nothing; the global provider hands out only no-op traces (with a control showing the same processor does receive a trace when tracing is on). During a whole run the socket recorder sees no socket at all. The recorder itself is tested against real loopback `net`, `tls` and `fetch` connections.
 - **Key and environment (S-54).** Wrong-provider and malformed keys, link, shared and multi-line key files, and `OPENAI_*`, proxy and TLS environment names are refused; errors never carry the key.
+- **Ledger.** A child process killed mid-run leaves its cap charged and its lock in place, and the next process is refused until the lock is cleared; a second process is refused while the first holds the lock; `M7O_SCRATCH` outside `work/`, or a link out of it, is refused.
 - **Supply chain (S-58).** Exact pins in `package.json`, installed and in the lockfile; every package with `sha512` integrity from the npm registry; no install script; no realtime or umbrella package; no spike source imports the umbrella, the trace exporter, any hosted or built-in tool or the WebSocket transport.
 
 ## Found while building

@@ -9,20 +9,20 @@
 // charges only: no task text, model text, command or key. Spend is kept in results/spend.json; caps: 0.20 USD a
 // run, 2.00 USD a day, 2.00 USD in total, `gpt-6-luna` only.
 
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RunBroker } from "./lib/broker.mjs";
 import { providerTransport, readKeyFile, keyRefusal, envRefusals } from "./lib/transport.mjs";
-import { OPENAI_PROFILE, RUN_CAPS, DAY_CAP_MICRO_USD, TOTAL_CAP_MICRO_USD, PINNED, versionRefusal } from "./lib/profile.mjs";
+import { OPENAI_PROFILE, RUN_CAPS, TOTAL_CAP_MICRO_USD, PINNED, versionRefusal } from "./lib/profile.mjs";
 import { runTask, tracingState } from "./lib/driver.mjs";
 import { decide, boundResult } from "./lib/policy.mjs";
 import { startSocketRecorder, unexplained } from "./lib/sockets.mjs";
+import { Ledger, scratchDir } from "./lib/ledger.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const RESULTS = join(here, "results");
-const SPEND = join(RESULTS, "spend.json");
-const SCRATCH = process.env.M7O_SCRATCH ?? join(here, "work");
+const SCRATCH = scratchDir(here, process.env.M7O_SCRATCH);
 const KEY_FILE = process.env.M7O_KEY_FILE ?? join(process.env.HOME ?? "", ".podster", "openai-runner.key");
 const ALLOWED_ENDPOINTS = [{ host: OPENAI_PROFILE.host, port: 443 }];
 const MIN_RUN_MICRO_USD = 20_000; // refuse to start a run with less than 0.02 USD of budget left
@@ -66,20 +66,8 @@ const TASKS = {
 };
 
 // ---- Spend ledger ---------------------------------------------------------------------------------------------
-
-const today = () => new Date().toISOString().slice(0, 10);
-const ledger = () => (existsSync(SPEND) ? JSON.parse(readFileSync(SPEND, "utf8")) : { total_micro_usd: 0, days: {}, runs: [] });
-function budgetLeft() {
-  const l = ledger();
-  return Math.min(TOTAL_CAP_MICRO_USD - l.total_micro_usd, DAY_CAP_MICRO_USD - (l.days[today()] ?? 0));
-}
-function addSpend(scenario, spent, cap) {
-  const l = ledger();
-  l.total_micro_usd += spent;
-  l.days[today()] = (l.days[today()] ?? 0) + spent;
-  l.runs.push({ scenario, at: new Date().toISOString(), spent_micro_usd: spent, cap_micro_usd: cap });
-  writeFileSync(SPEND, JSON.stringify(l, null, 2) + "\n");
-}
+// lib/ledger.mjs: one spike process at a time (an O_EXCL lock file), and each run's whole cap charged before it
+// starts, replaced by the real figure when it ends. A killed run stays charged its cap.
 
 // ---- Start checks -----------------------------------------------------------------------------------------------
 
@@ -98,21 +86,31 @@ function startChecks() {
 
 // ---- One run ---------------------------------------------------------------------------------------------------
 
-async function runScenario(scenario, key, { sandbox }) {
-  const left = budgetLeft();
+async function runScenario(scenario, key, { sandbox, ledger }) {
+  const left = ledger.left();
   if (left < MIN_RUN_MICRO_USD) throw new Error(`refused: ${left} micro-USD left of the spike's budget`);
   const taskName = { traffic: "read", read: "read", edit: "edit", refuse: "refuse", bound: "bound", usage: "usage", cancel: "edit", cap: "loop" }[scenario];
   const task = TASKS[taskName];
   const capSpend = scenario === "cap" ? Math.min(3_000, left) : Math.min(RUN_CAPS.spend_micro_usd, left);
   const caps = { ...RUN_CAPS, ...(task.caps ?? {}), spend_micro_usd: capSpend };
+  const ledgerId = ledger.reserve(scenario, capSpend);
+  let broker = null;
+  try {
+    return await runReserved({ scenario, key, sandbox, taskName, task, capSpend, caps, setBroker: (b) => (broker = b) });
+  } finally {
+    // Let in-flight settlement finish, then replace the reserved cap with the real figure. Anything the broker still
+    // holds as reserved never settled, so it counts too. A run that failed before its broker existed sent nothing.
+    if (broker) await new Promise((r) => setTimeout(r, 200));
+    ledger.settle(ledgerId, broker ? broker.state.spent_micro_usd + broker.state.reserved_micro_usd : 0);
+  }
+}
 
+async function runReserved({ scenario, key, sandbox, taskName, task, capSpend, caps, setBroker }) {
   // The task folder and its container.
   const taskDir = join(SCRATCH, "tasks", `${scenario}-${Date.now()}`);
   rmSync(taskDir, { recursive: true, force: true });
   mkdirSync(taskDir, { recursive: true });
   for (const [f, text] of Object.entries(ROOM)) writeFileSync(join(taskDir, f), text);
-  const containerName = `m7o-${scenario}-${process.pid}`;
-  sandbox.startTaskContainer(sandbox.env, { name: containerName, taskDir });
 
   const controller = new AbortController();
   let stopAt = null;
@@ -123,6 +121,7 @@ async function runScenario(scenario, key, { sandbox }) {
     if (scenario === "cancel" && transport.sent === 1) setTimeout(() => controller.abort(new Error("cancelled")), 50);
     return send(forward, signal);
   };
+  // Handed to the caller before the container starts, so the ledger settles from it whatever happens next.
   const broker = new RunBroker({
     profile: OPENAI_PROFILE,
     caps,
@@ -133,6 +132,9 @@ async function runScenario(scenario, key, { sandbox }) {
     },
   });
   controller.signal.addEventListener("abort", () => broker.cancel(), { once: true });
+  setBroker(broker);
+  const containerName = `m7o-${scenario}-${process.pid}`;
+  sandbox.startTaskContainer(sandbox.env, { name: containerName, taskDir });
 
   // The refused-before-send checks of step 3: bodies with refused keys go straight to the broker; none may be sent.
   const preSend = [];
@@ -171,7 +173,6 @@ async function runScenario(scenario, key, { sandbox }) {
   const ended = Date.now();
   // Let in-flight settlement finish before reading the broker's books.
   await new Promise((r) => setTimeout(r, 200));
-  addSpend(scenario, broker.state.spent_micro_usd, capSpend);
 
   const bound = rec.result ? boundResult(rec.result) : null;
   const out = {
@@ -248,14 +249,24 @@ async function main(argv) {
   const bad = keyRefusal(key, OPENAI_PROFILE);
   if (bad) throw new Error(`refused: ${bad}`);
   const sandbox = await import("./lib/sandbox.mjs");
-  mkdirSync(RESULTS, { recursive: true });
-  mkdirSync(SCRATCH, { recursive: true });
-  const env = sandbox.dockerEnv(SCRATCH);
-  for (const s of argv) {
-    const out = await runScenario(s, key, { sandbox: { ...sandbox, env } });
-    console.log(`${s}: requests=${out.broker.requests} spent_micro_usd=${out.broker.spent_micro_usd} stopped=${out.broker.stopped ?? "-"} result=${out.run.result?.status ?? "none"}`);
+  const ledger = new Ledger(RESULTS).lock();
+  const release = () => ledger.unlock();
+  process.once("SIGINT", () => {
+    // The open run stays charged its cap; only the lock is released.
+    release();
+    process.exit(130);
+  });
+  try {
+    mkdirSync(SCRATCH, { recursive: true });
+    const env = sandbox.dockerEnv(SCRATCH);
+    for (const s of argv) {
+      const out = await runScenario(s, key, { sandbox: { ...sandbox, env }, ledger });
+      console.log(`${s}: requests=${out.broker.requests} spent_micro_usd=${out.broker.spent_micro_usd} stopped=${out.broker.stopped ?? "-"} result=${out.run.result?.status ?? "none"}`);
+    }
+    console.log(`spike total: ${ledger.read().total_micro_usd} micro-USD of ${TOTAL_CAP_MICRO_USD}`);
+  } finally {
+    release();
   }
-  console.log(`spike total: ${ledger().total_micro_usd} micro-USD of ${TOTAL_CAP_MICRO_USD}`);
 }
 
 main(process.argv.slice(2)).catch((err) => {

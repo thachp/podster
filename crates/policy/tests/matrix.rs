@@ -625,6 +625,28 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
         authorize_requester_change(&outsider, &orphan, "x", false),
         Verdict::NotParticipant
     );
+    // A guest whose grant was widened to the Coordinator's scope sees the task but can't take it over (2026-11-21), and a
+    // person who's a coordinating member can.
+    for kind in [Agent, Person] {
+        let widened = Caller {
+            scopes: Scopes::COORDINATOR,
+            ..caller("stranger", kind, Role::Guest)
+        };
+        assert_eq!(
+            authorize_requester_change(&widened, &orphan, "stranger", false),
+            Verdict::Forbidden,
+            "{kind:?}"
+        );
+        let member = Caller {
+            scopes: Scopes::COORDINATOR,
+            ..caller("stranger", kind, Role::Member)
+        };
+        assert_eq!(
+            authorize_requester_change(&member, &orphan, "stranger", false),
+            Verdict::Allow,
+            "{kind:?}"
+        );
+    }
     // A hidden task stays hidden, however the request is formed.
     let guest = caller("stranger", Agent, Role::Guest);
     assert_eq!(
@@ -1118,9 +1140,13 @@ fn a_plan_is_for_the_requester_or_a_human_admin_who_sees_the_whole_room() {
         plan(&member(&t.requester, Role::Guest, TaskScope::OwnCreate)),
         Verdict::Forbidden
     );
-    // Seeing everything and being a coordinator isn't authority over someone else's task.
+    // A coordinator plans someone else's task (the architect's ruling on issue 507), and seeing everything alone doesn't.
     assert_eq!(
         plan(&member("agt_other", Role::Member, TaskScope::Coordinate)),
+        Verdict::Allow
+    );
+    assert_eq!(
+        plan(&member("agt_other", Role::Member, TaskScope::AllCreate)),
         Verdict::Forbidden
     );
     // An assignee and a reviewer have no say, even with the whole room in view.
@@ -1258,7 +1284,7 @@ fn an_agent_limited_to_its_own_tasks_sees_notices_about_itself_and_nobody_elses(
 }
 
 #[test]
-fn only_a_person_who_runs_the_room_sets_the_plan_start() {
+fn a_person_who_runs_the_room_sets_the_plan_start_and_a_plain_member_or_any_guest_does_not() {
     for (kind, role, allowed) in [
         (Person, Role::Owner, true),
         (Person, Role::Admin, true),
@@ -1279,6 +1305,91 @@ fn only_a_person_who_runs_the_room_sets_the_plan_start() {
         ),
         Verdict::NotParticipant
     );
+}
+
+#[test]
+fn a_coordinator_manages_the_plan_and_nothing_else_on_someone_elses_task() {
+    // The architect's ruling on issue 507, 2026-11-21: the room's start and every visible task's estimate and predecessors.
+    let t = task();
+    let with = |kind, role, tasks| Caller {
+        scopes: Scopes {
+            tasks,
+            ..Scopes::COORDINATOR
+        },
+        ..caller("agt_pm", kind, role)
+    };
+    for kind in [Person, Agent] {
+        let coordinator = with(kind, Role::Member, TaskScope::Coordinate);
+        assert!(coordinates_plan(&coordinator));
+        assert_eq!(
+            authorize_workroom(&coordinator, WorkroomAction::SetPlanStart),
+            Verdict::Allow,
+            "{kind:?}"
+        );
+        assert_eq!(
+            authorize_task(&coordinator, &t, A::SetPlan),
+            Verdict::Allow,
+            "{kind:?}"
+        );
+        for action in A::ALL {
+            if matches!(action, A::Read | A::PostMessage | A::SetPlan) {
+                continue;
+            }
+            assert_eq!(
+                authorize_task(&coordinator, &t, action),
+                Verdict::Forbidden,
+                "{kind:?} {action:?}"
+            );
+        }
+        for action in [
+            WorkroomAction::ManageAccess,
+            WorkroomAction::AppointAdmin,
+            WorkroomAction::ReadAuditLog,
+            WorkroomAction::ManageRoom,
+            WorkroomAction::TransferOwner,
+            WorkroomAction::PlanRelationship,
+        ] {
+            assert_eq!(
+                authorize_workroom(&coordinator, action),
+                Verdict::Forbidden,
+                "{kind:?} {action:?}"
+            );
+        }
+        // An ordinary member, and a guest whose grant was widened to the Coordinator's task scope.
+        for other in [
+            with(kind, Role::Member, TaskScope::AllCreate),
+            with(kind, Role::Member, TaskScope::All),
+            with(kind, Role::Guest, TaskScope::Coordinate),
+        ] {
+            assert!(!coordinates_plan(&other));
+            assert_eq!(
+                authorize_workroom(&other, WorkroomAction::SetPlanStart),
+                Verdict::Forbidden,
+                "{other:?}"
+            );
+            assert_ne!(authorize_task(&other, &t, A::SetPlan), Verdict::Allow);
+        }
+        // Someone outside the room, whatever its stored grant.
+        let outside = with(kind, Role::None, TaskScope::Coordinate);
+        assert!(!coordinates_plan(&outside));
+        assert_eq!(
+            authorize_workroom(&outside, WorkroomAction::SetPlanStart),
+            Verdict::NotParticipant
+        );
+        assert_eq!(
+            authorize_task(&outside, &t, A::SetPlan),
+            Verdict::NotParticipant
+        );
+    }
+    // An agent stored as an owner or admin holds a guest's scope, so it doesn't coordinate either.
+    for role in [Role::Owner, Role::Admin] {
+        let agent = with(Agent, role, TaskScope::Coordinate);
+        assert!(!coordinates_plan(&agent));
+        assert_eq!(
+            authorize_workroom(&agent, WorkroomAction::SetPlanStart),
+            Verdict::Forbidden
+        );
+    }
 }
 
 #[test]

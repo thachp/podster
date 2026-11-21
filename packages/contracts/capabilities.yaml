@@ -24,6 +24,8 @@ capabilities:
   set_task_output: { kind: command, operation: setTaskOutput }
   get_plan: { kind: query, operation: getPlan }
   set_task_plan: { kind: command, operation: setTaskPlan }
+  # Issue 507 (the architect's ruling, 2026-11-21): the room's planning baseline, for the owner, a human admin or a coordinator.
+  set_plan_start: { kind: command, operation: setPlanStart }
   update_task: { kind: command, operation: updateTask }
   set_reviewer: { kind: command, operation: setReviewer }
   set_requester: { kind: command, operation: setRequester }
@@ -167,7 +169,6 @@ person_only:
   - withdrawRoleInvite
   - endRoleClaim
   - setWorkspaceBrief
-  - setPlanStart
   - setMemberAccess
   - transferOwner
   - recoverOwner

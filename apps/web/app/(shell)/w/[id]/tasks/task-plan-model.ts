@@ -47,11 +47,12 @@ export function parseDuration(text: string): number | null | undefined {
 }
 
 /**
- * Only a guide to whether to offer the form. A plan is for a task's requester or a human admin who sees the whole room, and
- * only someone who sees the whole room is given a revision. Rust decides, and its refusal shows as `planProblem` says.
+ * Only a guide to whether to offer the form. A plan is for a task's requester, a human admin or a coordinator (issue 507) who
+ * sees the whole room, and only someone who sees the whole room is given a revision. Rust decides, and its refusal shows as
+ * `planProblem` says.
  */
-export const offersEdit = (plan: PlanRead, requester: string, me: string, role: string | undefined, archived: boolean) =>
-  plan.plan_revision !== undefined && !archived && (me === requester || role === "owner" || role === "admin");
+export const offersEdit = (plan: PlanRead, requester: string, me: string, role: string | undefined, archived: boolean, coordinates = false) =>
+  plan.plan_revision !== undefined && !archived && (me === requester || role === "owner" || role === "admin" || coordinates);
 
 export const isFinished = (status: string) => status === "completed" || status === "canceled";
 

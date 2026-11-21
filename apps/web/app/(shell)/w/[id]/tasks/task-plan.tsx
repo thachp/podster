@@ -10,7 +10,7 @@ import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
 import { taskPath } from "./task-actions";
 import { candidates, durationText, isFinished, MAX_DURATION_DAYS, MAX_PREDECESSORS, missesLinks, needsLatest, offersEdit, parseDuration, planProblem, predecessorsOf, repeatedTitles, type PlanRead } from "./task-plan-model";
-import { isArchivedRoom, TASK_STATUS, type TaskStatus } from "./task-model";
+import { coordinatesPlan, isArchivedRoom, TASK_STATUS, type TaskStatus } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
 const TARGET = "min-h-11 sm:min-h-8";
@@ -194,7 +194,7 @@ export function TaskPlan({ api, me, role }: { api: SheetApi<LoadedTask>; me: str
   }
 
   const incomplete = missesLinks(plan, finished);
-  const offered = offersEdit(plan, task.requester, me, role, isArchivedRoom(room)) && !incomplete;
+  const offered = offersEdit(plan, task.requester, me, role, isArchivedRoom(room), coordinatesPlan(room, role)) && !incomplete;
   const nothingToChange = finished && stored.length === 0;
   const repeated = repeatedTitles(plan);
   const tellApart = (title: string, id: string) => (repeated.has(title) ? `${title} (${id})` : title);

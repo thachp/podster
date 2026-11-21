@@ -15,9 +15,9 @@ const OPEN_LIST_UP_TO = 5;
  * The one place that says what the forecast is. Every date and word about the plan comes from the server, and all forecasting
  * stays in Rust. A read that hasn't answered says nothing here, so a room with a forecast never flashes "unavailable".
  */
-export function GanttForecastPanel({ plan, failed, workspace, role, archived, reload }: { plan: GanttPlan | null; failed: boolean; workspace: string; role: string | undefined; archived: boolean; reload: () => void }) {
+export function GanttForecastPanel({ plan, failed, workspace, role, archived, reload, coordinates = false }: { plan: GanttPlan | null; failed: boolean; workspace: string; role: string | undefined; archived: boolean; reload: () => void; coordinates?: boolean }) {
   if (!plan && !failed) return null;
-  const form = plan && offersStart(plan, role, archived) ? <GanttStartForm plan={plan} workspace={workspace} reload={reload} /> : null;
+  const form = plan && offersStart(plan, role, archived, coordinates) ? <GanttStartForm plan={plan} workspace={workspace} reload={reload} /> : null;
   // The form stays in one place whichever details show, so a first start that makes the forecast appear doesn't rebuild it, which would
   // lose the keyboard's place and the saved message.
   return (

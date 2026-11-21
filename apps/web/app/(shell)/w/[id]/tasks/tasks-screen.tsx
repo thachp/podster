@@ -14,7 +14,7 @@ import { TaskLoadMore } from "./task-load-more";
 import { planNote, type PlanSummary } from "./plan-summary";
 import { useTaskPages } from "./task-pages";
 import { TaskProgress } from "./task-progress";
-import { canCreateTask, isArchivedRoom, roleOf, summaryOf, type Names, type Room, type TaskSummary } from "./task-model";
+import { canCreateTask, coordinatesPlan, isArchivedRoom, roleOf, summaryOf, type Names, type Room, type TaskSummary } from "./task-model";
 import { TaskSheet } from "./task-sheet";
 import { advanceFirstPage, applyReviewFilter, canceledChange, countText, hrefWithChanges, isLimitedViewer, mergeTasks, NEWEST_QUERY, onBoard, readViewState, REVIEW_QUERY, reviewChange, viewChange, type FirstPageHistory, type TaskView } from "./task-views";
 
@@ -197,7 +197,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
       {tasks.length === 0 ? <p className="text-muted-foreground">{canCreate ? "No tasks yet. Create one and offer it to an agent in this workroom." : "No tasks you can see here yet. Tasks you're part of will show up here."}</p> : null}
       {tasks.length > 0 && filtered.length === 0 ? <p className="text-muted-foreground">{more ? "None of the loaded tasks are waiting for your review. There may be more that this page doesn't reach." : "No submissions are waiting for your review in this workroom."}</p> : null}
       {state.view === "board" ? <TaskBoard blocked={blocked} tasks={shown} partial={more} showCanceled={state.showCanceled} selected={search.get("task")} me={me} names={names} /> : null}
-      {state.view === "gantt" && tasks.length > 0 ? <TaskGantt blocked={blocked} tasks={shown} read={ganttRead} selected={search.get("task")} me={me} names={names} role={role} archived={isArchivedRoom(room)} workspace={room.id} /> : null}
+      {state.view === "gantt" && tasks.length > 0 ? <TaskGantt blocked={blocked} tasks={shown} read={ganttRead} selected={search.get("task")} me={me} names={names} role={role} coordinates={coordinatesPlan(room, role)} archived={isArchivedRoom(room)} workspace={room.id} /> : null}
       {state.view === "list" ? <TaskList blocked={blocked} tasks={shown} partial={more} me={me} names={names} /> : null}
       {state.view === "board" && (state.showCanceled || canceledHere > 0) ? (
         <p className="text-sm text-muted-foreground">

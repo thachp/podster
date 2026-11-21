@@ -65,7 +65,7 @@ const FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring";
  * accessible source, and the timeline draws what it says. Every date comes from the server. The table scrolls inside its own
  * region, so the page never scrolls sideways.
  */
-export function TaskGantt({ blocked = {}, tasks, read, selected, me, names, role, archived, workspace }: { blocked?: Record<string, string>; tasks: TaskSummary[]; read: GanttRead; selected: string | null; me: string; names: Names; role: string | undefined; archived: boolean; workspace: string }) {
+export function TaskGantt({ blocked = {}, tasks, read, selected, me, names, role, archived, workspace, coordinates = false }: { blocked?: Record<string, string>; tasks: TaskSummary[]; read: GanttRead; selected: string | null; me: string; names: Names; role: string | undefined; archived: boolean; workspace: string; coordinates?: boolean }) {
   const { plan, status, reload } = read;
   const table = useRef<HTMLDivElement>(null);
   const waiting = status === "loading" && !plan ? "Loading" : "Unavailable";
@@ -74,7 +74,7 @@ export function TaskGantt({ blocked = {}, tasks, read, selected, me, names, role
   const reading = status === "loading";
   return (
     <div className="space-y-3">
-      <GanttForecastPanel plan={plan} failed={status === "failed" || status === "refused"} workspace={workspace} role={role} archived={archived} reload={reload} />
+      <GanttForecastPanel plan={plan} failed={status === "failed" || status === "refused"} workspace={workspace} role={role} archived={archived} reload={reload} coordinates={coordinates} />
       {/* Always here, so a screen reader hears it change and a re-read doesn't move the rows. */}
       <p role="status" className="min-h-5 text-sm text-muted-foreground">
         {reading ? (plan ? "Checking for changes. This is what was last loaded." : "Loading estimates, predecessors and the forecast.") : ""}

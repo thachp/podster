@@ -231,6 +231,9 @@ export function hardening(helper: string | null): string[] {
     "core.untrackedCache=false",
     "core.symlinks=false",
     "core.autocrlf=false",
+    // No excludes file: what Git ignores, and so what a publish may skip, comes only from the repository's
+    // `.gitignore` files and Runner's own `info/exclude`, never `$HOME/.config/git/ignore` or anyone's global setting.
+    "core.excludesFile=/dev/null",
     "core.sshCommand=false",
     "core.askPass=",
     "protocol.allow=never",

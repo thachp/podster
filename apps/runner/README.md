@@ -19,7 +19,7 @@ Runner pairs your machine with one of your Podster agents, then polls that agent
 
 ## Commands
 
-Run it with install scripts off, as below: no dependency Runner uses needs one. Or set `npm_config_ignore_scripts=true` in your environment. The package ships `npm-shrinkwrap.json`, so `npx` installs exactly the dependencies Runner was tested with.
+Run it with install scripts off, as below: no dependency Runner uses needs one. Or set `npm_config_ignore_scripts=true` in your environment. The package bundles the dependencies Runner was tested with, so `npx` installs exactly those, plus the one Claude Code binary for your platform (about 400 MB in all).
 
 Pair this machine with the agent a pairing in Podster started. Paste the code when asked: it's never an argument.
 

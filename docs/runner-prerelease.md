@@ -19,7 +19,8 @@ The owner decided on 2026-11-19 to publish a marked test pre-release of Runner t
 - **Tag:** published only under npm's `test` dist-tag. npm may also point `latest` at the first version, because a package's first publish gets `latest` when it has none; step 4 checks.
 - **Gateway:** staging's, `https://gateway-staging.podster.dev`, by default. `pair --gateway <origin>` still names another.
 - **Unattended runs:** off by default, as before.
-- **Install:** the package ships `npm-shrinkwrap.json`, the same tree as `package-lock.json`, so an install gets exactly what CI tested. No production dependency has an install script, so users run it with scripts off: `npx --ignore-scripts podster@test …`.
+- **Install:** the package bundles its production tree (`bundleDependencies`), installed from `package-lock.json` by `npm ci` with integrity checked, so an install gets exactly what CI tested. The Claude Agent SDK's eight per-platform Claude Code packages are Runner's own `optionalDependencies`, pinned to the SDK's version, so npm installs only the host's: about 400 MB in all. No production dependency has an install script, so users run it with scripts off: `npx --ignore-scripts podster@test …`.
+- **No shrinkwrap, since 2026-11-20:** up to `0.0.1-test.11` the package shipped `npm-shrinkwrap.json`, and `npx podster@0.0.1-test.11` put 3.8 GB on disk. npm installs a dependency's shrinkwrap after its per-platform check and without leaving out dev entries, so every entry landed: all eight Claude Code binaries, and TypeScript, Vitest and rolldown for every platform. `apps/runner/scripts/pack.mjs` now packs the bundle from a fresh copy, and `apps/runner/scripts/install-check.mjs` installs the packed file the way `npx` does (from a registry on 127.0.0.1 that passes other packages through to npm's) and fails on another platform's binary, a dev tool or more than 500 MB. Both run in CI's runner job and in this workflow.
 - **Publisher:** only `.github/workflows/runner-prerelease.yml`, run by hand from `main` by the architect (since 2026-11-20), behind the GitHub environment `npm-test-prerelease`, with npm provenance and npm trusted publishing (OIDC). There's no npm token secret.
 - **Locally:** a plain `npm publish` from `apps/runner` is refused by the package's `prepublishOnly` guard, `apps/runner/scripts/publish-guard.mjs`. The guard only stops a mistake: `--ignore-scripts` skips it, and npm runs no script when it publishes a `.tgz`.
 
@@ -116,15 +117,15 @@ Every step here is the owner's. Agents don't sign in to npm, publish, create tok
 `workflow_dispatch` only, with the inputs `version` and `dry_run` (default on). Every action is pinned by full commit SHA. It has three jobs:
 
 1. **`main-only`** fails a run from any ref but `main`, and the jobs after it are skipped.
-2. **`build`** has `contents: read`, and no OIDC token or environment. It refuses a `version` input that isn't the version in `apps/runner/package.json`, or isn't `0.0.x-test.N`. Then it runs `npm ci --ignore-scripts`, the typecheck, the tests, the build and `npm pack --dry-run`. It packs the `.tgz`, prints its SHA-256, passes the file name and SHA-256 on as job outputs, and uploads the `.tgz` as an artifact kept 7 days.
+2. **`build`** has `contents: read`, and no OIDC token or environment. It refuses a `version` input that isn't the version in `apps/runner/package.json`, or isn't `0.0.x-test.N`. Then it runs `npm ci --ignore-scripts`, the typecheck, the tests and the build. It packs the `.tgz` with `scripts/pack.mjs`, prints its SHA-256, checks an install of it with `scripts/install-check.mjs`, passes the file name and SHA-256 on as job outputs, and uploads the `.tgz` as an artifact kept 7 days.
 3. **`publish`**, only with `dry_run` off and on `main`, runs in the `npm-test-prerelease` environment, with `contents: read` and `id-token: write`. It checks out nothing and runs no dependency code. It installs npm 11.21.2, downloads the artifact, checks the `.tgz` against build's SHA-256, then runs `npm publish ./podster-<version>.tgz --provenance --tag test --access public`, then prints the registry's `dist.shasum` and `dist.integrity` for the version (polling every 10 seconds for up to about 15 minutes, since npm can take minutes to show a new version; a timeout fails with its own message, distinct from a mismatch) and fails if the shasum differs from the packed file's. (On 2026-11-19 this step was `npm stage publish`, while the trusted publisher required staging; on 2026-11-20 it went back to `npm publish`.)
 
 The package holds:
 - `build/`;
 - `git/credential-helper`, which Git runs for Runner as `/bin/sh <path>`, so it needs no execute bit;
 - the two Dockerfiles, `sandbox/Dockerfile` and `claude-image/Dockerfile`, from which `run --provider-key-file` builds a missing image and pins it;
-- `npm-shrinkwrap.json`;
+- `node_modules/`, the bundled production tree, with no Claude Code binary and no dev tool;
 - the README;
 - `package.json`.
 
-It has no tests, source maps, fixtures or secrets.
+Runner's own files have no tests, source maps, fixtures or secrets. The bundled packages are as npm's registry serves them, checked against the lock's integrity.

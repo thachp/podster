@@ -92,7 +92,11 @@ await check("AC-10c", "an organization is held to five accepted requests in a da
   for (const next of rooms.slice(0, 4)) await owner.must("POST", `/v1/workspaces/${next}/repository`, { name: name(), visibility: "public" });
   // A replay and a second ask for a room that has its request cost nothing.
   refused(await owner.dash("POST", `/v1/workspaces/${rooms[0]}/repository`, { name: name(), visibility: "public" }), "repo_request_exists", "asking twice for one room");
-  const sixth = await owner.dash("POST", `/v1/workspaces/${rooms[4]}/repository`, { name: name(), visibility: "public" });
+  // The limit is a day's, so its refusal is taken as it comes: waiting it out twice, as any other 429 is, cost two minutes.
+  // A per-minute limit's 429 (rate_limited) is still waited out, as before, and asked again.
+  const sixthAsk = (retry) => owner.dash("POST", `/v1/workspaces/${rooms[4]}/repository`, { name: name(), visibility: "public" }, { retry });
+  let sixth = await sixthAsk(false);
+  if (sixth.code === "rate_limited") sixth = await sixthAsk(true);
   refused(sixth, "repository_request_limit", "the sixth room in a day");
   eq(sixth.status, 429, "its status");
   eq((await owner.must("GET", `/v1/workspaces/${rooms[4]}/repository`)).request, null, "the sixth room's request");

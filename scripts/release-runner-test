@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# The one way to make a Runner test pre-release: `bump` opens the version PR, and `publish` runs
+# .github/workflows/runner-prerelease.yml on main, approves its environment and checks what npm then holds. It replaces
+# the hand-run chain in docs/runner-prerelease.md, which broke twice, once on a ref-lock race between two `git fetch`es.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/release-runner-test bump [<version>] [--go]
+       scripts/release-runner-test publish <version> [--tag test] [--go]
+
+<version> is 0.0.1-test.N. With no --go it only reports: every check runs and is printed, and
+nothing is pushed, dispatched or approved. Both stages refuse, before changing anything, unless:
+
+  - jq is on PATH
+  - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked.
+    A fetch that fails on a ref lock (another fetch running beside it) is tried again, up to five
+    times, 2, 4, 8 and 16 seconds apart; any other fetch error is refused at once
+  - the version matches ^0\.0\.1-test\.[0-9]+$, with no leading zero, and isn't on npm yet, and its N is above both main's
+    and the highest 0.0.1-test.N npm lists, so versions only go up
+
+bump      Sets apps/runner/package.json's version, and the package's own two version fields in
+          package-lock.json and npm-shrinkwrap.json, to <version> (main's N plus one when it's left
+          out). Nothing else in those files may change, and it's checked. It commits that on a
+          detached worktree of main's tip in a scratch folder, so no checkout's branch is switched,
+          pushes it as chore/runner-test-N (refused if that branch, or a pull request from it,
+          already exists) and opens a pull request titled "chore: version Runner <version>". It never
+          merges: that's scripts/merge-gate's, at the reviewed sha.
+
+publish   Also refuses unless main's tip has <version> in all three files, ci.yml's run on main for that
+          sha has completed as success, and no Runner pre-release run is still under way. --tag takes
+          only "test", the one dist-tag the workflow publishes under; it never touches latest. Then:
+            1. gh workflow run runner-prerelease.yml --ref main -f version=<version> -f dry_run=false
+            2. finds that run: a workflow_dispatch run on main that wasn't there before the dispatch,
+               created after it was asked for, at main's sha. Exactly one, or it stops
+            3. looks up the npm-test-prerelease environment's id by name, waits for the run to ask
+               for it, and approves that one pending deployment, nothing else
+            4. waits for the run to finish, then reads the publish job's log for the packed file's
+               shasum, and checks npm's dist.shasum for <version> equals it and dist-tag test is
+               <version>. latest is reported, never changed.
+
+Its output carries versions, shas and run, job and environment ids only, never a token.
+
+Exit codes: 0 passed (and, with --go, done and checked); 1 refused, nothing changed; 2 wrong usage;
+3 started and failed: bump pushed but couldn't open the pull request, or publish's run failed, or
+its deployment couldn't be approved; 4 published, but npm's shasum or test tag isn't what the run
+packed; 5 dispatched, but the run couldn't be found or didn't finish in time, so the outcome is unknown.
+EOF
+}
+
+PACKAGE=podster
+WORKFLOW=runner-prerelease.yml
+ENVIRONMENT=npm-test-prerelease
+FILES="apps/runner/package.json apps/runner/package-lock.json apps/runner/npm-shrinkwrap.json"
+
+stage=
+version=
+go=false
+tag=test
+want_tag=false
+for arg in "$@"; do
+  if [ "$want_tag" = true ]; then tag=$arg; want_tag=false; continue; fi
+  case "$arg" in
+    -h | --help) usage; exit 0 ;;
+    --go)
+      if [ "$go" = true ]; then echo "release-runner-test: give --go once" >&2; exit 2; fi
+      go=true
+      ;;
+    --tag) want_tag=true ;;
+    --tag=*) tag=${arg#--tag=} ;;
+    -*) echo "release-runner-test: unknown option $arg" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -z "$stage" ]; then stage=$arg
+      elif [ -z "$version" ]; then version=$arg
+      else echo "release-runner-test: too many arguments" >&2; usage >&2; exit 2
+      fi
+      ;;
+  esac
+done
+if [ "$want_tag" = true ]; then echo "release-runner-test: --tag needs a value" >&2; exit 2; fi
+case "$stage" in
+  bump) ;;
+  publish) [ -n "$version" ] || { echo "release-runner-test: publish needs a version" >&2; usage >&2; exit 2; } ;;
+  *) usage >&2; exit 2 ;;
+esac
+if [ "$tag" != test ]; then
+  echo "release-runner-test: the dist-tag is '$tag'. Test pre-releases go under 'test' only, never latest or another" >&2
+  exit 2
+fi
+if [ -n "$version" ] && ! [[ "$version" =~ ^0\.0\.1-test\.(0|[1-9][0-9]*)$ ]]; then
+  echo "release-runner-test: '$version' isn't a test pre-release version, 0.0.1-test.N" >&2
+  exit 2
+fi
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+tab=$'\t'
+ok() { echo "ok      $*"; }
+refuse() { echo "REFUSE  $*"; echo "release-runner-test: refused. Nothing was changed."; exit 1; }
+failed() { echo "FAILED  $*"; echo "release-runner-test: failed after changing something (exit 3)."; exit 3; }
+unknown() { echo "UNKNOWN $*"; echo "release-runner-test: the outcome is unknown (exit 5)."; exit 5; }
+number() { printf '%s' "${1##*-test.}"; } # the N of 0.0.1-test.N
+
+command -v jq > /dev/null 2>&1 || refuse "jq is not on PATH"
+
+# A fetch beside another can fail on a ref lock. That's tried again; any other error isn't.
+fetch_main() {
+  local try=1 wait=2 out
+  while :; do
+    if out=$(git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main 2>&1); then return 0; fi
+    if ! printf '%s' "$out" | grep -q -i -E 'cannot lock ref|unable to create .*\.lock|\.lock.: file exists|unable to update local ref|but expected'; then
+      echo "        git fetch failed: $(printf '%s' "$out" | head -n 1)"
+      return 1
+    fi
+    if [ "$try" -ge 5 ]; then
+      echo "        git fetch hit a ref lock five times"
+      return 1
+    fi
+    echo "        git fetch hit a ref lock (try $try of 5), trying again in ${wait}s"
+    sleep "$wait"
+    try=$((try + 1))
+    wait=$((wait * 2))
+  done
+}
+
+fetch_main || refuse "could not fetch origin's main"
+if git symbolic-ref -q HEAD > /dev/null; then
+  refuse "the checkout is on branch $(git symbolic-ref --short HEAD). Run this from a checkout detached at main's tip: git checkout --detach origin/main"
+fi
+main=$(git rev-parse --verify --quiet refs/remotes/origin/main) || refuse "origin/main doesn't exist"
+here=$(git rev-parse HEAD)
+if [ "$here" != "$main" ]; then refuse "the checkout is at $here, and origin/main is at $main"; fi
+if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
+ok "the checkout is clean and detached at origin/main's tip, $main"
+
+# The package's own version fields in each file, at a commit: package.json has one, the two lock files two each.
+versions_at() { # versions_at SHA: one line per field, "FILE FIELD VERSION"
+  local file
+  for file in $FILES; do
+    git show "$1:$file" | jq -r --arg file "$file" '
+      [$file, ".version", (.version // "none")],
+      (if .lockfileVersion then [$file, ".packages[\"\"].version", (.packages[""].version // "none")] else empty end)
+      | join(" ")' || return 1
+  done
+}
+fields=$(versions_at "$main") || refuse "could not read the Runner's version fields at $main"
+current=$(printf '%s\n' "$fields" | awk '{ print $3 }' | sort -u)
+if [ "$(printf '%s\n' "$fields" | wc -l | tr -d ' ')" -ne 5 ]; then
+  refuse "expected five version fields at $main, found: $(printf '%s' "$fields" | tr '\n' ';')"
+fi
+if [ "$(printf '%s\n' "$current" | wc -l | tr -d ' ')" -ne 1 ]; then
+  refuse "the three files disagree on the version at $main: $(printf '%s' "$fields" | tr '\n' ';')"
+fi
+if ! [[ "$current" =~ ^0\.0\.1-test\.(0|[1-9][0-9]*)$ ]]; then refuse "main's version is '$current', not 0.0.1-test.N"; fi
+ok "main's Runner version is $current, in all three files"
+
+# What npm lists. --prefer-online so a cached packument can't hide a version.
+listed=$(npm view --prefer-online "$PACKAGE" versions --json 2> /dev/null) || refuse "could not read $PACKAGE's versions from npm"
+published=$(printf '%s' "$listed" | jq -r 'if type == "array" then .[] elif type == "string" then . else error("not a list") end' 2> /dev/null) \
+  || refuse "npm's version list for $PACKAGE isn't a list"
+[ -n "$published" ] || refuse "npm lists no version of $PACKAGE"
+highest=$(printf '%s\n' "$published" | sed -n 's/^0\.0\.1-test\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)
+[ -n "$highest" ] || refuse "npm lists no 0.0.1-test.N version of $PACKAGE"
+ok "the highest test pre-release on npm is 0.0.1-test.$highest"
+
+if [ "$stage" = bump ] && [ -z "$version" ]; then
+  next=$(number "$current")
+  if [ "$highest" -gt "$next" ]; then next=$highest; fi
+  version="0.0.1-test.$((next + 1))"
+  echo "        no version given, so $version"
+fi
+n=$(number "$version")
+if printf '%s\n' "$published" | grep -q -x -F "$version"; then refuse "$PACKAGE@$version is already on npm"; fi
+ok "$PACKAGE@$version isn't on npm"
+if [ "$n" -le "$highest" ]; then refuse "$version isn't above 0.0.1-test.$highest, the highest on npm"; fi
+ok "$version is above the highest on npm"
+
+# ---------------------------------------------------------------------------------------------------------------------
+if [ "$stage" = bump ]; then
+  if [ "$n" -le "$(number "$current")" ]; then refuse "$version isn't above main's $current"; fi
+  ok "$version is above main's $current"
+  branch="chore/runner-test-$n"
+  remote=$(git ls-remote --heads origin "refs/heads/$branch") || refuse "could not ask origin about $branch"
+  [ -z "$remote" ] || refuse "origin already has a branch $branch"
+  ok "origin has no branch $branch"
+  prs=$(gh pr list --head "$branch" --state all --json number --jq 'length') || refuse "could not list pull requests from $branch"
+  [ "$prs" = 0 ] || refuse "a pull request from $branch already exists"
+  ok "no pull request comes from $branch"
+
+  # A detached worktree of main's tip in a scratch folder: no checkout's branch moves, and no local branch is made.
+  scratch=$(mktemp -d)
+  cleanup() { git worktree remove --force "$scratch/wt" > /dev/null 2>&1 || true; rm -rf "$scratch"; }
+  trap cleanup EXIT
+  git worktree add --quiet --detach "$scratch/wt" "$main" || refuse "could not make a scratch worktree of $main"
+  # The top-level "version" line, and in the lock files the first "version" line inside packages[""]. Nothing else.
+  for file in $FILES; do
+    awk -v old="$current" -v new="$version" '
+      BEGIN { top = "  \"version\": \"" old "\","; own = "      \"version\": \"" old "\"," }
+      $0 == top && !doneTop { print "  \"version\": \"" new "\","; doneTop = 1; next }
+      $0 == "    \"\": {" { inOwn = 1 }
+      inOwn && $0 == own && !doneOwn { print "      \"version\": \"" new "\","; doneOwn = 1; inOwn = 0; next }
+      inOwn && /^    }/ { inOwn = 0 }
+      { print }' "$scratch/wt/$file" > "$scratch/edit"
+    cat "$scratch/edit" > "$scratch/wt/$file"
+  done
+  # The check: each file's own fields are the new version, and with those set aside nothing else changed.
+  for file in $FILES; do
+    strip='del(.version) | if .lockfileVersion then del(.packages[""].version) else . end'
+    before=$(git show "$main:$file" | jq -S "$strip") || refuse "could not read $file at $main"
+    after=$(jq -S "$strip" "$scratch/wt/$file") || refuse "the edited $file isn't JSON"
+    [ "$before" = "$after" ] || refuse "editing $file changed more than its version fields"
+  done
+  got=$(cd "$scratch/wt" && for file in $FILES; do
+    jq -r '.version, (if .lockfileVersion then .packages[""].version else empty end)' "$file"
+  done | sort -u)
+  [ "$got" = "$version" ] || refuse "after the edit the version fields read '$(printf '%s' "$got" | tr '\n' ' ')', not $version"
+  changed=$(git -C "$scratch/wt" diff --numstat | awk '{ printf "%s %s %s;", $1, $2, $3 }')
+  expected="2 2 apps/runner/npm-shrinkwrap.json;2 2 apps/runner/package-lock.json;1 1 apps/runner/package.json;"
+  [ "$changed" = "$expected" ] || refuse "the edit changed '$changed', not five version lines"
+  ok "the edit changes exactly the five version lines, to $version"
+
+  title="chore: version Runner $version"
+  if [ "$go" != true ]; then
+    echo "release-runner-test: bump passed. With --go it would commit \"$title\" on $main, push it as $branch and open a pull request. Nothing was pushed."
+    exit 0
+  fi
+  git -C "$scratch/wt" add -- $FILES
+  git -C "$scratch/wt" commit --quiet -m "$title" || refuse "could not commit the version change"
+  commit=$(git -C "$scratch/wt" rev-parse HEAD)
+  echo "committed $commit on $main"
+  git -C "$scratch/wt" push --quiet origin "HEAD:refs/heads/$branch" || refuse "could not push $branch (nothing reached origin, or check with: git ls-remote origin $branch)"
+  echo "pushed $branch at $commit"
+  body="Bumps Runner to $version for a test pre-release. Only the package's own version fields change, in apps/runner/package.json, package-lock.json and npm-shrinkwrap.json; scripts/release-runner-test bump checked that nothing else in those files changed. CI runs the Runner suite. Merge with scripts/merge-gate, then publish with scripts/release-runner-test publish $version."
+  url=$(gh pr create --base main --head "$branch" --title "$title" --body "$body") \
+    || failed "$branch is pushed at $commit, but the pull request wasn't opened. Open it with: gh pr create --base main --head $branch --title \"$title\""
+  echo "opened $url"
+  echo "release-runner-test: bump done: $branch at $commit. It isn't merged: run scripts/merge-gate on it at $commit."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+# publish
+[ "$current" = "$version" ] || refuse "main's tip, $main, has $current, not $version. Merge the bump first"
+ok "main's tip has $version in all three files"
+ci=$(gh run list --workflow ci.yml --branch main --event push --commit "$main" --limit 1 --json status,conclusion \
+  --jq '.[] | [.status, (if (.conclusion // "") == "" then "none" else .conclusion end)] | @tsv') \
+  || refuse "could not read ci.yml's run on main for $main"
+[ -n "$ci" ] || refuse "ci.yml has no run on main for $main"
+IFS=$tab read -r ci_status ci_conclusion <<< "$ci"
+[ "$ci_status" = completed ] || refuse "ci.yml's run on main for $main is still $ci_status"
+[ "$ci_conclusion" = success ] || refuse "ci.yml's run on main for $main ended as $ci_conclusion, not success. Nothing is rerun"
+ok "ci.yml succeeded on main at $main"
+busy=$(gh run list --workflow "$WORKFLOW" --limit 20 --json databaseId,status \
+  --jq '.[] | select(.status != "completed") | .databaseId | tostring') || refuse "could not list $WORKFLOW's runs"
+[ -z "$busy" ] || refuse "a $WORKFLOW run is still under way: $(printf '%s' "$busy" | tr '\n' ' ')"
+ok "no $WORKFLOW run is under way"
+env_id=$(gh api "repos/{owner}/{repo}/environments/$ENVIRONMENT" --jq '.id | tostring') || refuse "could not read the $ENVIRONMENT environment"
+[[ "$env_id" =~ ^[1-9][0-9]*$ ]] || refuse "the $ENVIRONMENT environment's id reads as '$env_id'"
+ok "the $ENVIRONMENT environment is $env_id"
+
+if [ "$go" != true ]; then
+  echo "release-runner-test: publish passed. With --go it would run $WORKFLOW on main at $main for $version, approve $ENVIRONMENT ($env_id) and check npm. Nothing was dispatched."
+  exit 0
+fi
+
+# Main must still be at the checked sha as the run is asked for, since the dispatch runs main's tip.
+tip=$(git ls-remote origin refs/heads/main | awk '{ print $1 }') || refuse "could not read main's tip again"
+[ "$tip" = "$main" ] || refuse "main moved to ${tip:-unknown} after the checks. Run this again from its new tip"
+runs_list() {
+  gh run list --workflow "$WORKFLOW" --branch main --event workflow_dispatch --limit 20 \
+    --json databaseId,headSha,createdAt \
+    --jq '.[] | [(.databaseId | tostring), .headSha, (.createdAt | fromdateiso8601 | tostring)] | @tsv'
+}
+before=$(runs_list) || refuse "could not list $WORKFLOW's runs"
+asked=$(date -u +%s)
+gh workflow run "$WORKFLOW" --ref main -f "version=$version" -f dry_run=false \
+  || unknown "the dispatch of $WORKFLOW failed or its answer was lost. Check with: gh run list --workflow $WORKFLOW --limit 3"
+echo "dispatched $WORKFLOW on main for $version at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# The run is the one that's new, at main's sha, and created no earlier than a minute before it was asked for (clocks
+# differ). Never "the latest".
+run=
+for try in $(seq 1 24); do
+  sleep 5
+  now=$(runs_list) || continue
+  found=$(printf '%s\n' "$now" | while IFS=$tab read -r id head created; do
+    [ -n "$id" ] || continue
+    printf '%s\n' "$before" | awk -F '\t' -v id="$id" '$1 == id { seen = 1 } END { exit seen ? 0 : 1 }' && continue
+    [ "$head" = "$main" ] || continue
+    [[ "$created" =~ ^[0-9]+$ ]] && [ "$created" -ge $((asked - 60)) ] || continue
+    echo "$id"
+  done)
+  count=$(printf '%s' "$found" | grep -c . || true)
+  if [ "$count" -gt 1 ]; then
+    unknown "more than one new $WORKFLOW run is at $main ($(printf '%s' "$found" | tr '\n' ' ')), so none is approved"
+  fi
+  if [ "$count" -eq 1 ]; then run=$found; break; fi
+done
+[ -n "$run" ] || unknown "no new $WORKFLOW run at $main appeared within two minutes of the dispatch. Nothing was approved"
+echo "the run is $run"
+
+# The run asks for the environment once build has passed. Only that environment, by id and name, is approved.
+pending=
+for try in $(seq 1 80); do
+  pending=$(gh api "repos/{owner}/{repo}/actions/runs/$run/pending_deployments" \
+    --jq '.[] | [(.environment.id | tostring), .environment.name, (.current_user_can_approve | tostring)] | @tsv') || pending=
+  if printf '%s\n' "$pending" | awk -F '\t' -v id="$env_id" -v name="$ENVIRONMENT" '$1 == id && $2 == name { f = 1 } END { exit f ? 0 : 1 }'; then break; fi
+  pending=
+  state=$(gh run view "$run" --json status,conclusion --jq '[.status, (.conclusion // "none")] | @tsv') || state=
+  IFS=$tab read -r run_status run_conclusion <<< "$state" || true
+  if [ "${run_status:-}" = completed ]; then failed "run $run ended as $run_conclusion before asking for $ENVIRONMENT. Nothing was approved"; fi
+  sleep 15
+done
+[ -n "$pending" ] || unknown "run $run didn't ask for $ENVIRONMENT within 20 minutes. Nothing was approved"
+can=$(printf '%s\n' "$pending" | awk -F '\t' -v id="$env_id" '$1 == id { print $3; exit }')
+[ "$can" = true ] || failed "run $run waits for $ENVIRONMENT ($env_id), and this account can't approve it. Approve or cancel it in GitHub"
+gh api -X POST "repos/{owner}/{repo}/actions/runs/$run/pending_deployments" \
+  -F "environment_ids[]=$env_id" -f state=approved -f comment="release-runner-test: $version at $main" > /dev/null \
+  || failed "could not approve $ENVIRONMENT ($env_id) for run $run. It still waits: approve or cancel it in GitHub"
+echo "approved $ENVIRONMENT ($env_id) for run $run"
+
+# build, then publish with its registry wait of up to 15 minutes: an hour is ample.
+outcome=
+for try in $(seq 1 120); do
+  state=$(gh run view "$run" --json status,conclusion,headSha --jq '[.status, (.conclusion // "none"), .headSha] | @tsv') || state=
+  IFS=$tab read -r run_status run_conclusion run_head <<< "$state" || true
+  if [ "${run_status:-}" = completed ]; then outcome=$run_conclusion; break; fi
+  sleep 30
+done
+[ -n "$outcome" ] || unknown "run $run didn't finish within an hour. Check it with: gh run view $run"
+[ "$run_head" = "$main" ] || failed "run $run reads as at $run_head, not $main"
+[ "$outcome" = success ] || failed "run $run ended as $outcome. Nothing is rerun: look into it with gh run view $run --log-failed"
+echo "run $run succeeded"
+
+job=$(gh run view "$run" --json jobs --jq '.jobs[] | select(.name == "publish") | .databaseId | tostring') || job=
+[[ "$job" =~ ^[0-9]+$ ]] || failed "could not find run $run's publish job"
+packed=$(gh run view "$run" --log --job "$job" | sed -n 's/.*packed file shasum: \([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' | sort -u) || packed=
+[[ "$packed" =~ ^[0-9a-f]{40}$ ]] || failed "could not read one packed file shasum from job $job's log"
+echo "the run packed shasum $packed"
+
+registry=
+for try in $(seq 1 20); do
+  registry=$(npm view --prefer-online "$PACKAGE@$version" dist.shasum 2> /dev/null || true)
+  [ -n "$registry" ] && break
+  sleep 15
+done
+tags=$(npm view --prefer-online "$PACKAGE" dist-tags --json 2> /dev/null) || tags=
+test_tag=$(printf '%s' "$tags" | jq -r '.test // "none"' 2> /dev/null) || test_tag=unreadable
+latest_tag=$(printf '%s' "$tags" | jq -r '.latest // "none"' 2> /dev/null) || latest_tag=unreadable
+echo "npm: $PACKAGE@$version dist.shasum ${registry:-not visible}; dist-tags test $test_tag, latest $latest_tag (left as it is)"
+problems=0
+if [ "$registry" = "$packed" ]; then ok "npm's shasum for $version is the packed file's"; else echo "WRONG   npm's shasum for $version is '${registry:-not visible}', not $packed"; problems=1; fi
+if [ "$test_tag" = "$version" ]; then ok "dist-tag test is $version"; else echo "WRONG   dist-tag test is $test_tag, not $version"; problems=1; fi
+if [ "$problems" -ne 0 ]; then
+  echo "release-runner-test: published by run $run, but npm doesn't hold what it packed under test (exit 4)."
+  exit 4
+fi
+echo "release-runner-test: published $PACKAGE@$version from $main by run $run, and npm's copy is the packed file."

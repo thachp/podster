@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+# Checks scripts/release-runner-test's refusals and both stages, with stand-ins for gh, npm and sleep, and no network.
+# git is real: each case runs against a scratch repository whose origin is a bare repository beside it, holding this
+# checkout's three Runner files, so the version edit is checked on their real layout. A git stand-in in front of it
+# fails `git fetch` with a ref-lock error as many times as asked. Needs jq.
+#
+#   scripts/test/release-runner-test-selftest
+set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/release-runner-test-selftest
+
+Checks scripts/release-runner-test's refusals and both stages, with stand-ins for gh, npm and sleep,
+a scratch git repository and no network. Needs jq.
+EOF
+  exit 0
+fi
+. "$(dirname "$0")/lib.sh"
+real_git=$(command -v git)
+# No one's own git settings (signing, hooks, a default branch) reach the scratch repositories, and the script's commit
+# has an identity on CI.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME=selftest GIT_AUTHOR_EMAIL=selftest@example.invalid
+export GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@example.invalid
+t=$'\t'
+env_id=27874616476
+packed=69370dddc7299188dcd0b7c21875f3e3ed9feff2
+
+stub sleep <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
+EOF
+
+# git, but a fetch fails on a ref lock while $fix/fetch-locks counts down, or with another error if $fix/fetch-error exists.
+stub git <<EOF
+#!/usr/bin/env bash
+fix="\$(dirname "\$0")/../fix"
+if [ "\${1:-}" = fetch ]; then
+  echo "git \$*" >> "\$fix/calls"
+  if [ -f "\$fix/fetch-error" ]; then echo "fatal: unable to access 'https://github.invalid/': Could not resolve host" >&2; exit 128; fi
+  left=\$(cat "\$fix/fetch-locks" 2>/dev/null || echo 0)
+  if [ "\$left" -gt 0 ]; then
+    echo \$((left - 1)) > "\$fix/fetch-locks"
+    echo "error: cannot lock ref 'refs/remotes/origin/main': is at 1111111111111111111111111111111111111111 but expected 2222222222222222222222222222222222222222" >&2
+    exit 1
+  fi
+fi
+case "\${1:-} \${2:-}" in "push "*) echo "git \$*" >> "\$fix/calls" ;; esac
+exec "$real_git" "\$@"
+EOF
+
+# Each answer is a fixture file. KEY.1, KEY.2, ... are served in turn, the last repeating.
+stub gh <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "gh $*" >> "$fix/calls"
+answer() {
+  [ -f "$fix/$1" ] || { echo "stand-in gh: no fixture $1" >&2; exit 97; }
+  [ "$(cat "$fix/$1")" = gh-fails ] && { echo "gh: HTTP 500" >&2; exit 1; }
+  cat "$fix/$1"
+}
+turns() {
+  local n=0
+  [ -f "$fix/$1.n" ] && n=$(cat "$fix/$1.n")
+  n=$((n + 1))
+  echo "$n" > "$fix/$1.n"
+  while [ "$n" -gt 1 ] && [ ! -f "$fix/$1.$n" ]; do n=$((n - 1)); done
+  answer "$1.$n"
+}
+case "$*" in
+  "pr list --head "*" --state all --json number --jq length") answer prs ;;
+  "pr create --base main --head "*) answer pr-create ;;
+  "run list --workflow ci.yml --branch main --event push --commit "*) answer ci ;;
+  "run list --workflow runner-prerelease.yml --limit 20 --json databaseId,status "*)
+    [ -f "$fix/move-main" ] && sh "$fix/move-main" > /dev/null 2>&1
+    answer busy
+    ;;
+  "api repos/{owner}/{repo}/environments/npm-test-prerelease --jq .id | tostring") answer env ;;
+  "run list --workflow runner-prerelease.yml --branch main --event workflow_dispatch --limit 20 "*) turns runs ;;
+  "workflow run runner-prerelease.yml "*) answer dispatch ;;
+  "api repos/{owner}/{repo}/actions/runs/"*"/pending_deployments --jq "*) turns pending ;;
+  "api -X POST repos/{owner}/{repo}/actions/runs/"*"/pending_deployments "*) answer approve ;;
+  "run view "*" --json status,conclusion --jq "*) answer early-state ;;
+  "run view "*" --json status,conclusion,headSha --jq "*) turns state ;;
+  "run view "*" --json jobs --jq "*) answer job ;;
+  "run view "*" --log --job "*) answer log ;;
+  *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
+esac
+EOF
+
+stub npm <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "npm $*" >> "$fix/calls"
+case "$*" in
+  "view --prefer-online podster versions --json") cat "$fix/npm-versions" ;;
+  "view --prefer-online podster dist-tags --json") cat "$fix/npm-tags" ;;
+  "view --prefer-online podster@"*" dist.shasum") cat "$fix/npm-shasum" ;;
+  *) echo "stand-in npm: unexpected: npm $*" >&2; exit 97 ;;
+esac
+EOF
+
+repo="$tmp/repo"
+origin="$tmp/origin.git"
+work="$tmp/work"
+files="apps/runner/package.json apps/runner/package-lock.json apps/runner/npm-shrinkwrap.json"
+g() { "$real_git" "$@"; }
+gw() { g -C "$work" "$@"; }
+
+# Sets every version field in the scratch work tree's three files with jq, as a fixture would want.
+set_version() { # set_version VERSION [FILE]
+  local file
+  for file in ${2:-$files}; do
+    jq --arg v "$1" '.version = $v | if .lockfileVersion then .packages[""].version = $v else . end' "$work/$file" > "$tmp/edit"
+    cat "$tmp/edit" > "$work/$file"
+  done
+}
+# main on origin at VERSION; the checkout under test detached at its tip, clean.
+fresh() { # fresh VERSION
+  rm -rf "$repo" "$origin" "$work"
+  rm -f "$fix"/*
+  : > "$fix/calls"
+  g init --quiet --bare --initial-branch=main "$origin"
+  g init --quiet --initial-branch=main "$work"
+  mkdir -p "$work/apps/runner" "$work/scripts"
+  local file
+  for file in $files; do cp "$scripts/../$file" "$work/$file"; done
+  cp "$scripts/release-runner-test" "$work/scripts/"
+  set_version "$1"
+  gw add -A && gw commit --quiet -m base && gw branch -M main
+  gw remote add origin "$origin" && gw push --quiet origin main
+  g clone --quiet "$origin" "$repo"
+  g -C "$repo" checkout --quiet --detach origin/main
+  # What all is well looks like: npm has up to 0.0.1-test.11, CI passed, nothing under way.
+  printf '["0.0.0-stage","0.0.1-test.1","0.0.1-test.2","0.0.1-test.10","0.0.1-test.11"]\n' > "$fix/npm-versions"
+  echo 0 > "$fix/prs"
+  echo "https://github.invalid/pull/900" > "$fix/pr-create"
+  printf 'completed\tsuccess\n' > "$fix/ci"
+  : > "$fix/busy"
+  echo "$env_id" > "$fix/env"
+}
+script() { echo "$repo/scripts/release-runner-test"; }
+# main moves on origin: the given VERSION merged.
+merge_version() { # merge_version VERSION
+  set_version "$1"
+  gw commit --quiet -am "chore: version Runner $1" && gw push --quiet origin main
+  g -C "$repo" fetch --quiet origin && g -C "$repo" checkout --quiet --detach origin/main
+}
+main_sha() { g -C "$origin" rev-parse refs/heads/main; }
+changes='gh workflow run|pending_deployments -|gh pr create|git push|npm publish|npm dist-tag|gh run rerun|gh pr merge'
+
+# --- usage ---
+fresh 0.0.1-test.11
+check "no arguments is refused, exit 2" run 2 "$(script)"
+check "an unknown stage is refused, exit 2" run 2 "$(script)" release 0.0.1-test.12
+check "publish with no version is refused, exit 2" run 2 "$(script)" publish
+for bad in 0.0.1 0.0.1-test 0.0.2-test.12 1.0.0-test.12 0.0.1-test.12a 0.0.1-test.012 0.0.1-beta.12 v0.0.1-test.12 0.0.1-test.-1; do
+  check "version $bad is refused, exit 2" run 2 "$(script)" publish "$bad"
+done
+for tag in latest beta next ""; do
+  check "--tag '$tag' is refused, exit 2" run 2 "$(script)" publish 0.0.1-test.12 --tag "$tag"
+done
+check "  and says only test" said "under 'test' only"
+check "--tag=latest is refused, exit 2" run 2 "$(script)" publish 0.0.1-test.12 --tag=latest
+check "--tag with no value is refused, exit 2" run 2 "$(script)" publish 0.0.1-test.12 --tag
+check "--go twice is refused, exit 2" run 2 "$(script)" bump --go --go
+check "an unknown option is refused, exit 2" run 2 "$(script)" publish 0.0.1-test.12 --force
+check "a third argument is refused, exit 2" run 2 "$(script)" publish 0.0.1-test.12 extra
+check "--help exits 0" run 0 "$(script)" --help
+check "  and names the exit codes" said '^Exit codes'
+check "none of those asked git, gh or npm anything" test ! -s "$fix/calls"
+
+# --- the checkout and the fetch ---
+fresh 0.0.1-test.11
+g -C "$repo" checkout --quiet -b feat/x
+check "a checkout on a branch is refused, exit 1" run 1 "$(script)" bump
+check "  and says to detach" said 'REFUSE  the checkout is on branch feat/x'
+fresh 0.0.1-test.11
+echo stray > "$repo/stray"
+check "an untracked file is refused, exit 1" run 1 "$(script)" bump
+check "  and says so" said 'REFUSE  the checkout has changed or untracked files'
+fresh 0.0.1-test.11
+echo ' ' >> "$repo/apps/runner/package.json"
+check "a changed file is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12
+fresh 0.0.1-test.11
+merge_version 0.0.1-test.12
+g -C "$repo" checkout --quiet --detach HEAD~1
+check "a checkout behind origin/main is refused, exit 1" run 1 "$(script)" bump
+check "  and names both shas" said "REFUSE  the checkout is at [0-9a-f]{40}, and origin/main is at $(main_sha)"
+
+fresh 0.0.1-test.11
+echo 2 > "$fix/fetch-locks"
+check "a fetch that hits a ref lock twice is tried again and passes, exit 0" run 0 "$(script)" bump
+check "  after three fetches" test "$(grep -c '^git fetch' "$fix/calls")" -eq 3
+check "  waiting 2s then 4s" test "$(grep '^sleep' "$fix/calls" | tr '\n' ' ')" = "sleep 2 sleep 4 "
+check "  and says why" said 'hit a ref lock \(try 1 of 5\)'
+fresh 0.0.1-test.11
+echo 9 > "$fix/fetch-locks"
+check "a fetch that hits a ref lock five times is refused, exit 1" run 1 "$(script)" bump
+check "  after five fetches" test "$(grep -c '^git fetch' "$fix/calls")" -eq 5
+check "  and asks nothing else" never_called '^(gh|npm) '
+fresh 0.0.1-test.11
+touch "$fix/fetch-error"
+check "a fetch that fails another way is refused at once, exit 1" run 1 "$(script)" bump
+check "  after one fetch and no wait" test "$(grep -c '^git fetch' "$fix/calls")$(grep -c '^sleep' "$fix/calls" || true)" = 10
+
+# --- versions ---
+fresh 0.0.1-test.11
+set_version 0.0.1-test.10 apps/runner/npm-shrinkwrap.json
+gw commit --quiet -am drift && gw push --quiet origin main
+g -C "$repo" fetch --quiet origin && g -C "$repo" checkout --quiet --detach origin/main
+check "files that disagree on the version are refused, exit 1" run 1 "$(script)" bump
+check "  and says so" said 'REFUSE  the three files disagree'
+fresh 0.0.1-test.11
+check "a version npm has is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.11
+check "  and says so" said 'REFUSE  podster@0.0.1-test.11 is already on npm'
+check "a version below npm's highest is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.3
+check "  and says so" said "REFUSE  0.0.1-test.3 isn't above 0.0.1-test.11"
+check "  as numbers, not text: test.3 isn't above test.11" said 'highest test pre-release on npm is 0.0.1-test.11'
+stub npm <<'EOF'
+#!/usr/bin/env bash
+echo "npm $*" >> "$(dirname "$0")/../fix/calls"
+echo "npm error code E500" >&2
+exit 1
+EOF
+check "an npm that can't be read is refused, exit 1" run 1 "$(script)" bump
+check "  and says so" said "REFUSE  could not read podster's versions from npm"
+# Back to the npm stand-in that answers.
+stub npm <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "npm $*" >> "$fix/calls"
+case "$*" in
+  "view --prefer-online podster versions --json") cat "$fix/npm-versions" ;;
+  "view --prefer-online podster dist-tags --json") cat "$fix/npm-tags" ;;
+  "view --prefer-online podster@"*" dist.shasum") cat "$fix/npm-shasum" ;;
+  *) echo "stand-in npm: unexpected: npm $*" >&2; exit 97 ;;
+esac
+EOF
+
+# --- bump ---
+fresh 0.0.1-test.11
+check "bump with no version reports for main's N plus one, exit 0" run 0 "$(script)" bump
+check "  which is 0.0.1-test.12" said 'no version given, so 0.0.1-test.12'
+check "  and checks the edit" said '^ok +the edit changes exactly the five version lines, to 0.0.1-test.12'
+check "  and pushes, opens and dispatches nothing" never_called "$changes"
+check "  and origin has no new branch" test -z "$(g -C "$origin" branch --list 'chore/*')"
+check "  and the checkout is still clean and detached at main" \
+  test -z "$(g -C "$repo" status --porcelain)" -a "$(g -C "$repo" rev-parse HEAD)" = "$(main_sha)"
+check "  and no scratch worktree is left" test "$(g -C "$repo" worktree list | wc -l | tr -d ' ')" -eq 1
+fresh 0.0.1-test.11
+printf '["0.0.1-test.1","0.0.1-test.13"]\n' > "$fix/npm-versions"
+check "bump with no version goes above npm's highest when that's above main's, exit 0" run 0 "$(script)" bump
+check "  which is 0.0.1-test.14" said 'no version given, so 0.0.1-test.14'
+fresh 0.0.1-test.11
+merge_version 0.0.1-test.13
+check "a version not above main's is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.12
+check "  and says so" said "REFUSE  0.0.1-test.12 isn't above main's 0.0.1-test.13"
+fresh 0.0.1-test.11
+gw push --quiet origin main:refs/heads/chore/runner-test-12
+check "a branch already on origin is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.12 --go
+check "  and says so, pushing nothing" said 'REFUSE  origin already has a branch chore/runner-test-12'
+check "  and opens nothing" never_called "$changes"
+fresh 0.0.1-test.11
+echo 1 > "$fix/prs"
+check "a pull request already from the branch is refused, exit 1" run 1 "$(script)" bump 0.0.1-test.12 --go
+check "  and pushes nothing" never_called "$changes"
+
+fresh 0.0.1-test.11
+base=$(main_sha)
+check "bump --go pushes the branch and opens the pull request, exit 0" run 0 "$(script)" bump 0.0.1-test.12 --go
+pushed=$(g -C "$origin" rev-parse --verify --quiet refs/heads/chore/runner-test-12 || true)
+check "  origin has chore/runner-test-12" test -n "$pushed"
+check "  one commit on main's tip" test "$(g -C "$origin" rev-parse "$pushed^")" = "$base"
+check "  titled for the version" test "$(g -C "$origin" log -1 --format=%s "$pushed")" = "chore: version Runner 0.0.1-test.12"
+check "  changing only the three files" \
+  test "$(g -C "$origin" diff --name-only "$base" "$pushed" | tr '\n' ' ')" = "apps/runner/npm-shrinkwrap.json apps/runner/package-lock.json apps/runner/package.json "
+got_lines=$(g -C "$origin" diff -U0 "$base" "$pushed" | grep -E '^[-+] ' | sed -E 's/^([-+]) +/\1/' | sort | uniq -c | awk '{ $1 = $1; print }' | tr '\n' ';')
+check "  five removed and five added, all the version field" \
+  test "$got_lines" = '5 +"version": "0.0.1-test.12",;5 -"version": "0.0.1-test.11",;'
+check "  every field at the new version, and npm's own fields kept" \
+  test "$(for f in $files; do g -C "$origin" show "$pushed:$f" | jq -r '.version, (if .lockfileVersion then .packages[""].version else empty end)'; done | sort -u)" = 0.0.1-test.12
+check "  the pull request asked for with the conventional title" called '^gh pr create --base main --head chore/runner-test-12 --title chore: version Runner 0.0.1-test.12 '
+check "  and says it isn't merged" said 'It isn.t merged: run scripts/merge-gate'
+check "  and never merges" never_called 'gh pr merge|gh workflow run|pending_deployments'
+check "  and the checkout is still clean and detached at main" \
+  test -z "$(g -C "$repo" status --porcelain)" -a "$(g -C "$repo" rev-parse HEAD)" = "$base" -a -z "$(g -C "$repo" symbolic-ref -q HEAD || true)"
+check "  and made no local branch" test -z "$(g -C "$repo" branch --list 'chore/*')"
+check "  and left no scratch worktree" test "$(g -C "$repo" worktree list | wc -l | tr -d ' ')" -eq 1
+
+fresh 0.0.1-test.11
+echo gh-fails > "$fix/pr-create"
+check "bump --go whose pull request can't be opened, exit 3" run 3 "$(script)" bump 0.0.1-test.12 --go
+check "  says the branch is pushed and how to open it" said 'FAILED  chore/runner-test-12 is pushed at [0-9a-f]{40}, but the pull request wasn.t opened'
+
+# --- publish ---
+# main at test.12, CI green, a dispatch that makes run 902 at main's sha, the environment asked for on the second read,
+# and npm then holding the packed file under test.
+ready() {
+  fresh 0.0.1-test.11
+  merge_version 0.0.1-test.12
+  local sha
+  sha=$(main_sha)
+  printf '900\t%s\t1795000000\n' "$sha" > "$fix/runs.1" # an older run at the same sha, before the dispatch
+  printf '902\t%s\t%s\n900\t%s\t1795000000\n' "$sha" "$(date -u +%s)" "$sha" > "$fix/runs.2"
+  : > "$fix/dispatch"
+  : > "$fix/pending.1"
+  printf '%s\tnpm-test-prerelease\ttrue\n' "$env_id" > "$fix/pending.2"
+  printf 'in_progress\tnone\n' > "$fix/early-state"
+  : > "$fix/approve"
+  printf 'in_progress\tnone\t%s\n' "$sha" > "$fix/state.1"
+  printf 'completed\tsuccess\t%s\n' "$sha" > "$fix/state.2"
+  echo 136757581011 > "$fix/job"
+  printf 'publish\tUNKNOWN STEP\t2026-11-21T06:19:55Z \033[36;1mecho "packed file shasum: $local_sha"\033[0m\npublish\tUNKNOWN STEP\t2026-11-21T06:21:48Z packed file shasum: %s\n' "$packed" > "$fix/log"
+  echo "$packed" > "$fix/npm-shasum"
+  printf '{"latest":"0.0.1-test.1","test":"0.0.1-test.12"}\n' > "$fix/npm-tags"
+}
+
+ready
+check "publish reports, exit 0" run 0 "$(script)" publish 0.0.1-test.12
+check "  and checked CI on main's tip" called "^gh run list --workflow ci.yml --branch main --event push --commit $(main_sha) "
+check "  and looked up the environment by name" said "^ok +the npm-test-prerelease environment is $env_id"
+check "  and dispatches and approves nothing" never_called "$changes"
+check "publish --tag test is accepted, exit 0" run 0 "$(script)" publish 0.0.1-test.12 --tag test
+
+ready
+check "a version main doesn't have is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.13
+check "  and says to merge the bump" said 'has 0.0.1-test.12, not 0.0.1-test.13. Merge the bump first'
+ready
+printf 'completed\tfailure\n' > "$fix/ci"
+check "CI that failed on main is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+check "  and says nothing is rerun" said 'ended as failure, not success. Nothing is rerun'
+check "  and dispatches nothing" never_called "$changes"
+ready
+printf 'in_progress\tnone\n' > "$fix/ci"
+check "CI still running on main is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+ready
+: > "$fix/ci"
+check "no CI run on main is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo 899 > "$fix/busy"
+check "a pre-release run under way is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+check "  and names it" said 'still under way: 899'
+check "  and dispatches nothing" never_called "$changes"
+ready
+echo gh-fails > "$fix/env"
+check "an environment that can't be read is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+check "  and dispatches nothing" never_called "$changes"
+ready
+printf '["0.0.1-test.11","0.0.1-test.12"]\n' > "$fix/npm-versions"
+check "a version already on npm is refused, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+check "  and dispatches nothing" never_called "$changes"
+ready
+cat > "$fix/move-main" <<EOF
+cd "$work" && echo moved > moved && "$real_git" add moved && "$real_git" commit --quiet -m moved && "$real_git" push --quiet origin main
+EOF
+check "main moving after the checks is refused before the dispatch, exit 1" run 1 "$(script)" publish 0.0.1-test.12 --go
+check "  and says so" said 'REFUSE  main moved to [0-9a-f]{40} after the checks'
+check "  and dispatches nothing" never_called "$changes"
+
+ready
+sha=$(main_sha)
+check "publish --go dispatches, approves, waits and checks npm, exit 0" run 0 "$(script)" publish 0.0.1-test.12 --go
+check "  dispatching main with the version and dry_run off" called '^gh workflow run runner-prerelease.yml --ref main -f version=0.0.1-test.12 -f dry_run=false$'
+check "  once" test "$(grep -c '^gh workflow run' "$fix/calls")" -eq 1
+check "  finding run 902, not the older 900 at the same sha" said '^the run is 902$'
+check "  approving the environment by its looked-up id, for 902" \
+  called "^gh api -X POST repos/\{owner\}/\{repo\}/actions/runs/902/pending_deployments -F environment_ids\[\]=$env_id -f state=approved "
+check "  once" test "$(grep -c 'pending_deployments -F' "$fix/calls")" -eq 1
+check "  reading the publish job's log" called '^gh run view 902 --log --job 136757581011$'
+check "  and comparing npm's shasum with the packed one" said "^ok +npm's shasum for 0.0.1-test.12 is the packed file's"
+check "  and the test tag" said '^ok +dist-tag test is 0.0.1-test.12'
+check "  reporting latest and leaving it" said 'latest 0.0.1-test.1 \(left as it is\)'
+check "  never touching a dist-tag, publishing or rerunning" never_called 'npm (publish|dist-tag|unpublish|deprecate)|gh run rerun|gh pr merge'
+check "  and output carries no token-like text" test "$(grep -c -i -E 'token|npm_[A-Za-z0-9]{8}|ghp_|github_pat_' "$tmp/out" || true)" -eq 0
+
+ready
+sha=$(main_sha)
+printf '902\t%s\t%s\n903\t%s\t%s\n' "$sha" "$(date -u +%s)" "$sha" "$(date -u +%s)" > "$fix/runs.2"
+check "two new runs at main's sha: nothing approved, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and says why" said 'more than one new runner-prerelease.yml run'
+check "  and approves nothing" never_called 'pending_deployments -F'
+ready
+sha=$(main_sha)
+printf '902\t%s\t%s\n' ffffffffffffffffffffffffffffffffffffffff "$(date -u +%s)" > "$fix/runs.2"
+check "a new run at another sha is not taken: exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and approves nothing" never_called 'pending_deployments -F'
+ready
+sha=$(main_sha)
+printf '902\t%s\t1795000000\n' "$sha" > "$fix/runs.2"
+check "a new run created well before the dispatch is not taken: exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and approves nothing" never_called 'pending_deployments -F'
+ready
+sha=$(main_sha)
+printf '900\t%s\t%s\n' "$sha" "$(date -u +%s)" > "$fix/runs.1"
+cp "$fix/runs.1" "$fix/runs.2"
+check "a recent run at main's sha that was there before the dispatch is not taken: exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and approves nothing" never_called 'pending_deployments -F'
+ready
+echo gh-fails > "$fix/dispatch"
+check "a dispatch that fails: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and approves nothing" never_called 'pending_deployments'
+ready
+printf '999\tstaging\ttrue\n' > "$fix/pending.2"
+check "a run waiting only on another environment: that one isn't approved, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and nothing is approved" never_called 'pending_deployments -F'
+ready
+printf '999\tnpm-test-prerelease\ttrue\n' > "$fix/pending.2"
+check "an environment of the right name but another id isn't approved, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+check "  and nothing is approved" never_called 'pending_deployments -F'
+ready
+printf '%s\tnpm-test-prerelease\tfalse\n' "$env_id" > "$fix/pending.2"
+check "an environment this account can't approve, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+check "  and says to approve or cancel it in GitHub" said "can't approve it. Approve or cancel it in GitHub"
+ready
+printf 'completed\tfailure\n' > "$fix/early-state"
+check "a run that fails before asking for the environment, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+check "  and nothing is approved" never_called 'pending_deployments -F'
+ready
+echo gh-fails > "$fix/approve"
+check "an approval that fails, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+ready
+printf 'completed\tfailure\t%s\n' "$(main_sha)" > "$fix/state.2"
+check "a run that fails after approval, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+check "  and says nothing is rerun" said 'ended as failure. Nothing is rerun'
+check "  and reruns nothing" never_called 'gh run rerun'
+ready
+printf 'in_progress\tnone\t%s\n' "$(main_sha)" > "$fix/state.2"
+check "a run that never finishes: unknown, exit 5" run 5 "$(script)" publish 0.0.1-test.12 --go
+ready
+echo 0000000000000000000000000000000000000000 > "$fix/npm-shasum"
+check "npm's shasum not the packed one, exit 4" run 4 "$(script)" publish 0.0.1-test.12 --go
+check "  and says so" said "WRONG   npm's shasum for 0.0.1-test.12 is '0{40}', not $packed"
+ready
+printf '{"latest":"0.0.1-test.1","test":"0.0.1-test.11"}\n' > "$fix/npm-tags"
+check "the test tag not at the version, exit 4" run 4 "$(script)" publish 0.0.1-test.12 --go
+check "  and says so" said 'WRONG   dist-tag test is 0.0.1-test.11, not 0.0.1-test.12'
+check "  and moves no tag" never_called 'npm dist-tag'
+ready
+printf 'publish\tx\tpacked file shasum: %s\npublish\tx\tpacked file shasum: %s\n' "$packed" 1111111111111111111111111111111111111111 > "$fix/log"
+check "a log with two packed shasums, exit 3" run 3 "$(script)" publish 0.0.1-test.12 --go
+
+# --- what the script can't do at all ---
+target="$scripts/release-runner-test"
+check "it never runs npm publish, dist-tag, unpublish or deprecate" \
+  test "$(grep -c -E '^[^#]*npm +(publish|dist-tag|unpublish|deprecate|login|token|adduser)' "$target")" -eq 0
+check "it never reruns, merges or rejects" test "$(grep -c -E 'gh +run +rerun|gh +pr +merge|state=rejected' "$target")" -eq 0
+check "it never passes latest as a tag" test "$(grep -c -E -- '--tag[ =]+latest|tag=latest' "$target")" -eq 0
+check "it switches no checkout's branch (it names checkout only in a message)" \
+  test "$(grep -c -E '^[^"#]*git +(-C +[^ ]+ +)?(checkout|switch)' "$target")" -eq 0
+check "its only push is the bump branch" test "$(grep -c -E 'git .*push' "$target")" -eq 1
+check "it dispatches in one place only, with dry_run=false" \
+  test "$(grep -c -E '^ *gh workflow run ' "$target")" -eq 1 -a "$(grep -E '^ *gh workflow run ' "$target" | grep -c 'dry_run=false')" -eq 1
+
+finish release-runner-test

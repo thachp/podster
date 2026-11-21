@@ -148,12 +148,19 @@ A spike, `spikes/m7-openai` (or a test branch of Runner), run locally by the arc
 ## Questions for the owner
 
 1. **The SDK:** the Agents SDK as recommended, or Codex (its own coding agent, but a larger and less controllable surface, as above), or both later?
+   *Answered 2026-11-21 by the architect, on the owner's behalf:* the Agents SDK, as recommended. Codex is set aside, and is revisited only if the Agents SDK path fails the spike.
 2. **The spike's spend:** approve 2.00 USD on a dedicated OpenAI project key, created by you (Runner and its builders never create accounts or keys), at `~/.podster/openai-runner.key`?
+   *Still the owner's (2026-11-21).* The 2.00 USD spike and creating the key at `~/.podster/openai-runner.key` wait on the owner.
 3. **Per Runner or per room:** keep one provider per Runner for now, or let one Runner run Claude in one room and OpenAI in another (two keys, two budgets)?
+   *Answered 2026-11-21 by the architect, on the owner's behalf:* one provider per Runner for now, through policy.json's top-level `adapter`; a per-room adapter comes later.
 4. **The OpenAI project's budget:** do you want the project budget set to match Runner's day cap as a second lock? Whether OpenAI enforces a project budget as a hard stop is unverified here.
+   *Still the owner's (2026-11-21).* The OpenAI project's budget is the owner's to set.
 5. **The model:** `gpt-6-luna` only at first (cheapest, unknown coding ability), or also `gpt-6.1-terra` (ten times the price) for the spike's comparison?
+   *Answered 2026-11-21 by the architect, on the owner's behalf:* `gpt-6-luna` only, for the spike.
 6. **Order:** start this after M7's gates close for the Claude adapter, or alongside? Under decision 26 nothing ships before M7's gates either way, and an OpenAI adapter adds its own items (S-53 to S-58) to the security review.
+   *Answered 2026-11-21 by the architect, on the owner's behalf:* the design and the spike may run now; the adapter's code lands after M7's Claude gates (step 18), so S-53 to S-58 join a later security review, not M7's.
 7. **Data retention:** is `store: false` with OpenAI's standard abuse-monitoring retention acceptable for room content, or does an OpenAI room need Zero Data Retention on your OpenAI organization first?
+   *Answered 2026-11-21 by the architect, on the owner's behalf:* `store: false` with OpenAI's standard retention is acceptable for staging and for pilots with test content; Zero Data Retention is revisited before any real customer content.
 
 ## Unverified
 

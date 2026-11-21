@@ -82,9 +82,11 @@ export const WORK_TREE_CACHES = [".cache", ".cargo", ".npm-global"] as const;
  * - Python's `__pycache__/` and `.pytest_cache/` at any depth;
  * - at the top only: cargo's build folder `/target/`, wrangler's local state `/.wrangler/`, and agents' scratch `/.tmp/`;
  * - `.DS_Store` at any depth;
- * - `.env` and `.env.*` at any depth, except `.env.example`, so an agent-written `.env` is never committed.
+ * - `.env` and `.env.*` at any depth, except `.env.example`, `.env.sample` and `.env.template`, so an agent-written
+ *   `.env` is never committed.
  * Folder lines end in `/`, so a link by one of those names isn't excluded and the work tree check still refuses it; a
- * folder Git then ignores whole is skipped by that check (`ignoredFolders`). An exclude applies only to untracked files:
+ * folder Git then ignores whole is skipped by that check (`ignoredFolders`), unless another ignored entry is listed
+ * beneath it (`wholeFolders`), so an excluded `.env` that is a link is always reached and refuses, at any depth. An exclude applies only to untracked files:
  * a file the repository tracks under or by one of these names is still committed as usual, and a folder holding one is
  * walked by the work tree check as before.
  */
@@ -100,6 +102,8 @@ export const WORK_TREE_DEFAULT_IGNORE = [
   ".env",
   ".env.*",
   "!.env.example",
+  "!.env.sample",
+  "!.env.template",
 ] as const;
 /**
  * The `info/exclude` Runner writes: each cache folder, anchored at the work tree's top, as a folder only, then the

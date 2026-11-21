@@ -706,7 +706,7 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     sh(w.seed, "push", "--quiet", w.remote, "main:main");
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
     // Runner's own exclude, in its Git folder, where no container reaches.
-    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n");
+    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n");
     // What a run leaves: cargo's registry beside the tracked config, uv's cache with its links, npm's global prefix
     // with a bin link, the task's HOME with tools' dot folders in it (a Maven wrapper's ~/.m2, java.util.prefs' ~/.java,
     // .NET's ~/.dotnet), NuGet's packages, and the task's real change.
@@ -849,6 +849,8 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await put("apps/web/.env.local", "SECRET=1\n");
     await put(".env.example", "SECRET=\n");
     await put("apps/web/.env.example", "SECRET=\n");
+    await put(".env.sample", "SECRET=\n");
+    await put(".env.template", "SECRET=\n");
     await put("pkg/__pycache__/mod.cpython-314.pyc");
     await put("pkg/.pytest_cache/v/cache/lastfailed");
     await put("target/debug/app");
@@ -862,10 +864,33 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await put("pkg/mod.py");
     const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
     if (published.kind !== "published") throw new Error("not published");
-    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".env.example", "README.md", "apps/web/.env.example", "docs/.tmp/kept.txt", "docs/target/page.md", "pkg/mod.py"]);
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".env.example", ".env.sample", ".env.template", "README.md", "apps/web/.env.example", "docs/.tmp/kept.txt", "docs/target/page.md", "pkg/mod.py"]);
     const gitDir = join(w.home, "git", ROOM, TASK);
     const index = sh(w.root, `--git-dir=${gitDir}`, `--work-tree=${w.taskFolder}`, "ls-files", "--cached", "-z").split("\0");
     expect(index.filter((p) => /(^|\/)\.env(\.local)?$/.test(p))).toEqual([]);
+  });
+
+  it("walks a folder whose only entries are ignored, so an ignored link or a .git look-alike below it still refuses (the review of #508)", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    // `sub` holds nothing but an excluded `.env` that is a link: Git lists `sub/` and `sub/.env`.
+    await mkdir(join(w.taskFolder, "sub"));
+    await symlink("/etc/passwd", join(w.taskFolder, "sub", ".env"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    await rm(join(w.taskFolder, "sub"), { recursive: true });
+    // `x` holds nothing but a `node_modules` with a `.git` folder: Git lists `x/` and `x/node_modules/`.
+    await mkdir(join(w.taskFolder, "x", "node_modules", ".git"), { recursive: true });
+    await writeFile(join(w.taskFolder, "x", "node_modules", ".git", "HEAD"), "ref: refs/heads/main\n");
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_git" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+    await rm(join(w.taskFolder, "x"), { recursive: true });
+    // A `packages/a` holding only `node_modules/.bin` with a link: its parents are walked, `node_modules` is skipped.
+    await mkdir(join(w.taskFolder, "packages", "a", "node_modules", ".bin"), { recursive: true });
+    await symlink("/usr/bin/env", join(w.taskFolder, "packages", "a", "node_modules", ".bin", "env"));
+    await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual(["README.md", "feature.txt"]);
   });
 
   it("still commits a .env file the repository tracks, since an exclude only affects untracked files", async () => {
@@ -1241,6 +1266,8 @@ describe("the work tree check", () => {
 
   it("takes only Git's whole folders, with no empty, `.` or `..` part, and counts a skipped folder's own entries only", async () => {
     expect([...wholeFolders(Buffer.from("node_modules/\0a.log\0packages/web/.venv/\0../x/\0a//b/\0./y/\0\0"))]).toEqual(["node_modules", "packages/web/.venv"]);
+    // A listed folder with another listed entry beneath it is walked; only the deepest are skipped.
+    expect([...wholeFolders(Buffer.from("f/\0f/.env\0x/\0x/node_modules/\0z/\0z/a/\0z/a/node_modules/\0y/node_modules/\0"))].sort()).toEqual(["x/node_modules", "y/node_modules", "z/a/node_modules"]);
     // Read as bytes: an entry that isn't UTF-8 refuses rather than turning into U+FFFD.
     expect(() => wholeFolders(Buffer.concat([Buffer.from("ok/\0"), Buffer.from([0xff, 0x2f, 0])]))).toThrow(/work_tree_name/);
     expect(() => nameOf(Buffer.from([0xc0, 0xaf]))).toThrow(/work_tree_name/);

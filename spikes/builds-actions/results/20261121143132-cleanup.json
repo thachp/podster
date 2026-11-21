@@ -1,0 +1,40 @@
+[
+  {
+    "check": "pre",
+    "name": "provision App installation",
+    "status": 200,
+    "permissions": {
+      "metadata": "read",
+      "administration": "write"
+    },
+    "repository_selection": "all"
+  },
+  {
+    "check": "pre",
+    "name": "mint provision, unscoped (cleanup)",
+    "status": 201,
+    "message": null,
+    "granted": {
+      "administration": "write",
+      "metadata": "read"
+    },
+    "repositories": "all"
+  },
+  {
+    "check": "cleanup",
+    "name": "delete builds-spike-20261121142858",
+    "status": 204,
+    "message": null
+  },
+  {
+    "check": "end",
+    "name": "tokens revoked",
+    "minted": 1,
+    "statuses": [
+      {
+        "token": "provision, unscoped (cleanup)",
+        "status": 204
+      }
+    ]
+  }
+]

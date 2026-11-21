@@ -183,8 +183,12 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
   it("reaches nothing on the machine through the internal network, and forwards no DNS query anywhere routed", async () => {
     const names = egressNames(REF);
     const fmt = (net: string, f: string) => run(["network", "inspect", "--format", f, net]).then((r) => r.stdout.trim());
+    // The networks' IPAM settings as JSON: Docker 29 prints a missing gateway as "invalid IP" through a template, and
+    // 28 as "", so only the JSON field is read.
+    const ipam = async (net: string) => JSON.parse(await fmt(net, "{{json .IPAM.Config}}")) as { Subnet?: string; Gateway?: string }[];
+    const gatewayOf = async (net: string) => (await ipam(net)).map((c) => c.Gateway ?? "").filter((g) => /^\d+\.\d+\.\d+\.\d+$/.test(g));
     // No gateway on the internal network, and on Linux no host address on its bridge.
-    expect(await fmt(names.network, "{{range .IPAM.Config}}{{.Gateway}}{{end}}")).toBe("");
+    expect(await gatewayOf(names.network)).toEqual([]);
     expect(await fmt(names.network, '{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}')).toBe("true");
     if (process.platform === "linux") {
       const id = (await fmt(names.network, "{{.Id}}")).slice(0, 12);
@@ -198,11 +202,22 @@ describe.runIf(ON)("the egress proxy on a real Docker Engine", () => {
     try {
       // Every host address Docker gives: the outbound network's gateway and the default bridge's, and any the internal
       // network's subnet has left free at .1.
-      const gateways = [await fmt(names.out, "{{range .IPAM.Config}}{{.Gateway}}{{end}}"), await fmt("bridge", "{{range .IPAM.Config}}{{.Gateway}}{{end}}")].filter((g) => /^\d+\.\d+\.\d+\.\d+$/.test(g));
-      expect(gateways.length).toBeGreaterThan(0);
+      // Since the internal network has none, every host address Docker gives elsewhere: the outbound network's gateway
+      // and the default bridge's, and on Linux the machine's own global addresses too.
+      const gateways = [...(await gatewayOf(names.out)), ...(await gatewayOf("bridge"))];
+      expect(gateways.length).toBe(2);
+      const own =
+        process.platform === "linux"
+          ? execFileSync("ip", ["-4", "-o", "addr", "show", "scope", "global"], { encoding: "utf8" })
+              .split("\n")
+              .map((l) => l.match(/inet (\d+\.\d+\.\d+\.\d+)\//)?.[1])
+              .filter((a): a is string => a !== undefined && !gateways.includes(a))
+          : [];
+      if (process.platform === "linux") expect(own.length).toBeGreaterThan(0);
       const held = (await fmt(names.network, "{{range .Containers}}{{.IPv4Address}} {{end}}")).split(/\s+/).map((a) => a.split("/")[0]);
-      const first = (await fmt(names.network, "{{range .IPAM.Config}}{{.Subnet}}{{end}}")).replace(/\.\d+\/\d+$/, ".1");
-      const targets = [...gateways, ...(held.includes(first) ? [] : [first])];
+      const first = ((await ipam(names.network))[0]?.Subnet ?? "").replace(/\.\d+\/\d+$/, ".1");
+      expect(first).toMatch(/^\d+\.\d+\.\d+\.1$/);
+      const targets = [...new Set([...gateways, ...own, ...(held.includes(first) ? [] : [first])])];
       const ports = [22, 80, 443, 3128, 5432, high];
       const result = await inTask(`probe ${targets.join(",")} ${ports.join(",")}`);
       const outcomes = result.split(",");

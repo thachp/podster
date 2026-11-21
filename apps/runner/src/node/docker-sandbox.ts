@@ -51,7 +51,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { toolchainEnv, type Toolchain } from "../core/toolchains.js";
-import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, TASK_HOME_IN_FOLDER, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { egressNames, logProxyDecisions, openEgress, removeNetworks, ROLE_NETWORK, ROLE_PROXY, type EgressOpts } from "./egress-network.js";
 import { onWindowsDrive } from "../core/policy.js";
@@ -104,6 +104,8 @@ export type ContainerBounds = { readonly pids: number; readonly memory: string; 
 export function limitsFor(spec: Pick<ContainerSpec, "toolchains">): ContainerBounds {
   return spec.toolchains.length > 0 ? TOOLCHAIN_LIMITS : LIMITS;
 }
+/** A task folder where Runner can't make the task's HOME (`.cache/home`) as a plain folder of its own: refused. */
+export const TASK_HOME_INVALID = "task_home_invalid";
 /** A run whose room names toolchains, with no toolchain image to be had: refused, never run in another image. */
 export const TOOLCHAIN_IMAGE_UNAVAILABLE = "toolchain_image_unavailable";
 type Limits = { folder_bytes: number; folder_entries: number };
@@ -345,6 +347,14 @@ export class DockerSandbox implements TaskSandbox {
     // /mnt, can't put a task on the Windows file system.
     const real = await realpath(spec.task_folder);
     if (onWindowsDrive(real) || onWindowsFilesystem(real, this.mounts())) throw new Error("workspace_on_windows_drive");
+    // The task's HOME, `.cache/home` in its folder (`TASK_HOME`), made by Runner as the task's user, every segment
+    // checked for links, so no tool's dot folder lands in the work tree's commit. A repository whose `.cache` or
+    // `.cache/home` is a link or a file refuses the run.
+    try {
+      await ensureFolder(spec.task_folder, join(spec.task_folder, ...TASK_HOME_IN_FOLDER));
+    } catch {
+      throw new Error(TASK_HOME_INVALID);
+    }
     if (signal.aborted) throw new Error("halted");
     // The room's toolchain image, built and pinned on first need; any failure refuses the run, never another image.
     let image = this.image;

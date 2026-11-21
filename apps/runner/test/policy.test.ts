@@ -551,8 +551,12 @@ describe("a room's toolchains (the owner's ruling of 2026-11-20)", () => {
     expect(parsePolicyConfig(withChains([])).ok).toBe(true);
   });
 
-  it("allow exactly rust and python, in any order, and hand the run its sorted list", () => {
-    expect(TOOLCHAINS).toEqual(["python", "rust"]);
+  it("allow exactly dotnet, java, python and rust, in any order, and hand the run its sorted list", () => {
+    expect(TOOLCHAINS).toEqual(["dotnet", "java", "python", "rust"]);
+    expect(decide({ config: withChains(["dotnet"]) }).facts?.toolchains).toEqual(["dotnet"]);
+    expect(decide({ config: withChains(["java"]) }).facts?.toolchains).toEqual(["java"]);
+    expect(decide({ config: withChains(["java", "dotnet"]) }).facts?.toolchains).toEqual(["dotnet", "java"]);
+    expect(decide({ config: withChains(["rust", "java", "python", "dotnet"]) }).facts?.toolchains).toEqual(["dotnet", "java", "python", "rust"]);
     expect(decide({ config: withChains(["rust"]) }).facts?.toolchains).toEqual(["rust"]);
     expect(decide({ config: withChains(["python"]) }).facts?.toolchains).toEqual(["python"]);
     const both = decide({ config: withChains(["rust", "python"]) });
@@ -566,7 +570,9 @@ describe("a room's toolchains (the owner's ruling of 2026-11-20)", () => {
   });
 
   const unknown: [string, unknown][] = [
-    [".NET, not yet a toolchain", "dotnet"],
+    ["another spelling of .NET", ".net"],
+    ["a JDK by version, not yet a toolchain", "java21"],
+    ["Gradle, which comes only through a project's wrapper", "gradle"],
     ["an upper-case name", "Rust"],
     ["a version suffix", "rust@1.100"],
     ["white space", " rust"],
@@ -579,8 +585,8 @@ describe("a room's toolchains (the owner's ruling of 2026-11-20)", () => {
     const at = `rooms[].toolchains:${TOOLCHAIN_UNKNOWN}:${ROOM}:1`;
     expect(parsePolicyConfig(withChains(["rust", entry]))).toEqual({ ok: false, at });
     const problem = policyProblem(at);
-    expect(problem).toBe(`entry 1 of the room ${ROOM}'s rooms[].toolchains isn't a toolchain Runner has (toolchain_unknown): list only "python" or "rust"`);
-    expect(problem).not.toMatch(/curl|dotnet|@1\.100|Rust| rust|null|\{/);
+    expect(problem).toBe(`entry 1 of the room ${ROOM}'s rooms[].toolchains isn't a toolchain Runner has (toolchain_unknown): list only "dotnet" or "java" or "python" or "rust"`);
+    expect(problem).not.toMatch(/curl|\.net|java21|gradle|@1\.100|Rust| rust|null|\{/);
     expect(decide({ config: withChains([entry]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
   });
 

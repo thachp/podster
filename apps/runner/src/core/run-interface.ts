@@ -121,8 +121,16 @@ export function markUntrusted(bytes: Uint8Array): UntrustedPrompt | null {
 
 // ---- The task's container ----
 
+/**
+ * The task's `HOME`, as a path inside its folder: `.cache/home`, under a folder Runner excludes from a repository
+ * room's commit (`WORK_TREE_CACHES`). The work tree is /work, so a `HOME` of /work would put every tool's dot folder
+ * (`~/.m2`, `~/.java`, `~/.local`, `~/.dotnet`, `~/.config` and the rest) in the commit; under `.cache` none can be. Runner
+ * makes it, owned by the task's user and checked for links, before the container starts. The working folder stays /work.
+ */
+export const TASK_HOME_IN_FOLDER = [".cache", "home"] as const;
+export const TASK_HOME = `${TASK_FOLDER_IN_CONTAINER}/${TASK_HOME_IN_FOLDER.join("/")}`;
 /** The container's whole environment: fixed, nothing inherited, nothing shaped like a secret. */
-export const CONTAINER_ENV: Readonly<Record<string, string>> = Object.freeze({ HOME: "/work", PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" });
+export const CONTAINER_ENV: Readonly<Record<string, string>> = Object.freeze({ HOME: TASK_HOME, PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8" });
 export const CONTAINER_WORKDIR = TASK_FOLDER_IN_CONTAINER;
 /** The egress proxy's name on a run's internal network, and its port (`egress-proxy.ts`). */
 export const EGRESS_ALIAS = "egress";

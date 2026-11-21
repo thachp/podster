@@ -66,9 +66,10 @@ export const REQUIRED_RULES = ["pull_request", "required_status_checks", "update
  */
 export const RENEW_BEFORE_MS = 4 * 60 * 1000;
 /**
- * The folders at the top of the work tree where tools in the task's container keep caches and installs (`/work` is
- * both `HOME` and the work tree): npm's global prefix (the task image's npmrc), cargo's home and uv's cache
- * (`TOOLCHAIN_ENV`), and anything else under `~/.cache`. Runner writes them into the `info/exclude` of its own Git folder,
+ * The folders at the top of the work tree (/work) where tools in the task's container keep caches and installs: npm's
+ * global prefix (the task image's npmrc), cargo's home (`CARGO_HOME`), and `.cache`, which holds the task's `HOME`
+ * (`.cache/home`, so every tool's dot folder lands there) and the caches the other toolchains' `TOOLCHAIN_ENV` puts
+ * there (uv's, the .NET CLI's, NuGet's, Maven's and Gradle's). Runner writes them into the `info/exclude` of its own Git folder,
  * which no container can reach, so they are never committed, whatever the repository's own `.gitignore` says. A file the
  * repository tracks under one of them is still committed as usual: an exclude applies only to untracked files.
  */

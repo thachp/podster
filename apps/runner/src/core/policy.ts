@@ -34,7 +34,7 @@
  *   wildcard, IP address, upper case, a trailing dot or a special-use name such as `localhost`) is refused at load with
  *   `network_host_invalid`, a repeated one with `network_host_duplicate`.
  * - **Toolchains** (the owner's ruling of 2026-11-20): a room's optional `toolchains` names pinned toolchain images its
- *   tasks run in (`TOOLCHAINS`: `python`, `rust`), `[]` by default. An unknown name is refused at load with
+ *   tasks run in (`TOOLCHAINS`: `dotnet`, `java`, `python`, `rust`), `[]` by default. An unknown name is refused at load with
  *   `toolchain_unknown`, a repeated one with `toolchain_duplicate`, each naming the room and the entry's index, never the
  *   entry's text; and a list in a room without the `shell` tool with `toolchain_needs_shell`, since nothing else can run
  *   a toolchain. They are a run fact, sorted, so a decision binds them. They add no network: a registry is reached only
@@ -69,7 +69,7 @@ export const DEFAULT_TOOLS: readonly Tool[] = ["read", "search", "write", "edit"
  * The optional toolchains a room may name, sorted by name: the order their images are layered. Each is a pinned image
  * built FROM the base task image (`toolchains.ts`, `apps/runner/toolchains/<name>/Dockerfile`).
  */
-export const TOOLCHAINS = ["python", "rust"] as const;
+export const TOOLCHAINS = ["dotnet", "java", "python", "rust"] as const;
 export type Toolchain = (typeof TOOLCHAINS)[number];
 export const isToolchain = (v: unknown): v is Toolchain => typeof v === "string" && (TOOLCHAINS as readonly string[]).includes(v);
 /** The SDK's structured result is itself a tool call, so the policy always names it (spike B ruling 2). */

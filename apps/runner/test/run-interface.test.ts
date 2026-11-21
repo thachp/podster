@@ -11,6 +11,7 @@ import type { Clock, FailureRecord, LogFields } from "../src/core/runtime.js";
 import {
   checkContainerSpec,
   CONTAINER_ENV,
+  CONTAINER_WORKDIR,
   containerSpec,
   markUntrusted,
   MAX_PROMPT_BYTES,
@@ -18,6 +19,8 @@ import {
   PLACEHOLDER_KEY,
   STOP_STEP_MS,
   SupervisedAdapter,
+  TASK_HOME,
+  TASK_HOME_IN_FOLDER,
   UNTRUSTED_FRAME,
   LIMITS_GUIDANCE,
   runFrame,
@@ -29,7 +32,8 @@ import {
   type ProviderTransport,
   type TaskSandbox,
 } from "../src/core/run-interface.js";
-import { shellDescription, TOOLCHAIN_ENV, TOOLCHAIN_INFO, toolchainLine } from "../src/core/toolchains.js";
+import { WORK_TREE_CACHES } from "../src/core/repository.js";
+import { shellDescription, TOOLCHAIN_ENV, TOOLCHAIN_INFO, TOOLCHAINS, toolchainLine } from "../src/core/toolchains.js";
 import { decideToolCall, MAX_SUMMARY_CHARS, parseRunResult, refusalText, RESULT_RULE_TEXT, RESULT_RULES, taskPath, type AllowedCall, type ResultRule } from "../src/core/tool-policy.js";
 
 const enc = new TextEncoder();
@@ -405,8 +409,35 @@ describe("a room's toolchains in the run (the owner's ruling of 2026-11-20)", ()
     expect(both.toolchains).toEqual(["python", "rust"]);
     expect(Object.keys(both.env).sort()).toEqual([...Object.keys(CONTAINER_ENV), "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "CARGO_HOME", ...Object.keys(TOOLCHAIN_ENV.python)].sort());
     expect(checkContainerSpec(both)).toBeNull();
-    // Every value is a fixed path or word: no caches in the noexec /tmp, nothing shaped like a secret.
-    for (const env of Object.values(TOOLCHAIN_ENV)) for (const value of Object.values(env)) expect(value).toMatch(/^(\/work\/|\/opt\/|only-managed$|never$)/);
+    const dotnet = containerSpec("run_1", { ...SHELL, toolchains: ["dotnet", "java"] });
+    expect(dotnet.env).toEqual({ ...CONTAINER_ENV, ...TOOLCHAIN_ENV.dotnet, ...TOOLCHAIN_ENV.java });
+    expect(checkContainerSpec(dotnet)).toBeNull();
+    // Every value is a fixed path or word, or a JVM option naming one: no caches in the noexec /tmp, nothing shaped like
+    // a secret, and the only host named is Runner's egress proxy.
+    for (const env of Object.values(TOOLCHAIN_ENV))
+      for (const value of Object.values(env))
+        expect(value).toMatch(/^(\/work\/[a-z0-9./-]+|\/opt\/[a-z0-9./-]+|only-managed|never|1|false|-Dmaven\.repo\.local=\/work\/\.cache\/m2\/repository|-Dhttps\.proxyHost=egress -Dhttps\.proxyPort=3128 -Dhttp\.proxyHost=egress -Dhttp\.proxyPort=3128 -Dorg\.gradle\.daemon=false -Dkotlin\.compiler\.execution\.strategy=in-process)$/);
+  });
+
+  it("gives every room's container a HOME inside a folder Runner excludes from a repository room's commit, and /work as its working folder", () => {
+    expect(TASK_HOME).toBe("/work/.cache/home");
+    expect(CONTAINER_WORKDIR).toBe("/work");
+    const shapes: RunFacts[] = [
+      FACTS,
+      SHELL,
+      { ...SHELL, network: ["registry.npmjs.org"] },
+      ...TOOLCHAINS.map((t) => ({ ...SHELL, toolchains: [t] })),
+      { ...SHELL, toolchains: [...TOOLCHAINS], network: ["api.nuget.org", "repo.maven.apache.org"] },
+    ];
+    for (const facts of shapes) {
+      const spec = containerSpec("run_1", facts);
+      expect(checkContainerSpec(spec)).toBeNull();
+      const home = spec.env.HOME;
+      expect([home, WORK_TREE_CACHES.some((name) => home.startsWith(`${CONTAINER_WORKDIR}/${name}/`))]).toEqual([home, true]);
+      expect(home).toBe(`${CONTAINER_WORKDIR}/${TASK_HOME_IN_FOLDER.join("/")}`);
+    }
+    // A HOME of /work itself, the work tree, is refused.
+    expect(checkContainerSpec({ ...containerSpec("run_1", FACTS), env: { ...CONTAINER_ENV, HOME: "/work" } })).toBe("env_not_allowed");
   });
 
   it("refuses a spec whose toolchains or environment don't match each other exactly", () => {
@@ -418,7 +449,9 @@ describe("a room's toolchains in the run (the owner's ruling of 2026-11-20)", ()
     const both = containerSpec("run_1", { ...SHELL, toolchains: ["python", "rust"] });
     expect(checkContainerSpec({ ...both, toolchains: ["rust", "python"] })).toBe("spec_invalid");
     expect(checkContainerSpec({ ...both, toolchains: ["rust", "rust"] as never })).toBe("spec_invalid");
-    expect(checkContainerSpec({ ...both, toolchains: ["dotnet"] as never })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: ["gradle"] as never })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: ["java", "dotnet"] })).toBe("spec_invalid");
+    expect(checkContainerSpec({ ...both, toolchains: ["dotnet", "python", "rust"] })).toBe("env_not_allowed");
     expect(checkContainerSpec({ ...both, toolchains: undefined as never })).toBe("spec_invalid");
   });
 

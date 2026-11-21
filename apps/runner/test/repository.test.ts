@@ -708,7 +708,8 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     // Runner's own exclude, in its Git folder, where no container reaches.
     expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\n");
     // What a run leaves: cargo's registry beside the tracked config, uv's cache with its links, npm's global prefix
-    // with a bin link, and the task's real change.
+    // with a bin link, the task's HOME with tools' dot folders in it (a Maven wrapper's ~/.m2, java.util.prefs' ~/.java,
+    // .NET's ~/.dotnet), NuGet's packages, and the task's real change.
     await mkdir(join(w.taskFolder, ".cargo", "registry", "cache"), { recursive: true });
     await writeFile(join(w.taskFolder, ".cargo", "registry", "cache", "itoa.crate"), "crate");
     await writeFile(join(w.taskFolder, ".cargo", "config.toml"), "[build]\njobs = 2\n");
@@ -718,6 +719,12 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await mkdir(join(w.taskFolder, ".npm-global", "bin"), { recursive: true });
     await writeFile(join(w.taskFolder, ".npm-global", "tool.js"), "x");
     await symlink("../tool.js", join(w.taskFolder, ".npm-global", "bin", "tool"));
+    for (const dot of [[".m2", "wrapper", "dists"], [".java", ".userPrefs"], [".dotnet", "corefx", "Runtime"], [".local", "share", "kotlin"]]) {
+      await mkdir(join(w.taskFolder, ".cache", "home", ...dot), { recursive: true });
+      await writeFile(join(w.taskFolder, ".cache", "home", ...dot, "x"), "x");
+    }
+    await mkdir(join(w.taskFolder, ".cache", "nuget", "packages", "newtonsoft.json"), { recursive: true });
+    await writeFile(join(w.taskFolder, ".cache", "nuget", "packages", "newtonsoft.json", "x.nupkg"), "x");
     await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
     const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
     if (published.kind !== "published") throw new Error("not published");

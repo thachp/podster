@@ -272,7 +272,7 @@ describe("the task container's network and environment", () => {
     // An upstream resolver that is never routed and isn't loopback (TEST-NET-1).
     expect(flag("--dns")).toEqual(["192.0.2.1"]);
     expect(flag("--env").sort()).toEqual([
-      "HOME=/work", "HTTPS_PROXY=http://egress:3128", "HTTP_PROXY=http://egress:3128", "LANG=C.UTF-8", "NO_PROXY=localhost,127.0.0.1,::1", "PATH=/usr/local/bin:/usr/bin:/bin",
+      "HOME=/work/.cache/home", "HTTPS_PROXY=http://egress:3128", "HTTP_PROXY=http://egress:3128", "LANG=C.UTF-8", "NO_PROXY=localhost,127.0.0.1,::1", "PATH=/usr/local/bin:/usr/bin:/bin",
       "http_proxy=http://egress:3128", "https_proxy=http://egress:3128", "no_proxy=localhost,127.0.0.1,::1",
     ]);
     expect(args.join(" ")).not.toMatch(/--network (host|bridge|none)|--cap-add|--privileged/);

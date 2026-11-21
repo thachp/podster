@@ -17,8 +17,9 @@
  *   only tag would delete an image built with none, such as the pinned base, and it keeps the parent from being pruned
  *   as dangling.
  *
- * - **One architecture.** The build gets ARCH, the Engine's architecture (`aarch64` or `x86_64`), and fetches only that
- *   architecture's tarballs; any other architecture refuses the build.
+ * - **One architecture.** The build gets ARCH, the Engine's architecture as that toolchain's tarballs name it (`aarch64`
+ *   or `x86_64` for Rust and Python, `arm64` or `x64` for .NET, `aarch64` or `x64` for Java: `TOOLCHAIN_ARCH`), and
+ *   fetches only that architecture's tarballs; any other architecture refuses the build.
  *
  * The `docker` program goes through Runner's own `DockerCli`. Nothing from the task or Podster reaches a build: the names
  * are the policy's known toolchains, and every argument is fixed or an image ID.
@@ -34,6 +35,8 @@ import { readNoFollow, writeNew } from "./safe-fs.js";
 
 /** Each toolchain's build folder, in Runner's own package: its Dockerfile, which copies nothing from the folder. */
 export const TOOLCHAIN_SOURCES: Readonly<Record<Toolchain, string>> = Object.freeze({
+  dotnet: fileURLToPath(new URL("../../toolchains/dotnet", import.meta.url)),
+  java: fileURLToPath(new URL("../../toolchains/java", import.meta.url)),
   python: fileURLToPath(new URL("../../toolchains/python", import.meta.url)),
   rust: fileURLToPath(new URL("../../toolchains/rust", import.meta.url)),
 });
@@ -103,6 +106,16 @@ export function builtOn(parent: readonly string[], child: readonly string[]): bo
 
 /** Docker's names for the architectures the toolchains ship for, and the names their tarballs use. */
 export const ARCHES: Readonly<Record<string, string>> = Object.freeze({ arm64: "aarch64", amd64: "x86_64" });
+/**
+ * Each toolchain's own spelling of those architectures, from `ARCHES`' (`aarch64`, `x86_64`): a Dockerfile can't map
+ * one name to another before its ADD, and .NET's and Temurin's tarballs use other names, so Runner passes each its own.
+ */
+export const TOOLCHAIN_ARCH: Readonly<Record<Toolchain, Readonly<Record<string, string>>>> = Object.freeze({
+  dotnet: Object.freeze({ aarch64: "arm64", x86_64: "x64" }),
+  java: Object.freeze({ aarch64: "aarch64", x86_64: "x64" }),
+  python: Object.freeze({ aarch64: "aarch64", x86_64: "x86_64" }),
+  rust: Object.freeze({ aarch64: "aarch64", x86_64: "x86_64" }),
+});
 
 /**
  * The Docker Engine's architecture, as the toolchains' tarballs name it, from `docker version`. Passed to the build as
@@ -139,7 +152,7 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
   const tag = `${BASE_TAG}:${parent.slice("sha256:".length)}`;
   const tagged = await opts.docker(["tag", parent, tag], { signal: opts.signal, timeoutMs: 60_000, maxOutputBytes: 4096 });
   if (tagged.code !== 0) throw new Error(TOOLCHAIN_BUILD_FAILED);
-  const built = await opts.docker(["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${arch}`, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]], { signal: opts.signal, timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
+  const built = await opts.docker(["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${TOOLCHAIN_ARCH[name][arch]}`, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]], { signal: opts.signal, timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
   const id = built.stdout.trim();
   if (built.code !== 0 || built.cut || !IMAGE_ID.test(id)) throw new Error(TOOLCHAIN_BUILD_FAILED);
   // Exactly the parent plus this toolchain's layers, with this recipe, whatever the tag named during the build.

@@ -67,11 +67,15 @@ export async function recipeOf(parent: string, name: Toolchain, readSource: (nam
   return createHash("sha256").update(`${RECIPE_VERSION}\n${parent}\n${name}\n${source}\n`).digest("hex");
 }
 
-type Inspected = { id: string; recipe: string | null; layers: string[] };
-/** One JSON object: Docker's own `json` of each field, so no label or ID can break the form. */
-const INSPECT_FORMAT = '{"id":{{json .Id}},"labels":{{json .Config.Labels}},"layers":{{json .RootFS.Layers}}}';
+type Inspected = { recipe: string | null; layers: string[] };
+/**
+ * One JSON object: Docker's own `json` of each field, so no label can break the form. The image's `.Id` isn't read:
+ * with Docker 29's containerd image store it can differ from the ID `docker build --quiet` printed, which is what a pin
+ * holds, so an image is matched by the ID it was asked for, its recipe and its layers.
+ */
+const INSPECT_FORMAT = '{"labels":{{json .Config.Labels}},"layers":{{json .RootFS.Layers}}}';
 
-/** An image's ID, recipe label and layers; "missing" only on Docker's own "No such image". Anything else throws. */
+/** An image's recipe label and layers; "missing" only on Docker's own "No such image". Anything else throws. */
 async function inspect(docker: DockerCli, id: string, signal?: AbortSignal): Promise<Inspected | "missing"> {
   const r = await docker(["image", "inspect", "--format", INSPECT_FORMAT, id], { signal, timeoutMs: 60_000, maxOutputBytes: 64 * 1024 });
   if (r.code !== 0) {
@@ -85,12 +89,11 @@ async function inspect(docker: DockerCli, id: string, signal?: AbortSignal): Pro
   } catch {
     throw new Error(TOOLCHAIN_INSPECT_FAILED);
   }
-  const { id: got, labels, layers } = (typeof parsed === "object" && parsed !== null ? parsed : {}) as { id?: unknown; labels?: unknown; layers?: unknown };
-  if (typeof got !== "string" || !IMAGE_ID.test(got)) throw new Error(TOOLCHAIN_INSPECT_FAILED);
+  const { labels, layers } = (typeof parsed === "object" && parsed !== null ? parsed : {}) as { labels?: unknown; layers?: unknown };
   if (!Array.isArray(layers) || layers.length === 0 || !layers.every((l) => typeof l === "string" && IMAGE_ID.test(l))) throw new Error(TOOLCHAIN_INSPECT_FAILED);
   if (labels !== null && (typeof labels !== "object" || Array.isArray(labels))) throw new Error(TOOLCHAIN_INSPECT_FAILED);
   const recipe = labels !== null && Object.hasOwn(labels, LABEL_RECIPE) ? (labels as Record<string, unknown>)[LABEL_RECIPE] : null;
-  return { id: got, recipe: typeof recipe === "string" ? recipe : null, layers };
+  return { recipe: typeof recipe === "string" ? recipe : null, layers };
 }
 
 /** The child's layers start with every one of the parent's and add at least one: it was built FROM the parent. */
@@ -121,13 +124,13 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
   const name = set[set.length - 1];
   const recipe = await recipeOf(parent, name, opts.readSource);
   const parentInfo = await inspect(opts.docker, parent, opts.signal);
-  if (parentInfo === "missing" || parentInfo.id !== parent) throw new Error(TOOLCHAIN_INSPECT_FAILED);
-  const fits = (info: Inspected | "missing", id: string) => info !== "missing" && info.id === id && info.recipe === recipe && builtOn(parentInfo.layers, info.layers);
+  if (parentInfo === "missing") throw new Error(TOOLCHAIN_INSPECT_FAILED);
+  const fits = (info: Inspected | "missing") => info !== "missing" && info.recipe === recipe && builtOn(parentInfo.layers, info.layers);
   const pinned = (await readNoFollow(path, 256))?.trim();
   if (pinned) {
     if (!IMAGE_ID.test(pinned)) throw new Error(TOOLCHAIN_PIN_INVALID);
     // A missing image, or a stale one (another parent or Dockerfile), is built again; a failed check stops.
-    if (fits(await inspect(opts.docker, pinned, opts.signal), pinned)) return pinned;
+    if (fits(await inspect(opts.docker, pinned, opts.signal))) return pinned;
   }
   opts.notify(buildingLine(set));
   const arch = await engineArch(opts.docker, opts.signal);
@@ -138,7 +141,7 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
   const id = built.stdout.trim();
   if (built.code !== 0 || built.cut || !IMAGE_ID.test(id)) throw new Error(TOOLCHAIN_BUILD_FAILED);
   // Exactly the parent plus this toolchain's layers, with this recipe, whatever the tag named during the build.
-  if (!fits(await inspect(opts.docker, id, opts.signal), id)) throw new Error(TOOLCHAIN_BUILD_FAILED);
+  if (!fits(await inspect(opts.docker, id, opts.signal))) throw new Error(TOOLCHAIN_BUILD_FAILED);
   await rm(path, { force: true });
   await writeNew(path, `${id}\n`);
   return id;

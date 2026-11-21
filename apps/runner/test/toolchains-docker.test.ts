@@ -43,6 +43,11 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
     toolchains,
     caps: { spend_micro_usd: 1, run_time_ms: 900_000, turns: 1, output_tokens: 1, max_tokens: 1 },
   });
+  /** Opens a run, saying Runner's own fixed message for the step that failed, if one did. */
+  const open = (ref: string, toolchains: Toolchain[]) =>
+    sandbox.open(containerSpec(ref, facts(ref, toolchains)), signal).catch((error: Error & { detail?: { stderr?: string } }) => {
+      throw new Error(`${error.message}: ${error.detail?.stderr ?? ""}`);
+    });
   const shell = async (ref: string, command: string) => sandbox.exec(ref, { call_id: "c", tool: "shell", command }, signal);
   const write = async (ref: string, path: string, content: string) => expect((await sandbox.exec(ref, { call_id: "w", tool: "write", path, content }, signal)).ok).toBe(true);
   const inspect = async (ref: string, format: string) => (await docker(["inspect", "--format", format, `podster-run-${ref}`], { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 })).stdout.trim();
@@ -77,7 +82,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
 
   it("Rust: the pinned versions, and an offline cargo build of a tiny crate whose build script runs in /work", async () => {
     const ref = "tc-rust";
-    await sandbox.open(containerSpec(ref, facts(ref, ["rust"])), signal);
+    await open(ref, ["rust"]);
     try {
       const pinned = (await readFile(join(home, pinName(["rust"])), "utf8")).trim();
       expect(pinned).toMatch(IMAGE_ID);
@@ -108,7 +113,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
 
   it("Python: the pinned versions, and an offline uv run of a standard-library script", async () => {
     const ref = "tc-python";
-    await sandbox.open(containerSpec(ref, facts(ref, ["python"])), signal);
+    await open(ref, ["python"]);
     try {
       expect(await inspect(ref, "{{.Image}}")).toBe((await readFile(join(home, pinName(["python"])), "utf8")).trim());
       const versions = await shell(ref, "uv --version && python --version && python3 --version && echo cache=$UV_CACHE_DIR downloads=$UV_PYTHON_DOWNLOADS");
@@ -131,7 +136,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
   it("both: one image layered on Python's pinned image, and a second ask builds nothing", async () => {
     const ref = "tc-both";
     const before = said.length;
-    await sandbox.open(containerSpec(ref, facts(ref, ["python", "rust"])), signal);
+    await open(ref, ["python", "rust"]);
     try {
       // Python's image was pinned by the test above, so only the combined step is built.
       expect(said.slice(before)).toEqual([expect.stringContaining("Python and Rust toolchains")]);
@@ -153,7 +158,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
 
   it("a room with no toolchains runs the base image itself, with the base bounds and neither toolchain", async () => {
     const ref = "tc-none";
-    await sandbox.open(containerSpec(ref, facts(ref, [])), signal);
+    await open(ref, []);
     try {
       expect(await inspect(ref, "{{.Image}}")).toBe(base);
       expect(await inspect(ref, "{{.HostConfig.PidsLimit}}")).toBe(String(LIMITS.pids));

@@ -124,7 +124,8 @@ function fakeDocker(images: Map<string, Image>, opts: { arch?: string; build?: (
       const ref = args[4];
       const image = images.get(ref);
       if (!image) return { code: 1, stdout: "", stderr: `Error response from daemon: No such image: ${ref}`, cut: false };
-      return ok(`${JSON.stringify({ id: ref, labels: image.labels, layers: image.layers })}\n`);
+      // Docker 29's containerd store answers another digest as `.Id` than the one a build printed; it isn't read.
+      return ok(`${JSON.stringify({ labels: image.labels, layers: image.layers })}\n`);
     }
     if (args[0] === "build") {
       const special = opts.build?.(args);

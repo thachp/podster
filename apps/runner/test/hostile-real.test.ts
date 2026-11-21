@@ -154,6 +154,7 @@ describe.runIf(OPTED_IN && DOCKER !== null)("step 12's real half (opt-in: runs D
         tools: ["read", "write"],
         shell: false,
         network: [],
+        toolchains: [],
         result_tool: "StructuredOutput",
         workspace_root: root,
         task_folder: join(root, "ws_real", `tsk_${name}`),

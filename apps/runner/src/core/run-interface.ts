@@ -35,6 +35,7 @@ import { RunBroker, type BrokerRefusal, type BrokerRequest, type Forward, type H
 import type { Adapter, RunFacts } from "./policy.js";
 import { CHANGE_TYPES } from "./pull-text.js";
 import type { Clock, Diagnostics, Logger } from "./runtime.js";
+import { isToolchainList, toolchainEnv, toolchainLine, type Toolchain } from "./toolchains.js";
 import { decideToolCall, MAX_RESULT_FILES, MAX_SUMMARY_CHARS, parseRunResult, TASK_FOLDER_IN_CONTAINER, type AllowedCall, type ToolCall, type ToolDecision } from "./tool-policy.js";
 
 /** An error's message when it's a bare code, as Runner's own errors are; `unknown` for anything else. */
@@ -73,18 +74,21 @@ export const LIMITS_GUIDANCE = [
 ].join("\n");
 
 /**
- * The frame a run's model gets: Runner's fixed frame, the run's exact tools and network from its facts (the owner's own
- * policy, as the policy checked it, never the task's words), and the fixed guidance on limits.
+ * The frame a run's model gets: Runner's fixed frame, the run's exact tools, toolchains and network from its facts (the
+ * owner's own policy, as the policy checked it, never the task's words), and the fixed guidance on limits. A run with no
+ * toolchains gets no toolchain line, so its frame is as before.
  */
-export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network">): string {
+export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network"> & { toolchains?: readonly Toolchain[] }): string {
   const tools = facts.tools.filter((t) => t !== "shell" || facts.shell);
   const shell = tools.includes("shell");
+  const toolchains = toolchainLine(facts.toolchains ?? [], shell);
   return [
     UNTRUSTED_FRAME,
     `Your tools in this run: ${tools.length > 0 ? tools.join(", ") : "none"}, and the structured result.${shell ? "" : " There is no shell: you can't run commands, tests, builds, package managers or tools such as wrangler."}`,
     facts.network.length > 0
       ? `Network: only HTTPS, on port 443, to exactly these hosts: ${facts.network.join(", ")}. It goes through Runner's proxy, which the container's HTTPS_PROXY already names, so tools that read it, such as npm, use it without setup. Nothing else is reachable: no other host or subdomain, no plain HTTP, no other port and no IP address.`
       : "Network: none. There is no network in this run: nothing outside the task's container is reachable, so don't plan to install packages (npm install, pip install), fetch anything or deploy. Work with the files that are there.",
+    ...(toolchains === null ? [] : [toolchains]),
     LIMITS_GUIDANCE,
   ].join("\n");
 }
@@ -143,6 +147,11 @@ export type ContainerSpec = {
   task_folder: string;
   /** None unless the policy lists hosts; then only those, through the egress proxy. A sandbox that can't hold it refuses to open. */
   network: ContainerNetwork;
+  /**
+   * The room's toolchains, sorted, each once: the image is the base task image with these layered on, and the
+   * environment adds each one's fixed `TOOLCHAIN_ENV`. Empty: the base image, exactly as before.
+   */
+  toolchains: Toolchain[];
   env: Record<string, string>;
   /** Only the task's folder. */
   mounts: { source: string; target: string }[];
@@ -157,12 +166,14 @@ export type ContainerSpec = {
 export const CONTAINER_MARGIN_S = 60;
 
 /** The container for a run, from its facts alone. */
-export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network" | "caps">): ContainerSpec {
+export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folder" | "network" | "caps"> & { toolchains?: readonly Toolchain[] }): ContainerSpec {
+  const toolchains = [...(facts.toolchains ?? [])];
   return {
     run_ref,
     task_folder: facts.task_folder,
     network: facts.network.length === 0 ? { kind: "none" } : { kind: "allowlist", hosts: [...facts.network] },
-    env: facts.network.length === 0 ? { ...CONTAINER_ENV } : { ...CONTAINER_ENV, ...EGRESS_ENV },
+    toolchains,
+    env: { ...CONTAINER_ENV, ...(facts.network.length === 0 ? {} : EGRESS_ENV), ...toolchainEnv(toolchains) },
     mounts: [{ source: facts.task_folder, target: CONTAINER_WORKDIR }],
     read_only_root: true,
     drop_capabilities: "all",
@@ -173,11 +184,13 @@ export function containerSpec(run_ref: string, facts: Pick<RunFacts, "task_folde
 
 /**
  * Why a spec can't be opened, or null. The environment must be exactly the fixed one (with the proxy's, `EGRESS_ENV`,
- * exactly when the network is an allowlist), so no key, token, keychain or D-Bus address, agent socket or Docker host
- * reaches a task; the only mount is the task's own folder.
+ * exactly when the network is an allowlist, and each listed toolchain's `TOOLCHAIN_ENV`), so no key, token, keychain or
+ * D-Bus address, agent socket or Docker host reaches a task; the only mount is the task's own folder. The toolchains
+ * must be known names, sorted, each once.
  */
 export function checkContainerSpec(spec: ContainerSpec): "env_not_allowed" | "mount_not_allowed" | "spec_invalid" | null {
-  const fixed: Readonly<Record<string, string>> = spec.network.kind === "allowlist" ? { ...CONTAINER_ENV, ...EGRESS_ENV } : CONTAINER_ENV;
+  if (!isToolchainList(spec.toolchains)) return "spec_invalid";
+  const fixed: Readonly<Record<string, string>> = { ...CONTAINER_ENV, ...(spec.network.kind === "allowlist" ? EGRESS_ENV : {}), ...toolchainEnv(spec.toolchains) };
   const names = Object.keys(spec.env);
   if (names.length !== Object.keys(fixed).length || names.some((n) => !Object.hasOwn(fixed, n) || spec.env[n] !== fixed[n])) return "env_not_allowed";
   if (spec.network.kind !== "none" && (spec.network.kind !== "allowlist" || spec.network.hosts.length === 0)) return "spec_invalid";
@@ -217,6 +230,8 @@ export interface DriverSession {
   readonly run_ref: string;
   readonly prompt: UntrustedPrompt;
   readonly frame: string;
+  /** The run's toolchains, sorted, for the shell tool's fixed description (`shellDescription`). */
+  readonly toolchains: readonly Toolchain[];
   /** For the SDK's own permission list, the second lock. Runner's `check` and `tool` decide regardless. */
   readonly allowed_tools: readonly string[];
   readonly result_schema: typeof RESULT_SCHEMA;
@@ -450,6 +465,7 @@ class LiveRun {
       run_ref: this.run.run_ref,
       prompt: this.prompt,
       frame: runFrame(facts),
+      toolchains: [...this.spec.toolchains],
       allowed_tools: [...facts.tools.filter((t) => t !== "shell" || facts.shell), facts.result_tool],
       result_schema: RESULT_SCHEMA,
       limits: { turns: facts.caps.turns, max_tokens: facts.caps.max_tokens, output_tokens: facts.caps.output_tokens, run_time_ms: facts.caps.run_time_ms },

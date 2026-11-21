@@ -19,7 +19,7 @@
  * `git.ts` says (L2 on #459). Logs carry IDs and codes only.
  */
 import { holdSecret } from "../core/known-secrets.js";
-import { lstat, opendir, realpath } from "node:fs/promises";
+import { lstat, opendir, realpath, rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { GatewayError, meaningOf } from "../core/errors.js";
 import type { Publication, PublishWords, RepoTask, RepositoryPath } from "../core/lifecycle.js";
@@ -27,6 +27,8 @@ import { pullText } from "../core/pull-text.js";
 import {
   checkProtected,
   COMMIT_IDENTITY,
+  WORK_TREE_CACHES,
+  WORK_TREE_EXCLUDE,
   fetchArgs,
   GITHUB,
   hardening,
@@ -48,7 +50,7 @@ import type { Clock, Logger } from "../core/runtime.js";
 import { foldedSegment } from "../core/tool-policy.js";
 import { checkedHelper, findGit, gitCli, type GitExec } from "./git.js";
 import { githubApi, type GitHubCall } from "./github-api.js";
-import { ensureFolder, MAX_FOLDER_ENTRIES, removeOwnFolder } from "./safe-fs.js";
+import { ensureFolder, MAX_FOLDER_ENTRIES, readNoFollow, removeOwnFolder, writeNew } from "./safe-fs.js";
 
 /** Podster's refusals of `get_repo_access` worth asking again later; any other refusal is final for this attempt. */
 const PASSING = new Set(["repo_access_busy", "rate_limited", "provider_unavailable", "standing_unknown", "repo_access_unavailable"]);
@@ -190,6 +192,30 @@ export class GitRepositoryPath implements RepositoryPath {
     return this.deps.git([...hardening(helper), ...locate(this.gitDir(task.workspace_id, task.task_id), task.task_folder), ...args], { secret: opts.secret, signal: opts.signal });
   }
 
+  /**
+   * Runner's own `info/exclude` in the task's Git folder: the tools' cache folders (`WORK_TREE_CACHES`), so they are
+   * never committed. Written at checkout, and again before a publish if it isn't exactly that.
+   */
+  private async excludeCaches(task: RepoTask): Promise<void> {
+    const gitDir = this.gitDir(task.workspace_id, task.task_id);
+    const info = await ensureFolder(gitDir, join(gitDir, "info"));
+    const path = join(info, "exclude");
+    if ((await readNoFollow(path, 4096)) === WORK_TREE_EXCLUDE) return;
+    await rm(path, { force: true });
+    await writeNew(path, WORK_TREE_EXCLUDE);
+  }
+
+  /**
+   * The cache folders Git ignores whole: excluded, and holding nothing the repository tracks. Only these are left out of
+   * the work tree check, since Git never reads into them; a cache folder holding a tracked file is checked as usual.
+   */
+  private async ignoredCaches(task: RepoTask, signal: AbortSignal): Promise<Set<string>> {
+    const listed = await this.git(task, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ...WORK_TREE_CACHES.map((name) => `:/${name}`)], { signal });
+    if (listed.code !== 0) throw new RepoPathError("commit_failed");
+    const entries = new Set(listed.stdout.split("\0"));
+    return new Set(WORK_TREE_CACHES.filter((name) => entries.has(`${name}/`)));
+  }
+
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
     const answer = await this.git(task, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`], { signal });
     const sha = answer.stdout.trim();
@@ -256,6 +282,7 @@ export class GitRepositoryPath implements RepositoryPath {
     await ensureFolder(dirname(dirname(task.task_folder)), task.task_folder, { makeRoot: true });
     // No templates, so no sample hooks or anything else from the system's Git is copied in.
     if ((await this.git(task, ["init", "--quiet", "--template="], { signal })).code !== 0) throw new RepoPathError("git_init_failed");
+    await this.excludeCaches(task);
     const fetched = await this.git(task, fetchArgs(scope.full_name, from, "refs/runner/start"), { secret: access.token, signal });
     if (fetched.code !== 0) throw this.gitFailure(task, fetched, "fetch_failed");
     // Pinned and verified: the commit fetched must be the one GitHub's API named; a branch that moved between is retried.
@@ -276,7 +303,8 @@ export class GitRepositoryPath implements RepositoryPath {
     const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
     const { default_branch } = await this.checked(task, access, signal);
     await this.apart(task);
-    await checkWorkTree(task.task_folder);
+    await this.excludeCaches(task);
+    await checkWorkTree(task.task_folder, MAX_FOLDER_ENTRIES, await this.ignoredCaches(task, signal));
     // Nothing in a container can reach the Git folder, so its head is the pinned commit, or Runner's own one commit on
     // it from an earlier try that a passing failure stopped (ruling 5 on #462); anything else refuses.
     const before = await this.head(task, signal);
@@ -349,10 +377,13 @@ const scopeOf = (task: RepoTask): RepoScope => ({ full_name: task.repository.ful
 /**
  * The work tree, walked with `lstat` and never through a link, before anything is committed from it: no link of any
  * kind, nothing named `.git` or folding to it at any depth (a nested repository would be read by host Git), and no more
- * entries than the folder bound allows.
+ * entries than the folder bound allows. `ignored` names top-level cache folders Git ignores whole (`ignoredCaches`):
+ * each must itself be a real folder, not a link, and isn't walked, since nothing in it is ever committed (uv's cache
+ * holds links of its own).
  */
-export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTRIES): Promise<void> {
+export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTRIES, ignored: ReadonlySet<string> = new Set()): Promise<void> {
   const stack = [folder];
+  const skip = new Set([...ignored].map((name) => join(folder, name)));
   let entries = 0;
   while (stack.length > 0) {
     const at = stack.pop() as string;
@@ -362,6 +393,7 @@ export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTR
       if (!info.isFile()) throw new RepoPathError("work_tree_special");
       continue;
     }
+    if (skip.has(at)) continue;
     const dir = await opendir(at);
     for await (const entry of dir) {
       if (++entries > maxEntries) throw new RepoPathError("work_tree_too_large");

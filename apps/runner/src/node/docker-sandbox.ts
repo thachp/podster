@@ -26,6 +26,11 @@
  *   lists `/proc` from inside, leaving out the listing's own process (`/proc/self`), init and the `sleep`, and kills
  *   what it found; it stops once two listings in a row find nothing. A command that keeps forking past
  *   `STRAY_LISTINGS` listings ends the container.
+ * - **Toolchains** (the owner's ruling of 2026-11-20): a room that names toolchains runs in an image built FROM the
+ *   base task image with them added, which `toolchainImage` gives (built and pinned on first need,
+ *   `toolchain-images.ts`), with each toolchain's fixed environment, and the larger bounds in `TOOLCHAIN_LIMITS`, which a
+ *   build needs. A room that names none runs in the base image with `LIMITS`, exactly as before. A toolchain image that
+ *   can't be had refuses the run (`toolchain_image_unavailable`), never falls back to another image.
  * - **Its lifetime** is the run-time cap plus a margin: the container's `sleep` ends then, never runs forever (L2).
  * - **Tools from argument arrays, never a shell:** read is `cat -- ./path`; search is `rg` with fixed flags,
  *   `-e PATTERN -- ./path`; write is `mkdir -p -- ./dir` and `tee -- ./path` with the content on standard input; edit
@@ -45,6 +50,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { toolchainEnv, type Toolchain } from "../core/toolchains.js";
 import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { egressNames, logProxyDecisions, openEgress, removeNetworks, ROLE_NETWORK, ROLE_PROXY, type EgressOpts } from "./egress-network.js";
@@ -85,6 +91,21 @@ export const LIMITS = Object.freeze({
   watch_ms: 2_000,
   folder_entries: 200_000,
 });
+/**
+ * **Proposed** figures for a room with any toolchain, only as far as builds need: more processes and threads (cargo runs
+ * rustc jobs, each with codegen threads), memory for rustc and the linker, a larger /tmp for the linker's and
+ * compilers' temporary files (it counts against memory), and ten minutes for one tool call, since a cold `cargo build`
+ * or `uv sync` can take longer than two. Every other bound is `LIMITS`'.
+ */
+export const TOOLCHAIN_LIMITS = Object.freeze({ ...LIMITS, pids: 1024, memory: "4g", tmpfs: "256m", tool_ms: 600_000 });
+/** The bounds a container runs under. */
+export type ContainerBounds = { readonly pids: number; readonly memory: string; readonly cpus: string; readonly tmpfs: string; readonly file_bytes: number; readonly tool_ms: number };
+/** The bounds a spec's container runs under: `TOOLCHAIN_LIMITS` when it names any toolchain, else `LIMITS`. */
+export function limitsFor(spec: Pick<ContainerSpec, "toolchains">): ContainerBounds {
+  return spec.toolchains.length > 0 ? TOOLCHAIN_LIMITS : LIMITS;
+}
+/** A run whose room names toolchains, with no toolchain image to be had: refused, never run in another image. */
+export const TOOLCHAIN_IMAGE_UNAVAILABLE = "toolchain_image_unavailable";
 type Limits = { folder_bytes: number; folder_entries: number };
 /**
  * A Docker failure as a fixed code with its step and exit code (`docker_rm_1`, `docker_ps_125`), never Docker's text
@@ -147,7 +168,8 @@ export const homeLabel = (home: string) => createHash("sha256").update(home).dig
 /** `docker run`'s arguments for a spec: the whole hardening list, and nothing from the task. */
 export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number; gid: number; home_label: string }): string[] {
   const allowlist = spec.network.kind === "allowlist";
-  const env = Object.entries(allowlist ? { ...CONTAINER_ENV, ...EGRESS_ENV } : CONTAINER_ENV).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
+  const limits = limitsFor(spec);
+  const env = Object.entries({ ...CONTAINER_ENV, ...(allowlist ? EGRESS_ENV : {}), ...toolchainEnv(spec.toolchains) }).flatMap(([name, value]) => ["--env", `${name}=${value}`]);
   // Only the run's internal network, never a route out; its resolver answers only that network's names.
   const network = allowlist ? ["--network", egressNames(spec.run_ref).network, "--dns", BLACKHOLE_DNS] : ["--network", "none"];
   return [
@@ -171,17 +193,17 @@ export function runArgs(spec: ContainerSpec, opts: { image: string; uid: number;
     "no-new-privileges",
     "--read-only",
     "--tmpfs",
-    `/tmp:rw,nosuid,nodev,noexec,size=${LIMITS.tmpfs}`,
+    `/tmp:rw,nosuid,nodev,noexec,size=${limits.tmpfs}`,
     "--pids-limit",
-    String(LIMITS.pids),
+    String(limits.pids),
     "--memory",
-    LIMITS.memory,
+    limits.memory,
     "--memory-swap",
-    LIMITS.memory,
+    limits.memory,
     "--cpus",
-    LIMITS.cpus,
+    limits.cpus,
     "--ulimit",
-    `fsize=${LIMITS.file_bytes}`,
+    `fsize=${limits.file_bytes}`,
     "--ulimit",
     "nofile=1024:1024",
     "--ulimit",
@@ -238,6 +260,8 @@ export function engineMajor(stdout: string): number | null {
 }
 
 type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void; events: SandboxEvents | null };
+/** The image for a set of toolchains (sorted, never empty), built and pinned on first need. */
+export type ToolchainImages = (toolchains: readonly Toolchain[], signal: AbortSignal) => Promise<string>;
 
 /** The most `/proc` listings one stray-reap may take before it ends the container instead. **Proposed** figure. */
 export const STRAY_LISTINGS = 6;
@@ -264,6 +288,7 @@ export class DockerSandbox implements TaskSandbox {
   private readonly wait: (ms: number) => Promise<void>;
   private readonly mounts: () => string | null;
   private readonly egress: EgressOpts | null;
+  private readonly toolchainImage: ToolchainImages | null;
   private engineChecked = false;
   private readonly log: Logger;
 
@@ -280,6 +305,8 @@ export class DockerSandbox implements TaskSandbox {
     mounts?: () => string | null;
     /** The egress proxy's pinned image and Runner's built program for it; without them a room listing hosts can't run. */
     proxy?: { image: string; program: () => Promise<string> };
+    /** The image for a room's toolchains; without it a room that names toolchains can't run. */
+    toolchainImage?: ToolchainImages;
     log?: Logger;
   }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
@@ -297,6 +324,7 @@ export class DockerSandbox implements TaskSandbox {
     this.mounts = opts.mounts ?? (() => null);
     this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
     this.log = opts.log ?? silentLogger;
+    this.toolchainImage = opts.toolchainImage ?? null;
     this.egress = opts.proxy ? { docker: opts.docker, image: opts.proxy.image, program: opts.proxy.program, uid: opts.uid, gid: opts.gid, home_label: this.homeLabel, wait: this.wait } : null;
   }
 
@@ -318,6 +346,22 @@ export class DockerSandbox implements TaskSandbox {
     const real = await realpath(spec.task_folder);
     if (onWindowsDrive(real) || onWindowsFilesystem(real, this.mounts())) throw new Error("workspace_on_windows_drive");
     if (signal.aborted) throw new Error("halted");
+    // The room's toolchain image, built and pinned on first need; any failure refuses the run, never another image.
+    let image = this.image;
+    if (spec.toolchains.length > 0) {
+      if (!this.toolchainImage) throw new Error(TOOLCHAIN_IMAGE_UNAVAILABLE);
+      let chosen: string;
+      try {
+        chosen = await this.toolchainImage(spec.toolchains, signal);
+      } catch (error) {
+        if (signal.aborted) throw new Error("halted");
+        // Runner's own fixed message for the step that failed, for the diagnostics file; Docker's output never.
+        throw new DetailedError(TOOLCHAIN_IMAGE_UNAVAILABLE, { stderr: error instanceof Error ? error.message : "" });
+      }
+      if (!IMAGE_ID.test(chosen)) throw new Error(TOOLCHAIN_IMAGE_UNAVAILABLE);
+      image = chosen;
+      if (signal.aborted) throw new Error("halted");
+    }
     if (spec.network.kind === "allowlist" && this.egress) {
       // Once per process: an Engine too old to keep DNS inside an internal network refuses every allowlist run.
       if (!this.engineChecked) {
@@ -336,7 +380,7 @@ export class DockerSandbox implements TaskSandbox {
         throw error;
       }
     }
-    const run = await this.docker(runArgs(spec, { image: this.image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
+    const run = await this.docker(runArgs(spec, { image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
     const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
     this.opened.set(spec.run_ref, opened);
@@ -408,7 +452,7 @@ export class DockerSandbox implements TaskSandbox {
 
   private async runTool(opened: Opened, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput> {
     const inContainer = (argv: string[], input?: string, max = MAX_TOOL_OUTPUT_BYTES) =>
-      this.docker(["exec", ...(input === undefined ? [] : ["--interactive"]), "--workdir", CONTAINER_WORKDIR, opened.name, ...argv], { input, signal, timeoutMs: LIMITS.tool_ms, maxOutputBytes: max });
+      this.docker(["exec", ...(input === undefined ? [] : ["--interactive"]), "--workdir", CONTAINER_WORKDIR, opened.name, ...argv], { input, signal, timeoutMs: limitsFor(opened.spec).tool_ms, maxOutputBytes: max });
     const text = (r: DockerResult) => (r.stdout + (r.stderr ? `\n${r.stderr}` : "")).trim() + (r.cut ? "\n[output cut]" : "");
     switch (call.tool) {
       case "read":

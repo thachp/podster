@@ -33,6 +33,12 @@
  *   Runner's egress proxy (`egress-proxy.ts`), and nothing else. An entry that isn't such a name (a scheme, port, path,
  *   wildcard, IP address, upper case, a trailing dot or a special-use name such as `localhost`) is refused at load with
  *   `network_host_invalid`, a repeated one with `network_host_duplicate`.
+ * - **Toolchains** (the owner's ruling of 2026-11-20): a room's optional `toolchains` names pinned toolchain images its
+ *   tasks run in (`TOOLCHAINS`: `python`, `rust`), `[]` by default. An unknown name is refused at load with
+ *   `toolchain_unknown`, a repeated one with `toolchain_duplicate`, each naming the room and the entry's index, never the
+ *   entry's text; and a list in a room without the `shell` tool with `toolchain_needs_shell`, since nothing else can run
+ *   a toolchain. They are a run fact, sorted, so a decision binds them. They add no network: a registry is reached only
+ *   if the room's `network` lists it.
  * - **Run decisions** are bound to every run fact, by a canonical form of the whole `RunFacts` (M1 on #455's review), and
  *   to the task's version, input hash, repository and base. They are single-use and expire.
  * - **The repository** (M7 step 10; L4 on #455's review): a room has one only when the owner named it here, by full name
@@ -59,6 +65,13 @@ export type Adapter = (typeof ADAPTERS)[number];
 export const TOOLS = ["read", "search", "write", "edit", "shell"] as const;
 export type Tool = (typeof TOOLS)[number];
 export const DEFAULT_TOOLS: readonly Tool[] = ["read", "search", "write", "edit"];
+/**
+ * The optional toolchains a room may name, sorted by name: the order their images are layered. Each is a pinned image
+ * built FROM the base task image (`toolchains.ts`, `apps/runner/toolchains/<name>/Dockerfile`).
+ */
+export const TOOLCHAINS = ["python", "rust"] as const;
+export type Toolchain = (typeof TOOLCHAINS)[number];
+export const isToolchain = (v: unknown): v is Toolchain => typeof v === "string" && (TOOLCHAINS as readonly string[]).includes(v);
 /** The SDK's structured result is itself a tool call, so the policy always names it (spike B ruling 2). */
 export const RESULT_TOOL = "StructuredOutput";
 
@@ -84,6 +97,8 @@ export const MAX_ACTIVE_TASKS_CEILING = 4;
 const MAX_ROOMS = 200;
 const MAX_ORGS = 50;
 const MAX_HOSTS = 50;
+/** A bound on a room's `toolchains` before each entry is read; a valid list is at most `TOOLCHAINS`' length. */
+const MAX_TOOLCHAIN_ENTRIES = 16;
 const MAX_AUTHORS = 1_000;
 const MAX_ROOT = 1_024;
 const MAX_NODES = 200_000;
@@ -116,6 +131,8 @@ export type RoomPolicy = {
   allowed_orgs: string[];
   tools: Tool[];
   network: string[];
+  /** Optional toolchains, as the owner listed them; `[]` for none. */
+  toolchains: Toolchain[];
   outputs: "hold" | "share";
   acknowledged: { trust_statement: boolean; public_room_warning: boolean };
   /** Null: the room has no repository, and a run starts in an empty folder. */
@@ -163,6 +180,8 @@ export type RunFacts = {
   tools: Tool[];
   shell: boolean;
   network: string[];
+  /** The room's toolchains, sorted; `[]` runs the base task image exactly as before. */
+  toolchains: Toolchain[];
   result_tool: typeof RESULT_TOOL;
   workspace_root: string;
   task_folder: string;
@@ -213,6 +232,12 @@ type Parsed<T> = { ok: true; value: T } | { ok: false; at: string };
 export const NETWORK_HOST_INVALID = "network_host_invalid";
 /** A room's `network` naming one host twice. */
 export const NETWORK_HOST_DUPLICATE = "network_host_duplicate";
+/** A room's `toolchains` entry that isn't one of `TOOLCHAINS`. */
+export const TOOLCHAIN_UNKNOWN = "toolchain_unknown";
+/** A room's `toolchains` naming one toolchain twice. */
+export const TOOLCHAIN_DUPLICATE = "toolchain_duplicate";
+/** A room naming toolchains without the `shell` tool, which is the only way to run them. */
+export const TOOLCHAIN_NEEDS_SHELL = "toolchain_needs_shell";
 /** What's wrong with a policy that failed to parse, for the owner, by where it failed. */
 export function policyProblem(at: string): string {
   const host = at.match(/^rooms\[\]\.network:(network_host_invalid|network_host_duplicate):([A-Za-z0-9_-]{1,128}):(\d{1,3})$/);
@@ -220,6 +245,11 @@ export function policyProblem(at: string): string {
     return `entry ${host[3]} of the room ${host[2]}'s rooms[].network isn't a host name Runner can allow (${NETWORK_HOST_INVALID}): list exact lower-case host names such as registry.npmjs.org, with no scheme, port, path, wildcard, IP address or trailing dot`;
   }
   if (host) return `entry ${host[3]} of the room ${host[2]}'s rooms[].network repeats a host already listed (${NETWORK_HOST_DUPLICATE})`;
+  const chain = at.match(/^rooms\[\]\.toolchains:(toolchain_unknown|toolchain_duplicate):([A-Za-z0-9_-]{1,128}):(\d{1,3})$/);
+  if (chain && chain[1] === TOOLCHAIN_UNKNOWN) return `entry ${chain[3]} of the room ${chain[2]}'s rooms[].toolchains isn't a toolchain Runner has (${TOOLCHAIN_UNKNOWN}): list only ${TOOLCHAINS.map((t) => `"${t}"`).join(" or ")}`;
+  if (chain) return `entry ${chain[3]} of the room ${chain[2]}'s rooms[].toolchains repeats a toolchain already listed (${TOOLCHAIN_DUPLICATE})`;
+  const shell = at.match(/^rooms\[\]\.toolchains:toolchain_needs_shell:([A-Za-z0-9_-]{1,128})$/);
+  if (shell) return `the room ${shell[1]} lists rooms[].toolchains without "shell" in rooms[].tools, and only the shell can run a toolchain (${TOOLCHAIN_NEEDS_SHELL})`;
   return `${at} is missing or out of range`;
 }
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
@@ -307,6 +337,18 @@ function parseNetwork(v: unknown, roomId: string): Parsed<string[]> {
   }
   return { ok: true, value: [...seen] };
 }
+/** A room's `toolchains`: known names, each once, at most all of them. Entries are named by index, never by text. */
+function parseToolchains(v: unknown, roomId: string): Parsed<Toolchain[]> {
+  if (!Array.isArray(v) || v.length > MAX_TOOLCHAIN_ENTRIES) return fail("rooms[].toolchains");
+  const seen = new Set<Toolchain>();
+  for (let i = 0; i < v.length; i++) {
+    const entry: unknown = v[i];
+    if (!isToolchain(entry)) return fail(`rooms[].toolchains:${TOOLCHAIN_UNKNOWN}:${roomId}:${i}`);
+    if (seen.has(entry)) return fail(`rooms[].toolchains:${TOOLCHAIN_DUPLICATE}:${roomId}:${i}`);
+    seen.add(entry);
+  }
+  return { ok: true, value: [...seen] };
+}
 const isTool = (v: unknown): v is Tool => typeof v === "string" && (TOOLS as readonly string[]).includes(v);
 
 const GH_OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
@@ -354,7 +396,7 @@ function parseCaps(v: unknown): Parsed<Caps> {
 }
 
 function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
-  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "outputs", "repository"])) return fail("rooms[]");
+  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "toolchains", "outputs", "repository"])) return fail("rooms[]");
   const roomId = own(v, "room_id");
   if (!isId(roomId)) return fail("rooms[].room_id");
   const mode = Object.hasOwn(v, "mode") ? v.mode : "ask";
@@ -367,6 +409,10 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const parsedNetwork = Object.hasOwn(v, "network") ? parseNetwork(v.network, roomId) : ({ ok: true, value: [] as string[] } as const);
   if (!parsedNetwork.ok) return parsedNetwork;
   const network = parsedNetwork.value;
+  const parsedToolchains = Object.hasOwn(v, "toolchains") ? parseToolchains(v.toolchains, roomId) : ({ ok: true, value: [] as Toolchain[] } as const);
+  if (!parsedToolchains.ok) return parsedToolchains;
+  const toolchains = parsedToolchains.value;
+  if (toolchains.length > 0 && !tools.includes("shell")) return fail(`rooms[].toolchains:${TOOLCHAIN_NEEDS_SHELL}:${roomId}`);
   const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
   const ack = own(v, "acknowledged");
@@ -377,7 +423,7 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const given = Object.hasOwn(v, "repository") ? v.repository : null;
   const repository = given === null ? null : parseRepoScope(given);
   if (given !== null && repository === null) return fail("rooms[].repository");
-  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
+  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, toolchains, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
 }
 
 /**
@@ -559,6 +605,7 @@ function decide(input: EvaluateInput): Decision {
     tools: [...room.tools],
     shell: room.tools.includes("shell"),
     network: [...room.network],
+    toolchains: [...room.toolchains].sort(),
     result_tool: RESULT_TOOL,
     workspace_root: config.workspace_root,
     task_folder: `${config.workspace_root}/${ids.workspace_id}/${ids.task_id}`,

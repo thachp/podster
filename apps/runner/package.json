@@ -18,6 +18,8 @@
     "sandbox/Dockerfile",
     "claude-image/Dockerfile",
     "proxy-image/Dockerfile",
+    "toolchains/python/Dockerfile",
+    "toolchains/rust/Dockerfile",
     "npm-shrinkwrap.json",
     "README.md"
   ],

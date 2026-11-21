@@ -680,6 +680,66 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await expect(w.path.prepare({ ...w.task, continue_from: first.commit }, w.signal)).rejects.toMatchObject({ code: "task_branch_moved" });
   });
 
+  it("never commits the tools' cache folders, even with no .gitignore, and still commits the repository's own files under them", async () => {
+    const w = await world();
+    // The repository tracks one file under .cargo, as projects do with .cargo/config.toml, and has no .gitignore.
+    sh(w.seed, "checkout", "--quiet", "main");
+    await mkdir(join(w.seed, ".cargo"));
+    await writeFile(join(w.seed, ".cargo", "config.toml"), "[build]\n");
+    sh(w.seed, "add", ".cargo/config.toml");
+    sh(w.seed, "commit", "--quiet", "-m", "cargo config");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    // Runner's own exclude, in its Git folder, where no container reaches.
+    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\n");
+    // What a run leaves: cargo's registry beside the tracked config, uv's cache with its links, npm's global prefix
+    // with a bin link, and the task's real change.
+    await mkdir(join(w.taskFolder, ".cargo", "registry", "cache"), { recursive: true });
+    await writeFile(join(w.taskFolder, ".cargo", "registry", "cache", "itoa.crate"), "crate");
+    await writeFile(join(w.taskFolder, ".cargo", "config.toml"), "[build]\njobs = 2\n");
+    await mkdir(join(w.taskFolder, ".cache", "uv", "archive-v0"), { recursive: true });
+    await writeFile(join(w.taskFolder, ".cache", "uv", "archive-v0", "six.py"), "x");
+    await symlink("archive-v0/six.py", join(w.taskFolder, ".cache", "uv", "link"));
+    await mkdir(join(w.taskFolder, ".npm-global", "bin"), { recursive: true });
+    await writeFile(join(w.taskFolder, ".npm-global", "tool.js"), "x");
+    await symlink("../tool.js", join(w.taskFolder, ".npm-global", "bin", "tool"));
+    await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    const files = sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort();
+    expect(files).toEqual([".cargo/config.toml", "README.md", "feature.txt"]);
+    expect(sh(w.remote, "show", `${published.commit}:.cargo/config.toml`)).toBe("[build]\njobs = 2");
+    // Nothing was removed from the work tree.
+    expect((await readdir(join(w.taskFolder, ".cargo", "registry", "cache"))).length).toBe(1);
+  });
+
+  it("still walks a cache folder that holds a tracked file, so a link there refuses, and refuses a cache folder that is a link", async () => {
+    const w = await world();
+    sh(w.seed, "checkout", "--quiet", "main");
+    await mkdir(join(w.seed, ".cargo"));
+    await writeFile(join(w.seed, ".cargo", "config.toml"), "[build]\n");
+    sh(w.seed, "add", ".cargo/config.toml");
+    sh(w.seed, "commit", "--quiet", "-m", "cargo config");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await rm(join(w.taskFolder, ".cargo", "config.toml"));
+    await symlink("/etc/passwd", join(w.taskFolder, ".cargo", "config.toml"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    await rm(join(w.taskFolder, ".cargo"), { recursive: true });
+    await symlink("/etc", join(w.taskFolder, ".cache"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  it("puts its exclude back before a publish if a Git folder lacks it", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await rm(join(w.home, "git", ROOM, TASK, "info", "exclude"));
+    await mkdir(join(w.taskFolder, ".cache"));
+    await writeFile(join(w.taskFolder, ".cache", "x"), "x");
+    expect(await w.path.publish({ ...w.task, base_commit: base }, w.signal)).toEqual({ kind: "no_changes" });
+  });
+
   it("refuses a work tree with a link, before Git adds anything", async () => {
     const w = await world();
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;

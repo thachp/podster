@@ -381,6 +381,7 @@ describe("the prompt and the container", () => {
     const spec = containerSpec("run_1", FACTS);
     expect(spec).toMatchObject({ run_ref: "run_1", network: { kind: "none" }, mounts: [{ source: FACTS.task_folder, target: "/work" }], read_only_root: true, drop_capabilities: "all", user: "unprivileged" });
     expect(spec.env).toEqual(CONTAINER_ENV);
+    expect(spec.env.WRANGLER_SEND_METRICS).toBe("false");
     expect(containerSpec("run_1", { ...FACTS, network: ["registry.npmjs.org"] }).network).toEqual({ kind: "allowlist", hosts: ["registry.npmjs.org"] });
     expect(checkContainerSpec(spec)).toBeNull();
   });

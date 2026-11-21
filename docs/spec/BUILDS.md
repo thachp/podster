@@ -2,7 +2,7 @@
 
 Status: **Proposed** by the architect on 2026-11-21, not approved, and nothing here is built. The owner chose on 2026-11-21 that a room's build artifacts come **from GitHub CI**, not from Runner uploading files ([decision 238](PRODUCT.md#decisions-needed)). That choice is the only settled part. Everything below is the architect's proposal for how to do it. Companions: [Product](PRODUCT.md#assets-outputs-and-releases) · [Design](DESIGN.md#workroom-page) · [Architecture](ARCHITECTURE.md#build-artifacts-from-github-actions-proposed) · [Access control](ACCESS-CONTROL.md) · [ADR 0009](../adr/0009-managed-repositories.md#three-apps)
 
-**It can't show anything yet.** Managed repositories are set up with GitHub Actions switched off, and a repository isn't ready unless it is off ([decision 188](PRODUCT.md#decisions-needed), `SetupStep::DisableActions` in `crates/core/src/provisioning.rs`). With Actions off there are no workflow runs, so there are no builds to list. Whether, and how, Actions are switched on in managed repositories is its own decision with its own security review, and it isn't made here. It's the first [open question](#open-questions).
+**It can't show anything yet.** Managed repositories are set up with GitHub Actions switched off, and a repository isn't ready unless it is off ([decision 188](PRODUCT.md#decisions-needed), `SetupStep::DisableActions` in `crates/core/src/provisioning.rs`). With Actions off there are no workflow runs, so there are no builds to list. Whether Actions are switched on in managed repositories is its own decision. Rules for it are [proposed below](#turning-actions-on-proposed-rules), as an amendment to decision 188 that stands only once the owner approves it.
 
 ## What it is
 
@@ -113,6 +113,23 @@ The App's token for Builds is cut down to **Actions read and Metadata read** on 
 
 **Owner granted 2026-11-21; installation checked the same day.** Adding Actions read to the App is a change in the GitHub organization, which is the owner's, not an agent's. On 2026-11-21 the owner granted it, and the architect checked the same day, through the organization's installations list, that the `podster-staging-merge` installation on `podsterdev` shows Actions read, Contents write, Metadata read, Pull requests write and Commit statuses write. **Not done:** a live read of runs or artifacts with the App's token. Its key isn't on the architect's machine; the API Worker would hold it. So the App's actual reach with Actions read is unverified. As with the checks reader (`GITHUB_AGENT_APP_READS_CHECKS` in `apps/api/src/workspace/changes.rs`), the build adds a switch the owner sets once the build is in place, with the permission already granted. Until then the view says **Not configured** and nothing is asked of GitHub.
 
+## Turning Actions on: proposed rules
+
+**Proposed** by the architect on 2026-11-21, drafted at the owner's request ("Yes, draft them"). These are a **proposed amendment to [decision 188](PRODUCT.md#decisions-needed)**, which has Actions off in every managed repository. Decision 188 stands unchanged until the owner approves them, and nothing here is built or set on any repository. Each claim about GitHub is labelled as in [ADR 0009](../adr/0009-managed-repositories.md#how-to-read-this): **Verified** only where the M5 spike saw it; **GitHub's documentation** where it was read and not run; **Unverified** otherwise.
+
+1. **Agents can't add or change workflows.** GitHub refuses a change that creates or edits a file under `.github/workflows/` from a GitHub App token without the Workflows permission. **Verified, once,** through the contents API: the agent-token App's token got `403` ([spike](../../spikes/m5-github/README.md), item 10). **Unverified:** the same refusal for `git push` over HTTPS, which the spike never tried. The agent-token App holds Contents write, Pull requests write and Metadata read and no Workflows, and **no App whose tokens reach an agent ever gets Workflows**. Only a person, the room's owner or an admin acting in GitHub, adds or changes workflows on the default branch. Defence in depth, **a later Runner change, not in this PR:** Runner refuses to commit any change under `.github/workflows/`. Runner has no such check today.
+2. **A read-only `GITHUB_TOKEN`, and no pull request approvals.** The repository's default workflow permissions are read, and Actions may not create or approve pull requests (`default_workflow_permissions: read`, `can_approve_pull_request_reviews: false`). Provisioning already sets these today (`SetupStep::RestrictWorkflowPermissions`). **A caveat, GitHub's documentation:** this is a default, not a ceiling. A workflow file's own `permissions:` key can ask for write on a run that isn't from a fork. So the real limit is rule 1: only people write workflows, and a workflow a person adds should state `permissions: contents: read` itself. A task branch is in the same repository, not a fork, so a workflow that asked for write would run agent-written code (`npm test`, a build script) with that write token.
+3. **No secrets.** Managed repositories hold no Actions secrets or variables, Podster never sets any, and no environments are created. A workflow therefore has nothing to leak but its own `GITHUB_TOKEN`.
+4. **Allowed actions.** Only GitHub-owned actions plus an explicit allow-list, each pinned by full commit sha; no other Marketplace actions. **GitHub's documentation, not run:** the repository's Actions permissions take `allowed_actions: selected`, with `github_owned_allowed` and `patterns_allowed` set through the selected-actions endpoint, and a newer setting that requires actions to be pinned to a full-length sha. The allow-list is the owner's to approve.
+5. **Forks.** While managed repositories are public ([decision 181](PRODUCT.md#decisions-needed)), workflows on pull requests from forks need approval for **all outside contributors**, GitHub's strictest fork approval setting (**GitHub's documentation, not run**). `pull_request_target` isn't used in any default workflow. Decision 188's rule that a fork's pull request is never a task change is unchanged.
+6. **Checks don't gate merges.** The merge App's required `podster/review` status stays the only gate. **Verified, once:** a status from another App was refused by the ruleset (`405`). A workflow's results are shown, as checks and in Builds, and are informational; a read-only token can't set a commit status anyway.
+7. **Runners and cost.** GitHub-hosted standard runners only, which GitHub documents as free for public repositories. No self-hosted runners, and no larger runners. A private managed repository's minutes would be billed, so **Actions stays off in any private managed repository** until the owner rules on spend.
+8. **Artifact retention.** Provisioning sets each repository's artifact and log retention, proposed **30 days**, instead of GitHub's 90-day default. **GitHub's documentation, not run:** a repository-level retention setting exists in the REST API. The figure is the owner's.
+9. **Provisioning.** `SetupStep::DisableActions` becomes a configure step that, with a deployment switch on, enables Actions and sets rules 2, 4, 5 and 8; readiness reads each back and fails closed, as it does for Actions off today (`verify_ready` in `crates/core/src/provisioning.rs`). The switch defaults off, and with it off behaviour is exactly today's: Actions off, and a repository isn't ready unless it is. A private repository is always set up with Actions off (rule 7).
+10. **A spike before any code,** on `podsterdev`, to verify: (a) the agent-token App's token is refused pushing a workflow file, by the contents API and by `git push`; (b) a run's default `GITHUB_TOKEN` is read-only, and what a workflow's `permissions:` key can raise it to; (c) fork pull request approval applies to an outside contributor's pull request; (d) the provisioning App sets and reads back rules 2, 4, 5 and 8 with its existing Administration write. If it needs another permission, that's named and is the owner's.
+
+**What needs the owner's yes:** turning Actions on at all, which loosens decision 188; the allow-list of actions; the retention figure; and any App permission the spike finds missing. Granting the merge App Actions read is already done (owner granted 2026-11-21; installation checked the same day).
+
 ## Out of scope
 
 - Runner uploading build files.
@@ -120,17 +137,17 @@ The App's token for Builds is cut down to **Actions read and Metadata read** on 
 - Copying artifacts into Podster's storage, scanning them or keeping them past GitHub's expiry.
 - CI other than GitHub Actions, and repositories other than the room's managed one.
 - Logs, re-running, canceling or approving a workflow from Podster.
-- Turning GitHub Actions on in managed repositories, which this needs and doesn't decide.
+- Turning GitHub Actions on in managed repositories, which this needs and doesn't decide. Its rules are [proposed above](#turning-actions-on-proposed-rules) as an amendment to decision 188.
 
 ## What the owner does
 
-- Decide whether, and under what rules, GitHub Actions runs in managed repositories ([decision 188](PRODUCT.md#decisions-needed) has it off).
+- Decide whether GitHub Actions runs in managed repositories, under the [proposed rules](#turning-actions-on-proposed-rules), with the allow-list, the retention figure and any App permission the spike finds missing ([decision 188](PRODUCT.md#decisions-needed) has it off).
 - Done: the merge App's **Actions: read**. Owner granted 2026-11-21; installation checked the same day.
 - Set the build's switch on staging once the permission is in place.
 
 ## Open questions
 
-1. **Actions in managed repositories.** Which workflows may run, on which events, with what `GITHUB_TOKEN` permissions and secrets, and what happens with pull requests from forks while repositories are public. Without a yes, Builds stays empty.
+1. **Actions in managed repositories.** The [proposed rules](#turning-actions-on-proposed-rules) await the owner's yes and a spike. Without both, Builds stays empty.
 2. **Which runs count.** All branches; or only task branches (`podster/<task_id>`) and the default branch, hiding runs on other branches.
 3. **Who sees Builds.** The stricter table above, or the wider reading that a run's artifacts are like input assets and anyone who sees the whole room's tasks sees them all. And whether a Guest or Public participant sees runs on their own task's branch.
 4. **The Task Sheet.** Whether Builds also appear in the Task Sheet's engineering details, for the task's branch.

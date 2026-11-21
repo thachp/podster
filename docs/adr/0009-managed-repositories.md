@@ -277,6 +277,7 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 - **Proposed, not currently true, and not tried:** Actions are off in every managed repository until a later decision. The provisioning App switches them off on each repository it creates, a repository setting, with its Administration permission. It reads the setting back, and a repository isn't ready unless it's off. A spike item. No App gets the Workflows permission.
 - **Separate and optional:** switching Actions off for the whole organization. Only the owner can make that setting. That no App here can change it is untested; none holds an organization permission.
 - **Unverified:** whether a workflow already in a repository can be abused, and whether disabling Actions also stops workflows on pull requests from forks. M6 will need its own decision before anything runs.
+- **Proposed amendment, 2026-11-21, not in force until the owner approves it:** [rules for turning Actions on](../spec/BUILDS.md#turning-actions-on-proposed-rules), so a room can show its build artifacts. Behind a switch that defaults off, `SetupStep::DisableActions` becomes a configure step for public repositories: Actions on, a read-only default token, sha-pinned allowed actions, approval for all outside contributors' fork runs and a set artifact retention, each read back for readiness. No App agents receive tokens from ever gets Workflows. Private repositories keep Actions off. A spike on `podsterdev` comes first.
 
 ### Public repositories, forks and takedown
 

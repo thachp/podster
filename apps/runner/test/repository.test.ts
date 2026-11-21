@@ -706,7 +706,7 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     sh(w.seed, "push", "--quiet", w.remote, "main:main");
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
     // Runner's own exclude, in its Git folder, where no container reaches.
-    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n/.wrangler/\n");
+    expect(await readFile(join(w.home, "git", ROOM, TASK, "info", "exclude"), "utf8")).toBe("/.cache/\n/.cargo/\n/.npm-global/\nnode_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n");
     // What a run leaves: cargo's registry beside the tracked config, uv's cache with its links, npm's global prefix
     // with a bin link, the task's HOME with tools' dot folders in it (a Maven wrapper's ~/.m2, java.util.prefs' ~/.java,
     // .NET's ~/.dotnet), NuGet's packages, and the task's real change.
@@ -833,6 +833,71 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     const index = sh(w.root, `--git-dir=${gitDir}`, `--work-tree=${w.taskFolder}`, "ls-files", "--cached", "-z").split("\0");
     expect(index.filter((p) => p.includes("node_modules") || p.includes(".venv") || p.includes(".wrangler"))).toEqual([]);
     expect((await lstat(join(w.taskFolder, "node_modules", ".bin", "tool"))).isSymbolicLink()).toBe(true);
+  });
+
+  it("leaves the default ignore list out of every commit with no .gitignore: .env files, Python caches, build output, scratch and .DS_Store", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    const put = async (path: string, text = "x\n") => {
+      await mkdir(join(w.taskFolder, path, ".."), { recursive: true });
+      await writeFile(join(w.taskFolder, path), text);
+    };
+    // An agent-written `.env` must never be committed, at the top or nested; the example file still is.
+    await put(".env", "SECRET=1\n");
+    await put(".env.local", "SECRET=1\n");
+    await put("apps/web/.env", "SECRET=1\n");
+    await put("apps/web/.env.local", "SECRET=1\n");
+    await put(".env.example", "SECRET=\n");
+    await put("apps/web/.env.example", "SECRET=\n");
+    await put("pkg/__pycache__/mod.cpython-314.pyc");
+    await put("pkg/.pytest_cache/v/cache/lastfailed");
+    await put("target/debug/app");
+    await put(".tmp/notes.txt");
+    await put(".wrangler/state/v3/d1.sqlite");
+    await put(".DS_Store");
+    await put("pkg/.DS_Store");
+    // Anchored lines only cover the top: a nested `target`, `.tmp` or `.wrangler` folder is committed as source.
+    await put("docs/target/page.md");
+    await put("docs/.tmp/kept.txt");
+    await put("pkg/mod.py");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".env.example", "README.md", "apps/web/.env.example", "docs/.tmp/kept.txt", "docs/target/page.md", "pkg/mod.py"]);
+    const gitDir = join(w.home, "git", ROOM, TASK);
+    const index = sh(w.root, `--git-dir=${gitDir}`, `--work-tree=${w.taskFolder}`, "ls-files", "--cached", "-z").split("\0");
+    expect(index.filter((p) => /(^|\/)\.env(\.local)?$/.test(p))).toEqual([]);
+  });
+
+  it("still commits a .env file the repository tracks, since an exclude only affects untracked files", async () => {
+    const w = await world();
+    sh(w.seed, "checkout", "--quiet", "main");
+    await writeFile(join(w.seed, ".env"), "MODE=dev\n");
+    sh(w.seed, "add", ".env");
+    sh(w.seed, "commit", "--quiet", "-m", "env");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, ".env"), "MODE=test\n");
+    await writeFile(join(w.taskFolder, ".env.local"), "SECRET=1\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".env", "README.md"]);
+    expect(sh(w.remote, "show", `${published.commit}:.env`)).toBe("MODE=test");
+  });
+
+  it("skips a nested __pycache__ holding a link, and refuses an excluded .env that is a link", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await mkdir(join(w.taskFolder, "pkg", "sub", "__pycache__"), { recursive: true });
+    await symlink("/etc", join(w.taskFolder, "pkg", "sub", "__pycache__", "link"));
+    await writeFile(join(w.taskFolder, "pkg", "sub", "mod.py"), "x\n");
+    // Git names an ignored link as a file, so it is walked, and it refuses.
+    await symlink("/etc/passwd", join(w.taskFolder, ".env"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+    await rm(join(w.taskFolder, ".env"));
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual(["README.md", "pkg/sub/mod.py"]);
   });
 
   it("still refuses a link outside the excluded dependency folders, and a link named like one, with no .gitignore", async () => {

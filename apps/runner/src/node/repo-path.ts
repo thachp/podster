@@ -201,9 +201,9 @@ export class GitRepositoryPath implements RepositoryPath {
   }
 
   /**
-   * Runner's own `info/exclude` in the task's Git folder: the tools' cache folders (`WORK_TREE_CACHES`) and the
-   * dependency folders (`WORK_TREE_DEPENDENCIES`: `node_modules` and `.venv` at any depth, `.wrangler` at the top), so
-   * nothing untracked in them is ever committed, and `ignoredFolders` names them so the work tree check skips them.
+   * Runner's own `info/exclude` in the task's Git folder: the tools' cache folders (`WORK_TREE_CACHES`) and the default
+   * ignore list (`WORK_TREE_DEFAULT_IGNORE`: dependency folders, build output, scratch, `.DS_Store` and `.env` files), so
+   * nothing untracked there is ever committed, and `ignoredFolders` names the folders so the work tree check skips them.
    * A tracked file under one is still committed. Written at checkout, and again before a publish if it isn't exactly that.
    */
   private async excludeCaches(task: RepoTask): Promise<void> {

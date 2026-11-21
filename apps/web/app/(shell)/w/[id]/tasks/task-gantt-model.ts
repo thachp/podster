@@ -143,8 +143,8 @@ export function arrowPath(fromX: number, fromY: number, toX: number, toY: number
 
 const NOTHING_CHANGED = "That didn't save, and nothing changed.";
 
-/** The form only offers what the server is likely to take. Rust decides. */
-export const offersStart = (plan: GanttPlan, role: string | undefined, archived: boolean) => plan.start !== undefined && plan.revision !== undefined && !archived && (role === "owner" || role === "admin");
+/** The form only offers what the server is likely to take: to the owner, an admin or a coordinator (issue 507). Rust decides. */
+export const offersStart = (plan: GanttPlan, role: string | undefined, archived: boolean, coordinates = false) => plan.start !== undefined && plan.revision !== undefined && !archived && (role === "owner" || role === "admin" || coordinates);
 
 export const startNeedsLatest = (code: string, status: number) => code === "plan_conflict" || code === "unknown" || status >= 500;
 

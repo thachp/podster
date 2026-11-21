@@ -553,6 +553,17 @@ describe("setting the room's start", () => {
     });
   });
 
+  it("is offered to a member coordinating the plan, and not to a plain member or a guest (issue 507)", async () => {
+    const as = (role: string, tasks: string): Room => ({ ...room(), members: [{ principal_id: "per_me", kind: "person", org_id: "org_a", role }], access: { tasks } });
+    for (const [viewer, offered] of [[as("member", "coordinate"), true], [as("member", "all_create"), false], [as("guest", "coordinate"), false]] as const) {
+      planReply = () => json({ ...fullPlan, start: null, forecast: { label: "Baseline plan", available: false, reasons: ["no_start"], explanation: "Set it." } });
+      show(threeTasks, { room: viewer });
+      await screen.findByText("Set it.");
+      expect(screen.queryByRole("button", { name: "Set start date" }) !== null).toBe(offered);
+      cleanup();
+    }
+  });
+
   it("is offered to an owner or admin, and to nobody the server gives no start", async () => {
     await asOwner();
     expect(screen.getByRole("button", { name: "Set start date" })).toBeInTheDocument();

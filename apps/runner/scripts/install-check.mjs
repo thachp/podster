@@ -68,7 +68,7 @@ for (const known of [
   ...Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies }),
   ...Object.entries(lock.packages).filter(([path]) => path !== "").map(([path, entry]) => entry.name ?? path.slice(path.lastIndexOf("node_modules/") + 13)),
 ]) {
-  passThrough.set(`/${known}`, `${UPSTREAM}/${known.replace("/", "%2f")}`);
+  passThrough.set(`/${known}`, `${UPSTREAM}/${known.replaceAll("/", "%2f")}`);
 }
 
 const server = createServer(async (req, res) => {

@@ -625,6 +625,28 @@ fn the_coordinator_takes_over_only_a_task_whose_requester_left_and_only_for_itse
         authorize_requester_change(&outsider, &orphan, "x", false),
         Verdict::NotParticipant
     );
+    // A guest whose grant was widened to the Coordinator's scope sees the task but can't take it over (2026-11-21), and a
+    // person who's a coordinating member can.
+    for kind in [Agent, Person] {
+        let widened = Caller {
+            scopes: Scopes::COORDINATOR,
+            ..caller("stranger", kind, Role::Guest)
+        };
+        assert_eq!(
+            authorize_requester_change(&widened, &orphan, "stranger", false),
+            Verdict::Forbidden,
+            "{kind:?}"
+        );
+        let member = Caller {
+            scopes: Scopes::COORDINATOR,
+            ..caller("stranger", kind, Role::Member)
+        };
+        assert_eq!(
+            authorize_requester_change(&member, &orphan, "stranger", false),
+            Verdict::Allow,
+            "{kind:?}"
+        );
+    }
     // A hidden task stays hidden, however the request is formed.
     let guest = caller("stranger", Agent, Role::Guest);
     assert_eq!(

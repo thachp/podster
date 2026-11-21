@@ -1,0 +1,80 @@
+{
+  "total_micro_usd": 5951,
+  "days": {
+    "2026-11-21": 5951
+  },
+  "runs": [
+    {
+      "id": "traffic-1795299067980-50923",
+      "scenario": "traffic",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:11:07.980Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 172,
+      "settled": true
+    },
+    {
+      "id": "bound-1795299088538-51078",
+      "scenario": "bound",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:11:28.538Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 821,
+      "settled": true
+    },
+    {
+      "id": "usage-1795299100257-51186",
+      "scenario": "usage",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:11:40.257Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 1186,
+      "settled": true
+    },
+    {
+      "id": "read-1795299118360-51331",
+      "scenario": "read",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:11:58.360Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 175,
+      "settled": true
+    },
+    {
+      "id": "edit-1795299127721-51405",
+      "scenario": "edit",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:12:07.721Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 410,
+      "settled": true
+    },
+    {
+      "id": "refuse-1795299148712-51599",
+      "scenario": "refuse",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:12:28.712Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 103,
+      "settled": true
+    },
+    {
+      "id": "cancel-1795299158542-51703",
+      "scenario": "cancel",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:12:38.542Z",
+      "cap_micro_usd": 200000,
+      "spent_micro_usd": 2908,
+      "settled": true
+    },
+    {
+      "id": "cap-1795299167916-51813",
+      "scenario": "cap",
+      "day": "2026-11-21",
+      "at": "2026-11-21T22:12:47.916Z",
+      "cap_micro_usd": 3000,
+      "spent_micro_usd": 176,
+      "settled": true
+    }
+  ]
+}

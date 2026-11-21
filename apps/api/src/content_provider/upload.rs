@@ -95,7 +95,7 @@ fn token_form(token: &str) -> bool {
 }
 
 /// Standard base64, padded, as the files' call takes it.
-fn base64_into(out: &mut Vec<u8>, bytes: &[u8]) {
+pub(crate) fn base64_into(out: &mut Vec<u8>, bytes: &[u8]) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let letter = |index: u32| ALPHABET.get((index & 63) as usize).copied().unwrap_or(b'=');
     out.reserve(bytes.len().div_ceil(3) * 4);

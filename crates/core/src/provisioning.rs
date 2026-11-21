@@ -454,9 +454,48 @@ impl NotReady {
     }
 }
 
+/// Where the default ignore file goes in a new repository: the top of its default branch.
+pub const DEFAULT_IGNORE_PATH: &str = ".gitignore";
+
+/// The commit message of the one commit that adds [`DEFAULT_IGNORE_PATH`].
+pub const DEFAULT_IGNORE_MESSAGE: &str = "Add Podster's default .gitignore";
+
+/// The lines a new managed repository's `.gitignore` starts with (the architect's ruling of 2026-11-21): the same list,
+/// in the same order, as Runner's `WORK_TREE_DEFAULT_IGNORE` in `apps/runner/src/core/repository.ts`, which keeps them
+/// out of every commit whatever the repository holds. This makes the list visible and editable in new repositories. It
+/// is fixed here, in code, and never comes from a task, a message or anything an agent sent.
+pub const DEFAULT_IGNORE: &[&str] = &[
+    "node_modules/",
+    ".venv/",
+    "__pycache__/",
+    ".pytest_cache/",
+    "/target/",
+    "/.wrangler/",
+    "/.tmp/",
+    ".DS_Store",
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.env.sample",
+    "!.env.template",
+];
+
+/// The whole file [`DEFAULT_IGNORE_PATH`] is created with: [`DEFAULT_IGNORE`], one line each, ending in a newline.
+pub fn default_ignore_file() -> String {
+    DEFAULT_IGNORE
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 /// Something setup may add to a repository Podster made. Setup only ever adds what's missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStep {
+    /// The default `.gitignore` ([`default_ignore_file`]) on the default branch, if no file is at that path yet. Only
+    /// for a repository with no ruleset yet: once the rules are on, nothing commits straight to the default branch, and a
+    /// repository someone already set up keeps whatever it has. The merge App writes it, as the one server-held App with
+    /// Contents write; the provisioning App has none. Never part of readiness: the file is the room's to edit or remove.
+    SeedDefaultIgnore,
     DisableActions,
     /// Workflows' default token reads only, and can't approve pull requests.
     RestrictWorkflowPermissions,
@@ -664,6 +703,10 @@ pub fn missing_steps(expected: &Expected, observed: &Observed) -> Result<Vec<Set
         return Err(NotReady::SettingsDiffer);
     }
     let mut steps = vec![];
+    // First, while nothing guards the default branch yet: the rulesets below are what would refuse it.
+    if observed.rulesets.is_empty() {
+        steps.push(SetupStep::SeedDefaultIgnore);
+    }
     match observed.actions_enabled {
         None => return Err(NotReady::ActionsUnreadable),
         Some(true) => steps.push(SetupStep::DisableActions),
@@ -699,8 +742,15 @@ pub fn missing_steps(expected: &Expected, observed: &Observed) -> Result<Vec<Set
 
 /// Whether what was read back is exactly what readiness needs. Nothing missing, nothing different, nothing extra.
 pub fn verify_ready(expected: &Expected, observed: &Observed) -> Result<(), NotReady> {
-    match missing_steps(expected, observed)?.first() {
+    // The default ignore file isn't judged: a room may edit or remove it, and a repository with no rulesets is missing
+    // them anyway.
+    let steps = missing_steps(expected, observed)?;
+    match steps
+        .iter()
+        .find(|step| **step != SetupStep::SeedDefaultIgnore)
+    {
         None => Ok(()),
+        Some(SetupStep::SeedDefaultIgnore) => Ok(()),
         Some(SetupStep::DisableActions) => Err(NotReady::ActionsEnabled),
         Some(SetupStep::RestrictWorkflowPermissions) => Err(NotReady::WorkflowPermissionsDiffer),
         Some(SetupStep::CreateReviewRuleset | SetupStep::CreateUpdateRuleset) => {
@@ -928,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_repository_needs_all_three_steps_and_a_half_set_up_one_only_what_is_missing() {
+    fn a_new_repository_needs_every_step_and_a_half_set_up_one_only_what_is_missing() {
         let fresh = Observed {
             actions_enabled: Some(true),
             rulesets: vec![],
@@ -937,6 +987,7 @@ mod tests {
         assert_eq!(
             missing_steps(&EXPECTED, &fresh),
             Ok(vec![
+                SetupStep::SeedDefaultIgnore,
                 SetupStep::DisableActions,
                 SetupStep::CreateReviewRuleset,
                 SetupStep::CreateUpdateRuleset
@@ -976,6 +1027,59 @@ mod tests {
             ),
             Err(NotReady::ActionsEnabled)
         );
+    }
+
+    #[test]
+    fn the_default_ignore_file_is_runners_list_one_line_each() {
+        assert_eq!(DEFAULT_IGNORE_PATH, ".gitignore");
+        assert_eq!(
+            default_ignore_file(),
+            "node_modules/\n.venv/\n__pycache__/\n.pytest_cache/\n/target/\n/.wrangler/\n/.tmp/\n.DS_Store\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n"
+        );
+    }
+
+    #[test]
+    fn the_default_ignore_file_is_seeded_first_and_only_before_any_ruleset() {
+        // A new repository: the file first, while nothing guards the default branch, and the rulesets after it.
+        let fresh = Observed {
+            rulesets: vec![],
+            ..ready()
+        };
+        let steps = missing_steps(&EXPECTED, &fresh).unwrap_or_default();
+        assert_eq!(steps.first(), Some(&SetupStep::SeedDefaultIgnore));
+        let seed = steps
+            .iter()
+            .position(|s| *s == SetupStep::SeedDefaultIgnore);
+        let first_rule = steps.iter().position(|s| {
+            matches!(
+                s,
+                SetupStep::CreateReviewRuleset | SetupStep::CreateUpdateRuleset
+            )
+        });
+        assert!(seed < first_rule);
+        // Once any ruleset is there, setup never writes to the default branch, whether a run made it or someone else.
+        for rulesets in [vec![review()], vec![update()], ready().rulesets] {
+            let observed = Observed {
+                rulesets,
+                ..ready()
+            };
+            let steps = missing_steps(&EXPECTED, &observed);
+            assert!(steps.is_ok());
+            assert!(!steps
+                .unwrap_or_default()
+                .contains(&SetupStep::SeedDefaultIgnore));
+        }
+        // It's never part of readiness: a repository with no rulesets is missing them, and nothing else is said.
+        assert_eq!(
+            verify_ready(&EXPECTED, &fresh),
+            Err(NotReady::RulesetMissing)
+        );
+        // A repository that can't be set up isn't seeded either.
+        let archived = Observed {
+            archived: true,
+            ..fresh.clone()
+        };
+        assert_eq!(missing_steps(&EXPECTED, &archived), Err(NotReady::Archived));
     }
 
     #[test]

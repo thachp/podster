@@ -17,9 +17,10 @@ use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use podster_core::provisioning::{
-    classify_creation, gone, installation_read, repository_gone, token_answer_matches, Bypass,
-    Creation, InstallationRead, Observed, RepoSettings, Ruleset, SetupStep, WorkflowPermissions,
-    DEFAULT_BRANCH_REF, PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
+    classify_creation, default_ignore_file, gone, installation_read, repository_gone,
+    token_answer_matches, Bypass, Creation, InstallationRead, Observed, RepoSettings, Ruleset,
+    SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF, DEFAULT_IGNORE_MESSAGE,
+    DEFAULT_IGNORE_PATH, PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
 };
 use podster_core::rate_limit::{
     has_secondary_marker, primary_403, rate_limit_wait_ms, LimitSignals,
@@ -921,6 +922,9 @@ impl Provider for GitHubApp {
                 self.ruleset_body(false),
                 201,
             ),
+            // Never this App's: it holds no Contents permission. The merge App seeds the file
+            // (`MergeApp::seed_default_ignore`), and nothing is sent here.
+            SetupStep::SeedDefaultIgnore => return Err(Failure::Unreadable),
         };
         let (status, _) = self.send(method, &path, &token, Some(body)).await?;
         if status == expected {
@@ -1513,6 +1517,66 @@ impl MergeApp {
             default_branch_has,
             default_branch: reported,
         })
+    }
+
+    /// Seeds a new repository's default `.gitignore` at setup ([`SetupStep::SeedDefaultIgnore`]), with a token that can
+    /// write contents and nothing else. Provisioning asks only while the repository has no ruleset, so nothing guards the
+    /// default branch yet. A file already at that path is left exactly as it is, so a second run changes nothing. The
+    /// file's text is `core`'s fixed list, never anything from a request.
+    pub async fn seed_default_ignore(
+        &self,
+        repo_id: i64,
+    ) -> MergeStepRead<std::result::Result<(), Failure>> {
+        let token = match self.narrow(repo_id, TokenPermissions::SEEDER).await {
+            Ok(token) => token,
+            Err((failure, revoked)) => {
+                return MergeStepRead {
+                    answer: Err(failure),
+                    failed_at_mint: true,
+                    revoked,
+                }
+            }
+        };
+        let path = format!("/repositories/{repo_id}/contents/{DEFAULT_IGNORE_PATH}");
+        let present = |answer: std::result::Result<(u16, Value), Failure>| match answer {
+            Ok((200, _)) => Ok(true),
+            Ok((404, _)) => Ok(false),
+            Ok((status, _)) => Err(Failure::Status(status)),
+            Err(failure) => Err(failure),
+        };
+        let answer = match present(call(Method::Get, &path, &token, None).await) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let mut content = vec![];
+                crate::content_provider::upload::base64_into(
+                    &mut content,
+                    default_ignore_file().as_bytes(),
+                );
+                let body = json!({
+                    "message": DEFAULT_IGNORE_MESSAGE,
+                    "content": String::from_utf8_lossy(&content),
+                });
+                match call(Method::Put, &path, &token, Some(body)).await {
+                    Ok((201, _)) => Ok(()),
+                    // Without a `sha`, GitHub refuses to replace a file that's there. One that came between the read
+                    // and the write is the file there, and is left as it is.
+                    Ok((422, _)) => match present(call(Method::Get, &path, &token, None).await) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(Failure::Status(422)),
+                        Err(failure) => Err(failure),
+                    },
+                    Ok((status, _)) => Err(Failure::Status(status)),
+                    Err(failure) => Err(failure),
+                }
+            }
+            Err(failure) => Err(failure),
+        };
+        let revoked = self.tokens.revoke_token(&token).await == Revoked::Gone;
+        MergeStepRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
+        }
     }
 
     /// The repository's default branch as GitHub reports it now, or `None` if it couldn't be read.

@@ -197,6 +197,11 @@ async function settled(r: { id: string; owner: Who }) {
 }
 const rowsOf = (id: string, table: string) => inRoom(id, (sql) => sql.exec(`SELECT * FROM ${table}`).toArray() as any[]);
 const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FROM event ORDER BY seq").toArray().map((e: any) => e.type as string));
+/** Every call a merge App token made about a repository, and every token the merge App was given for it. */
+const seedCalls = async (repo: number) => ((await (await fetch(`https://github-fake.example.com/merge-calls?repo=${repo}`)).json()) as { calls: { method: string; path: string; permissions: Record<string, string>; status: number; body: any }[] }).calls;
+const seedTokens = async (repo: number) => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${repo}`)).json()) as { live: boolean; permissions: Record<string, string>; asked: any }[];
+/** The default `.gitignore` every new repository starts with: Runner's own list (`crates/core/src/provisioning.rs`). */
+const DEFAULT_IGNORE = ["node_modules/", ".venv/", "__pycache__/", ".pytest_cache/", "/target/", "/.wrangler/", "/.tmp/", ".DS_Store", ".env", ".env.*", "!.env.example", "!.env.sample", "!.env.template"].map((line) => `${line}\n`).join("");
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {
@@ -846,6 +851,12 @@ describe("the provisioning job", () => {
     expect(review.rules[1].parameters.required_status_checks).toEqual([{ context: "podster/review", integration_id: GH.mergeAppId }]);
     expect(update).toMatchObject({ name: "podster-update", enforcement: "active", bypass_actors: [{ actor_id: GH.mergeAppId, actor_type: "Integration", bypass_mode: "always" }] });
     expect(update.rules).toEqual([{ type: "update" }]);
+    // The default `.gitignore`, seeded by the merge App before either ruleset, with a token for contents alone, revoked.
+    expect(made.files).toEqual({ ".gitignore": DEFAULT_IGNORE });
+    const seeding = await seedCalls(id);
+    expect(seeding.map((c) => `${c.method} ${c.path} ${c.status}`)).toEqual([`GET /repositories/${id}/contents/.gitignore 404`, `PUT /repositories/${id}/contents/.gitignore 201`]);
+    expect(seeding[1].body).toEqual({ message: "Add Podster's default .gitignore", content: Buffer.from(DEFAULT_IGNORE).toString("base64") });
+    expect(await seedTokens(id)).toEqual([expect.objectContaining({ live: false, permissions: { contents: "write", metadata: "read" }, asked: { repository_ids: [id], permissions: { contents: "write", metadata: "read" } } })]);
     // The attempt, the events, the audit, and the routing row once the link is ready.
     expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => [a.attempt, a.provider_name, a.outcome])).toEqual([[1, "engineering", "created"]]);
     expect((await eventTypes(r.id)).filter((t) => t.startsWith("repository."))).toEqual(["repository.requested", "repository.ready"]);
@@ -1049,6 +1060,59 @@ describe("the provisioning job", () => {
       expect(await indexRow(made.id), what).toBeNull();
       expect((await eventTypes(r.id)).filter((t) => t.startsWith("repository.")), what).toEqual(["repository.requested", "repository.setup_failed"]);
     }
+  });
+
+  it("seeds the default .gitignore only before any ruleset, leaves a file that's there as it is, and fails setup if it can't", async () => {
+    // A file already there, as a template or a person put it: left exactly as it is, and nothing is written.
+    const kept = await room({ script: { fresh: { files: { ".gitignore": "mine\n" } } } });
+    await ask(kept);
+    expect((await settled(kept)).request).toMatchObject({ state: "ready", reason: null });
+    let [made] = (await github()).repos;
+    expect(made.files).toEqual({ ".gitignore": "mine\n" });
+    expect((await seedCalls(made.id)).map((c) => `${c.method} ${c.status}`)).toEqual(["GET 200"]);
+    // One that lands between the read and the write: GitHub refuses the write, the file is read again and kept.
+    const raced = await room({ script: { seed: "race" } });
+    await ask(raced);
+    expect((await settled(raced)).request).toMatchObject({ state: "ready", reason: null });
+    [made] = (await github()).repos;
+    expect(made.files).toEqual({ ".gitignore": "someone-elses\n" });
+    expect((await seedCalls(made.id)).map((c) => `${c.method} ${c.status}`)).toEqual(["GET 404", "PUT 422", "GET 200"]);
+    // Refused, or no token: setup fails before anything else is set up, and a retry seeds it and goes on.
+    for (const seed of ["forbidden", "mint"]) {
+      const r = await room({ script: { seed } });
+      await ask(r);
+      expect((await settled(r)).request, seed).toMatchObject({ state: "failed", reason: "setup_call_failed" });
+      [made] = (await github()).repos;
+      expect(made.rulesets, seed).toEqual([]);
+      expect(made.actionsEnabled, seed).toBe(true);
+      expect((await seedTokens(made.id)).every((t) => !t.live), seed).toBe(true);
+      await fake("/script", { seed: null });
+      expect((await retry(r)).status, seed).toBe(200);
+      expect((await settled(r)).request, seed).toMatchObject({ state: "ready", reason: null });
+      expect((await github()).repos[0].files, seed).toEqual({ ".gitignore": DEFAULT_IGNORE });
+    }
+    // Seeded, then a ruleset failed: the retry finds a ruleset on and never writes to the default branch again.
+    const half = await room({ script: { ruleset: "drop_update" } });
+    await ask(half);
+    expect((await settled(half)).request).toMatchObject({ state: "failed", reason: "ruleset_missing" });
+    [made] = (await github()).repos;
+    expect(made.files).toEqual({ ".gitignore": DEFAULT_IGNORE });
+    const before = (await seedCalls(made.id)).length;
+    await fake("/script", { ruleset: "ok" });
+    expect((await retry(half)).status).toBe(200);
+    expect((await settled(half)).request).toMatchObject({ state: "ready", reason: null });
+    expect((await seedCalls(made.id)).length).toBe(before);
+  });
+
+  it("creates nothing while the merge App isn't configured, since it seeds the default .gitignore", async () => {
+    const r = await room();
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_merge_app (x INTEGER)"));
+    await ask(r);
+    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "provisioning_not_configured" });
+    expect((await github()).calls).toEqual([]);
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_no_merge_app"));
+    expect((await retry(r)).status).toBe(200);
+    expect((await settled(r)).request.state).toBe("ready");
   });
 
   it("narrows workflows that could write or approve, and reads them back read-only before linking", async () => {

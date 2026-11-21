@@ -420,7 +420,7 @@ export class GitRepositoryPath implements RepositoryPath {
 
   /**
    * A failed fetch or push, by a fixed code: a refused credential reads as a revoked token, and a push GitHub or the way
-   * to it found too large as `push_too_large`. Git's words are matched here and never kept or logged.
+   * to it plainly refused for its size as `push_too_large`; a timeout or failed connection stays `github_unreachable`. Git's words are matched here and never kept or logged.
    */
   private gitFailure(task: RepoTask, result: { stdout: string; stderr: string }, fallback: string): RepoPathError {
     const text = `${result.stdout}\n${result.stderr}`;
@@ -428,11 +428,15 @@ export class GitRepositoryPath implements RepositoryPath {
       this.deps.broker.revoked(task.workspace_id, task.task_id);
       return new RepoPathError("token_revoked");
     }
-    // A push too large for GitHub or the HTTPS path to it: GitHub's large-file refusal, an HTTP 413, a pack over a limit,
-    // or the connection dropped mid-push. Only for a push; checked before the plain rejection, since GH001 arrives as one.
-    if (fallback === "push_failed" && /GH001|RPC failed|remote end hung up|HTTP 413|returned error: 413|\b413 Request Entity Too Large|pack exceeds/i.test(text)) return new RepoPathError("push_too_large");
+    // A timeout or a connection that failed is the network's, and tried again, whatever else Git said with it: `RPC
+    // failed; curl 28 Operation timed out` is one.
+    if (/Could not resolve host|Failed to connect|Connection timed out|Operation timed out|timed out|Connection reset/i.test(text)) return new RepoPathError("github_unreachable", true);
+    // A push GitHub or the way to it refused for its size, only on a clear sign of it: an HTTP 413, a pack over a limit,
+    // or GitHub's large-file refusal. Only for a push; checked before the plain rejection, since GH001 arrives as one. A
+    // bare `RPC failed` or `remote end hung up` says neither, and falls back to `push_failed`.
+    if (fallback === "push_failed" && /HTTP 413|returned error: 413|pack exceeds|GH001|exceeds GitHub's file size limit|this exceeds/i.test(text)) return new RepoPathError("push_too_large");
     if (/\[rejected\]|\[remote rejected\]|non-fast-forward|fetch first/.test(text)) return new RepoPathError("push_rejected");
-    if (/Could not resolve host|Failed to connect|Connection timed out|Operation timed out|unable to access/i.test(text)) return new RepoPathError("github_unreachable", true);
+    if (/unable to access/i.test(text)) return new RepoPathError("github_unreachable", true);
     return new RepoPathError(fallback);
   }
 }

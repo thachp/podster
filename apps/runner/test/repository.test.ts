@@ -1011,7 +1011,7 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
       "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n",
       "remote: error: GH001: Large files detected. You may want to try Git Large File Storage.\nremote: error: File big.bin is 140.00 MB; this exceeds GitHub's file size limit of 100.00 MB\n ! [remote rejected] podster/task_1 -> podster/task_1 (pre-receive hook declined)\n",
       "remote: fatal: pack exceeds maximum allowed size\nerror: failed to push some refs\n",
-      "fatal: the remote end hung up unexpectedly\n",
+      "remote: error: File dist/app.bin is 120.00 MB; this exceeds GitHub's file size limit of 100.00 MB\n",
     ];
     for (const stderr of answers) {
       const w = await world();
@@ -1030,6 +1030,20 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_rejected" });
     w.fakes.push = { code: 1, stdout: "", stderr: "something else\n" };
     await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_failed" });
+    // A timeout or failed connection stays the network's, and is tried again, even beside `RPC failed` or a hang-up.
+    for (const stderr of [
+      "error: RPC failed; curl 28 Operation timed out after 300000 milliseconds with 0 bytes received\nfatal: the remote end hung up unexpectedly\n",
+      "error: RPC failed; curl 56 Connection reset by peer\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n",
+      "fatal: unable to access 'https://github.com/podsterdev/todo-app.git/': Failed to connect to github.com port 443\n",
+    ]) {
+      w.fakes.push = { code: 128, stdout: "", stderr };
+      await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "github_unreachable", transient: true });
+    }
+    // A bare `RPC failed` or hang-up, with no sign of a timeout or of size, is the plain fallback.
+    for (const stderr of ["error: RPC failed; curl 92 HTTP/2 stream 0 was not closed cleanly\nfatal: the remote end hung up unexpectedly\n", "fatal: the remote end hung up unexpectedly\n"]) {
+      w.fakes.push = { code: 1, stdout: "", stderr };
+      await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_failed", transient: false });
+    }
   });
 
   it("walks a folder whose only entries are ignored, so an ignored link or a .git look-alike below it still refuses (the review of #508)", async () => {

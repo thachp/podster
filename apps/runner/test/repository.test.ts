@@ -31,7 +31,7 @@ import { pullText } from "../src/core/pull-text.js";
 import { lineLogger } from "../src/core/runtime.js";
 import { checkedHelper, findGit, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
-import { checkWorkTree, GitRepositoryPath, RepoBroker } from "../src/node/repo-path.js";
+import { checkWorkTree, GitRepositoryPath, RepoBroker, wholeFolders } from "../src/node/repo-path.js";
 
 const OWNER = "org_owner";
 const ROOM = "room_1";
@@ -328,7 +328,7 @@ describe("decision 230's own rules", () => {
   it("starts every Git command with hooks and fsmonitor off, no helper but Runner's, and the Git folder named", () => {
     const args = [...hardening("/opt/runner/git/credential-helper"), ...locate("/home/o/.runner/git/r/t", "/work/r/t")];
     const settings = args.filter((_, i) => args[i - 1] === "-c");
-    for (const s of ["core.hooksPath=/dev/null", "core.fsmonitor=false", "protocol.allow=never", "protocol.https.allow=always", "http.followRedirects=false", "submodule.recurse=false", "safe.directory=/work/r/t"]) expect(settings).toContain(s);
+    for (const s of ["core.hooksPath=/dev/null", "core.fsmonitor=false", "core.excludesFile=/dev/null", "protocol.allow=never", "protocol.https.allow=always", "http.followRedirects=false", "submodule.recurse=false", "safe.directory=/work/r/t"]) expect(settings).toContain(s);
     // The empty helper clears any named before it, so Runner's own is the only one.
     // Run through /bin/sh by its path (the ruling on #470), so the helper needs no execute bit.
     expect(settings.indexOf("credential.helper=")).toBeLessThan(settings.indexOf("credential.helper=!/bin/sh /opt/runner/git/credential-helper"));
@@ -748,6 +748,121 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
   });
 
+  /** The repository's `.gitignore` on `main`, committed and pushed before the checkout. */
+  const ignoring = async (w: Awaited<ReturnType<typeof world>>, lines: string) => {
+    sh(w.seed, "checkout", "--quiet", "main");
+    await writeFile(join(w.seed, ".gitignore"), lines);
+    sh(w.seed, "add", ".gitignore");
+    sh(w.seed, "commit", "--quiet", "-m", "ignore");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+  };
+  /** What `npm install` and `uv venv` leave: links in `node_modules/.bin` and `.venv/bin`, one pointing out of the tree. */
+  const installed = async (folder: string) => {
+    await mkdir(join(folder, "node_modules", "tool", "bin"), { recursive: true });
+    await writeFile(join(folder, "node_modules", "tool", "bin", "tool.js"), "x");
+    await mkdir(join(folder, "node_modules", ".bin"));
+    await symlink("../tool/bin/tool.js", join(folder, "node_modules", ".bin", "tool"));
+    await mkdir(join(folder, ".venv", "bin"), { recursive: true });
+    await symlink("/opt/uv/python/bin/python3.14", join(folder, ".venv", "bin", "python"));
+    await symlink("python", join(folder, ".venv", "bin", "python3"));
+  };
+
+  it("skips folders the repository's .gitignore ignores whole, so installed dependencies publish, and commits none of them", async () => {
+    const w = await world();
+    await ignoring(w, "node_modules/\n.venv/\n");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await installed(w.taskFolder);
+    // A nested package's own dependencies are ignored whole too, by the same unanchored line.
+    await mkdir(join(w.taskFolder, "packages", "web", "node_modules", ".bin"), { recursive: true });
+    await symlink("/usr/bin/env", join(w.taskFolder, "packages", "web", "node_modules", ".bin", "env"));
+    await writeFile(join(w.taskFolder, "packages", "web", "index.js"), "x\n");
+    await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".gitignore", "README.md", "feature.txt", "packages/web/index.js"]);
+    // `git add --all` staged nothing under a skipped folder: the index of Runner's Git folder holds none of it.
+    const gitDir = join(w.home, "git", ROOM, TASK);
+    const index = sh(w.root, `--git-dir=${gitDir}`, `--work-tree=${w.taskFolder}`, "ls-files", "--cached", "-z").split("\0");
+    expect(index.filter((p) => p.includes("node_modules") || p.includes(".venv"))).toEqual([]);
+    // The links are still there, untouched.
+    expect((await lstat(join(w.taskFolder, "node_modules", ".bin", "tool"))).isSymbolicLink()).toBe(true);
+  });
+
+  it("refuses the same links when the repository doesn't ignore their folders", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await installed(w.taskFolder);
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+  });
+
+  it("refuses an ignored folder that is a link, a link on the way to one, an ignored file that is a link, and a link outside them", async () => {
+    const w = await world();
+    // Without a trailing slash the line ignores a link by that name too; Git names it as a file, so it is walked.
+    await ignoring(w, "node_modules\n*.log\n");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    const outside = await temp();
+    await mkdir(join(outside, "node_modules"));
+    const refused = async () => {
+      await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+      expect(w.gitCalls.some((c) => c.args.includes("add"))).toBe(false);
+    };
+    await symlink(join(outside, "node_modules"), join(w.taskFolder, "node_modules"));
+    await refused();
+    await rm(join(w.taskFolder, "node_modules"));
+    // `vendor` leads out of the tree to a folder holding `node_modules`: Git doesn't follow it, and the walk refuses it.
+    await symlink(outside, join(w.taskFolder, "vendor"));
+    await refused();
+    await rm(join(w.taskFolder, "vendor"));
+    await symlink("/etc/passwd", join(w.taskFolder, "debug.log"));
+    await refused();
+    await rm(join(w.taskFolder, "debug.log"));
+    // A real ignored folder doesn't excuse a link elsewhere that points out of the work tree.
+    await installed(w.taskFolder);
+    await mkdir(join(w.taskFolder, "src"));
+    await symlink("/etc/passwd", join(w.taskFolder, "src", "passwd"));
+    await refused();
+    await rm(join(w.taskFolder, "src", "passwd"));
+    await rm(join(w.taskFolder, ".venv"), { recursive: true });
+    // With those gone, only the skipped `node_modules` is left: it passes the check, and Git has nothing to commit.
+    expect(await w.path.publish({ ...w.task, base_commit: base }, w.signal)).toEqual({ kind: "no_changes" });
+  });
+
+  it("still walks an ignored folder that holds a tracked file, skipping only the whole folders under it", async () => {
+    const w = await world();
+    await ignoring(w, "node_modules/\n");
+    // The repository tracks one file under an ignored folder, as some do with a patched dependency.
+    await mkdir(join(w.seed, "node_modules"));
+    await writeFile(join(w.seed, "node_modules", "patched.js"), "x\n");
+    sh(w.seed, "add", "--force", "node_modules/patched.js");
+    sh(w.seed, "commit", "--quiet", "-m", "patched");
+    sh(w.seed, "push", "--quiet", w.remote, "main:main");
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await installed(w.taskFolder);
+    await rm(join(w.taskFolder, ".venv"), { recursive: true });
+    // Beside the tracked file, an ignored link is walked and refuses.
+    await symlink("/etc/passwd", join(w.taskFolder, "node_modules", "linked.js"));
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    await rm(join(w.taskFolder, "node_modules", "linked.js"));
+    // `node_modules/.bin` and `node_modules/tool` hold nothing tracked, so Git ignores them whole and they are skipped.
+    await writeFile(join(w.taskFolder, "node_modules", "patched.js"), "y\n");
+    const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
+    if (published.kind !== "published") throw new Error("not published");
+    expect(sh(w.remote, "ls-tree", "-r", "--name-only", published.commit).split("\n").sort()).toEqual([".gitignore", "README.md", "node_modules/patched.js"]);
+  });
+
+  it("never skips a folder only a global excludes file ignores: Runner's Git reads none", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    // Where Git looks for a user's excludes by default, under the HOME Runner's Git runs with.
+    await mkdir(join(w.root, "git-home", ".config", "git"), { recursive: true });
+    await writeFile(join(w.root, "git-home", ".config", "git", "ignore"), "node_modules/\n.venv/\n");
+    await installed(w.taskFolder);
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "work_tree_link" });
+    // Every command pins the setting, so neither that file nor any configured `core.excludesFile` is read.
+    expect(w.gitCalls.every((c) => c.args.includes("core.excludesFile=/dev/null"))).toBe(true);
+  });
+
   it("reports a revoked token: GitHub's 401 drops it, and the next use asks Podster again", async () => {
     const w = await world();
     const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
@@ -912,5 +1027,18 @@ describe("the work tree check", () => {
     const big = await temp();
     for (let i = 0; i < 5; i++) await writeFile(join(big, `f${i}`), "x");
     await expect(checkWorkTree(big, 3)).rejects.toMatchObject({ code: "work_tree_too_large" });
+  });
+
+  it("takes only Git's whole folders, with no empty, `.` or `..` part, and counts a skipped folder's own entries only", async () => {
+    expect([...wholeFolders("node_modules/\0a.log\0packages/web/.venv/\0../x/\0a//b/\0./y/\0\0")]).toEqual(["node_modules", "packages/web/.venv"]);
+    const dir = await temp();
+    await mkdir(join(dir, "deps", "a", "b"), { recursive: true });
+    await symlink("/etc/passwd", join(dir, "deps", "a", "b", "link"));
+    await expect(checkWorkTree(dir)).rejects.toMatchObject({ code: "work_tree_link" });
+    await checkWorkTree(dir, 2, new Set(["deps"]));
+    await expect(checkWorkTree(dir, 1, new Set(["deps"]))).rejects.toMatchObject({ code: "work_tree_too_large" });
+    // A `.git` look-alike at the top of a skipped folder still refuses: host Git looks there for a nested repository.
+    await mkdir(join(dir, "deps", ".GIT"));
+    await expect(checkWorkTree(dir, 10, new Set(["deps"]))).rejects.toMatchObject({ code: "work_tree_git" });
   });
 });

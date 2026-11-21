@@ -27,7 +27,6 @@ import { pullText } from "../core/pull-text.js";
 import {
   checkProtected,
   COMMIT_IDENTITY,
-  WORK_TREE_CACHES,
   WORK_TREE_EXCLUDE,
   fetchArgs,
   GITHUB,
@@ -206,14 +205,16 @@ export class GitRepositoryPath implements RepositoryPath {
   }
 
   /**
-   * The cache folders Git ignores whole: excluded, and holding nothing the repository tracks. Only these are left out of
-   * the work tree check, since Git never reads into them; a cache folder holding a tracked file is checked as usual.
+   * The folders Git ignores whole, anywhere in the work tree (the owner's ruling of 2026-11-20): excluded, and holding
+   * nothing the repository tracks, so `git add --all` never reads into them and nothing in them can reach the commit.
+   * Only these are left out of the work tree check; one holding a tracked file is listed file by file instead, and walked
+   * as usual. What counts as ignored is the repository's own `.gitignore` files and Runner's `info/exclude`, nothing
+   * else (`core.excludesFile=/dev/null` in `hardening`, and no global or system configuration in `gitEnv`).
    */
-  private async ignoredCaches(task: RepoTask, signal: AbortSignal): Promise<Set<string>> {
-    const listed = await this.git(task, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ...WORK_TREE_CACHES.map((name) => `:/${name}`)], { signal });
+  private async ignoredFolders(task: RepoTask, signal: AbortSignal): Promise<Set<string>> {
+    const listed = await this.git(task, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", ":/"], { signal });
     if (listed.code !== 0) throw new RepoPathError("commit_failed");
-    const entries = new Set(listed.stdout.split("\0"));
-    return new Set(WORK_TREE_CACHES.filter((name) => entries.has(`${name}/`)));
+    return wholeFolders(listed.stdout);
   }
 
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
@@ -304,7 +305,7 @@ export class GitRepositoryPath implements RepositoryPath {
     const { default_branch } = await this.checked(task, access, signal);
     await this.apart(task);
     await this.excludeCaches(task);
-    await checkWorkTree(task.task_folder, MAX_FOLDER_ENTRIES, await this.ignoredCaches(task, signal));
+    await checkWorkTree(task.task_folder, MAX_FOLDER_ENTRIES, await this.ignoredFolders(task, signal));
     // Nothing in a container can reach the Git folder, so its head is the pinned commit, or Runner's own one commit on
     // it from an earlier try that a passing failure stopped (ruling 5 on #462); anything else refuses.
     const before = await this.head(task, signal);
@@ -375,11 +376,29 @@ export class GitRepositoryPath implements RepositoryPath {
 const scopeOf = (task: RepoTask): RepoScope => ({ full_name: task.repository.full_name, provider_repo_id: task.repository.provider_repo_id });
 
 /**
+ * The folders in `git ls-files -z --others --ignored --directory`'s answer, relative to the work tree's top: only
+ * entries Git names with a trailing `/`, which it does for a folder it ignores whole. An ignored file, a link Git
+ * ignores (Git names a link as a file), and anything with an empty, `.` or `..` part are left out, so they are walked.
+ */
+export function wholeFolders(listing: string): Set<string> {
+  const folders = new Set<string>();
+  for (const entry of listing.split("\0")) {
+    if (!entry.endsWith("/")) continue;
+    const parts = entry.slice(0, -1).split("/");
+    if (parts.every((part) => part !== "" && part !== "." && part !== "..")) folders.add(parts.join("/"));
+  }
+  return folders;
+}
+
+/**
  * The work tree, walked with `lstat` and never through a link, before anything is committed from it: no link of any
  * kind, nothing named `.git` or folding to it at any depth (a nested repository would be read by host Git), and no more
- * entries than the folder bound allows. `ignored` names top-level cache folders Git ignores whole (`ignoredCaches`):
- * each must itself be a real folder, not a link, and isn't walked, since nothing in it is ever committed (uv's cache
- * holds links of its own).
+ * entries than the folder bound allows. `ignored` names folders Git ignores whole (`ignoredFolders`), relative to the
+ * top. One is skipped only when the walk reaches it, so a link on the way to it refuses first, and only when it is
+ * itself a real folder, not a link. Its own entries are still read and counted against the bound, so that no `.git`
+ * look-alike sits where host Git looks for a nested repository; nothing below them is walked or counted, since nothing
+ * in it is ever committed (`node_modules/.bin`, a virtual environment and uv's cache hold links of their own). A link
+ * Git ignores as a file still refuses.
  */
 export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTRIES, ignored: ReadonlySet<string> = new Set()): Promise<void> {
   const stack = [folder];
@@ -393,12 +412,12 @@ export async function checkWorkTree(folder: string, maxEntries = MAX_FOLDER_ENTR
       if (!info.isFile()) throw new RepoPathError("work_tree_special");
       continue;
     }
-    if (skip.has(at)) continue;
+    const skipped = skip.has(at);
     const dir = await opendir(at);
     for await (const entry of dir) {
       if (++entries > maxEntries) throw new RepoPathError("work_tree_too_large");
       if (foldedSegment(entry.name) === ".git") throw new RepoPathError("work_tree_git");
-      stack.push(join(at, entry.name));
+      if (!skipped) stack.push(join(at, entry.name));
     }
   }
 }

@@ -74,8 +74,21 @@ export const RENEW_BEFORE_MS = 4 * 60 * 1000;
  * repository tracks under one of them is still committed as usual: an exclude applies only to untracked files.
  */
 export const WORK_TREE_CACHES = [".cache", ".cargo", ".npm-global"] as const;
-/** The `info/exclude` Runner writes: each cache folder, anchored at the work tree's top, as a folder only. */
-export const WORK_TREE_EXCLUDE = WORK_TREE_CACHES.map((name) => `/${name}/\n`).join("");
+/**
+ * Dependency and tool-state folders that are never source and commonly hold links, which Runner also writes into its
+ * own `info/exclude`, so a repository with no `.gitignore` can still publish after an install: `node_modules` and
+ * `.venv` at any depth (a monorepo nests them; `node_modules/.bin` and a virtual environment's `bin` hold links), and
+ * wrangler's local state, `.wrangler`, at the top only. Each is a folder-only line, so a link by one of these names is
+ * not excluded and the work tree check still refuses it. As with the caches, an exclude applies only to untracked
+ * files: a file the repository tracks under one of them is still committed as usual, and a folder holding one is
+ * walked by the work tree check as before.
+ */
+export const WORK_TREE_DEPENDENCIES = ["node_modules/", ".venv/", "/.wrangler/"] as const;
+/**
+ * The `info/exclude` Runner writes: each cache folder, anchored at the work tree's top, as a folder only, then the
+ * dependency folders (`WORK_TREE_DEPENDENCIES`) as written there.
+ */
+export const WORK_TREE_EXCLUDE = [...WORK_TREE_CACHES.map((name) => `/${name}/`), ...WORK_TREE_DEPENDENCIES].map((line) => `${line}\n`).join("");
 
 /** The prefix of every task branch. */
 export const BRANCH_PREFIX = "podster/";

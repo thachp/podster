@@ -12,7 +12,7 @@
  *   that commit, and verifies the head and a clean tree before answering it for the decision to pin.
  * - **`publish`**, after the run's container is confirmed stopped, asks for the token again (renewing after a full
  *   recheck if it's due), checks the repository and its rules again, walks the work tree without following anything and
- *   refuses any link or `.git` look-alike the task left, commits on top of the pinned commit under a fixed identity,
+ *   refuses any link or `.git` look-alike the task left, refuses a change under `.github/workflows/`, commits on top of the pinned commit under a fixed identity,
  *   pushes the one task branch, and opens its pull request, or finds the one it opened before, and verifies it.
  *
  * Host-side folder access goes through `safe-fs.ts` (`lstat`, `O_NOFOLLOW`, `realpath`; L3 on #459). Git runs as
@@ -231,6 +231,20 @@ export class GitRepositoryPath implements RepositoryPath {
     return wholeFolders(listed.stdout_bytes);
   }
 
+  /**
+   * Refuses (`work_tree_workflow`) when what would be committed adds, changes, deletes or renames anything under
+   * `.github/workflows/` (BUILDS.md rule 1): every path the index differs in from the pinned commit, renames read as a
+   * deletion and an addition, so both sides count. Runs after `git add --all`, so a workflow file the task made counts,
+   * and one the repository tracks that the task left alone doesn't. GitHub refuses such a push from the App anyway.
+   */
+  private async noWorkflowChange(task: RepoTask & { base_commit: string }, signal: AbortSignal): Promise<void> {
+    const args = ["diff", "--cached", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--end-of-options", task.base_commit, "--"];
+    const listed = await this.git(task, args, { signal });
+    if (listed.code === GIT_OUTPUT_CUT) throw new RepoPathError("work_tree_too_large");
+    if (listed.code !== 0 || listed.stdout_bytes === undefined) throw new RepoPathError("commit_failed");
+    if (touchesWorkflows(listed.stdout_bytes)) throw new RepoPathError("work_tree_workflow");
+  }
+
   private async head(task: RepoTask, signal: AbortSignal, rev = "HEAD"): Promise<string> {
     const answer = await this.git(task, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`], { signal });
     const sha = answer.stdout.trim();
@@ -326,6 +340,7 @@ export class GitRepositoryPath implements RepositoryPath {
     if (before !== task.base_commit && (await this.head(task, signal, "HEAD^")) !== task.base_commit) throw new RepoPathError("checkout_moved");
     // `:/` names the whole work tree from its top, whatever Git's working folder is.
     if ((await this.git(task, ["add", "--all", "--", ":/"], { signal })).code !== 0) throw new RepoPathError("commit_failed");
+    await this.noWorkflowChange(task, signal);
     if (before === task.base_commit) {
       if (await this.clean(task, signal)) return { kind: "no_changes" };
       const identity = ["-c", `user.name=${COMMIT_IDENTITY.name}`, "-c", `user.email=${COMMIT_IDENTITY.email}`];
@@ -439,6 +454,22 @@ export function wholeFolders(listing: Uint8Array): Set<string> {
     if (parts.every((part) => part !== "" && part !== "." && part !== "..") && !parents.has(name)) folders.add(name);
   }
   return folders;
+}
+
+/**
+ * Whether a NUL-separated list of changed paths (relative to the work tree's top) names anything under
+ * `.github/workflows/`, each part compared as a file system might see it (`foldedSegment`), so `.GitHub/Workflows/x.yml`
+ * counts too. Only the top-level folder counts: it is the only one GitHub runs workflows from.
+ */
+export function touchesWorkflows(listing: Uint8Array): boolean {
+  const bytes = Buffer.from(listing.buffer, listing.byteOffset, listing.byteLength);
+  for (let at = 0; at < bytes.length; ) {
+    const end = bytes.indexOf(0, at);
+    const parts = bytes.subarray(at, end === -1 ? bytes.length : end).toString("utf8").split("/");
+    if (parts.length >= 2 && foldedSegment(parts[0]) === ".github" && foldedSegment(parts[1]) === "workflows") return true;
+    at = end === -1 ? bytes.length : end + 1;
+  }
+  return false;
 }
 
 /**

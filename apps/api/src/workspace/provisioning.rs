@@ -19,11 +19,12 @@
 //! repository is known by the ID in the provider's answer to this room's own creation call, never by a name. Nothing here
 //! deletes a repository or falls back to another organization. Logs and events carry IDs, reason codes and HTTP statuses.
 use super::*;
-use crate::github::{Config, CreateAnswer, Failure, GitHubApp, Provider};
+use crate::github::{Config, CreateAnswer, Failure, GitHubApp, MergeApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, rate_limited_run_waits, reserved_name, retry_allowed,
     retry_name, retry_wait_ms, verify_ready, Configured, Expected, RepositoryRequesters,
-    RequestLimitReached, MAX_SETUP_RUNS, RATE_LIMITED_REASON, SETUP_GONE_WAITS, SETUP_GONE_WAIT_MS,
+    RequestLimitReached, SetupStep, MAX_SETUP_RUNS, RATE_LIMITED_REASON, SETUP_GONE_WAITS,
+    SETUP_GONE_WAIT_MS,
 };
 use podster_core::rate_limit::limit_repeated_after_reset;
 use podster_core::repositories::{
@@ -1040,8 +1041,16 @@ impl Workspace {
         let Some(config) = Config::from_env(&self.env) else {
             return Ok(Some(failed("provisioning_not_configured", 0)));
         };
+        // The merge App seeds a new repository's default `.gitignore`, the one setup step that writes contents, which
+        // the provisioning App can't. Without it nothing is created: a repository it can't seed couldn't merge either.
+        let Some(merge_config) = self.merge_config(&sql) else {
+            return Ok(Some(failed("provisioning_not_configured", 0)));
+        };
+        let seeder = MergeApp::new(merge_config);
         let provider = GitHubApp::new(config);
-        let outcome = self.provision_with(&provider, request, request_id).await;
+        let outcome = self
+            .provision_with(&provider, &seeder, request, request_id, room)
+            .await;
         let unrevoked = provider.release().await;
         if unrevoked > 0 {
             // Each lives out its hour: the one narrowed to this repository, or the installation's own. IDs and a count
@@ -1058,8 +1067,10 @@ impl Workspace {
     async fn provision_with(
         &self,
         provider: &GitHubApp,
+        seeder: &MergeApp,
         request: &Value,
         request_id: &str,
+        room: &str,
     ) -> R<Option<Ended>> {
         let config = provider.config();
         // Authority first, from current state: the delegation, the room and the person who asked.
@@ -1228,7 +1239,20 @@ impl Workspace {
             Err(not_ready) => return Ok(Some(failed(not_ready.code(), 0))),
         };
         for step in steps {
-            if let Err(failure) = provider.apply(repo_id, step).await {
+            let applied = if step == SetupStep::SeedDefaultIgnore {
+                let seeded = seeder.seed_default_ignore(repo_id).await;
+                if !seeded.revoked {
+                    // It lives out its hour, able to write this one repository's contents. IDs only.
+                    console_error!(
+                        "{}",
+                        json!({ "at": "provision.seed_token_not_revoked", "room": room, "request": request_id })
+                    );
+                }
+                seeded.answer
+            } else {
+                provider.apply(repo_id, step).await
+            };
+            if let Err(failure) = applied {
                 return Ok(Some(failed_call("setup_call_failed", failure)));
             }
         }

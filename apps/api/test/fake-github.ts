@@ -21,7 +21,7 @@ type Ruleset = { id: number; name: string; target: string; enforcement: string; 
 /** The repository settings Podster asks for at creation and reads back (the M5 security review's F7 and F8). */
 type Settings = { has_issues: boolean; has_wiki: boolean; has_projects: boolean; has_discussions: boolean; allow_auto_merge: boolean; delete_branch_on_merge: boolean };
 type Workflow = { default_workflow_permissions: string; can_approve_pull_request_reviews: boolean };
-type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[]; settings?: Settings; workflow?: Workflow; hideMergeSettings?: boolean; deleted?: boolean };
+type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[]; settings?: Settings; workflow?: Workflow; hideMergeSettings?: boolean; deleted?: boolean; files?: Record<string, string> };
 /** What Podster asks for, and GitHub's defaults for what a creation call leaves out. */
 const ASKED: Settings = { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
 const GITHUB_DEFAULTS: Settings = { has_issues: true, has_wiki: true, has_projects: true, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
@@ -65,6 +65,11 @@ type Script = {
   nextId?: number;
   /** A status for revoking a token, if not 204. The token then stays live. */
   revoke?: number;
+  /**
+   * How seeding the default `.gitignore` goes, by the merge App: forbidden (the write answers 403); race (someone else's
+   * file lands between the read and the write, so the write answers 422); mint (the merge App's token is refused).
+   */
+  seed?: string;
 };
 /**
  * The agent-token App's side (M5 step 6), kept apart from everything above so specs running in parallel can't reset it:
@@ -98,6 +103,8 @@ type AgentScript = {
 /** Commit statuses set on a test's repository, and every call a merge App token made about it. */
 const statuses = new Map<number, { sha: string; state: string; context: string }[]>();
 const mergeCalls: { repo: number; method: string; path: string; permissions: Record<string, string>; status: number; body: unknown }[] = [];
+/** Every call the merge App's seeding token made at setup (the default `.gitignore`), kept apart from its merge-shaped calls. */
+const seedCalls: typeof mergeCalls = [];
 /**
  * Repositories as provisioning left them, for the merge job's readiness read-back (M5 step 7b): Actions off, the two
  * rulesets, an initial commit. Each is one test's own, with its own script, and apart from the provisioning spec's
@@ -151,6 +158,8 @@ let repos = new Map<number, Repo>();
 let tokens = new Map<string, "all" | number[]>();
 let calls: Call[] = [];
 let script: Script = {};
+/** The provisioning spec's script, where a local `script` hides it. */
+const provisioningScript = () => script;
 let nextId = 9000;
 let nextRuleset = 100;
 let creations = 0;
@@ -261,7 +270,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/merge-calls") {
       const repo = Number(url.searchParams.get("repo"));
-      return json({ calls: mergeCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), statuses: statuses.get(repo) ?? [], pulls: agentRepos.get(repo)?.pulls ?? {}, has: agentRepos.get(repo)?.has ?? [] });
+      return json({ calls: mergeCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), seeds: seedCalls.filter((c) => c.repo === repo).map(({ repo: _, ...c }) => c), statuses: statuses.get(repo) ?? [], pulls: agentRepos.get(repo)?.pulls ?? {}, has: agentRepos.get(repo)?.has ?? [] });
     }
     if (url.pathname === "/agent-gate") {
       return json({ waiting: gates.get(Number(url.searchParams.get("repo")))?.length ?? 0 });
@@ -364,7 +373,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     tokens.set(token, wanted ?? "all");
     return json(provisionTokenAnswer(token, body, wanted, script.tokenMode), 201);
   }
-  if (agentLive.has(bearer) || agentTokens.some((t) => t.token === bearer)) return agentRead(request, path, bearer) ?? mergeCall(request, path, bearer, body) ?? agentRevoke(request, path, bearer);
+  if (agentLive.has(bearer) || agentTokens.some((t) => t.token === bearer)) return seedCall(request, path, bearer, body) ?? agentRead(request, path, bearer) ?? mergeCall(request, path, bearer, body) ?? agentRevoke(request, path, bearer);
   if (readyIssued.has(bearer)) return readyRoute(request, path, bearer);
   if (auth !== "token" || !scope) return json({ message: "Bad credentials" }, 401);
   // A token revokes itself, and is refused from then on.
@@ -445,7 +454,9 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
 /** A token request from the agent-token App, answered as GitHub does: the permissions and repositories it granted. */
 async function agentMint(body: any, app: "agent" | "merge"): Promise<Response> {
   const wanted = Array.isArray(body?.repository_ids) ? (body.repository_ids as number[]) : null;
-  const script = wanted?.length === 1 ? agentRepos.get(wanted[0]) : undefined;
+  // A repository the provisioning spec made: the merge App seeds its default `.gitignore` at setup.
+  if (app === "merge" && wanted?.length === 1 && !agentRepos.has(wanted[0]) && repos.has(wanted[0]) && provisioningScript().seed === "mint") return json({ message: "SECRET-PROVIDER-TEXT" }, 403);
+  const script = wanted?.length === 1 ? (agentRepos.get(wanted[0]) ?? (app === "merge" && repos.has(wanted[0]) ? {} : undefined)) : undefined;
   if (!wanted || !script) return json({ message: "no such repository" }, 422);
   const mode = script.mode ?? "ok";
   // The gate first, so a test can change how this mint answers while it waits there.
@@ -463,6 +474,39 @@ async function agentMint(body: any, app: "agent" | "merge"): Promise<Response> {
   const life = mode === "long_life" ? 7_200_000 : 3_600_000;
   const repositories = mode === "no_repositories" || scope === "all" ? undefined : scope.map((id) => ({ id, name: `repo-${id}` }));
   return json({ token, expires_at: new Date(Date.now() + life).toISOString(), permissions, repository_selection: scope === "all" ? "all" : "selected", ...(repositories ? { repositories } : {}) }, 201);
+}
+
+/**
+ * The merge App reading or writing a file of a repository the provisioning spec made, as GitHub's contents API answers:
+ * the file's text as base64, `404` for none, and a write without a `sha` refused (`422`) where a file is already there.
+ * Once any ruleset is on, a write to the default branch is refused (`409`), as the rules refuse it. Each call is logged
+ * under `seeds`, apart from the merge App's merge-shaped calls. Null for anything else.
+ */
+function seedCall(request: Request, path: string, bearer: string, body: any): Response | null {
+  const asked = path.match(/^\/repositories\/(\d+)\/contents\/(.+)$/);
+  const held = agentTokens.find((t) => t.token === bearer);
+  const repo = asked ? repos.get(Number(asked[1])) : undefined;
+  if (!asked || !repo || agentRepos.has(repo.id) || !held || !agentLive.has(bearer)) return null;
+  const answer = (payload: unknown, status = 200) => {
+    seedCalls.push({ repo: repo.id, method: request.method, path, permissions: held.permissions, status, body });
+    return json(payload, status);
+  };
+  const reaches = held.repo === "all" || held.repo.includes(repo.id);
+  if (!reaches || held.app !== "merge" || !held.permissions.contents) return answer({ message: "Resource not accessible by integration" }, 403);
+  const name = decodeURIComponent(asked[2]);
+  const files = (repo.files ??= {});
+  if (request.method === "GET") {
+    const text = files[name];
+    return text === undefined ? answer({ message: "Not Found" }, 404) : answer({ type: "file", path: name, sha: "f1".repeat(20), content: Buffer.from(text).toString("base64") });
+  }
+  if (request.method !== "PUT") return answer({ message: "not here" }, 405);
+  if (held.permissions.contents !== "write") return answer({ message: "Resource not accessible by integration" }, 403);
+  if (repo.rulesets.length > 0) return answer({ message: "Repository rule violations found" }, 409);
+  if (script.seed === "forbidden") return answer({ message: "SECRET-PROVIDER-TEXT" }, 403);
+  if (script.seed === "race") files[name] = "someone-elses\n";
+  if (files[name] !== undefined) return answer({ message: "Invalid request.\n\n\"sha\" wasn't supplied." }, 422);
+  files[name] = Buffer.from(String(body?.content ?? ""), "base64").toString("utf8");
+  return answer({ content: { path: name, sha: "f2".repeat(20) }, commit: { sha: "c1".repeat(20), message: body?.message } }, 201);
 }
 
 /** An agent token revoking itself. One already revoked is refused, as GitHub refuses a token it no longer knows. */

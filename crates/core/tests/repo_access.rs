@@ -688,6 +688,19 @@ fn githubs_answer_must_be_exactly_what_was_asked_for() {
     }
 }
 
+/// The merge App's seeding token at setup can write contents and nothing else: no pull requests, statuses or checks.
+#[test]
+fn the_seeding_token_asks_for_contents_and_metadata_alone() {
+    let asked = TokenPermissions::SEEDER;
+    assert_eq!(
+        asked.pairs(),
+        vec![("contents", "write"), ("metadata", "read")]
+    );
+    assert!(minted_token_matches(REPO, &[REPO], &asked.pairs(), asked));
+    let merger = TokenPermissions::MERGER.pairs();
+    assert!(!minted_token_matches(REPO, &[REPO], &merger, asked));
+}
+
 /// A new token is minted only after the default branch's rules and bypass list were read back exactly right just now.
 /// Returning a held token with time left asks GitHub for nothing, so it reads nothing back either.
 #[test]

@@ -118,6 +118,16 @@ impl TokenPermissions {
         checks: None,
     };
 
+    /// The merge App's token for seeding a new repository's default `.gitignore` at setup, before its rulesets: contents
+    /// and nothing else. It can't open or merge a pull request or set a status.
+    pub const SEEDER: TokenPermissions = TokenPermissions {
+        contents: Some(Level::Write),
+        pull_requests: None,
+        metadata: Level::Read,
+        statuses: None,
+        checks: None,
+    };
+
     /// The server's own read of a commit's statuses and check runs (M5 step 8): nothing it can write with, and no
     /// contents. The agent-token App must hold both for this to be minted, which is the owner's to add.
     pub const CHECKS_READER: TokenPermissions = TokenPermissions {

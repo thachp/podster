@@ -173,6 +173,59 @@ fn weekends_are_skipped_and_a_weekend_start_begins_on_monday() {
 }
 
 #[test]
+fn a_coordinators_baseline_and_estimates_date_implementation_then_qa_then_demo_packaging() {
+    // Issue 507's room: a coordinator sets the start and estimates the owner's tasks. Monday Nov 23 2026; Thanksgiving counts.
+    let input = BaselineInput {
+        start: Some(validate_plan_start("2026-11-23", "America/New_York").unwrap()),
+        tasks: vec![
+            with("demo_packaging", Open, Some(1)),
+            with("implementation", Accepted, Some(3)),
+            with("qa", Offered, Some(2)),
+        ],
+        edges: vec![
+            ("implementation".into(), "qa".into()),
+            ("qa".into(), "demo_packaging".into()),
+        ],
+    };
+    let forecast = baseline(&input).unwrap();
+    let span = |id: &str| {
+        let t = forecast.tasks.iter().find(|t| t.id == id).unwrap();
+        (
+            t.earliest_start.to_string(),
+            t.earliest_finish.to_string(),
+            t.critical,
+        )
+    };
+    assert_eq!(
+        span("implementation"),
+        ("2026-11-23".into(), "2026-11-25".into(), true)
+    );
+    assert_eq!(span("qa"), ("2026-11-26".into(), "2026-11-27".into(), true));
+    assert_eq!(
+        span("demo_packaging"),
+        ("2026-11-30".into(), "2026-11-30".into(), true)
+    );
+    assert_eq!(forecast.duration_days, 6);
+    assert_eq!(forecast.finish, date("2026-11-30"));
+    assert_eq!(
+        forecast.critical_paths,
+        vec![vec!["implementation", "qa", "demo_packaging"]]
+    );
+    // Without the start, or with an estimate missing, there's no forecast to show.
+    let unstarted = BaselineInput {
+        start: None,
+        ..input.clone()
+    };
+    assert_eq!(baseline(&unstarted).unwrap_err(), vec![Withheld::NoStart]);
+    let mut unestimated = input;
+    unestimated.tasks[0].duration_days = None;
+    assert_eq!(
+        baseline(&unestimated).unwrap_err(),
+        vec![Withheld::MissingEstimates]
+    );
+}
+
+#[test]
 fn a_holiday_counts_as_a_working_day() {
     // Friday December 25 2026, then the next working day is Monday.
     assert_eq!(date("2026-12-25").working_day(0), date("2026-12-25"));

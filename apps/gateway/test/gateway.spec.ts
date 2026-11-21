@@ -2642,6 +2642,46 @@ describe("kernel journey across two organizations", () => {
     expect((await dash(personA, "GET", `/v1/workspaces/${room}/plan`)).status).toBe(200);
   });
 
+  it("lets a coordinator set the room's start and plan the owner's tasks over MCP, and nothing else (issue 507)", async () => {
+    const { personA, lead, architect, room, version } = await setup();
+    const made = async (title: string) => {
+      const r = await dash(personA, "POST", `/v1/workspaces/${room}/tasks`, { title, instructions: "x" });
+      expect(r.status).toBe(200);
+      return r.body.id as string;
+    };
+    const [build, qa, demo] = [await made("Implementation"), await made("QA"), await made("Demo packaging")];
+    const revision = async () => (await lead.tool("get_plan", { workspace_id: room })).data.plan_revision as number;
+    const baseline = { workspace_id: room, start_date: "2026-11-23", timezone: "America/New_York" };
+    const plan = async (task: string, duration_days: number, predecessors: string[], key: string) =>
+      lead.tool("set_task_plan", { workspace_id: room, task_id: task, plan_revision: await revision(), duration_days, predecessors, idempotency_key: key });
+    // An ordinary member is refused both the start and the owner's task, a guest the start, and an agent outside the room sees no room.
+    expect((await lead.tool("set_plan_start", { ...baseline, plan_revision: await revision(), idempotency_key: "start-member" })).code).toBe("not_allowed");
+    expect((await plan(build, 3, [], "plan-member")).code).toBe("not_allowed");
+    expect((await execute(architect, "set_plan_start", { ...baseline, plan_revision: 0, idempotency_key: "start-guest" })).code).toBe("not_allowed");
+    const outsider = await mcpAgent(await signUp());
+    expect((await outsider.tool("set_plan_start", { ...baseline, plan_revision: 0, idempotency_key: "start-outsider" })).code).toBe("workspace_not_found");
+    expect((await outsider.tool("set_task_plan", { workspace_id: room, task_id: build, plan_revision: 0, duration_days: 3, predecessors: [], idempotency_key: "plan-outsider" })).code).toBe("workspace_not_found");
+    // With the Coordinator preset, the same agent sets the start and the owner's estimates and dependencies.
+    expect((await dash(personA, "PUT", `/v1/workspaces/${room}/members/${lead.id}/access`, { preset: "coordinator", policy_version: await version() })).status).toBe(200);
+    const started = await lead.tool("set_plan_start", { ...baseline, plan_revision: await revision(), idempotency_key: "start-coordinator" });
+    expect(started.data.start).toEqual({ date: "2026-11-23", timezone: "America/New_York" });
+    expect((await plan(build, 3, [], "plan-build")).data.duration_days).toBe(3);
+    expect((await plan(qa, 2, [build], "plan-qa")).data.predecessors).toEqual([build]);
+    expect((await plan(demo, 1, [qa], "plan-demo")).data.predecessors).toEqual([qa]);
+    // Nothing else on the owner's task.
+    const task = (await lead.tool("get_task", { workspace_id: room, task_id: build })).data.task;
+    expect((await lead.tool("update_task", { workspace_id: room, task_id: build, version: task.version, title: "Renamed", idempotency_key: "rename" })).code).toBe("not_allowed");
+    expect((await lead.tool("get_task", { workspace_id: room, task_id: build })).data.task.title).toBe("Implementation");
+    // The forecast dates implementation, then QA, then demo packaging.
+    const forecast = (await lead.tool("get_plan", { workspace_id: room })).data.forecast;
+    expect(forecast.available).toBe(true);
+    const span = (id: string) => forecast.tasks.find((t: any) => t.id === id);
+    expect([span(build).earliest_start, span(build).earliest_finish]).toEqual(["2026-11-23", "2026-11-25"]);
+    expect([span(qa).earliest_start, span(qa).earliest_finish]).toEqual(["2026-11-26", "2026-11-27"]);
+    expect([span(demo).earliest_start, span(demo).earliest_finish]).toEqual(["2026-11-30", "2026-11-30"]);
+    expect(forecast.critical_paths).toEqual([[build, qa, demo]]);
+  });
+
   it("passes list_activity's order and cursor through to the API, over both connection methods", async () => {
     const { personA, lead, architect, room, version } = await setup();
     await dash(personA, "PUT", `/v1/workspaces/${room}/brief`, { goal: "Ship", policy_version: await version() });

@@ -6475,10 +6475,15 @@ describe("task plans", () => {
     // The assignee and the reviewer have no say.
     expect((await set(BOB, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
     expect((await set(REVIEWER, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
-    // Someone who can see every task, but isn't this one's requester.
+    // A coordinator plans a task it didn't request, and sets the room's start, but nothing else (issue 507). A plain member can't.
     const wide: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
     await asMember(id, wide, { preset: "coordinator" });
-    expect((await set(wide, tasks, t.id, id, { duration_days: 3 })).code).toBe("not_allowed");
+    expect((await set(wide, tasks, t.id, id, { duration_days: 3 })).status).toBe(200);
+    expect((await api(wide, "POST", `${tasks}/${t.id}/update`, { version: t.version, title: "Renamed" })).code).toBe("not_allowed");
+    const start = async (who: Who) => api(who, "PUT", `${planOf(id)}/start`, { start_date: "2026-11-23", timezone: "America/New_York", plan_revision: await revision(id) });
+    expect((await start(REVIEWER)).code).toBe("not_allowed");
+    expect((await start(wide)).status).toBe(200);
+    expect((await start(OUTSIDER)).code).toBe("workspace_not_found");
     // A requester limited to their own tasks, because refusing a loop could reveal a hidden link.
     const narrow: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
     await asMember(id, narrow, { preset: "guest", scopes: { tasks: "own_create" } });
@@ -6489,8 +6494,8 @@ describe("task plans", () => {
     expect((await set(narrow, tasks, t.id, id, { duration_days: 3 })).code).toBe("task_not_found");
     expect((await set(OUTSIDER, tasks, t.id, id, { duration_days: 3 })).code).toBe("workspace_not_found");
     const unchanged = await read(OWNER, id);
-    expect(unchanged.tasks.find((x) => x.id === t.id).duration_days).toBe(2);
-    expect(unchanged.plan_revision).toBe(2);
+    expect(unchanged.tasks.find((x) => x.id === t.id).duration_days).toBe(3);
+    expect(unchanged.plan_revision).toBe(4);
   });
 
   it("refuses a loop, a task from elsewhere, itself, a duplicate and a bad duration, changing nothing", async () => {

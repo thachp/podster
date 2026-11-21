@@ -228,7 +228,7 @@ fn start_of(sql: &SqlStorage) -> R<Option<(String, String)>> {
 }
 
 /// Sets the room's one start date and timezone. A forecast moves with them, so this moves the plan's revision and time like any
-/// other plan edit. It wakes nobody, and only a person who runs the room can do it.
+/// other plan edit. It wakes nobody, and only a person who runs the room or a member coordinating its plan can do it.
 pub(super) fn handle_set_start(
     sql: &SqlStorage,
     caller: &Caller,

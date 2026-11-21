@@ -55,7 +55,14 @@ export type TaskOutput = { id: string; title: string; removed: boolean };
 export type TaskDetail = { task: Task; expected_output?: TaskOutput | null; change?: PullRequestChange | null; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
-export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[] };
+/** `access` is the viewer's own effective access, as the room read gives it. */
+export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[]; access?: { tasks?: string } };
+
+/**
+ * Whether the viewer coordinates the room's plan: a member whose effective task scope is the Coordinator's, as crates/policy's
+ * `coordinates_plan` says (issue 507). It offers only the plan and the room's start, never another control. Rust decides.
+ */
+export const coordinatesPlan = (room: Pick<Room, "access"> | null | undefined, role: string | undefined) => role === "member" && room?.access?.tasks === "coordinate";
 
 /** Display only. In an archived room Rust refuses every new command with `workspace_archived`. */
 export const isArchivedRoom = (room: Pick<Room, "status">) => room.status === "archived";

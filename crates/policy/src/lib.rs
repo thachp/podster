@@ -341,7 +341,8 @@ pub enum WorkroomAction {
     TransferOwner,
     /// Adding or removing a planned line between work roles. No agent yet, the lead included (decision 45).
     PlanRelationship,
-    /// The room's planning start date and timezone (decision 70).
+    /// The room's planning start date and timezone (decision 70), for a person who runs the room or a member coordinating its
+    /// plan (the architect's ruling on issue 507, 2026-11-21).
     SetPlanStart,
 }
 
@@ -538,14 +539,27 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
         WorkroomAction::ManageAccess
         | WorkroomAction::ReadAuditLog
         | WorkroomAction::ManageRoom
-        | WorkroomAction::PlanRelationship
-        | WorkroomAction::SetPlanStart => is_human_admin(caller),
+        | WorkroomAction::PlanRelationship => is_human_admin(caller),
+        WorkroomAction::SetPlanStart => is_human_admin(caller) || coordinates_plan(caller),
     };
     if allowed {
         Verdict::Allow
     } else {
         Verdict::Forbidden
     }
+}
+
+/// Whether the caller coordinates the room's plan: a member, person or agent, whose task scope is the Coordinator's. It covers
+/// only the plan, which is the room's start date and timezone and every visible task's estimate and predecessors, and nothing
+/// else on a task (the architect's ruling on issue 507, 2026-11-21). A guest never does, whatever its grant says.
+pub fn coordinates_plan(caller: &Caller) -> bool {
+    is_coordinator(caller)
+}
+
+/// A member, person or agent, whose task scope is the Coordinator's. A guest never is, even with a widened grant, and an
+/// agent stored as an owner or admin isn't either, since it holds a guest's scope (the architect's ruling, 2026-11-21).
+fn is_coordinator(caller: &Caller) -> bool {
+    caller.role == Role::Member && caller.effective_scopes().tasks == TaskScope::Coordinate
 }
 
 fn is_party(caller: &Caller, task: &Task) -> bool {
@@ -642,8 +656,11 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
             is_requester || admin
         }
         TaskAction::SetRequester => admin,
-        // Refusing a loop could reveal a hidden link, so this needs the whole room as well as authority over the task.
-        TaskAction::SetPlan => (is_requester || admin) && sees_whole_room(caller),
+        // Refusing a loop could reveal a hidden link, so this needs the whole room as well as authority over the task. A
+        // coordinator has that authority over every task's plan, and only its plan.
+        TaskAction::SetPlan => {
+            (is_requester || admin || coordinates_plan(caller)) && sees_whole_room(caller)
+        }
         TaskAction::Accept | TaskAction::Decline | TaskAction::Release | TaskAction::Submit => {
             is_assignee
         }
@@ -658,8 +675,8 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
     }
 }
 
-/// Who can change a task's requester: an owner or admin, or someone with the Coordinator's scope taking over for itself a
-/// task whose requester left. The flag can outlast someone coming back, so `requester_is_here` says who's in the room now.
+/// Who can change a task's requester: an owner or admin, or a member with the Coordinator's scope taking over for itself a
+/// task whose requester left. A guest whose grant was widened to that scope can't (tightened 2026-11-21). The flag can outlast someone coming back, so `requester_is_here` says who's in the room now.
 pub fn authorize_requester_change(
     caller: &Caller,
     task: &Task,
@@ -668,7 +685,7 @@ pub fn authorize_requester_change(
 ) -> Verdict {
     match authorize_task(caller, task, TaskAction::SetRequester) {
         Verdict::Forbidden
-            if caller.effective_scopes().tasks == TaskScope::Coordinate
+            if is_coordinator(caller)
                 && task.needs_requester
                 && !requester_is_here
                 && requester == caller.id =>

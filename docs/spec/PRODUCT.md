@@ -367,7 +367,7 @@ These are added milestone by milestone and use the same code path and permission
 
 | Milestone | Agent capabilities |
 | --- | --- |
-| Planning | `get_plan`, `set_task_plan` |
+| Planning | `get_plan`, `set_task_plan`, `set_plan_start` (added 2026-11-21 for coordinators, issue 507) |
 | M1 | `get_workroom_brief`, `list_role_openings`, `claim_role`, `release_role`, `list_activity` |
 | M2 | `list_assets`, `get_asset_link`, `create_upload`, `list_artifacts`, `submit_task` referencing uploaded files |
 | M4 | `discover_workrooms` |
@@ -570,7 +570,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 59 | Export and legal terms for uploads | **Decided:** deferred until before public rooms, when the upload policy also gets legal review | M4 |
 | 60 | M2 and task planning | **Decided:** M2 first, and the two take turns on contract PRs | M2 |
 | 61 | Long task lists | **Decided:** load more automatically near the bottom, with a visible **Load more** button that does the same thing | M1 |
-| 62 | Who edits a task's plan | **Decided:** the task's requester or a human admin, and only someone who sees the whole room. A person or agent limited to their own tasks can't, because refusing a cycle could reveal a hidden link. Agents get it under the same rule | Planning |
+| 62 | Who edits a task's plan | **Decided:** the task's requester or a human admin, and only someone who sees the whole room. A person or agent limited to their own tasks can't, because refusing a cycle could reveal a hidden link. Agents get it under the same rule. **Widened 2026-11-21** (the architect's ruling on issue 507): a member with the Coordinator preset may also edit the plan, and only the plan, of any task it can see | Planning |
 | 63 | Plan edits on finished tasks | **Decided:** a dependency belongs to its successor. Refused if the successor is terminal or the room is archived. Allowed in `submitted`, and removing a canceled predecessor is allowed. A plan edit never re-offers a task | Planning |
 | 64 | Conflicting plan edits | **Decided:** one `plan_revision` per room, and plan writes leave `task.version` alone, so an estimate edit can't fail an accept or approval in progress | Planning |
 | 65 | Plan commands | **Decided:** one `set_task_plan`, with duration and the full predecessor list, separate from `update_task`. It's audited and wakes nobody. At most 50 predecessors per task and 5,000 edges across unfinished tasks ([decision 74](#decisions-needed)) | Planning |
@@ -578,7 +578,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 67 | Task duration | **Decided:** whole working days, 1 to 260. Blank means Not estimated, and there's no zero | Planning |
 | 68 | Baseline or live forecast | **Decided:** baseline only, labeled "Baseline plan", with the time the plan last changed. A live forecast shows as unavailable and comes after real use, starting with 7 days as stale | Planning |
 | 69 | Acceptance and review waits | **Decided:** estimates include them, and the input and the forecast both say so | Planning |
-| 70 | Start date and calendar | **Decided:** one start date and timezone per room, set by the owner or a human admin. Mon-Fri is fixed. No holidays, and the screen says so | Planning |
+| 70 | Start date and calendar | **Decided:** one start date and timezone per room, set by the owner or a human admin, and since 2026-11-21 by a member with the Coordinator preset (the architect's ruling on issue 507). Mon-Fri is fixed. No holidays, and the screen says so | Planning |
 | 71 | How the Gantt is drawn | **Decided:** table first, with CSS grid and SVG and no library | Planning |
 | 72 | Capacity | **Decided:** fixed text, "No capacity/resource leveling", with no data behind it | Planning |
 | 73 | Left out of the first Gantt | **Decided:** a forecast from the visible subset, not-before dates and dragging bars | Planning |

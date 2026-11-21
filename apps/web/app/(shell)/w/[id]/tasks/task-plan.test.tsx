@@ -1,8 +1,9 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SheetApi } from "@/components/sheet/target-sheet";
 import { goToSignIn } from "./go-to-sign-in";
+import { coordinatesPlan } from "./task-model";
 import { TaskPlan } from "./task-plan";
 import { candidates, durationText, offersEdit, parseDuration, planProblem, type PlanRead } from "./task-plan-model";
 import type { LoadedTask } from "./task-sheet";
@@ -27,9 +28,9 @@ const setUnsaved = vi.fn();
 const refresh = vi.fn();
 const refreshList = vi.fn();
 
-const apiFor = (over: { status?: string; requester?: string; archived?: boolean } = {}) =>
+const apiFor = (over: { status?: string; requester?: string; archived?: boolean; tasks?: string } = {}) =>
   ({
-    data: { workspace: "ws_1", task: { id: "tsk_1", requester: over.requester ?? "per_me", status: over.status ?? "open" }, room: { id: "ws_1", name: "R", owner: "per_o", status: over.archived ? "archived" : "active" } },
+    data: { workspace: "ws_1", task: { id: "tsk_1", requester: over.requester ?? "per_me", status: over.status ?? "open" }, room: { id: "ws_1", name: "R", owner: "per_o", status: over.archived ? "archived" : "active", access: over.tasks ? { tasks: over.tasks } : undefined } },
     setUnsaved,
     setSending: vi.fn(),
     refresh,
@@ -131,6 +132,21 @@ describe("who's offered the form", () => {
     expect(offersEdit(whole, "agt_x", "per_me", "member", false)).toBe(false);
     expect(offersEdit(whole, "per_me", "per_me", "member", true)).toBe(false);
     expect(offersEdit({ ...whole, plan_revision: undefined }, "per_me", "per_me", "admin", false)).toBe(false);
+  });
+
+  it("offers a coordinator someone else's task, and not a plain member or a guest (issue 507)", async () => {
+    expect(coordinatesPlan({ access: { tasks: "coordinate" } }, "member")).toBe(true);
+    expect(coordinatesPlan({ access: { tasks: "all_create" } }, "member")).toBe(false);
+    expect(coordinatesPlan({ access: { tasks: "coordinate" } }, "guest")).toBe(false);
+    expect(coordinatesPlan({}, "member")).toBe(false);
+    expect(offersEdit(whole, "agt_x", "per_me", "member", false, true)).toBe(true);
+    expect(offersEdit(whole, "agt_x", "per_me", "member", true, true)).toBe(false);
+    for (const [role, tasks, offered] of [["member", "coordinate", true], ["member", "all_create", false], ["guest", "coordinate", false]] as const) {
+      await open(apiFor({ requester: "per_o", tasks }), role);
+      await screen.findByText(/3 working days, including acceptance and review/);
+      expect(screen.queryByRole("button", { name: "Edit plan" }) !== null).toBe(offered);
+      cleanup();
+    }
   });
 
   it("shows no form in an archived room", async () => {

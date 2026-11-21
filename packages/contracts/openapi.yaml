@@ -634,7 +634,7 @@ paths:
     put:
       operationId: setPlanStart
       tags: [commands]
-      summary: "Set the room's one planning start date and timezone. Only the owner or a human admin can (decision 70). It moves `plan_revision` and `plan_changed_at` like any plan edit, unless it saves what's already there, and it wakes nobody. A date on a weekend is accepted and kept as entered, and the plan begins that Monday, which the forecast gives as `begins_on`. It can be changed but not cleared"
+      summary: "Set the room's one planning start date and timezone. The owner, a human admin or a member with the Coordinator preset can (decision 70, widened to coordinators by the architect's ruling on issue 507, 2026-11-21); anyone else in the room gets `not_allowed`. It moves `plan_revision` and `plan_changed_at` like any plan edit, unless it saves what's already there, and it wakes nobody. A date on a weekend is accepted and kept as entered, and the plan begins that Monday, which the forecast gives as `begins_on`. It can be changed but not cleared"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetPlanStart" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -643,7 +643,7 @@ paths:
     put:
       operationId: setTaskPlan
       tags: [commands]
-      summary: "Replace a task's duration and predecessors, for its requester or a human admin who sees the whole room. A `duration_days` that's left out or null erases the estimate. Refused if the room is archived, and if the task is finished unless it only removes canceled predecessors. A loop gets `dependency_cycle`, and a `plan_revision` that isn't current gets `plan_conflict`. It leaves `task.version` alone, wakes nobody and is recorded as `task.plan_changed`, which only someone who sees the whole room can read. Over 50 predecessors gets `invalid_argument`. Over 5,000 edges across unfinished tasks, or predecessors with over 25,000 ancestor edges when any is being added, gets `limit_exceeded`"
+      summary: "Replace a task's duration and predecessors, for its requester, a human admin or a member with the Coordinator preset, who sees the whole room. A coordinator can change any visible task's plan, and nothing else on it (issue 507). A `duration_days` that's left out or null erases the estimate. Refused if the room is archived, and if the task is finished unless it only removes canceled predecessors. A loop gets `dependency_cycle`, and a `plan_revision` that isn't current gets `plan_conflict`. It leaves `task.version` alone, wakes nobody and is recorded as `task.plan_changed`, which only someone who sees the whole room can read. Over 50 predecessors gets `invalid_argument`. Over 5,000 edges across unfinished tasks, or predecessors with over 25,000 ancestor edges when any is being added, gets `limit_exceeded`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetTaskPlan" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }

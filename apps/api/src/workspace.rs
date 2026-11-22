@@ -85,6 +85,7 @@ mod merges;
 mod moderation;
 mod objects;
 mod outputs;
+mod person_invitations;
 mod plan;
 mod planned;
 mod provenance;
@@ -1138,6 +1139,10 @@ fn handle_create_invitation(
     body: &Value,
     now: i64,
 ) -> R<Value> {
+    // A person invitation, addressed to one email (decision 239).
+    if body.get("invitee").is_some() {
+        return person_invitations::create(sql, caller, room, body, now);
+    }
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
     require_policy_version(sql, body)?;
     let role = field(body, "role")?.unwrap_or_else(|| "guest".to_string());
@@ -1213,6 +1218,7 @@ fn handle_withdraw_invitation(
         "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
         vec![id.into()],
     )?;
+    person_invitations::erase_ended(sql, now)?;
     audit(sql, caller, "invitation.withdrawn", id, None, None, now)?;
     Ok(json!({ "id": id, "status": "withdrawn" }))
 }
@@ -1760,6 +1766,7 @@ fn end_invitations_of(
             now,
         )?;
     }
+    person_invitations::erase_ended(sql, now)?;
     Ok(())
 }
 
@@ -2629,12 +2636,15 @@ mod queries {
     /// Invitations still usable, for those who manage access. The token was shown once and isn't kept.
     pub fn list_invitations(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageAccess))?;
-        let found = rows(sql, "SELECT id, invited_org_id, work_role_id, role, guest_can_create, created_by, created_at, expires_at FROM invitation WHERE status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT ?",
+        // A person invitation's address is shown to those who manage access, and to nobody else (decision 239).
+        let found = rows(sql, "SELECT i.id, i.invited_org_id, i.work_role_id, i.role, i.guest_can_create, i.created_by, i.created_at, i.expires_at, p.kind AS invitee_kind, p.email AS invitee_email
+            FROM invitation i LEFT JOIN invitation_invitee p ON p.invitation_id = i.id WHERE i.status = 'pending' AND i.expires_at > ? ORDER BY i.created_at DESC LIMIT ?",
             vec![now.into(), (INVITATIONS_LISTED + 1).into()])?;
         let truncated = found.len() as i64 > INVITATIONS_LISTED;
         let invitations: Vec<Value> = found.into_iter().take(INVITATIONS_LISTED as usize).map(|row| json!({
             "id": row["id"], "invited_org_id": row["invited_org_id"], "work_role_id": row["work_role_id"], "role": row["role"], "guest_can_create": int(&row["guest_can_create"]) != 0,
             "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
+            "invitee_kind": row["invitee_kind"].as_str().unwrap_or("organization"), "invitee_email": row["invitee_email"],
         })).collect();
         Ok(json!({ "invitations": invitations, "truncated": truncated }))
     }
@@ -3238,6 +3248,10 @@ impl Workspace {
         let invitation = find_invitation(&sql, &id, &secret, now_ms())?
             .filter(|row| row["status"].as_str() == Some("pending"))
             .ok_or_else(ApiError::invitation_not_found)?;
+        // A person invitation shows nothing to anyone but the person it's addressed to (decision 241).
+        if let Some(address) = person_invitations::invitee(&sql, &id)? {
+            return person_invitations::preview(&sql, identity, &invitation, address.as_deref());
+        }
         // A link naming an organization is for that organization's people. Anyone in an organization revoked since the link
         // was made learns nothing, like any other bad link.
         let invited = invitation["invited_org_id"].as_str();
@@ -3286,6 +3300,25 @@ impl Workspace {
         let now = now_ms();
         let invitation =
             find_invitation(&sql, &id, &secret, now)?.ok_or_else(ApiError::invitation_not_found)?;
+        // A person invitation adds the person accepting it, and is decided in one transaction (decision 239).
+        if person_invitations::invitee(&sql, &id)?.is_some() {
+            let (identity, body) = (identity.clone(), body.clone());
+            let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+            let slot = out.clone();
+            transaction_sync(&self.state, move || {
+                *slot.borrow_mut() = Some(person_invitations::accept(
+                    &sql,
+                    &identity,
+                    &id,
+                    &secret,
+                    &body,
+                    now_ms(),
+                )?);
+                Ok(())
+            })?;
+            let answer = out.borrow_mut().take();
+            return answer.ok_or_else(|| ApiError::internal("no result"));
+        }
         let org = required(body, "org_id")?;
         let mut agents: Vec<String> = body
             .get("agents")
@@ -3832,6 +3865,15 @@ impl Workspace {
         }
         if let Some(next) = (migrated && !outbox_held(&sql)?)
             .then(|| a2a_read::next_due(&sql, now))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A person invitation's address is erased once it ends or expires.
+        if let Some(next) = migrated
+            .then(|| person_invitations::next_erasure(&sql))
             .transpose()?
             .flatten()
         {
@@ -4533,6 +4575,8 @@ impl Workspace {
                 | (Method::Post, ["releases", _, "approve" | "decline"])
                 // Deleting the app's data only takes away (S4 of the store plan).
                 | (Method::Post, ["apps", _, "delete-data"])
+                // Leaving only takes away, as a removal does.
+                | (Method::Post, ["leave"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -4636,10 +4680,12 @@ impl Workspace {
         } else {
             serde_json::from_str(&raw).map_err(|_| ApiError::invalid_argument())?
         };
-        // Hashing the parsed body means a retry with reordered keys is still the same request.
+        // Hashing the parsed body means a retry with reordered keys is still the same request. A person invitation's
+        // address isn't part of it, so the kept record can't confirm one.
+        let fingerprint = person_invitations::fingerprint_body(&body);
         let hash = format!(
             "{:x}",
-            Sha256::digest(format!("{method:?} {path} {body}").as_bytes())
+            Sha256::digest(format!("{method:?} {path} {fingerprint}").as_bytes())
         );
         let test_fail = cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
         let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
@@ -4790,6 +4836,18 @@ impl Workspace {
                     },
                 )
             }
+            (Method::Post, ["leave"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    releasers::watching(sql, "member_left", || {
+                        person_invitations::leave(sql, &who.caller, now)
+                    })
+                },
+            ),
             (Method::Delete, ["invitations", _]) => self.command(
                 &identity,
                 key,
@@ -5648,6 +5706,19 @@ impl DurableObject for Workspace {
         // A link off ready unpublishes the room's app, once the deployment's ceiling allows it: worked out from the
         // room's rows on every alarm, so a restart between the degrade and the unpublish loses nothing.
         self.repo_unpublish_from_alarm().await;
+        // A person invitation's address goes once it ends or expires. Only in a room on the current schema.
+        if store::is_initialized(&sql).unwrap_or(false)
+            && !store::needs_migration(&sql).unwrap_or(true)
+        {
+            if let Err(error) =
+                person_invitations::erase_ended(&sql, Date::now().as_millis() as i64)
+            {
+                console_error!(
+                    "couldn't erase ended invitation addresses: {:?}",
+                    error.code()
+                );
+            }
+        }
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
@@ -5805,6 +5876,7 @@ fn departure_effect_in_room(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
             )?;
         }
     }
+    person_invitations::erase_ended(sql, now)?;
     // The room keeps its owner until recovery names another. They stop being a participant, so their tasks follow the
     // departure table and nothing more reaches their inbox. Each departure applies once, and one from before they
     // became owner under their current membership doesn't count.

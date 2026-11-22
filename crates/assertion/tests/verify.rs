@@ -226,6 +226,16 @@ fn a_target_member_claim_is_read_and_is_optional() {
     );
 }
 
+#[test]
+fn a_verified_email_claim_is_read_and_is_optional() {
+    let without = verify(&sign(&claims()), &keys(), NOW).unwrap();
+    assert_eq!(without.verified_email, None);
+    let mut body = claims();
+    body["verified_email"] = json!("long@example.com");
+    let with = verify(&sign(&body), &keys(), NOW).unwrap();
+    assert_eq!(with.verified_email.as_deref(), Some("long@example.com"));
+}
+
 fn public_claims() -> Value {
     json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "public", "jti": "p1", "iat": NOW, "exp": NOW + 60 })
 }
@@ -256,6 +266,7 @@ fn a_public_assertion_names_no_one() {
         ("admin_orgs", json!(["org_1"])),
         ("target_member", json!({ "person": "per_1", "orgs": {} })),
         ("linker", json!({ "person": "per_1", "since": 1 })),
+        ("verified_email", json!("a@example.com")),
         ("anything", json!(true)),
     ] {
         let mut c = public_claims();

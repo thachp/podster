@@ -88,6 +88,7 @@ pub async fn room_page(req: Request, env: Env, handle: &str) -> R<Response> {
                 admin_orgs: vec![],
                 org_since: Default::default(),
                 target_member: None,
+                verified_email: None,
                 gen: identity.gen,
                 linker: None,
                 workspace_id: String::new(),

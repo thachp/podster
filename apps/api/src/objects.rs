@@ -257,6 +257,7 @@ async fn ask_room(env: &Env, room: &str, path: &str, body: &Value) -> R<Response
         admin_orgs: vec![],
         org_since: std::collections::HashMap::new(),
         target_member: None,
+        verified_email: None,
         gen: None,
         linker: None,
         workspace_id: room.to_string(),

@@ -12,6 +12,7 @@
  * installed for a pairing may be stored as the host key, so a registration can never go out under a key nobody paired.
  */
 import type { AgentConnection, HostIdentity, Keypair, ProviderConfig, Storage } from "@auth/agent";
+import { STORED_CAPABILITY_BITS } from "./capabilities.js";
 import { isRegistration, type NudgeRegistration } from "./nudge.js";
 import { thumbprintOf } from "./thumbprint.js";
 
@@ -40,6 +41,98 @@ const HOST = "host";
 const NUDGE = "nudge";
 const AGENTS = "agents";
 const agentName = (id: string) => `agent:${id}`;
+
+/** An agent connection as Runner stores it since issue 527. Short names, since every byte counts twice on macOS. */
+type CompactConnection = {
+  v: 2;
+  /** agentId, hostId, providerName, issuer, mode */
+  a: string;
+  h: string;
+  p: string;
+  i: string;
+  m: AgentConnection["mode"];
+  /** The private key, whose public half is itself without `d`; or `kp`, the whole keypair, when it isn't. */
+  k?: Keypair["privateKey"];
+  kp?: Keypair;
+  /** The active grants in `STORED_CAPABILITY_BITS`, as a bitset in lowercase hex. */
+  g: string;
+  /** Any other active grants, by name. Left out when there are none. */
+  n?: string[];
+  t: number;
+};
+
+const isString = (value: unknown): value is string => typeof value === "string";
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isJwk = (value: unknown): value is Keypair["privateKey"] => isObject(value) && isString(value.kty);
+const isKeypair = (value: unknown): value is Keypair => isObject(value) && isJwk(value.publicKey) && isJwk(value.privateKey);
+
+/** The public half of a private JWK: the same members without `d`. */
+function publicOf(privateKey: Keypair["privateKey"]): Keypair["publicKey"] {
+  const { d: _d, ...rest } = privateKey;
+  return rest;
+}
+
+function sameJwk(a: Keypair["publicKey"], b: Keypair["publicKey"]): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => Object.hasOwn(b, key) && a[key] === b[key]);
+}
+
+function compact(connection: AgentConnection): CompactConnection {
+  const active = [...new Set(connection.capabilityGrants.filter((grant) => grant.status === "active").map((grant) => grant.capability))];
+  let bits = 0n;
+  const named: string[] = [];
+  for (const capability of active) {
+    const bit = STORED_CAPABILITY_BITS.indexOf(capability);
+    if (bit >= 0) bits |= 1n << BigInt(bit);
+    else named.push(capability);
+  }
+  const { publicKey, privateKey } = connection.agentKeypair;
+  const derivable = isString(privateKey.d) && sameJwk(publicKey, publicOf(privateKey));
+  return {
+    v: 2,
+    a: connection.agentId,
+    h: connection.hostId,
+    p: connection.providerName,
+    i: connection.issuer,
+    m: connection.mode,
+    ...(derivable ? { k: privateKey } : { kp: connection.agentKeypair }),
+    g: bits.toString(16),
+    ...(named.length > 0 ? { n: named } : {}),
+    t: connection.createdAt,
+  };
+}
+
+function isCompact(value: unknown): value is CompactConnection {
+  if (!isObject(value) || value.v !== 2) return false;
+  if (![value.a, value.h, value.p, value.i, value.m].every(isString)) return false;
+  if (typeof value.t !== "number" || !isString(value.g) || !/^[0-9a-f]{1,64}$/.test(value.g)) return false;
+  if (value.n !== undefined && !(Array.isArray(value.n) && value.n.every(isString))) return false;
+  return value.k !== undefined ? isJwk(value.k) && isString(value.k.d) && value.kp === undefined : isKeypair(value.kp);
+}
+
+/** A record in the slim form Runner stored before issue 527: an `AgentConnection` with only active grant names. */
+function isSlim(value: unknown): value is AgentConnection {
+  if (!isObject(value) || value.v !== undefined) return false;
+  if (![value.agentId, value.hostId, value.providerName, value.issuer, value.mode].every(isString)) return false;
+  return typeof value.createdAt === "number" && isKeypair(value.agentKeypair) && Array.isArray(value.capabilityGrants) && value.capabilityGrants.every((grant) => isObject(grant) && isString(grant.capability) && isString(grant.status));
+}
+
+function expand(record: CompactConnection): AgentConnection {
+  const bits = BigInt(`0x${record.g}`);
+  // A bit past the table's end came from a later Runner's table: a capability this one doesn't know, so not one it uses.
+  const fromBits = STORED_CAPABILITY_BITS.filter((_, bit) => (bits >> BigInt(bit)) & 1n);
+  const agentKeypair = record.k !== undefined ? { publicKey: publicOf(record.k), privateKey: record.k } : (record.kp as Keypair);
+  return {
+    agentId: record.a,
+    hostId: record.h,
+    providerName: record.p,
+    issuer: record.i,
+    mode: record.m,
+    agentKeypair,
+    capabilityGrants: [...fromBits, ...(record.n ?? [])].map((capability) => ({ capability, status: "active" as const })),
+    createdAt: record.t,
+  };
+}
 
 export class RunnerStorage implements Storage {
   private readonly secrets: SecretStore;
@@ -81,30 +174,31 @@ export class RunnerStorage implements Storage {
     await this.secrets.delete(HOST);
   }
 
+  /**
+   * The agent's connection. A record in the compact form (`v: 2`, issue 527) is expanded; one in the slim form Runner
+   * stored before it (H1 on #454) is read as it is, and is rewritten compactly at the next write. Anything else reads as
+   * an error, never as no connection.
+   */
   async getAgentConnection(agentId: string): Promise<AgentConnection | null> {
-    return this.read<AgentConnection>(agentName(agentId));
+    const value = await this.read<unknown>(agentName(agentId));
+    if (value === null) return null;
+    const connection = isCompact(value) ? expand(value) : isSlim(value) ? value : null;
+    if (!connection) throw new Error("Runner's key store holds something it can't read. Run `forget`, then pair again.");
+    return connection;
   }
 
   /**
-   * Stores the agent's connection, slimmed to what Runner uses (H1 on #454): its IDs, issuer, mode, keypair and the names
-   * of its active grants. The plugin's answer also carries each grant's description and schemas, about 14 KB in all,
-   * which is more than macOS's keychain tool takes on one line; Runner reads those from the gateway when it needs them.
+   * Stores the agent's connection in the compact form (issue 527): its IDs, issuer, mode, private key and the names of
+   * its active grants as a bitset over `STORED_CAPABILITY_BITS`, with any name not in that table listed by name. The
+   * plugin's answer also carries each grant's description and schemas, about 14 KB in all, which is more than macOS's
+   * keychain tool takes on one line (H1 on #454); Runner reads those from the gateway when it needs them. The public key
+   * is the private key without `d`, so only the private key is kept; a keypair that isn't shaped so is kept whole.
    * The agent is named in the index first, so a write that fails part way is still found and deleted by `deleteAll`.
    */
   async setAgentConnection(agentId: string, connection: AgentConnection): Promise<void> {
     const ids = (await this.read<string[]>(AGENTS)) ?? [];
     if (!ids.includes(agentId)) await this.secrets.set(AGENTS, JSON.stringify([...ids, agentId]));
-    const slim: AgentConnection = {
-      agentId: connection.agentId,
-      hostId: connection.hostId,
-      providerName: connection.providerName,
-      issuer: connection.issuer,
-      mode: connection.mode,
-      agentKeypair: connection.agentKeypair,
-      capabilityGrants: connection.capabilityGrants.filter((grant) => grant.status === "active").map((grant) => ({ capability: grant.capability, status: "active" })),
-      createdAt: connection.createdAt,
-    };
-    await this.secrets.set(agentName(agentId), JSON.stringify(slim));
+    await this.secrets.set(agentName(agentId), JSON.stringify(compact(connection)));
   }
 
   async deleteAgentConnection(agentId: string): Promise<void> {

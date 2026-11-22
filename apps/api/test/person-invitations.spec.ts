@@ -143,6 +143,43 @@ describe("AC-34: who may invite a person", () => {
     expect(await records(id)).not.toContain("example.com");
   });
 
+  it("keeps the address out of the idempotency record, so the record can't confirm a guessed one, and still replays a retry", async () => {
+    const id = await room();
+    const v = await version(id);
+    const body = { policy_version: v, invitee: { kind: "person", email: ADDRESS } };
+    const headers = async () => ({ "x-podster-assertion": await assertion(OWNER), "content-type": "application/json", "idempotency-key": "pi-fingerprint" });
+    const send = async () => {
+      const res = await SELF.fetch(`https://api.internal/v1/workspaces/${id}/invitations`, { method: "POST", headers: await headers(), body: JSON.stringify(body) });
+      return { status: res.status, body: await res.json<any>() };
+    };
+    const first = await send();
+    expect(first.status).toBe(200);
+    const sha = async (text: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const path = `/v1/workspaces/${id}/invitations`;
+    const [stored] = await inRoom(id, (sql) => sql.exec("SELECT request_hash, response_json FROM idempotency WHERE actor_id = ? AND key = 'pi-fingerprint'", OWNER.id).toArray() as any[]);
+    // The fingerprint is the body with the address left out, which shows this reproduces how it's made.
+    expect(stored.request_hash).toBe(await sha(`Post ${path} {"invitee":{"kind":"person"},"policy_version":${v}}`));
+    expect(stored.request_hash).not.toBe(await sha(`Post ${path} {"invitee":{"email":"${ADDRESS}","kind":"person"},"policy_version":${v}}`));
+    expect(stored.request_hash).not.toBe(await sha(ADDRESS));
+    expect(JSON.stringify(stored)).not.toContain(ADDRESS);
+    expect(JSON.stringify(stored)).not.toContain(await sha(ADDRESS));
+    // A retry under the same key gets the first answer, without the token, and makes no second invitation.
+    const again = await send();
+    expect(again.status).toBe(200);
+    expect(again.body.id).toBe(first.body.id);
+    expect(again.body.token).toBeUndefined();
+    expect((await invitationRows(id)).filter((r) => r.kind === "person")).toHaveLength(1);
+  });
+
+  it("refuses someone the link isn't addressed to before looking at the rest of their request", async () => {
+    const id = await room();
+    const made = await invite(id, ADDRESS);
+    for (const body of [{ token: made.body.token }, { token: made.body.token, org_id: "bad/id" }, { token: made.body.token, org_id: STRANGER.org, agents: [AGENT.id] }]) {
+      const res = await api(STRANGER, "POST", "/v1/invitations/accept", body);
+      expect([res.status, res.code], JSON.stringify(body)).toEqual([404, "invitation_not_found"]);
+    }
+  });
+
   it("allows 20 pending and 20 made a day", async () => {
     const id = await room();
     for (let n = 0; n < 20; n++) expect((await invite(id, `p${n}@example.com`)).status).toBe(200);

@@ -29,6 +29,17 @@ pub(super) fn normalize_email(raw: &str) -> Option<String> {
     valid.then_some(email)
 }
 
+/// A command's body as its idempotency fingerprint sees it: a person invitation's address left out. The record is kept,
+/// and an unsalted hash of a body holding the address would confirm a guessed one; the key and the other fields still
+/// tell a retry from a different request (the architect's ruling on #533's review).
+pub(super) fn fingerprint_body(body: &Value) -> Value {
+    let mut body = body.clone();
+    if let Some(invitee) = body.get_mut("invitee").and_then(Value::as_object_mut) {
+        invitee.remove("email");
+    }
+    body
+}
+
 /// Whether an invitation is for a person, and the address it still holds (none once it ended).
 pub(super) fn invitee(sql: &SqlStorage, invitation: &str) -> R<Option<Option<String>>> {
     Ok(rows(
@@ -255,8 +266,8 @@ pub(super) fn accept(
     let Some(address) = invitee(sql, id)? else {
         return Err(ApiError::invitation_not_found());
     };
-    let org = required(body, "org_id")?;
-    let request = json!({ "org_id": org }).to_string();
+    // Who is asking comes first: someone the link isn't addressed to learns nothing from how their request is formed.
+    let request = json!({ "org_id": body["org_id"] }).to_string();
     if found["status"].as_str() == Some("accepted") {
         if found["accepted_by"].as_str() == Some(identity.id.as_str())
             && found["accepted_request"].as_str() == Some(request.as_str())
@@ -270,6 +281,7 @@ pub(super) fn accept(
     if !addressed_to(identity, address.as_deref()) {
         return Err(ApiError::invitation_not_found());
     }
+    let org = required(body, "org_id")?;
     // A person invitation brings in the person only.
     if body.get("agents").is_some() {
         return Err(ApiError::invalid_argument());

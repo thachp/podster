@@ -4680,10 +4680,12 @@ impl Workspace {
         } else {
             serde_json::from_str(&raw).map_err(|_| ApiError::invalid_argument())?
         };
-        // Hashing the parsed body means a retry with reordered keys is still the same request.
+        // Hashing the parsed body means a retry with reordered keys is still the same request. A person invitation's
+        // address isn't part of it, so the kept record can't confirm one.
+        let fingerprint = person_invitations::fingerprint_body(&body);
         let hash = format!(
             "{:x}",
-            Sha256::digest(format!("{method:?} {path} {body}").as_bytes())
+            Sha256::digest(format!("{method:?} {path} {fingerprint}").as_bytes())
         );
         let test_fail = cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
         let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();

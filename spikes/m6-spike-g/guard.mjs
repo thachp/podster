@@ -37,7 +37,10 @@ export function allow(method, url, body, ctx) {
     if (spikeKey(key, domain) && (method === "PUT" || method === "DELETE")) return;
     if (key === STOP_KEY) {
       if (method === "PUT" && ctx.stopAllowed === true && body === stopValue(ctx.run)) return;
-      // Only right after a read that found a spike's value there (`isSpikeStop`), which the runner says by this flag.
+      // Only right after a read that found a spike's value there (`isSpikeStop`). The guard can't read, so it trusts
+      // this flag, which only the runner's `deleteStopIfOurs` sets, for its one delete. KV has no compare-and-delete:
+      // a write by someone else between that read and this delete would be deleted with it. That window is a known
+      // limit, accepted because the gate keeps the stop part to a namespace that holds only the spike's keys.
       if (method === "DELETE" && ctx.stopReadSpike === true) return;
     }
     throw new Error("refusing: a KV key that isn't the spike's");

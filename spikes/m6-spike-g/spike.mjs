@@ -126,7 +126,6 @@ const ctx = {
   domain: config.content_domain,
   run: RUN,
   stopAllowed: false,
-  stopOwned: false,
   stopReadSpike: false,
   dnsZone: config.dns_zone,
   dnsZoneId: null,
@@ -190,9 +189,13 @@ const sleep = (ms) =>
   });
 const deadline = setTimeout(() => stopAll("time bound"), bounds.ms);
 deadline.unref();
+// After SIGHUP the terminal may be gone: a write to it then fails (EIO, EPIPE), and must not end the clean-up. Every
+// line also goes to the results file.
+process.stdout.on("error", () => {});
+process.stderr.on("error", () => {});
 const onSignal = (signal) => () => {
   if (stopping === "Ctrl-C" || stopping === signal) {
-    console.error("spike G: second Ctrl-C, leaving now. Run `node spike.mjs cleanup …` to delete what may be left.");
+    console.error("spike G: second signal, leaving now. Run `node spike.mjs cleanup …` to delete what may be left.");
     process.exit(130);
   }
   stopping = signal;
@@ -577,11 +580,18 @@ async function cycle(label, scripts, tag) {
  * Deletes the stop key only if a read just now found a spike's value there. The guard refuses the delete without that
  * read (`ctx.stopReadSpike`), and the flag is spent by the one delete. Anything else there is left, and reported.
  */
-async function deleteStopIfOurs(step, cleanup = false) {
-  const read = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup });
+async function deleteStopIfOurs(step, { cleanup = false, retry404 = false } = {}) {
+  // Right after the spike's own write, a read can still miss it. In the run, a 404 is read again over about 10 s
+  // before the stop's removal goes unmeasured; the clean-up takes it at once and lists again at its end.
+  let read = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup });
+  const reads = [read.status];
+  for (let i = 0; retry404 && read.status === 404 && i < 4 && alive(); i++) {
+    await sleep(2_500);
+    read = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup });
+    reads.push(read.status);
+  }
   if (read.status === 404) {
-    ctx.stopOwned = false;
-    record(step, { read: answer(read), deleted: false, note: "absent" });
+    record(step, { read: answer(read), reads, deleted: false, note: "absent" });
     return null;
   }
   if (read.status !== 200 || !isSpikeStop(read.text)) {
@@ -591,8 +601,7 @@ async function deleteStopIfOurs(step, cleanup = false) {
   ctx.stopReadSpike = true;
   try {
     const del = await api("DELETE", kvPath(STOP_KEY), { token: "kv", cleanup });
-    if (del.status === 200) ctx.stopOwned = false;
-    record(step, { read: answer(read), deleted: del.status === 200, delete: { ...answer(del), result: del.json?.result ?? null } });
+    record(step, { read: answer(read), reads, deleted: del.status === 200, delete: { ...answer(del), result: del.json?.result ?? null } });
     return del;
   } finally {
     ctx.stopReadSpike = false;
@@ -613,12 +622,12 @@ async function stopPart(label, scripts) {
     await api("DELETE", kvPath(key), { token: "kv" });
     return;
   }
-  ctx.stopOwned = true; // before the write: if its answer is lost, the clean-up still looks for it
+  // If the write's answer is lost, the clean-up still reads the key and removes it if it holds the spike's value.
   const put = await api("PUT", kvPath(STOP_KEY), { token: "kv", body: stopValue(RUN), type: "text/plain" });
   const [down, backSet] = await settle([watch(label, "absent", put.done), readBack(STOP_KEY, put.done, expect)]);
   record("stop-set", { provider: { ...answer(put), result: put.json?.result ?? null }, at_host: timeline(down, "absent", put.done), read_back: backSet });
   ctx.stopAllowed = false; // one write of the stop, no more
-  const del = await deleteStopIfOurs("stop-delete");
+  const del = await deleteStopIfOurs("stop-delete", { retry404: true });
   if (del) {
     const [up, backGone] = await settle([watch(label, "v1", del.done), readBack(STOP_KEY, del.done, expect)]);
     record("stop-removed", { at_host: timeline(up, "v1", del.done), read_back: backGone });
@@ -724,9 +733,10 @@ const txtRecords = () => listAll(`/zones/${ctx.dnsZoneId}/dns_records?type=TXT`,
 
 async function cleanup() {
   const left = {};
+  // The stop first: if the clean-up's bound runs out later, the content domain is never left dark by the spike.
+  await deleteStopIfOurs("cleanup-stop", { cleanup: true });
   const kvKeys = await allKeys("spikeg", true);
   for (const k of kvKeys.keys ?? []) if (spikeKey(k, ctx.domain)) await api("DELETE", kvPath(k), { token: "kv", cleanup: true });
-  await deleteStopIfOurs("cleanup-stop", true);
   if (tokens.scripts) {
     const listed = await listAll(dispatchPath(), "scripts");
     for (const s of listed.items) if (SPIKE_SCRIPT.test(s.id)) named.add(s.id);

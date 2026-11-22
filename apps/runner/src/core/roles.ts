@@ -15,6 +15,14 @@
  *   accepts no task and a decline declines none; neither grants a person anything.
  * - **Agent content is data.** An opening's title and responsibilities are someone else's text. They go only to the
  *   owner's screen, marked as untrusted, never to a model, a log or Runner's record.
+ * - **A question never holds up task work** (issue 528). The owner's answer is waited for off the poll loop: a pass starts
+ *   the question and returns, and the answer is used on a later pass, after the room is read again. One question is on
+ *   the terminal at a time; other invites wait, unanswered, for their turn. The invite stays pending until it's answered.
+ *   A question a task needs the terminal for interrupts it (`QuestionInterrupted`), and it's asked again after.
+ * - **A stored answer belongs to one invite.** The room's list doesn't name an invite apart from its opening, so Runner
+ *   ties each answer to the room's newest `role.invited` notice when the answer was made. A newer notice may be the same
+ *   opening withdrawn and invited again, so a refusal, a `later` or an answer not yet sent is dropped then, and the invite
+ *   is read and asked about afresh. An owner's answer that arrives after a newer notice is set aside the same way.
  * - **An older pairing.** A pairing registered before these capabilities were Runner's doesn't hold them, and calling one
  *   would read as an authority error. Runner checks its stored grants first and, missing any, leaves invites alone and
  *   says once that pairing again enables this.
@@ -46,7 +54,17 @@ export type RoleView = {
   external: boolean;
 };
 
-/** Asks the owner about an invite. `approve` claims it, `decline` turns it down, `later` leaves it. */
+/** A role question set aside because something else needed the terminal: not an answer, and asked again soon. */
+export class QuestionInterrupted extends Error {
+  constructor() {
+    super("question_interrupted");
+  }
+}
+
+/**
+ * Asks the owner about an invite. `approve` claims it, `decline` turns it down, `later` leaves it. It may take as long as
+ * the owner does: Runner doesn't wait for it before task work. It rejects with `QuestionInterrupted` when set aside.
+ */
 export interface RolePrompter {
   role?(view: RoleView, signal?: AbortSignal): Promise<OwnerAnswer>;
 }
@@ -69,7 +87,12 @@ export type RoleDeps = {
   clock: Clock;
   log: Logger;
   newId?: () => string;
+  /** Ends the poll loop's wait early once the owner answers, so the answer is used soon. Optional. */
+  wake?: () => void;
 };
+
+/** A question on the terminal now. */
+type Asking = { key: string; seq: number | null; controller: AbortController };
 
 const PRESET = /^[a-z_]{1,32}$/;
 const answerKey = (workspace: string, role: string) => `${workspace}/${role}`;
@@ -111,6 +134,10 @@ export class RoleInvites {
   private readonly deps: RoleDeps;
   private readonly newId: () => string;
   private toldMissing = false;
+  /** The one question waiting for the owner, if any. */
+  private asking: Asking | null = null;
+  /** Owner answers not yet used, by answer key, with the notice they were asked under. Used only after a fresh read. */
+  private readonly heard = new Map<string, { choice: OwnerAnswer; seq: number | null }>();
 
   constructor(deps: RoleDeps) {
     this.deps = deps;
@@ -151,13 +178,30 @@ export class RoleInvites {
     });
   }
 
-  /** Rooms with something to do now: a check due, a command owed, or an invite the owner left whose wait is over. */
+  /** The room's newest invite notice: what a stored answer's `invite_seq` is checked against. */
+  private noticeSeq(workspace: string): number | null {
+    return this.deps.poller.record.role_checks?.[workspace]?.seq ?? null;
+  }
+
+  /** Whether a stored answer was made under an older notice than the room's newest, so may be for another invite. */
+  private stale(answer: RoleAnswer): boolean {
+    return (answer.invite_seq ?? null) !== this.noticeSeq(answer.workspace_id);
+  }
+
+  /**
+   * Rooms with something to do now: a check due, a command owed, an owner's answer to use, or an invite whose turn to be
+   * asked has come. An invite waiting for the question on the terminal to end waits without reading its room.
+   */
   private work(): { rooms: string[]; owed: RoleAnswer[] } {
     const record = this.deps.poller.record;
-    const answers = Object.values(record.role_answers ?? {});
-    const owed = answers.filter((a) => a.state === "claiming" || a.state === "declining");
+    const answers = Object.entries(record.role_answers ?? {});
+    const owed = answers.map(([, a]) => a).filter((a) => a.state === "claiming" || a.state === "declining");
     const rooms = new Set(Object.values(record.role_checks ?? {}).filter((c) => c.due).sort((a, b) => a.updated_at - b.updated_at).map((c) => c.workspace_id));
-    for (const a of answers) if (a.state === "later" && (a.asked_at === null || this.now() - a.asked_at >= ROLE_ASK_AGAIN_MS)) rooms.add(a.workspace_id);
+    for (const [key, a] of answers) {
+      if (a.state !== "later") continue;
+      if (this.heard.has(key)) rooms.add(a.workspace_id);
+      else if (a.asked_at === null ? this.asking === null : this.now() - a.asked_at >= ROLE_ASK_AGAIN_MS) rooms.add(a.workspace_id);
+    }
     return { rooms: [...rooms].slice(0, ROOMS_PER_PASS), owed };
   }
 
@@ -178,6 +222,12 @@ export class RoleInvites {
     try {
       for (const answer of owed) {
         if (signal.aborted) return;
+        if (this.stale(answer)) {
+          // A newer invite notice in the room: this answer may be for an invite that's gone. The room is read again.
+          await this.setAnswer(answerKey(answer.workspace_id, answer.role_id), null);
+          this.log("answer_set_aside", answer.workspace_id);
+          continue;
+        }
         await this.send(answer);
       }
       for (const room of rooms) {
@@ -212,26 +262,55 @@ export class RoleInvites {
     // An answer whose invite the room no longer lists is done with: claimed, declined, withdrawn or closed.
     await this.forgetRoom(workspace, new Set(read.invited.map((i) => i.role_id)));
     const config = await this.readConfig();
+    const seq = this.noticeSeq(workspace);
     for (const invite of read.invited) {
       if (signal.aborted) return;
       const key = answerKey(workspace, invite.role_id);
       const known = this.deps.poller.record.role_answers?.[key];
-      if (known?.state === "refused" || known?.state === "claiming" || known?.state === "declining") continue;
-      if (known?.state === "later" && known.asked_at !== null && this.now() - known.asked_at < ROLE_ASK_AGAIN_MS) continue;
-      this.log("found", workspace);
+      const fresh = !!known && !this.stale(known);
+      if (fresh && known.state === "refused") continue;
+      if (known?.state === "claiming" || known?.state === "declining") continue;
       const mode = roleMode(config, workspace, this.deps.home);
+      const heard = this.heard.get(key);
+      this.heard.delete(key);
       let choice: OwnerAnswer;
-      if (mode === "accept") choice = "approve";
-      else {
-        choice = this.deps.prompter.role ? await this.deps.prompter.role(invite, signal).catch(() => "later" as const) : "later";
-        if (signal.aborted) return;
+      if (mode === "accept") {
+        // The owner set this room to claim by itself: a question still open about it isn't needed.
+        if (this.asking?.key === key) this.asking.controller.abort();
+        this.log("found", workspace);
+        choice = "approve";
+      } else if (heard && heard.seq === seq) {
+        choice = heard.choice;
+      } else {
+        // An answer asked under an older notice may be about an invite that's gone: asked again, never reused.
+        if (heard) this.log("answer_set_aside", workspace);
+        if (this.asking?.key === key) {
+          // Asked under an older notice: its answer couldn't be used, so the question ends now and is asked again after.
+          if (this.asking.seq !== seq) this.asking.controller.abort();
+          continue;
+        }
+        if (fresh && known.state === "later" && known.asked_at !== null && this.now() - known.asked_at < ROLE_ASK_AGAIN_MS) continue;
+        if (this.asking || !this.deps.prompter.role) {
+          // Another question is on the terminal, or there's no way to ask: it waits, never answered by silence.
+          if (!this.asking) choice = "later";
+          else {
+            if (known?.state !== "later" || known.asked_at !== null || known.invite_seq !== seq) await this.setAnswer(key, this.later(invite, seq, null));
+            continue;
+          }
+        } else {
+          this.log("found", workspace);
+          await this.setAnswer(key, this.later(invite, seq, null));
+          this.ask(key, seq, invite, signal);
+          this.log("asking_owner", workspace);
+          continue;
+        }
       }
       if (choice === "later") {
-        await this.setAnswer(key, { workspace_id: workspace, role_id: invite.role_id, state: "later", key: null, code: null, asked_at: this.now(), updated_at: this.now() });
+        await this.setAnswer(key, this.later(invite, seq, this.now()));
         this.log("waiting_for_owner", workspace);
         continue;
       }
-      const pending: RoleAnswer = { workspace_id: workspace, role_id: invite.role_id, state: choice === "approve" ? "claiming" : "declining", key: this.newId(), code: null, asked_at: this.now(), updated_at: this.now() };
+      const pending: RoleAnswer = { workspace_id: workspace, role_id: invite.role_id, state: choice === "approve" ? "claiming" : "declining", key: this.newId(), code: null, asked_at: this.now(), invite_seq: seq, updated_at: this.now() };
       // Stored before it's sent, so a lost answer is asked again with the same key.
       await this.setAnswer(key, pending);
       this.log(mode === "accept" ? "accepting_by_policy" : choice === "approve" ? "accepting_by_owner" : "declining_by_owner", workspace);
@@ -240,10 +319,45 @@ export class RoleInvites {
     await this.settleCheck(workspace);
   }
 
+  /** An invite left unanswered, asked at `asked_at`, or null while it waits for the terminal. */
+  private later(invite: RoleView, seq: number | null, askedAt: number | null): RoleAnswer {
+    return { workspace_id: invite.workspace_id, role_id: invite.role_id, state: "later", key: null, code: null, asked_at: askedAt, invite_seq: seq, updated_at: this.now() };
+  }
+
+  /**
+   * Puts the question to the owner without waiting for the answer. The answer is kept in memory only, and used on a later
+   * pass once the room is read again. A local stop, a withdrawn invite or a policy that claims by itself ends it unanswered.
+   */
+  private ask(key: string, seq: number | null, invite: RoleView, signal: AbortSignal) {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    signal.addEventListener("abort", stop, { once: true });
+    const asking: Asking = { key, seq, controller };
+    this.asking = asking;
+    const question = (async () => (this.deps.prompter.role as NonNullable<RolePrompter["role"]>).call(this.deps.prompter, invite, controller.signal))();
+    void question
+      .then(
+        (choice) => choice,
+        (error) => (error instanceof QuestionInterrupted ? null : ("later" as const)),
+      )
+      .then((choice) => {
+        signal.removeEventListener("abort", stop);
+        if (this.asking === asking) this.asking = null;
+        // Set aside for something else on the terminal: no answer, so it's asked again on a coming pass.
+        if (choice !== null && !controller.signal.aborted) this.heard.set(key, { choice, seq });
+        this.deps.wake?.();
+      });
+  }
+
   /** Drops this room's settled answers whose invite isn't listed now. One under way is kept until it's sent. */
   private async forgetRoom(workspace: string, stillInvited: Set<string>) {
     const stale = Object.entries(this.deps.poller.record.role_answers ?? {}).filter(([, a]) => a.workspace_id === workspace && !stillInvited.has(a.role_id) && a.state !== "claiming" && a.state !== "declining");
-    for (const [key] of stale) await this.setAnswer(key, null);
+    for (const [key] of stale) {
+      this.heard.delete(key);
+      // A question about an invite that's gone ends unanswered.
+      if (this.asking?.key === key) this.asking.controller.abort();
+      await this.setAnswer(key, null);
+    }
   }
 
   /** Sends a claim or a decline with its stored key. A refusal is recorded and not tried again for this invite. */

@@ -73,6 +73,12 @@ export type RoleAnswer = {
   key: string | null;
   code: string | null;
   asked_at: number | null;
+  /**
+   * The room's newest invite notice (`RoleCheck.seq`) when this answer was made: the invite's identity as Runner can see
+   * it (issue 528). A newer notice in the room may be a withdrawn invite made again, so the answer isn't reused then.
+   * Missing in a record from before issue 528.
+   */
+  invite_seq?: number | null;
   updated_at: number;
 };
 

@@ -397,7 +397,9 @@ describe("which tasks are linked, and the switch", () => {
     expect(await events(id)).toEqual([]);
   });
 
-  it("links only tasks made while the repository is ready, and never blocks any other (M5-15)", async () => {
+  it("links a task at creation only while the repository is ready, and never blocks any other (M5-15)", async () => {
+    // The link is written straight, so no transaction makes it ready and the room has started already: only creation links
+    // here. Linking tasks made earlier, once the link is ready, is in provisioning.spec.ts (the ruling of 2026-11-22).
     const id = await room({ link: false });
     const early = await accepted(id);
     await addLink(id, "degraded");

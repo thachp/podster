@@ -670,10 +670,15 @@ fn handle_task_command_with(
         decide(&task, &caller.id, command.clone(), &observed)
             .map_err(|e| ApiError::from_core(&e))?;
     }
+    let switched_on = context.switched_on;
     let pinned = changes::before_decide(sql, context, &task, verb, body, &mut observed)?;
     let decision =
         decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
+    // A task sent back from review, made before the room's repository was ready, is linked now (2026-11-22).
+    if action == TaskAction::RequestChanges {
+        changes::link_if_due(sql, switched_on, &decision.task, now)?;
+    }
     if let Some(pinned) = pinned {
         changes::record(sql, &caller.id, &decision.task, verb, pinned, now)?;
     }
@@ -2869,6 +2874,8 @@ pub struct Workspace {
     /// When the provisioning job may next run, for the one case the room couldn't write that down. The wait itself is
     /// kept in `repo_request`, so a restart doesn't forget it.
     provision_not_before: std::cell::Cell<i64>,
+    /// Whether this start of the room has linked its due tasks (`changes::Workspace::link_open_tasks_once`).
+    open_tasks_linked: std::cell::Cell<bool>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
     /// How many creations of this room are under way, between the request arriving and the room existing: a release
@@ -5481,6 +5488,7 @@ impl DurableObject for Workspace {
             scan_send_failures: std::cell::Cell::new(0),
             scan_send_retry_at: std::cell::Cell::new(0),
             provision_not_before: std::cell::Cell::new(0),
+            open_tasks_linked: std::cell::Cell::new(false),
             held_clear: std::cell::Cell::new(false),
             creating: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
@@ -5517,6 +5525,7 @@ impl DurableObject for Workspace {
         } else {
             None
         };
+        self.link_open_tasks_once();
         let response = match self.dispatch(req).await {
             Ok(value) => Response::from_json(&value),
             Err(error) => {

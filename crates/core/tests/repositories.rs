@@ -298,3 +298,30 @@ fn m5_03_a_retry_uses_a_new_name_and_never_adopts_by_name() {
         assert_eq!(refusal.code(), code);
     }
 }
+
+#[test]
+fn a_task_made_before_the_repository_was_ready_is_linked_once_it_is_while_its_work_is_still_to_do()
+{
+    use podster_core::TaskStatus;
+    for status in TaskStatus::ALL {
+        let to_do = matches!(
+            status,
+            TaskStatus::Open | TaskStatus::Offered | TaskStatus::Accepted
+        );
+        assert_eq!(
+            links_existing_task(status, false, Some(LinkStatus::Ready)),
+            to_do,
+            "{status:?}"
+        );
+        // Already linked: nothing to do, and nothing ever unlinks it.
+        assert!(!links_existing_task(status, true, Some(LinkStatus::Ready)));
+        // Only a ready link links anything: not a degraded or suspended one, and not setup that's pending or failed.
+        for link in [
+            None,
+            Some(LinkStatus::Degraded),
+            Some(LinkStatus::Suspended),
+        ] {
+            assert!(!links_existing_task(status, false, link));
+        }
+    }
+}

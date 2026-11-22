@@ -1331,6 +1331,9 @@ impl Workspace {
                 roles::room_managers(sql, "")?,
                 now,
             )?;
+            // Tasks made while setup was pending, with their work still to do, are linked now (2026-11-22). The job runs
+            // only while managed repositories are on.
+            changes::link_open_tasks(sql, true, now)?;
             Ok(true)
         })?;
         Ok((!linked).then(|| failed("authority_lost", 0)))

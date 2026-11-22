@@ -31,10 +31,14 @@ import {
   COMMIT_LIMITS,
   WORK_TREE_EXCLUDE,
   fetchArgs,
+  gitFailureCause,
+  gitFailureCode,
+  gitVersionSupported,
   GITHUB,
   hardening,
   isCommit,
   locate,
+  parseGitVersion,
   pushArgs,
   readAccess,
   readPullRequest,
@@ -47,6 +51,7 @@ import {
   type GitHubRequest,
   type RepoAccess,
   type RepoScope,
+  type RepoStage,
 } from "../core/repository.js";
 import type { Clock, Logger } from "../core/runtime.js";
 import { foldedSegment } from "../core/tool-policy.js";
@@ -160,6 +165,8 @@ export const IGNORED_LIST_TIMEOUT_MS = 30_000;
 /** Reads of a pull request whose head still shows the commit before the push, and the wait between them. */
 export const PR_READS = 5;
 export const PR_READ_WAIT_MS = 2_000;
+/** How long `git --version` may take at setup. */
+export const GIT_VERSION_TIMEOUT_MS = 10_000;
 
 export class GitRepositoryPath implements RepositoryPath {
   private readonly deps: RepoPathDeps;
@@ -310,42 +317,49 @@ export class GitRepositoryPath implements RepositoryPath {
     if (plain(await real(root), await real(this.deps.home))) throw new RepoPathError("path_unsafe");
   }
 
-  async prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }> {
-    await this.apart(task);
+  /**
+   * The commit the run starts from, read from GitHub's API: what Runner last pushed, while the task branch still points
+   * at it; else the default branch's head. A task branch someone else moved is never built on.
+   */
+  private async startOf(task: RepoTask & { continue_from: string | null }, access: RepoAccess, signal: AbortSignal): Promise<{ start: string; from: string }> {
     const scope = scopeOf(task);
-    const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
     const { default_branch } = await this.checked(task, access, signal);
     const branch = task.repository.branch;
-    // The commit the run starts from: what Runner last pushed, while the task branch still points at it; else the default
-    // branch's head. A task branch someone else moved is never built on.
-    let start: string;
-    let from: string;
     if (task.continue_from !== null) {
       if (!isCommit(task.continue_from)) throw new RepoPathError("record_invalid");
       const head = readRef(await this.read(task, access, GITHUB.ref(scope.full_name, branch), signal, "task_branch_gone"), branch);
       if (head !== task.continue_from) throw new RepoPathError("task_branch_moved");
-      start = head;
-      from = branch;
-    } else {
-      start = readRef(await this.read(task, access, GITHUB.ref(scope.full_name, default_branch), signal, "default_branch_gone"), default_branch);
-      from = default_branch;
+      return { start: head, from: branch };
     }
+    const start = readRef(await this.read(task, access, GITHUB.ref(scope.full_name, default_branch), signal, "default_branch_gone"), default_branch);
+    return { start, from: default_branch };
+  }
 
-    // A fresh Git folder and a fresh work tree, both made by Runner, mode 0700, through no link.
-    const gitDir = this.gitDir(task.workspace_id, task.task_id);
-    await removeOwnFolder(gitDir);
-    await removeOwnFolder(task.task_folder);
-    await ensureFolder(join(this.deps.home, "git"), gitDir, { makeRoot: true });
-    await ensureFolder(dirname(dirname(task.task_folder)), task.task_folder, { makeRoot: true });
-    // No templates, so no sample hooks or anything else from the system's Git is copied in.
-    if ((await this.git(task, ["init", "--quiet", "--template="], { signal })).code !== 0) throw new RepoPathError("git_init_failed");
-    await this.excludeCaches(task);
-    const fetched = await this.git(task, fetchArgs(scope.full_name, from, "refs/runner/start"), { secret: access.token, signal });
-    if (fetched.code !== 0) throw this.gitFailure(task, fetched, "fetch_failed");
-    // Pinned and verified: the commit fetched must be the one GitHub's API named; a branch that moved between is retried.
-    if ((await this.head(task, signal, "refs/runner/start")) !== start) throw new RepoPathError("base_moved", true);
-    if ((await this.git(task, ["checkout", "--quiet", "--no-track", "-b", branch, start], { signal })).code !== 0) throw new RepoPathError("checkout_failed");
-    if ((await this.head(task, signal)) !== start || !(await this.clean(task, signal))) throw new RepoPathError("checkout_unverified");
+  async prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }> {
+    await this.apart(task);
+    const scope = scopeOf(task);
+    const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
+    // GitHub's API, before any Git command: a failure here is the facts check's, not the fetch's (#520).
+    const { start, from } = await inStage("facts", () => this.startOf(task, access, signal));
+    const branch = task.repository.branch;
+    // Host Git from here on: the fetch names its own stage; everything else is the checkout's, on this machine only.
+    await inStage("checkout", async () => {
+      // A fresh Git folder and a fresh work tree, both made by Runner, mode 0700, through no link.
+      const gitDir = this.gitDir(task.workspace_id, task.task_id);
+      await removeOwnFolder(gitDir);
+      await removeOwnFolder(task.task_folder);
+      await ensureFolder(join(this.deps.home, "git"), gitDir, { makeRoot: true });
+      await ensureFolder(dirname(dirname(task.task_folder)), task.task_folder, { makeRoot: true });
+      // No templates, so no sample hooks or anything else from the system's Git is copied in.
+      if ((await this.git(task, ["init", "--quiet", "--template="], { signal })).code !== 0) throw new RepoPathError("git_init_failed");
+      await this.excludeCaches(task);
+      const fetched = await this.git(task, fetchArgs(scope.full_name, from, "refs/runner/start"), { secret: access.token, signal });
+      if (fetched.code !== 0) throw this.gitFailure(task, fetched, "fetch");
+      // Pinned and verified: the commit fetched must be the one GitHub's API named; a branch that moved between is retried.
+      if ((await this.head(task, signal, "refs/runner/start")) !== start) throw new RepoPathError("base_moved", true);
+      if ((await this.git(task, ["checkout", "--quiet", "--no-track", "-b", branch, start], { signal })).code !== 0) throw new RepoPathError("checkout_failed");
+      if ((await this.head(task, signal)) !== start || !(await this.clean(task, signal))) throw new RepoPathError("checkout_unverified");
+    });
     this.deps.log("repo.checkout", "verified", { workspace: task.workspace_id, task: task.task_id });
     return { repository_id: String(scope.provider_repo_id), base_commit: start };
   }
@@ -381,7 +395,7 @@ export class GitRepositoryPath implements RepositoryPath {
     if ((await this.head(task, signal, "HEAD^")) !== task.base_commit) throw new RepoPathError("commit_unexpected");
 
     const pushed = await this.git(task, pushArgs(scope.full_name, branch, default_branch), { secret: access.token, signal });
-    if (pushed.code !== 0) throw this.gitFailure(task, pushed, "push_failed");
+    if (pushed.code !== 0) throw this.gitFailure(task, pushed, "push");
     if (!pushed.stdout.split("\n").some((line) => /^[*= ]\t/.test(line) && line.includes(`refs/heads/${branch}:refs/heads/${branch}`))) throw new RepoPathError("push_unconfirmed");
 
     const want = { scope, branch, default_branch, commit };
@@ -419,25 +433,26 @@ export class GitRepositoryPath implements RepositoryPath {
   }
 
   /**
-   * A failed fetch or push, by a fixed code: a refused credential reads as a revoked token, and a push GitHub or the way
-   * to it plainly refused for its size as `push_too_large`; a timeout or failed connection stays `github_unreachable`. Git's words are matched here and never kept or logged.
+   * A failed fetch or push, by a fixed code (`gitFailureCause`, `gitFailureCode`; #520): the cause is read from Git's exit
+   * code and words, which are matched there and never kept or logged. The error carries the stage and Git's exit code
+   * for the local diagnostics file. A refused credential drops the token, so the next use asks Podster again.
    */
-  private gitFailure(task: RepoTask, result: { stdout: string; stderr: string }, fallback: string): RepoPathError {
-    const text = `${result.stdout}\n${result.stderr}`;
-    if (/Authentication failed|could not read (Username|Password)|returned error: 40[13]|Invalid username or (password|token)/i.test(text)) {
-      this.deps.broker.revoked(task.workspace_id, task.task_id);
-      return new RepoPathError("token_revoked");
-    }
-    // A timeout or a connection that failed is the network's, and tried again, whatever else Git said with it: `RPC
-    // failed; curl 28 Operation timed out` is one.
-    if (/Could not resolve host|Failed to connect|Connection timed out|Operation timed out|timed out|Connection reset/i.test(text)) return new RepoPathError("github_unreachable", true);
-    // A push GitHub or the way to it refused for its size, only on a clear sign of it: an HTTP 413, a pack over a limit,
-    // or GitHub's large-file refusal. Only for a push; checked before the plain rejection, since GH001 arrives as one. A
-    // bare `RPC failed` or `remote end hung up` says neither, and falls back to `push_failed`.
-    if (fallback === "push_failed" && /HTTP 413|returned error: 413|pack exceeds|GH001|exceeds GitHub's file size limit|this exceeds/i.test(text)) return new RepoPathError("push_too_large");
-    if (/\[rejected\]|\[remote rejected\]|non-fast-forward|fetch first/.test(text)) return new RepoPathError("push_rejected");
-    if (/unable to access/i.test(text)) return new RepoPathError("github_unreachable", true);
-    return new RepoPathError(fallback);
+  private gitFailure(task: RepoTask, result: GitResult, op: "fetch" | "push"): RepoPathError {
+    const { code, transient, revoke } = gitFailureCode(gitFailureCause(result, op), op);
+    if (revoke) this.deps.broker.revoked(task.workspace_id, task.task_id);
+    return new RepoPathError(code, transient, { stage: op, exit_code: result.code });
+  }
+}
+
+/** Runs one stage of a checkout, naming the stage on a refusal that doesn't name one yet (#520). */
+async function inStage<T>(stage: RepoStage, step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (error) {
+    if (!(error instanceof RepoPathError) || error.detail.stage !== undefined) throw error;
+    const named = new RepoPathError(error.code, error.transient, { ...error.detail, stage });
+    if (error.stack !== undefined) named.stack = error.stack;
+    throw named;
   }
 }
 
@@ -574,5 +589,20 @@ export async function hostRepositoryPath(home: string, request: AgentRequest, cl
   }
   // An empty home for Git, so it reads no one's settings; the Git folders sit beside it, under `git/`.
   const gitHome = await ensureFolder(home, join(home, "git-home"));
-  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git: gitCli(program, gitHome), github, helper, log, app_origin: opts.app_origin ?? null });
+  let git: GitExec;
+  try {
+    git = gitCli(program, gitHome);
+  } catch {
+    log("repo.setup", "unavailable", { code: "git_unavailable" });
+    return null;
+  }
+  // A Git older than `MIN_GIT_VERSION` refuses an option every fetch passes (#520): said once here, by its code, rather
+  // than as each task's failed fetch. An answer that isn't Git's usual line is let through; the fetch then says why.
+  const version = await git(["--version"], { timeout_ms: GIT_VERSION_TIMEOUT_MS }).catch(() => null);
+  const parsed = version && version.code === 0 ? parseGitVersion(version.stdout) : null;
+  if (parsed && !gitVersionSupported(parsed)) {
+    log("repo.setup", "unavailable", { code: "git_too_old" });
+    return null;
+  }
+  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git, github, helper, log, app_origin: opts.app_origin ?? null });
 }

@@ -31,7 +31,14 @@ export { isFullName, type RepoScope };
 export type RepoAccess = { token: string; expires_at: number; repository: string; clone_url: string; authority_ends_at: number | null };
 
 /** Why the repository path refused or failed, as a fixed code. Never text from GitHub, Git or Podster. */
-export type AccessDetail = { names?: string; count?: number; length?: number; prefix?: "yes" | "no"; type?: string };
+export type AccessDetail = { names?: string; count?: number; length?: number; prefix?: "yes" | "no"; type?: string; stage?: RepoStage; exit_code?: number };
+
+/**
+ * Where on the repository path a failure happened (#520): `facts`, GitHub's API answers read before any Git command
+ * (the repository, its rules, the start ref); `fetch` and `push`, host Git against GitHub; `checkout`, host Git on this
+ * machine only. A fixed word, for the log and the local diagnostics file.
+ */
+export type RepoStage = "facts" | "fetch" | "checkout" | "push";
 
 const KEY_NAME = /^[a-z_]{1,40}$/;
 
@@ -362,6 +369,108 @@ export function locate(git_dir: string, work_tree: string): string[] {
   if (!isPlainPath(git_dir) || !isPlainPath(work_tree)) throw new RepoPathError("path_unsafe");
   // `safe.directory` names only this work tree, on the command line, which Git counts as protected configuration.
   return ["-c", `safe.directory=${work_tree}`, `--git-dir=${git_dir}`, `--work-tree=${work_tree}`];
+}
+
+/**
+ * The oldest Git Runner works with: 2.29, the first with `fetch --no-write-fetch-head` (`fetchArgs`). An older Git
+ * refuses that option with its usage text and exit 129, which before #520 read only as `fetch_failed`.
+ */
+export const MIN_GIT_VERSION: readonly [number, number] = [2, 29];
+
+/** `git --version`'s major and minor, or null when the answer isn't Git's usual `git version X.Y…` line. */
+export function parseGitVersion(text: string): [number, number] | null {
+  const m = /^git version (\d{1,4})\.(\d{1,4})(?:[.\s]|$)/.exec(text.trim());
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/** Whether a version read by `parseGitVersion` is at least `MIN_GIT_VERSION`. */
+export const gitVersionSupported = (v: readonly [number, number]) => v[0] > MIN_GIT_VERSION[0] || (v[0] === MIN_GIT_VERSION[0] && v[1] >= MIN_GIT_VERSION[1]);
+
+/**
+ * Why a host Git command against GitHub failed, read from its exit code and its words (#520). The words are matched
+ * here and never kept, logged or put in an error; only the cause, a fixed word, leaves. Checked in this order, since one
+ * failure often says several things (`unable to access` comes with nearly every transport failure):
+ *
+ * - `auth`: GitHub refused the credential (401, or Git found none to send).
+ * - `access_denied`: GitHub took the credential but refused the repository to it (403, `Permission to … denied`).
+ * - `repository_not_found`: GitHub answered that no such repository is visible to the credential (404); for an App's
+ *   token, the App isn't installed on it or the token's scope leaves it out.
+ * - `ref_missing`: the repository has no such branch (`couldn't find remote ref`).
+ * - `dns`, `network`, `tls`: the name didn't resolve; the connection failed, was reset or timed out (and Runner's own
+ *   time limit, exit 124); the TLS handshake or the certificate check failed.
+ * - `too_large`, `rejected`: a push GitHub or the way to it refused for its size, or as not a fast-forward.
+ * - `git_too_old`: Git didn't know an option Runner passes (exit 129, `unknown option`, its usage text).
+ * - `https_unavailable`: this Git can't speak HTTPS (no `git-remote-https`).
+ * - `local_write`: Git couldn't write Runner's own Git folder (a lock, a permission, a full or read-only disk).
+ * - `unknown`: none of these.
+ */
+export type GitCause = "auth" | "access_denied" | "repository_not_found" | "ref_missing" | "dns" | "network" | "tls" | "too_large" | "rejected" | "git_too_old" | "https_unavailable" | "local_write" | "unknown";
+
+export function gitFailureCause(result: { code: number; stdout: string; stderr: string }, op: "fetch" | "push"): GitCause {
+  const text = `${result.stdout}\n${result.stderr}`;
+  if (/Authentication failed|could not read (Username|Password)|returned error: 401|Invalid username or (password|token)/i.test(text)) return "auth";
+  if (/returned error: 403|Permission to \S+ denied|Write access to repository not granted/i.test(text)) return "access_denied";
+  if (/Repository not found|repository '[^'\n]*' not found|returned error: 404/i.test(text)) return "repository_not_found";
+  if (/couldn't find remote ref|could not find remote ref/i.test(text)) return "ref_missing";
+  if (/Could not resolve (host|proxy)|Temporary failure in name resolution|Name or service not known|nodename nor servname/i.test(text)) return "dns";
+  // A timeout or a connection that failed is the network's, whatever else Git said with it: `RPC failed; curl 28
+  // Operation timed out` is one. Runner's own time limit (124) is one too.
+  if (result.code === 124 || /Failed to connect|Connection (timed out|reset|refused)|Operation timed out|timed out/i.test(text)) return "network";
+  if (/SSL certificate problem|certificate verif|server certificate|SSL connect error|SSL_connect|SSL_ERROR|gnutls_handshake|TLS connect error|unable to get local issuer|CAfile|CApath/i.test(text)) return "tls";
+  // Only for a push, on a clear sign of size: an HTTP 413, a pack over a limit, or GitHub's large-file refusal; checked
+  // before the plain rejection, since GH001 arrives as one. A bare `RPC failed` or `remote end hung up` says neither.
+  if (op === "push" && /HTTP 413|returned error: 413|pack exceeds|GH001|exceeds GitHub's file size limit|this exceeds/i.test(text)) return "too_large";
+  if (/\[rejected\]|\[remote rejected\]|non-fast-forward|fetch first/.test(text)) return "rejected";
+  if (result.code === 129 || /unknown option|unknown switch|^usage: git /im.test(text)) return "git_too_old";
+  if (/unable to find remote helper|remote-https|transport 'https' not allowed|Protocol "?https"? not supported/i.test(text)) return "https_unavailable";
+  if (/cannot lock ref|unable to (write|create|append)|could not write|Permission denied|No space left|Read-only file system|insufficient permission|Disk quota/i.test(text)) return "local_write";
+  if (/unable to access/i.test(text)) return "network";
+  return "unknown";
+}
+
+/**
+ * The fixed code a failed fetch or push is refused with, by its cause, and whether it's tried again later. A fetch
+ * names its cause under `fetch_` (#520), so the release reason and `podster why` say which; a push keeps its codes from
+ * before (`token_revoked`, `github_unreachable`, `push_too_large`, `push_rejected`, `push_failed`) and names the causes
+ * it had none for under `push_`. `revoke`: the token is dropped, so the next use asks Podster again.
+ */
+export function gitFailureCode(cause: GitCause, op: "fetch" | "push"): { code: string; transient: boolean; revoke: boolean } {
+  const passing = cause === "dns" || cause === "network" || cause === "tls";
+  if (op === "fetch") {
+    const codes: Record<GitCause, string> = {
+      auth: "fetch_auth_failed",
+      access_denied: "fetch_access_denied",
+      repository_not_found: "fetch_repository_not_found",
+      // GitHub's API named the branch a moment before: read afresh at the next turn.
+      ref_missing: "fetch_ref_missing",
+      dns: "fetch_dns_failed",
+      network: "fetch_unreachable",
+      tls: "fetch_tls_failed",
+      too_large: "fetch_failed",
+      rejected: "fetch_failed",
+      git_too_old: "fetch_git_too_old",
+      https_unavailable: "fetch_https_unavailable",
+      local_write: "fetch_local_write_failed",
+      unknown: "fetch_failed",
+    };
+    return { code: codes[cause], transient: passing || cause === "ref_missing", revoke: cause === "auth" || cause === "access_denied" };
+  }
+  const codes: Record<GitCause, string> = {
+    auth: "token_revoked",
+    access_denied: "token_revoked",
+    repository_not_found: "push_repository_not_found",
+    ref_missing: "push_failed",
+    dns: "github_unreachable",
+    network: "github_unreachable",
+    tls: "github_unreachable",
+    too_large: "push_too_large",
+    rejected: "push_rejected",
+    git_too_old: "push_git_too_old",
+    https_unavailable: "push_https_unavailable",
+    local_write: "push_local_write_failed",
+    unknown: "push_failed",
+  };
+  return { code: codes[cause], transient: passing, revoke: cause === "auth" || cause === "access_denied" };
 }
 
 /** Fetches exactly one branch into one local ref: no tags, no submodules, no other refs. */

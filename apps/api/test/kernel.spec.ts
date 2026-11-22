@@ -1815,6 +1815,47 @@ describe("inbox", () => {
     expect((await inbox(bob)).acked_seq).toBe(before.acked_seq);
   });
 
+  it("oversight pages newest first by cursor, to the end, without moving the cursor (issue 547)", async () => {
+    const { id, tasks, bob } = await setup();
+    for (let i = 0; i < 3; i++) await offerTo(tasks, bob, `t${i}`);
+    await drain(id);
+    // 48 more, so pages run past what one read holds. Delivery is tested elsewhere; this only pages.
+    await runInDurableObject(inboxStub(bob.id), (_: any, state: any) => {
+      const sql = state.storage.sql;
+      const last = sql.exec("SELECT last_seq FROM inbox_state").one().last_seq;
+      for (let seq = last + 1; seq <= last + 48; seq++) sql.exec("INSERT INTO inbox_event (seq, event_id, workspace_id, type, task_id, actor_id, created_at) VALUES (?, ?, ?, 'task.updated', NULL, ?, ?)", seq, `evt_page_${seq}`, id, LEAD.id, Date.now());
+      sql.exec("UPDATE inbox_state SET last_seq = ?", last + 48);
+    });
+    const admin = orgAdmin(bob.org);
+    const before = await inbox(bob);
+    const all = (await api(admin, "GET", `/v1/agents/${bob.id}/inbox?after=0&limit=50`)).body.events.map((e: any) => e.seq);
+    const oldestFirst = [...all, ...(await api(admin, "GET", `/v1/agents/${bob.id}/inbox?after=${all.at(-1)}&limit=50`)).body.events.map((e: any) => e.seq)];
+    const seen: number[] = [];
+    let path = `/v1/agents/${bob.id}/inbox?order=newest&limit=10`;
+    for (let page = 0; page < 20; page++) {
+      const { status, body } = await api(admin, "GET", path);
+      expect(status).toBe(200);
+      expect(body.acked_seq).toBe(before.acked_seq);
+      seen.push(...body.events.map((e: any) => e.seq));
+      if (body.next_before === null) break;
+      expect(body.events).toHaveLength(10);
+      expect(body.next_before).toBe(body.events.at(-1).seq);
+      path = `/v1/agents/${bob.id}/inbox?before=${body.next_before}&limit=10`;
+    }
+    expect(seen).toEqual(oldestFirst.toReversed());
+    expect(seen.length).toBeGreaterThanOrEqual(51);
+    // A full last page still says it's the end.
+    const exact = await api(admin, "GET", `/v1/agents/${bob.id}/inbox?before=${seen.at(-10)! + 1}&limit=10`);
+    expect(exact.body.events).toHaveLength(10);
+    expect(exact.body.next_before).toBeNull();
+    for (const query of ["order=sideways", "before=0", "before=x", "order=newest&after=1", "before=5&after=1", "order=oldest&before=5", "order=newest&ack=true"]) expect((await api(admin, "GET", `/v1/agents/${bob.id}/inbox?${query}`)).status, query).toBe(400);
+    // The agent's own inbox reads as it always has: oldest first from its cursor, with no newest-first cursor.
+    const own = await inbox(bob, "?order=newest&before=5");
+    expect(own.events.map((e: any) => e.seq)).toEqual(before.events.map((e: any) => e.seq));
+    expect(own).not.toHaveProperty("next_before");
+    expect(await inbox(bob)).toEqual(before);
+  });
+
   it("identity and people's inboxes report what's unread", async () => {
     const { id, tasks, bob } = await setup();
     await offerTo(tasks, bob);

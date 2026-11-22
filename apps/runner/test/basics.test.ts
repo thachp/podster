@@ -135,7 +135,8 @@ describe("the key store, behind the SDK's Storage", () => {
     expect(JSON.stringify(full).length).toBeGreaterThan(12_000);
     await storage.setAgentConnection("plg_1", full);
     const stored = secrets.values.get("agent:plg_1") as string;
-    expect(stored.length).toBeLessThan(1_500);
+    // 23 grant names since issue 522: 1,580 characters here, against about 14 KB as the plugin answers it.
+    expect(stored.length).toBeLessThan(1_700);
     const read = await storage.getAgentConnection("plg_1");
     expect(read).toMatchObject({ agentId: "plg_1", hostId: "host_1", issuer: "https://podster.dev/api/auth", mode: "delegated", agentKeypair });
     expect(read?.capabilityGrants).toEqual(RUNNER_CAPABILITIES.filter((_, i) => i !== 3).map((capability) => ({ capability, status: "active" })));

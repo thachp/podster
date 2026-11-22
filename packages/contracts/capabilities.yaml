@@ -9,6 +9,8 @@ capabilities:
   list_role_openings: { kind: query, operation: listRoles }
   claim_role: { kind: command, operation: claimRole }
   release_role: { kind: command, operation: releaseRole }
+  # Issue 522: the invited agent turns down its own invite. Not a room's withdrawal, and not declining a task.
+  decline_role: { kind: command, operation: declineRoleInvite }
   create_task: { kind: command, operation: createTask }
   create_upload: { kind: command, operation: createUpload }
   get_asset_link: { kind: query, operation: getFile }

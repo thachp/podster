@@ -662,6 +662,16 @@ fn only_agents_claim_roles() {
 }
 
 #[test]
+fn only_the_invited_agent_declines_its_own_invite() {
+    assert!(may_decline_role_invite(Agent, true));
+    // No invite for this caller: an agent the invite doesn't name can't turn it down for the one it does.
+    assert!(!may_decline_role_invite(Agent, false));
+    // A person never declines for an agent: a room's withdrawal is a separate action by an owner or admin.
+    assert!(!may_decline_role_invite(Person, true));
+    assert!(!may_decline_role_invite(Person, false));
+}
+
+#[test]
 fn ending_a_claim_restores_what_was_had_and_otherwise_never_widens() {
     // Nobody touched it meanwhile: back to what it had, up or down.
     assert_eq!(
@@ -715,6 +725,7 @@ fn role_changes_are_named_in_the_denial_record() {
             "role.withdraw_invite",
         ),
         ("POST", vec!["roles", "r", "claim"], "role.claim"),
+        ("POST", vec!["roles", "r", "decline"], "role.decline"),
         ("POST", vec!["roles", "r", "release"], "role.release"),
         (
             "DELETE",

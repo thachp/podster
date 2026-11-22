@@ -5015,6 +5015,16 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| roles::handle_claim_role(sql, &who.caller, &target, now),
             ),
+            (Method::Post, ["roles", _, "decline"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    roles::handle_decline_role_invite(sql, &who.caller, &target, now)
+                },
+            ),
             (Method::Post, ["roles", _, "release"]) => self.command(
                 &identity,
                 key,

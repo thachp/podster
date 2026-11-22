@@ -4,6 +4,11 @@ import { relativeTime } from "./time";
 
 describe("activity", () => {
   it("calls verify Approve, in the design's words", () => expect(eventVerb("task.completed")).toBe("approved a task"));
+  it("names an agent turning down its own role invite apart from a room's withdrawal (issue 522)", () => {
+    expect(eventVerb("role.invite_declined")).toBe("turned down an invite to a role opening");
+    expect(auditAction("role.invite_declined")).toBe("Turned down a role invite:");
+    expect(auditAction("role.invite_withdrawn")).toBe("Withdrew a role invite from");
+  });
   it("shows an unknown type as the server named it", () => {
     expect(eventVerb("task.new_thing")).toBe("task.new_thing");
     expect(auditAction("new.thing")).toBe("new.thing");

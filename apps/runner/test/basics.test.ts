@@ -1,7 +1,7 @@
 // The small pieces: reading the gateway's refusals, the thumbprint, the gateway's origin, the log, and the key store.
 import { generateKeypair } from "@auth/agent";
 import { describe, expect, it } from "vitest";
-import { RUNNER_CAPABILITIES } from "../src/core/capabilities.js";
+import { RUNNER_CAPABILITIES, STORED_CAPABILITY_BITS } from "../src/core/capabilities.js";
 import { codeFrom, errorFrom, GatewayError, meaningOf } from "../src/core/errors.js";
 import { gatewayFetch, gatewayOrigin } from "../src/core/gateway.js";
 import { logLine } from "../src/core/runtime.js";
@@ -135,13 +135,49 @@ describe("the key store, behind the SDK's Storage", () => {
     expect(JSON.stringify(full).length).toBeGreaterThan(12_000);
     await storage.setAgentConnection("plg_1", full);
     const stored = secrets.values.get("agent:plg_1") as string;
-    // 23 grant names since issue 522: 1,580 characters here, against about 14 KB as the plugin answers it.
-    expect(stored.length).toBeLessThan(1_700);
+    // Since issue 527 the grants are a bitset and only the private key is kept: under 400 characters here, against
+    // 1,580 in the slim form and about 14 KB as the plugin answers it.
+    expect(stored.length).toBeLessThan(400);
     const read = await storage.getAgentConnection("plg_1");
     expect(read).toMatchObject({ agentId: "plg_1", hostId: "host_1", issuer: "https://podster.dev/api/auth", mode: "delegated", agentKeypair });
     expect(read?.capabilityGrants).toEqual(RUNNER_CAPABILITIES.filter((_, i) => i !== 3).map((capability) => ({ capability, status: "active" })));
     expect(stored).not.toContain("~");
     expect(stored).not.toMatch(/"(description|input|output|hostName)"/);
+  });
+
+  it("pins the capability bit table: append only, so a stored bitset always reads as the grants it was written for (issue 527)", () => {
+    // Never edit these 23: only append after them. A record written today must read the same in every later Runner.
+    expect(STORED_CAPABILITY_BITS.slice(0, 23)).toEqual([
+      "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "read_inbox", "ack_inbox", "list_tasks", "get_task",
+      "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link",
+      "list_assets", "get_repo_access", "set_a2a_endpoint", "verify_a2a_endpoint", "list_role_openings", "claim_role", "decline_role",
+    ]);
+    expect(new Set(STORED_CAPABILITY_BITS).size).toBe(STORED_CAPABILITY_BITS.length);
+    expect(Object.isFrozen(STORED_CAPABILITY_BITS)).toBe(true);
+  });
+
+  it("keeps a keypair whole when its public key isn't the private key without d, and stores grants outside the table by name", async () => {
+    const secrets = new MemorySecretStore();
+    const storage = new RunnerStorage(secrets);
+    const made = await generateKeypair();
+    const odd = { publicKey: { ...made.publicKey, alg: "EdDSA" }, privateKey: made.privateKey };
+    const connection = { agentId: "plg_1", hostId: "h", providerName: "p", issuer: "i", mode: "delegated" as const, agentKeypair: odd, capabilityGrants: [{ capability: "not_in_table", status: "active" as const }, { capability: "get_task", status: "active" as const }, { capability: "get_task", status: "active" as const }], createdAt: 1 };
+    await storage.setAgentConnection("plg_1", connection);
+    expect(JSON.parse(secrets.values.get("agent:plg_1") as string)).toMatchObject({ v: 2, kp: odd, n: ["not_in_table"] });
+    expect(await storage.getAgentConnection("plg_1")).toEqual({ ...connection, capabilityGrants: [{ capability: "get_task", status: "active" }, { capability: "not_in_table", status: "active" }] });
+  });
+
+  it("reads a bit past the table's end, from a later Runner, as a capability it doesn't know, and refuses a malformed record", async () => {
+    const secrets = new MemorySecretStore();
+    const storage = new RunnerStorage(secrets);
+    const { privateKey } = await generateKeypair();
+    const record = { v: 2, a: "plg_1", h: "h", p: "p", i: "i", m: "delegated", k: privateKey, g: (1n << 200n | 1n).toString(16), t: 1 };
+    secrets.values.set("agent:plg_1", JSON.stringify(record));
+    expect((await storage.getAgentConnection("plg_1"))?.capabilityGrants).toEqual([{ capability: STORED_CAPABILITY_BITS[0], status: "active" }]);
+    for (const bad of [{ ...record, g: "XYZ" }, { ...record, v: 3 }, { ...record, k: { kty: "OKP" } }, { ...record, a: 1 }, { agentId: "plg_1" }, [1, 2]]) {
+      secrets.values.set("agent:plg_1", JSON.stringify(bad));
+      await expect(storage.getAgentConnection("plg_1")).rejects.toThrow(/can't read/);
+    }
   });
 
   it("names an agent in its index before writing its item, so a failed write is still deleted by deleteAll", async () => {

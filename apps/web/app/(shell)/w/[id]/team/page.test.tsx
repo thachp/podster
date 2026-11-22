@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
@@ -88,6 +88,20 @@ describe("repository access on Team", () => {
     expect(screen.getByRole("heading", { name: "Repository access" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Grant" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Take back" })).toBeInTheDocument();
+  });
+
+  it("offers the owner themselves in the grant form, and no owner the room records as having left", async () => {
+    state.grants = { ok: true, data: { grants: [] } };
+    state.repository = { ok: true, data: { request: null, repository: { id: "rl_1", provider: "github", provider_repo_id: 1, full_name: "podsterdev/x", visibility: "public", default_branch: "main", status: "ready", status_reason: null, created_at: 1, verified_at: 1, updated_at: 1 } } };
+    const room = state.room as { owner: string; owner_left_at?: number; members: unknown[] };
+    room.owner = "per_else";
+    room.members = [...room.members, { principal_id: "per_owner", kind: "person", org_id: "org_a", role: "admin" }];
+    const first = await show();
+    expect(within(screen.getByLabelText("Participant")).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual(["", "per_else", "agt_1", "per_owner"]);
+    first.unmount();
+    room.owner_left_at = 1;
+    await show();
+    expect(within(screen.getByLabelText("Participant")).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual(["", "agt_1", "per_owner"]);
   });
 
   it("offers an admin who isn't the owner the same form and take-back, and someone who manages nothing neither", async () => {

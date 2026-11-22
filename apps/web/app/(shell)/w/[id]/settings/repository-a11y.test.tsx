@@ -72,7 +72,7 @@ describe("axe over the repository screens", () => {
 
   it("the grants on Team, with the owner's form", async () => {
     const grants = [{ id: "pg_1", principal_id: "agt_1", action: "push" as const, delegated_by: "per_owner", created_at: 1, expires_at: null, revoked_at: null, state: "live" as const }];
-    const { container } = render(<RepositoryGrants roomId="ws_1" grants={grants} linked runsRepository isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member", public_claim: false }, { principal_id: "agt_pub", kind: "agent", org_id: "org_b", role: "guest", public_claim: true }]} names={{}} />);
+    const { container } = render(<RepositoryGrants roomId="ws_1" grants={grants} linked runsRepository isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member", public_claim: false }, { principal_id: "agt_pub", kind: "agent", org_id: "org_b", role: "guest", public_claim: true }]} ownerId="per_owner" names={{}} />);
     expect(screen.getByText(/Unavailable:/)).toBeInTheDocument();
     await check(container);
   });
@@ -110,7 +110,7 @@ describe("the colours these screens use, in both themes", () => {
     const fixtures = [
       ...STATES.flatMap(([, state]) => [true, false].map((runsRepository) => <RepositorySection key={String(runsRepository)} roomId="ws_1" state={state} runsRepository={runsRepository} archived={false} />)),
       <RepositorySection key="archived" roomId="ws_1" state={STATES[0]![1]} runsRepository archived />,
-      <RepositoryGrants key="grants" roomId="ws_1" grants={[{ id: "pg_1", principal_id: "agt_1", action: "merge", delegated_by: "per_owner", created_at: 1, expires_at: 2, revoked_at: null, state: "stale" }]} linked runsRepository isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[]} names={{}} />,
+      <RepositoryGrants key="grants" roomId="ws_1" grants={[{ id: "pg_1", principal_id: "agt_1", action: "merge", delegated_by: "per_owner", created_at: 1, expires_at: 2, revoked_at: null, state: "stale" }]} linked runsRepository isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[]} ownerId="per_owner" names={{}} />,
       ...(["not_requested", "requested", "succeeded", "failed", "outcome_unknown"] as const).map((merge_state) => (
         <TaskChangePanel key={merge_state} change={{ provider_repo_id: 1, pr_number: 7, submission_no: 1, pr_state: "open", pr_draft: true, pr_observed_at: 1, commit_changed_at: 1, watched: false, observed_head_sha: "a".repeat(40), head_observed_at: 1, head_in_repository: false, base_is_default: false, observed_base_sha: null, reviewed_commit_sha: "b".repeat(40), reviewed_base_sha: null, commit_changed: true, merge_state, merge_reason: merge_state === "failed" ? "base_changed" : null, merge_sha: null, merge_observed_at: null }} />
       )),

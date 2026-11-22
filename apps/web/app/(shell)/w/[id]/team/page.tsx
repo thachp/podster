@@ -85,6 +85,8 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
           policyVersion={canManage ? room.policy_version : null}
           archived={isArchived(room)}
           members={membersOf(room)}
+          // The owner isn't in the members list. An owner who left their organization is offered nothing; the API refuses it too.
+          ownerId={typeof room.owner_left_at === "number" ? null : room.owner}
           names={names}
         />
       ) : (

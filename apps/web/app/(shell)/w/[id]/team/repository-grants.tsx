@@ -23,6 +23,11 @@ export type GrantsProps = {
   policyVersion: number | null;
   archived: boolean;
   members: Member[];
+  /**
+   * The room's owner, a participant who isn't in `members`, or null when the room records them as having left their
+   * organization. Offered a grant like any participant: an owner may give themselves merge (decision 186 as amended).
+   */
+  ownerId: string | null;
   names: Record<string, string>;
 };
 
@@ -31,7 +36,7 @@ export type GrantsProps = {
  * managed repositories switched off nothing here renders. Each grant's `state` is the API's display value: it decides
  * nothing here, and every use of a grant is checked again from current authority.
  */
-export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrgAdmin, viewerId, policyVersion, archived, members, names }: GrantsProps) {
+export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrgAdmin, viewerId, policyVersion, archived, members, ownerId, names }: GrantsProps) {
   const commands = useCommands(policyVersion);
   const { send, clear } = commands;
   const ids = { who: useId(), action: useId(), expiry: useId(), expiryHint: useId(), merge: useId() };
@@ -46,7 +51,7 @@ export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrg
   const mayGrant = runsRepository && linked === true && !archived && policyVersion !== null;
   // Someone who joined through a public claim can't hold repository access, so they're never offered. The flag is the room
   // read's, for those who manage access; the API refuses such a grant with `grantee_public` whatever the form shows.
-  const offered = members.filter((member) => member.public_claim !== true);
+  const offered = members.filter((member) => member.public_claim !== true && member.principal_id !== ownerId);
   const unavailable = members.filter((member) => member.public_claim === true);
 
   const give = async () => {
@@ -132,6 +137,11 @@ export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrg
               }}
             >
               <option value="">Choose a participant</option>
+              {ownerId !== null ? (
+                <option value={ownerId}>
+                  {ownerId} · {label(ownerId)} (owner)
+                </option>
+              ) : null}
               {offered.map((member) => (
                 <option key={member.principal_id} value={member.principal_id}>
                   {member.principal_id} · {label(member.principal_id)} ({member.kind === "agent" ? "agent" : "person"})

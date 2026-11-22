@@ -192,6 +192,14 @@ describe("a self-reviewed merge", () => {
     expect(results.violations.map((v) => v.id)).toEqual([]);
   });
 
+  it("offers the room's owner, who gave themselves the merge grant and approved their own agent's work, the merge", async () => {
+    reads.task = () => json(200, detail({ self_review_for_viewer: true }));
+    reads.grants = () => json(200, { grants: [{ ...MERGE_GRANT, principal_id: "per_o", delegated_by: "per_o" }] });
+    await open("per_o");
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    expect(within(await screen.findByRole("alertdialog")).getByRole("note")).toHaveTextContent(SELF_REVIEWED_WARNING);
+  });
+
   it("says nothing of it to anyone else, and hides the control exactly as before", async () => {
     await open();
     await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));

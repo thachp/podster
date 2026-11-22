@@ -38,11 +38,9 @@ use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
 const CARDS_PER_PAGE: u32 = 20;
-const CARD_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    3_000
-};
+/// How long each room has to answer for its card. Tests keep it: shortening it for every room made a healthy room that was
+/// slow to wake on a loaded runner lose its card.
+const CARD_TIMEOUT_MS: u64 = 3_000;
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
@@ -211,10 +209,10 @@ async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value
     let workspace = row["workspace_id"].as_str()?;
     let mut listed = json!({ "workspace_id": workspace, "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"], "card": null });
     let read = async {
-        // Tests can't otherwise make a room hang.
+        // Tests can't otherwise make a room hang. It never answers, so only the timeout can end its read.
         #[cfg(feature = "failpoints")]
         if workspace.starts_with("ws_hang_") {
-            Delay::from(Duration::from_millis(CARD_TIMEOUT_MS * 20)).await;
+            std::future::pending::<()>().await;
         }
         let mut caller = caller.clone();
         caller.workspace_id = workspace.to_string();
@@ -231,7 +229,13 @@ async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value
         };
         Ok::<_, ApiError>((response.status_code(), card))
     };
-    let timeout = Delay::from(Duration::from_millis(CARD_TIMEOUT_MS));
+    // A room made to hang gives up at once, so a test needn't wait out the real budget, and every other room keeps it.
+    let budget = if cfg!(feature = "failpoints") && workspace.starts_with("ws_hang_") {
+        0
+    } else {
+        CARD_TIMEOUT_MS
+    };
+    let timeout = Delay::from(Duration::from_millis(budget));
     match select(Box::pin(read), timeout).await {
         Either::Left((Ok((_, Some(card))), _)) => listed["card"] = card,
         Either::Left((Ok((403 | 404, None)), _)) => return None,

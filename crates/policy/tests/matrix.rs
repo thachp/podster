@@ -315,6 +315,7 @@ fn only_a_lack_of_authority_counts_as_a_denial() {
         "access_revoked",
         "workspace_not_found",
         "self_sign_off",
+        "self_assignment",
     ] {
         assert!(is_authority_refusal("task.accept", code), "{code}");
     }
@@ -1493,5 +1494,34 @@ fn a_person_invitation_gives_guest_or_member_only() {
         (Role::None, false),
     ] {
         assert_eq!(person_invitation_role_allowed(role), allowed, "{role:?}");
+    }
+}
+
+#[test]
+fn an_agent_never_names_itself_as_assignee_and_people_name_anyone() {
+    // Decision 248 (the owner's ruling, 2026-11-22): a coordinator agent, a member agent, and an agent stored with an
+    // owner's role are all refused for themselves, whatever they create or offer.
+    let coordinator = Caller {
+        scopes: Scopes::COORDINATOR,
+        ..caller("agt_Hari", Agent, Role::Member)
+    };
+    for agent in [
+        coordinator.clone(),
+        caller("agt_Hari", Agent, Role::Member),
+        caller("agt_Hari", Agent, Role::Guest),
+        caller("agt_Hari", Agent, Role::Owner),
+    ] {
+        assert!(!may_assign_to(&agent, "agt_Hari"), "{agent:?}");
+        // Offering to another agent, or to a person, still works.
+        assert!(may_assign_to(&agent, "agt_Other"), "{agent:?}");
+        assert!(may_assign_to(&agent, "per_Owner"), "{agent:?}");
+    }
+    // IDs compare exactly: an agent whose ID differs only in case is someone else.
+    assert!(may_assign_to(&coordinator, "agt_hari"));
+    // People, the owner and admins included, may name the coordinator, or themselves.
+    for role in [Role::Owner, Role::Admin, Role::Member] {
+        let person = caller("per_Owner", Person, role);
+        assert!(may_assign_to(&person, "agt_Hari"), "{role:?}");
+        assert!(may_assign_to(&person, "per_Owner"), "{role:?}");
     }
 }

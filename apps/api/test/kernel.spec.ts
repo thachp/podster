@@ -96,6 +96,13 @@ const offer = async (tasks: string, extra: object = {}) => {
   expect(r.status).toBe(200);
   return r.body;
 };
+/** A task LEAD requests and is offered by an admin, since an agent can't name itself as assignee (decision 248). */
+const offerLeadItsOwn = async (tasks: string, extra: object = {}) => {
+  const made = await offer(tasks, { assignee: undefined, ...extra });
+  const r = await api(ADMIN, "POST", `${tasks}/${made.id}/assign`, { version: made.version, assignee: LEAD.id });
+  expect(r.status).toBe(200);
+  return r.body;
+};
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to before submitted files were flagged: the newest migration. */
 const undoSubmittedFlagMigration = (state: any) => {
@@ -495,6 +502,32 @@ describe("kernel journey", () => {
     expect((await api(LEAD, "POST", `${path}/verify`, { submission_no: 1 })).code).toBe("not_allowed");
     expect((await api(LEAD, "POST", `${path}/set-reviewer`, { version: 3, reviewer: LEAD.id })).code).toBe("not_allowed");
     expect((await api(ADMIN, "POST", `${path}/set-reviewer`, { version: 3, reviewer: LEAD.id })).body.reviewer).toBe(LEAD.id);
+  });
+
+  it("refuses an agent naming itself as assignee, a coordinator included, and lets people and other agents offer (decision 248)", async () => {
+    const { id, tasks } = await room();
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${LEAD.id}/access`, { preset: "coordinator" })).status).toBe(200);
+    const work = { title: "Design billing API", instructions: "Write the design", reviewer: REVIEWER.id };
+    const own = await api(LEAD, "POST", tasks, { ...work, assignee: LEAD.id });
+    expect([own.status, own.code]).toEqual([403, "self_assignment"]);
+    expect((await api(LEAD, "GET", tasks)).body.tasks).toEqual([]);
+    // With no assignee it's allowed, and offering it to itself, first or over another's offer, is refused.
+    const open = await api(LEAD, "POST", tasks, work);
+    expect([open.status, open.body.status, open.body.assignee]).toEqual([200, "open", null]);
+    const path = `${tasks}/${open.body.id}`;
+    expect((await api(LEAD, "POST", `${path}/assign`, { version: 1, assignee: LEAD.id })).code).toBe("self_assignment");
+    const offered = await api(LEAD, "POST", `${path}/assign`, { version: 1, assignee: BOB.id });
+    expect([offered.status, offered.body.status, offered.body.assignee]).toEqual([200, "offered", BOB.id]);
+    expect((await api(LEAD, "POST", `${path}/assign`, { version: 2, assignee: LEAD.id })).code).toBe("self_assignment");
+    expect((await api(BOB, "POST", `${path}/accept`, { version: 2 })).body.status).toBe("accepted");
+    // A person still offers the coordinator work, by creating or reassigning, and it accepts its own offer.
+    const given = await api(OWNER, "POST", tasks, { ...work, assignee: LEAD.id });
+    expect([given.status, given.body.assignee]).toEqual([200, LEAD.id]);
+    expect((await api(LEAD, "POST", `${tasks}/${given.body.id}/accept`, { version: 1 })).body.status).toBe("accepted");
+    const later = await api(LEAD, "POST", tasks, work);
+    const reassigned = await api(ADMIN, "POST", `${tasks}/${later.body.id}/assign`, { version: 1, assignee: LEAD.id });
+    expect([reassigned.status, reassigned.body.assignee]).toEqual([200, LEAD.id]);
+    expect((await api(LEAD, "POST", `${tasks}/${later.body.id}/accept`, { version: 2 })).body.status).toBe("accepted");
   });
 
   it("requires acceptance again after a material edit, and rejects other fields", async () => {
@@ -3861,7 +3894,7 @@ describe("an organization's oversight of its own agent", () => {
 
   it("isn't for the room's own organization, or someone the room revoked", async () => {
     const { id, tasks } = await room();
-    const task = await offer(tasks, { assignee: LEAD.id, reviewer: REVIEWER.id });
+    const task = await offerLeadItsOwn(tasks, { reviewer: REVIEWER.id });
     // An admin of the room's organization the owner never added sees nothing of its agent.
     const notAdded: Who = { id: "per_never_added", kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     expect((await seen(notAdded, id, LEAD)).code).toBe("workspace_not_found");
@@ -4536,8 +4569,7 @@ describe("access presets and scopes", () => {
     const toRequester = await offer(tasks);
     await api(BOB, "POST", `${tasks}/${toRequester.id}/accept`, { version: 1 });
     await api(BOB, "POST", `${tasks}/${toRequester.id}/submit`, { version: 2, artifacts: [{ uri: "https://example.com/a", label: "A" }] });
-    const lead = await api(LEAD, "POST", tasks, { title: "Requester is assignee", instructions: "x", assignee: LEAD.id, reviewer: REVIEWER.id });
-    expect(lead.status).toBe(200);
+    const lead = { body: await offerLeadItsOwn(tasks, { title: "Requester is assignee", instructions: "x", reviewer: REVIEWER.id }) };
     expect((await setAccess(OWNER, id, REVIEWER, { scopes: { review: "none" } })).status).toBe(200);
     const moved = (await api(LEAD, "GET", `${tasks}/${toRequester.id}`)).body.task;
     expect([moved.reviewer, moved.status, moved.needs_attention]).toEqual([LEAD.id, "submitted", false]);
@@ -7290,7 +7322,7 @@ describe("the collaboration list and map", () => {
     const leaving: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: leaving.id, kind: "agent", org_id: "org_a", role: "member" })).status).toBe(200);
     // A reviewer named, then removed, before the submission that would have gone to them.
-    const task = await offer(tasks, { reviewer: leaving.id, assignee: LEAD.id, title: "Self" });
+    const task = await offerLeadItsOwn(tasks, { reviewer: leaving.id, title: "Self" });
     expect(task.id).toBeTruthy();
     await api(LEAD, "POST", `${tasks}/${task.id}/accept`, { version: task.version });
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${leaving.id}`, {})).status).toBe(200);

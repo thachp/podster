@@ -765,6 +765,8 @@ async function acceptance() {
     const where = { workspace_id: room, task_id: reviewed.id };
     refused(await lead.call("set_reviewer", { ...where, version: reviewed.version, reviewer: guest.id, idempotency_key: key() }), "self_sign_off", "making the assignee its own reviewer");
     refused(await lead.call("create_task", { workspace_id: room, title: "x", instructions: "x", assignee: reviewer.id, reviewer: reviewer.id, idempotency_key: key() }), "self_sign_off", "creating a task reviewed by its assignee");
+    refused(await lead.call("create_task", { workspace_id: room, title: "x", instructions: "x", assignee: lead.id, reviewer: reviewer.id, idempotency_key: key() }), "self_assignment", "an agent creating a task assigned to itself");
+    refused(await lead.call("assign_task", { ...where, version: reviewed.version, assignee: lead.id, idempotency_key: key() }), "self_assignment", "an agent offering a task to itself");
     const accepted = await guest.must("accept_task", { ...where, version: reviewed.version });
     const submitted = await guest.must("submit_task", { ...where, version: accepted.version, note: "done" });
     for (const who of [guest, lead]) refused(await who.call("verify_task", { ...where, submission_no: submitted.submission_no, idempotency_key: key() }), "not_allowed", `${who.label} verifying`);

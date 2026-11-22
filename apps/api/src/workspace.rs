@@ -21,7 +21,7 @@ use podster_core::{
 use podster_policy::{
     authorize_requester_change, authorize_reviewer_change, authorize_task, authorize_workroom,
     can_review, can_see_event, can_see_task, denied_change_name, effective_scopes,
-    is_authority_refusal, may_claim_role, may_decide_review, may_recover_ownership,
+    is_authority_refusal, may_assign_to, may_claim_role, may_decide_review, may_recover_ownership,
     org_departure_ends, owner_authority_holds, reads_every_thread, scopes_after_claim,
     sees_notices_about_itself, sees_planned_relationships, sees_who_planned, sees_whole_plan,
     sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller, ConversationScope, Preset,
@@ -637,6 +637,11 @@ fn handle_task_command_with(
     }
 
     let command = parse_command(verb, body)?;
+    if let Command::Assign { assignee, .. } = &command {
+        if !may_assign_to(caller, assignee) {
+            return Err(ApiError::self_assignment());
+        }
+    }
     match &command {
         Command::SetReviewer { reviewer, .. } => require_eligible_reviewer(sql, reviewer)?,
         Command::SetRequester { requester, .. }
@@ -736,6 +741,9 @@ fn handle_create_task(
         has_linked_repository: changes::links_new_tasks(sql, switched_on)?,
     };
     if let Some(assignee) = &new.assignee {
+        if !may_assign_to(caller, assignee) {
+            return Err(ApiError::self_assignment());
+        }
         require_participant(sql, assignee)?;
     }
     require_eligible_reviewer(sql, new.reviewer.as_deref().unwrap_or(&caller.id))?;

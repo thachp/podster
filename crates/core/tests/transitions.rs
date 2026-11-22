@@ -1428,3 +1428,39 @@ fn approving_records_the_exact_submission_and_nothing_else_touches_it() {
         }
     }
 }
+
+/// Decision 248: an agent never names itself as assignee, which `crates/policy`'s `may_assign_to` refuses before core runs.
+/// Core keeps what follows from someone else's offer: the coordinator creates a task with no assignee, offers it to
+/// another agent, and that agent accepts its own offer, which is acceptance and not self-assignment.
+#[test]
+fn an_agent_offered_work_by_another_accepts_it() {
+    let new = NewTask {
+        id: "t".into(),
+        title: "title".into(),
+        instructions: "do it".into(),
+        acceptance_criteria: None,
+        assignee: None,
+        reviewer: None,
+        due_at: None,
+        follow_up_of: None,
+        has_linked_repository: false,
+    };
+    let open = decide_create("agt_coord", new).unwrap().task;
+    assert_eq!((open.status, open.assignee.as_deref()), (Open, None));
+    let offer = Command::Assign {
+        version: open.version,
+        assignee: "agt_worker".into(),
+    };
+    let offered = decide(&open, "agt_coord", offer, &Observed::default())
+        .unwrap()
+        .task;
+    assert_eq!(offered.status, Offered);
+    assert_eq!(offered.assignee.as_deref(), Some("agt_worker"));
+    let accept = Command::Accept {
+        version: offered.version,
+    };
+    let accepted = decide(&offered, "agt_worker", accept, &Observed::default())
+        .unwrap()
+        .task;
+    assert_eq!(accepted.status, Accepted);
+}

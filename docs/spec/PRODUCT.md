@@ -261,11 +261,11 @@ override their owner. The coordination kernel never follows artifact links. Futu
 
 | Action | Who | From → to |
 | --- | --- | --- |
-| `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given. If the default reviewer is ineligible under the `set_reviewer` rule, an explicit reviewer is required |
+| `create_task` | Requester (any member; guests if allowed) | → `open`, or straight to `offered` if an assignee is given. An agent can't name itself as the assignee, a coordinator included (`self_assignment`, [decision 248](#decisions-needed)). If the default reviewer is ineligible under the `set_reviewer` rule, an explicit reviewer is required |
 | `update_task` | Requester or admin, with current `version` | Non-terminal states only. Edits `title`, `instructions`, `acceptance_criteria` and `due_at`, and nothing else. Changing instructions or criteria from `accepted` returns to `offered`. Not allowed in `submitted`: request changes first |
 | `set_reviewer` | Requester or admin, with current `version`; only the owner or an admin once `submitted` | Non-terminal states only. Never the assignee. The new reviewer must have review scope, where scopes exist, and meet the room's person-review policy |
 | `set_requester` | Owner or admin; or a Coordinator, only for itself and only when the requester has left | Non-terminal states, including `submitted` |
-| `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer |
+| `assign_task` | Requester or admin | `open` → `offered`; or re-offer from `offered` to someone else. Never the current reviewer. An agent never offers a task to itself, a coordinator included (`self_assignment`, [decision 248](#decisions-needed)); a person may offer it to any participant, the coordinator included |
 | `accept_task` | The offered agent | `offered` → `accepted` |
 | `decline_task` | The offered agent, with a reason | `offered` → `open` |
 | `release_task` | The assignee, with a reason | `accepted` → `open` |
@@ -757,6 +757,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 245 | The room's own organization at acceptance | **Ruled by the architect and approved by the owner on 2026-11-22:** refused; people of the room's organization are added directly, as today | Later |
 | 246 | A person re-invitation and a revoked row's identity | **Ruled by the architect and approved by the owner on 2026-11-22:** accepting can't change the revoked row's `kind` or `org_id` unless the owner made the invitation, as `handle_add_member` reserves that to the owner today | Later |
 | 247 | Oversight after a person leaves a room | **Ruled by the architect and approved by the owner on 2026-11-22:** an organization admin who held a person row in a room never gets oversight of their agents there back, however they left, by choice, `org_departure`, removal or a revoked organization | Later |
+| 248 | Whether an agent can make itself a task's assignee | **Decided by the owner on 2026-11-22** ("per ur rec"): no. An agent can't create a task with itself as assignee, offer one to itself, or re-offer or reassign one to itself, a coordinator included; it gets `self_assignment` (403), decided in `crates/policy` (`may_assign_to`) from the caller's current identity. People, the owner and admins, can still assign any agent, the coordinator included, and an agent offered a task by someone else still accepts it. An agent may still create a task with no assignee. Prompted by the Hello World room, where the coordinator twice created tasks assigned to itself that no Runner ran, so they stalled at Awaiting acceptance | M7 |
 
 ## M7 decisions, November 18, 2026
 

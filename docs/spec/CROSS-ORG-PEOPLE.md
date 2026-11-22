@@ -1,6 +1,6 @@
 # Inviting a person from another organization
 
-Status: **Proposed** by the architect on 2026-11-22, not approved, and nothing here is built. On 2026-11-22 the owner said yes to the idea of a room's owner inviting a *person* from another organization into a workroom. That yes is the only settled part; this document is what the owner approves before a build starts. Companions: [Product](PRODUCT.md#invitations-private-workrooms) · [Access control](ACCESS-CONTROL.md) · [Architecture](ARCHITECTURE.md#invitations-across-organizations) · [Design](DESIGN.md#team-and-manage-access-sheet)
+Status: **approved by the owner on 2026-11-22** ("sound good"), accepting the five recommended answers and the architect's three rulings as written; they are decisions 239 to 247 in [PRODUCT.md](PRODUCT.md#decisions-needed). Nothing here is built yet: the build list and plan below are an engineering plan, not a claim that anything shipped. The owner first said yes to the idea earlier the same day. Companions: [Product](PRODUCT.md#invitations-private-workrooms) · [Access control](ACCESS-CONTROL.md) · [Architecture](ARCHITECTURE.md#invitations-across-organizations) · [Design](DESIGN.md#team-and-manage-access-sheet)
 
 ## Why
 
@@ -107,15 +107,20 @@ Rust decides, from current `Workspace` DO state, in one transaction: policy, the
 
 ## What changes in the specs
 
-On approval, in the same PR as the build's first step:
+Done in the approving PR (#530):
 
-- **Decision 7** gains one sentence: a person from another organization may hold their own explicit role in a room through a person invitation they accepted. The rule itself, that people see a room only through their own role, is unchanged.
-- **PRODUCT.md:** the [Invitations](PRODUCT.md#invitations-private-workrooms) list gets a **Person from another organization** bullet; the [Authorization roles](PRODUCT.md#authorization-roles-kernel-baseline) bullet on outside members covers people; [decision 239](PRODUCT.md#decisions-needed) records the open questions' answers.
-- **ACCESS-CONTROL.md:** two matrix rows (**Invite a person from another organization**, **Leave a workroom**), and new tests AC-34 to AC-37 below.
+- **Decision 7** has a dated amendment: a person from another organization may hold their own explicit role in a room through an accepted person invitation. The rule that people see a room only through their own role is unchanged.
+- **PRODUCT.md:** the [Invitations](PRODUCT.md#invitations-private-workrooms) list and the [Authorization roles](PRODUCT.md#authorization-roles-kernel-baseline) bullet on outside members cover people; decisions 239 to 247 record the answers and rulings.
+- **ACCESS-CONTROL.md:** matrix rows **Invite a person from another organization** and **Leave a workroom**, and tests AC-34 to AC-37.
+
+Left for the build, because they describe built behavior:
+
 - **ARCHITECTURE.md:** [Invitations across organizations](ARCHITECTURE.md#invitations-across-organizations) gets a person flow; the `Workspace` DO's `invitation` table gets its new columns.
 - **DESIGN.md:** the [Team](DESIGN.md#team-and-manage-access-sheet) section gets **Invite a person** and an **External** label on outside people; the accept page gets the organization picker; the room gets **Leave workroom**. PR 524's copy, "an invitation brings in agents only", changes to name the two kinds.
 
-### Proposed tests
+### Acceptance tests
+
+Also in [ACCESS-CONTROL.md](ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests). None is written or run yet.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
@@ -137,27 +142,24 @@ Named, not written:
 
 ## Build plan
 
-1. Merge this proposal with the owner's answers; record a decision row and amend decision 7.
+1. Done: this document approved, decisions 239 to 247 recorded, decision 7 amended (PR #530).
 2. Contract PR: openapi changes and the assertion field. Merges alone, in turn.
 3. API: first the `handle_change_role` organization check with its AC-36 case; then the DO migration, person invitation create, list, preview, accept and leave, with AC-34 to AC-37 in `apps/api/test`.
 4. Gateway: the verified-email fact on the two routes, sent only when `emailVerified = 1`, with gateway tests for an unverified row and a test person.
 5. Web: Invite a person, External label, accept page organization picker, Leave workroom; PR 524's copy updated.
 6. Deploy to staging and run it with the owner and Long: invite Long by email into the demo room, accept as a guest, see the room listed and open, then leave.
 
-## The architect's rulings, for the owner to review
+## Decisions
 
-Settled by the architect on 2026-11-22 on review of this proposal. They stand unless the owner overrules them:
+Approved by the owner on 2026-11-22 ("sound good"), as recommended and as the architect ruled, unchanged.
 
-- **The room's own organization can't be chosen** at acceptance. People of that organization are added directly, as today.
-- **A re-invitation can't change a revoked row's identity** (`kind`, `org_id`) unless the owner made it, as `handle_add_member` reserves that to the owner today.
-- **Oversight never comes back** to an organization admin who held a person row in the room, however they left, so leaving before a removal gains nothing.
-
-## Open questions for the owner
-
-| # | Question | Recommendation |
+| Decision | Question | Answer |
 | --- | --- | --- |
-| 1 | Who may invite a person: the owner only, or the owner and appointed admins? | **Owner and admins**, the same authority that already invites a whole organization's agents as members. Owner only would be stricter than today's agent path for no clear gain |
-| 2 | How is the invitation addressed: email-bound, an open one-use link, or an existing account? | **Email-bound link**, accepted only by a verified matching sign-in. An open link can be forwarded; addressing by account needs a directory lookup that would reveal who has one |
-| 3 | What roles can an outside person get? | **Guest by default, Member by explicit choice, never admin**, matching how outside organizations are invited |
-| 4 | Which organization does the person join as? | **Their choice among their current organizations other than the room's, personal by default.** It's a label and an anchor for departure, with no authority |
-| 5 | Should outside people see Builds runs on their own task's branch? | **No**, until BUILDS.md's open question 3 is answered for guests generally |
+| 240 | Who may invite a person | The owner and appointed admins, the same authority that invites a whole organization's agents |
+| 241 | How the invitation is addressed | An email-bound, one-use link, accepted only by a signed-in person whose verified email matches |
+| 242 | What roles an outside person can get | Guest by default, Member by explicit choice, never admin |
+| 243 | Which organization the person joins as | Their choice among their current organizations other than the room's, personal by default; a label and an anchor for departure, with no authority |
+| 244 | Builds runs on their own task's branch | None, until BUILDS.md's open question 3 is answered for guests generally |
+| 245 | The room's own organization at acceptance | Refused; people of that organization are added directly, as today (the architect's ruling) |
+| 246 | A re-invitation and a revoked row's identity | It can't change `kind` or `org_id` unless the owner made it, as `handle_add_member` reserves that to the owner today (the architect's ruling) |
+| 247 | Oversight after leaving | Never comes back to an organization admin who held a person row in the room, however they left, so leaving before a removal gains nothing (the architect's ruling) |

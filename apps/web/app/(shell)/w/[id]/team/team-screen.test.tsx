@@ -133,7 +133,7 @@ describe("Team, as the owner", () => {
     render(<TeamScreen {...props} />);
     await userEvent.selectOptions(screen.getByLabelText("Agent"), "agt_2");
     await userEvent.click(screen.getByRole("button", { name: "Add agent" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Send an invitation");
+    expect(await screen.findByRole("alert")).toHaveTextContent("send an invitation for another organization's agents");
     expect(screen.getByLabelText("Agent")).toHaveValue("agt_2");
   });
 
@@ -281,13 +281,15 @@ describe("Team, for others", () => {
     expect(screen.queryByRole("button", { name: "Make admin" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove admin" })).not.toBeInTheDocument();
     expect(within(row("per_m")).getByRole("button", { name: "Revoke" })).toBeInTheDocument();
-    expect(within(row("You")).queryByRole("button")).not.toBeInTheDocument();
+    // Their own row offers only leaving (decision 239).
+    expect(within(row("You")).getAllByRole("button").map((button) => button.textContent)).toEqual(["Leave workroom"]);
     expect(screen.getAllByLabelText("Role").at(-1)).not.toHaveTextContent("Admin");
   });
 
   it("a member has no controls at all", () => {
     render(<TeamScreen {...props} policyVersion={null} invitations={null} viewer={{ id: "per_m", orgs: ["org_a"], adminOrgs: [] }} />);
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    // Nothing but leaving, which is their own act (decision 239).
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Leave workroom"]);
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Invitations" })).not.toBeInTheDocument();
   });

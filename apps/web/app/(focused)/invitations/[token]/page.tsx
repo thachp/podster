@@ -17,6 +17,10 @@ export default async function InvitationPage({ params, searchParams }: { params:
             ? { organizations: organizations.data.organizations.filter((org) => org.role === "admin").map(({ id, name }) => ({ id, name })), agents: agents.data.agents.filter((agent) => agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id })), partial: agents.data.truncated === true }
             : null
         }
+        people={{
+          orgNames: organizations.ok ? Object.fromEntries(organizations.data.organizations.map((org) => [org.id, org.name])) : {},
+          personal: organizations.ok ? (organizations.data.organizations.find((org) => org.personal === 1)?.id ?? null) : null,
+        }}
       />
     </section>
   );

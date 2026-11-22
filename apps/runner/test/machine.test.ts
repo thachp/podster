@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { generateKeypair } from "@auth/agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { NEVER, RUNNER_CAPABILITIES } from "../src/core/capabilities.js";
+import { NEVER, RUNNER_CAPABILITIES, STORED_CAPABILITY_BITS } from "../src/core/capabilities.js";
 import { checkNudgeUrl, MAX_NUDGE_URL_BYTES } from "../src/core/nudge.js";
 import { emptyState } from "../src/core/state.js";
 import { childEnv, forbidden, INHERITED } from "../src/node/child-env.js";
@@ -383,8 +383,8 @@ describe("Runner's own source", () => {
     }
   });
 
-  it("leaves room in the macOS keychain line for Runner's agent with its capability list, measured again at step 14 (#454 re-review)", async () => {
-    // The longest real values: Better Auth's 32-character IDs, staging's issuer, and every capability active.
+  /** A stand-in for `security` that keeps every `-i` line it was given, for measuring. */
+  function measuringTool() {
     const items = new Map<string, string>();
     const lines: string[] = [];
     const runner: Runner = async (_file, args, input) => {
@@ -397,26 +397,69 @@ describe("Runner's own source", () => {
       const account = args[args.indexOf("-a") + 1];
       return items.has(account) ? { code: 0, stdout: `${items.get(account)}\n`, stderr: "" } : { code: 44, stdout: "", stderr: "" };
     };
-    const storage = new RunnerStorage(new MacKeychain("/Users/someone-with-a-long-name/Library/Application-Support/podster-runner", runner));
+    return { items, lines, runner };
+  }
+  const LONG_HOME = "/Users/someone-with-a-long-name/Library/Application-Support/podster-runner";
+  const STAGING_ISSUER = "https://gateway-staging.podster.dev/api/auth";
+
+  it("leaves room in the macOS keychain line for Runner's agent with its capability list, measured again for issue 527", async () => {
+    // The longest real values: Better Auth's 32-character IDs, staging's issuer, and every capability active.
+    const { lines, runner } = measuringTool();
+    const storage = new RunnerStorage(new MacKeychain(LONG_HOME, runner));
     const id = "A".repeat(32);
     const grants = RUNNER_CAPABILITIES.map((capability) => ({ capability, status: "active" as const }));
-    await storage.setAgentConnection(id, { agentId: id, hostId: "B".repeat(32), providerName: "podster", issuer: "https://gateway-staging.podster.dev/api/auth", mode: "delegated", agentKeypair: await generateKeypair(), capabilityGrants: grants, createdAt: 1_800_000_000_000 });
+    const connection = { agentId: id, hostId: "B".repeat(32), providerName: "podster", issuer: STAGING_ISSUER, mode: "delegated" as const, agentKeypair: await generateKeypair(), capabilityGrants: grants, createdAt: 1_800_000_000_000 };
+    await storage.setAgentConnection(id, connection);
     const line = Buffer.byteLength(lines.at(-1) as string);
-    expect(RUNNER_CAPABILITIES).toContain("get_repo_access");
-    expect(line).toBeLessThan(MAC_LINE_LIMIT);
-    // Measured 2026-11-18 with 18 capabilities and a long home: 3,029 of 3,584 bytes. Measured again 2026-11-19 for step
-    // 11, which submits with `submit_task` and posts its one progress message with `send_message`, both already listed, so
-    // still 18 capabilities and 3,029 bytes. Each more capability as long as `get_repo_access` costs its grant's JSON
-    // twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more. Measured again 2026-11-19 for step 14,
-    // which adds `set_a2a_endpoint` and `verify_a2a_endpoint`: 20 capabilities, 3,243 of 3,584 bytes, 341 left, so 3 more
-    // as long as `get_repo_access` fit. Measured again 2026-11-21 for issue 522, which adds `list_role_openings`,
-    // `claim_role` and `decline_role`: 23 capabilities, 3,539 of 3,584 bytes, 45 left, so no more as long as
-    // `get_repo_access` fit. A further capability needs the stored grant list made smaller first.
     expect(RUNNER_CAPABILITIES).toHaveLength(23);
-    expect(RUNNER_CAPABILITIES).toEqual(expect.arrayContaining(["submit_task", "send_message", "set_a2a_endpoint", "verify_a2a_endpoint"]));
-    const perCapability = 2 * Buffer.byteLength(`${JSON.stringify({ capability: "get_repo_access", status: "active" })},`);
-    expect(line).toBe(3_539);
-    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBe(0);
+    // Measured 2026-11-21 for issue 522 in the slim form: 3,539 of 3,584 bytes, 45 left. Issue 527 stores the grants as
+    // a bitset and only the private key: 875 bytes, 2,709 left. Each capability in `STORED_CAPABILITY_BITS` costs at
+    // most a hex digit of the bitset, twice over.
+    expect(line).toBe(875);
+    expect(await storage.getAgentConnection(id)).toEqual(connection);
+  });
+
+  it("leaves room for an issuer 100 characters longer and 10 more capabilities, none of them in the bit table (issue 527)", async () => {
+    const { lines, runner } = measuringTool();
+    const storage = new RunnerStorage(new MacKeychain(LONG_HOME, runner));
+    const id = "A".repeat(32);
+    // The worst case for a new capability: not yet appended to the bit table, so stored by its name. Each is 30
+    // characters, longer than any Runner names today.
+    const added = Array.from({ length: 10 }, (_, i) => `future_capability_named_long_${i}`);
+    for (const name of added) expect(STORED_CAPABILITY_BITS).not.toContain(name);
+    const grants = [...RUNNER_CAPABILITIES, ...added].map((capability) => ({ capability, status: "active" as const }));
+    const issuer = `${STAGING_ISSUER}/${"x".repeat(99)}`;
+    expect(issuer.length).toBe(STAGING_ISSUER.length + 100);
+    const connection = { agentId: id, hostId: "B".repeat(32), providerName: "podster", issuer, mode: "delegated" as const, agentKeypair: await generateKeypair(), capabilityGrants: grants, createdAt: 1_800_000_000_000 };
+    await storage.setAgentConnection(id, connection);
+    const line = Buffer.byteLength(lines.at(-1) as string);
+    // Measured 2026-11-21: 1,747 of 3,584 bytes, 1,837 left, about half the line.
+    expect(line).toBe(1_747);
+    expect(MAC_LINE_LIMIT - line).toBeGreaterThan(MAC_LINE_LIMIT / 2 - 100);
+    expect(await storage.getAgentConnection(id)).toEqual(connection);
+  });
+
+  it("reads an agent connection stored in the slim form before issue 527, and rewrites it compactly at the next write", async () => {
+    const { items, lines, runner } = measuringTool();
+    const keychain = new MacKeychain(LONG_HOME, runner);
+    const storage = new RunnerStorage(keychain);
+    const id = "A".repeat(32);
+    // Exactly what an earlier Runner wrote: the whole keypair and each active grant as an object.
+    const slim = { agentId: id, hostId: "B".repeat(32), providerName: "podster", issuer: STAGING_ISSUER, mode: "delegated" as const, agentKeypair: await generateKeypair(), capabilityGrants: RUNNER_CAPABILITIES.map((capability) => ({ capability, status: "active" as const })), createdAt: 1_800_000_000_000 };
+    await keychain.set("agents", JSON.stringify([id]));
+    await keychain.set(`agent:${id}`, JSON.stringify(slim));
+    const before = Buffer.byteLength(lines.at(-1) as string);
+    expect(before).toBe(3_539);
+    expect(await storage.getAgentConnection(id)).toEqual(slim);
+    expect(await storage.listAgentConnections()).toEqual([slim]);
+    // The next write is compact, and reads back the same.
+    await storage.setAgentConnection(id, slim);
+    expect(Buffer.byteLength(lines.at(-1) as string)).toBe(875);
+    const stored = JSON.parse(await keychain.get(`agent:${id}`) as string);
+    expect(stored).toMatchObject({ v: 2, a: id });
+    expect(stored).not.toHaveProperty("capabilityGrants");
+    expect(await storage.getAgentConnection(id)).toEqual(slim);
+    expect([...items.keys()].filter((account) => account.endsWith(`:agent:${id}`))).toHaveLength(1);
   });
 
   it("leaves room in the macOS keychain line for the nudge's registration at its longest URL (step 14)", async () => {

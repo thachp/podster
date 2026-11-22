@@ -571,7 +571,7 @@ describe("room schema step 45, on a room with jobs on record", () => {
       // they aren't there, so all twelve run.
       sql.exec("DROP TABLE hostname_provider");
       sql.exec("DROP TABLE release_uncertain");
-      sql.exec("UPDATE schema_version SET version = version - 12");
+      sql.exec("UPDATE schema_version SET version = version - 13");
       return newest;
     });
     const before = await inRoom(r.room, (sql) => sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray());

@@ -73,6 +73,7 @@ async fn room(
         admin_orgs: vec![],
         org_since: Default::default(),
         target_member: None,
+        verified_email: None,
         gen: claim["generation"].as_u64(),
         linker: None,
         workspace_id: ws.to_string(),

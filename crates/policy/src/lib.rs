@@ -344,6 +344,10 @@ pub enum WorkroomAction {
     /// The room's planning start date and timezone (decision 70), for a person who runs the room or a member coordinating its
     /// plan (the architect's ruling on issue 507, 2026-11-21).
     SetPlanStart,
+    /// Leaving the room on one's own (decision 239, CROSS-ORG-PEOPLE.md): a person who holds a place here, other than its
+    /// owner, who transfers ownership first (the architect's ruling, 2026-11-22). An agent leaves through its owner's
+    /// withdrawal instead, whatever role is stored for it.
+    LeaveRoom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +432,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("DELETE", ["organizations", _]) => "organization.revoke",
         ("POST", ["invitations"]) => "invitation.create",
         ("DELETE", ["invitations", _]) => "invitation.withdraw",
+        ("POST", ["leave"]) => "member.leave",
         ("PUT", ["members", _, "access"]) => "member.change_access",
         ("POST", ["roles"]) => "role.create",
         ("PUT", ["roles", _]) => "role.update",
@@ -542,12 +547,21 @@ pub fn authorize_workroom(caller: &Caller, action: WorkroomAction) -> Verdict {
         | WorkroomAction::ManageRoom
         | WorkroomAction::PlanRelationship => is_human_admin(caller),
         WorkroomAction::SetPlanStart => is_human_admin(caller) || coordinates_plan(caller),
+        WorkroomAction::LeaveRoom => {
+            caller.kind == PrincipalKind::Person && caller.role != Role::Owner
+        }
     };
     if allowed {
         Verdict::Allow
     } else {
         Verdict::Forbidden
     }
+}
+
+/// The role a person invitation may give (decisions 239 and 242, CROSS-ORG-PEOPLE.md): guest, or member by explicit choice.
+/// Never admin or owner, which stay with the room's organization, and never no role.
+pub fn person_invitation_role_allowed(role: Role) -> bool {
+    matches!(role, Role::Member | Role::Guest)
 }
 
 /// Whether the caller coordinates the room's plan: a member, person or agent, whose task scope is the Coordinator's. It covers

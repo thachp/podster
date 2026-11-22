@@ -75,6 +75,9 @@ pub struct Caller {
     pub org_since: std::collections::HashMap<String, i64>,
     #[serde(default)]
     pub target_member: Option<podster_assertion::TargetMember>,
+    /// The person's verified email, passed on only for a person invitation's preview and acceptance.
+    #[serde(default)]
+    pub verified_email: Option<String>,
     pub gen: Option<u64>,
     /// For an agent, who linked the credential this request came with. Recorded when it sets an A2A endpoint.
     #[serde(default)]
@@ -432,6 +435,7 @@ async fn route(
     let now = (Date::now().as_millis() / 1000) as i64;
     let identity = verify(&token, &keys, now).map_err(|_| ApiError::invalid_assertion())?;
     let is_agent = identity.kind == Kind::Agent;
+    let verified_email = identity.verified_email.clone().filter(|_| !is_agent);
     let departure = identity.departure.clone();
     let identity_replay = identity.agent_jti.clone();
     let identity_replay_exp = identity.agent_jti_exp.unwrap_or(identity.exp);
@@ -443,6 +447,8 @@ async fn route(
         admin_orgs: identity.admin_orgs,
         org_since: identity.org_since,
         target_member: identity.target_member,
+        // Only the two invitation routes below pass it on, so no other route ever sees an email.
+        verified_email: None,
         gen: identity.gen,
         // Only an agent's credential has a linker.
         linker: identity.linker.filter(|_| is_agent),
@@ -671,6 +677,7 @@ async fn route(
                 .as_str()
                 .and_then(workspace::workspace_of_token)
                 .ok_or_else(ApiError::invitation_not_found)?;
+            caller.verified_email = verified_email;
             (workspace, INTERNAL_PREVIEW_PATH.to_string())
         }
         ["v1", "invitations", "accept"] if method == Method::Post => {
@@ -684,6 +691,7 @@ async fn route(
                 .ok_or_else(ApiError::invalid_argument)?;
             let workspace =
                 workspace::workspace_of_token(token).ok_or_else(ApiError::invitation_not_found)?;
+            caller.verified_email = verified_email;
             (workspace, INTERNAL_ACCEPT_PATH.to_string())
         }
         ["v1", "workspaces", ws, ..] => ((*ws).to_string(), path.clone()),

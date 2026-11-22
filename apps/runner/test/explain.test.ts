@@ -3,7 +3,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { EXPLAINED_CODES, explain, explainLine, FAILURE_OUTCOMES } from "../src/core/explain.js";
+import { EXPLAINED_CODES, explain, explained, explainLine, FAILURE_OUTCOMES } from "../src/core/explain.js";
 import { RESULT_RULES } from "../src/core/tool-policy.js";
 import { explainingLogger } from "../src/node/explaining-log.js";
 
@@ -111,5 +111,13 @@ describe("the terminal's line", () => {
       expect(e.todo).toMatch(/gateway address/);
       expect(e.todo).toMatch(/access page/);
     }
+  });
+
+  it("says plainly that a task Podster calls unlinked ran without the repository, on the terminal and in `why`", () => {
+    const e = explain("task_not_linked");
+    expect(e.what).toMatch(/isn't linked to the room's repository, so Runner ran it without one/);
+    expect(e.what).not.toMatch(/state changed/);
+    expect(explained("without_repository", undefined)).toBe(true);
+    expect(explainLine("task_not_linked", "/h/logs/errors.jsonl")).toMatch(/^  why: Podster said this task isn't linked .*\(code task_not_linked; details: \/h\/logs\/errors\.jsonl\)$/);
   });
 });

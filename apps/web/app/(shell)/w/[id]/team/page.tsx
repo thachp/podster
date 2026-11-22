@@ -54,6 +54,7 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
       roomName={room.name}
       archived={isArchived(room)}
       owner={room.owner}
+      roomOrg={roomOrg}
       policyVersion={canManage ? room.policy_version : null}
       members={membersOf(room)}
       viewer={{ id: identity.data.id, orgs: identity.data.orgs, adminOrgs: identity.data.admin_orgs }}

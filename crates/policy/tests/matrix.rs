@@ -1453,3 +1453,45 @@ fn a_forecast_goes_only_to_someone_who_sees_the_whole_plan_and_never_to_a_guest(
         TaskScope::All
     )));
 }
+
+/// Decision 239's "Leave a workroom": a person with a place here leaves on their own; the owner transfers first, and an
+/// agent leaves only through its owner's withdrawal, whatever role is stored for it.
+#[test]
+fn only_a_person_other_than_the_owner_leaves_on_their_own() {
+    for role in [Role::Admin, Role::Member, Role::Guest] {
+        assert_eq!(
+            authorize_workroom(&caller("x", Person, role), WorkroomAction::LeaveRoom),
+            Verdict::Allow,
+            "{role:?}"
+        );
+    }
+    assert_eq!(
+        authorize_workroom(&caller("x", Person, Role::Owner), WorkroomAction::LeaveRoom),
+        Verdict::Forbidden
+    );
+    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        assert_eq!(
+            authorize_workroom(&caller("x", Agent, role), WorkroomAction::LeaveRoom),
+            Verdict::Forbidden,
+            "{role:?}"
+        );
+    }
+    assert_eq!(
+        authorize_workroom(&caller("x", Person, Role::None), WorkroomAction::LeaveRoom),
+        Verdict::NotParticipant
+    );
+}
+
+/// Decision 242: a person invitation gives guest or member, never admin, owner or nothing.
+#[test]
+fn a_person_invitation_gives_guest_or_member_only() {
+    for (role, allowed) in [
+        (Role::Owner, false),
+        (Role::Admin, false),
+        (Role::Member, true),
+        (Role::Guest, true),
+        (Role::None, false),
+    ] {
+        assert_eq!(person_invitation_role_allowed(role), allowed, "{role:?}");
+    }
+}

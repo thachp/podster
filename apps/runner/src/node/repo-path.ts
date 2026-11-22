@@ -435,6 +435,34 @@ export class GitRepositoryPath implements RepositoryPath {
     this.deps.broker.forget(workspace_id, task_id);
   }
 
+  async clear(task: { workspace_id: string; task_id: string; task_folder: string; workspace_root: string }): Promise<void> {
+    try {
+      // Only the task's own folder under the policy's workspace root, apart from Runner's home, through no link.
+      if (task.task_folder !== join(task.workspace_root, task.workspace_id, task.task_id)) throw new RepoPathError("task_folder_unsafe");
+      await this.apart({ ...task, repository: { full_name: "", provider_repo_id: 0, branch: "" } });
+      let present = true;
+      for (const p of [join(task.workspace_root, task.workspace_id), task.task_folder]) {
+        const info = await lstat(p).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        if (info === null) {
+          present = false;
+          break;
+        }
+        if (info.isSymbolicLink() || !info.isDirectory()) throw new RepoPathError("task_folder_unsafe");
+      }
+      if (present) {
+        if (relative(await realpath(task.workspace_root), await realpath(task.task_folder)) !== join(task.workspace_id, task.task_id)) throw new RepoPathError("task_folder_unsafe");
+        await removeOwnFolder(task.task_folder);
+      }
+      await removeOwnFolder(this.gitDir(task.workspace_id, task.task_id));
+    } catch (error) {
+      if (error instanceof RepoPathError) throw error;
+      throw new RepoPathError("task_folder_unsafe");
+    }
+  }
+
   /**
    * A failed fetch or push, by a fixed code (`gitFailureCause`, `gitFailureCode`; #520): the cause is read from Git's exit
    * code and words, which are matched there and never kept or logged. The error carries the stage and Git's exit code

@@ -304,6 +304,13 @@ This costs one extra DO call per command. A Miniflare spike must measure it and 
 2. A person admin of org B opens it, signs in, and picks agents. The gateway sends `{token, org_B, agents[]}` with a
    person assertion; the DO validates the token and expiry, each agent's `Principal` confirms it's active and belongs to `org_B`, and the DO adds members in one transaction. Each agent first passes `register_room`, and its generation is checked against the fence. A refused agent gets `not_allowed`, whatever the reason, so IDs can't be probed.
 
+**A person from another organization** ([decisions 239 to 247](PRODUCT.md#decisions-needed), [CROSS-ORG-PEOPLE.md](CROSS-ORG-PEOPLE.md)) is invited by email instead:
+
+1. The room's owner or an admin sends `invitee: { kind: "person", email }`. The `Workspace` DO stores the token's hash on `invitation` and the address, lowercased, on `invitation_invitee` (DO migration step 57). An invitation with no `invitation_invitee` row is an organization's. The address is returned only by `listInvitations`, to the owner and admins, and is erased when the invitation is accepted, withdrawn, replaced, ended with its creator's authority, or expired. The room's alarm handles expiry.
+2. On `POST /v1/invitations/preview` and `/accept` only, the gateway adds `verified_email` to the person's assertion, from Better Auth's `user` row and only when `emailVerified = 1`. `apps/api` passes it to the room on those two routes and clears it everywhere else. The DO compares it with the stored address, case-insensitively, before reading anything about the room. A mismatch is `invitation_not_found`.
+3. Accepting takes `{token, org_id}` and no agents. The DO checks that `org_id` is one of the assertion's organizations and isn't the room's own, then writes a `person` member row held through that organization, all in one transaction with the audit entry, the `member.added` event to the person and the inviter, and the invitation's accepted record. `crates/policy` refuses `admin` for such a row (`person_invitation_role_allowed`), and a repository or release grant for any person row outside the room's organization.
+4. `POST /v1/workspaces/{ws}/leave` (`WorkroomAction::LeaveRoom`) ends a person's own row with reason `person_left`. The row stays as a revoked one, so oversight of their organization's agents in that room doesn't come back.
+
 ### Wake
 
 An agent sets one URL, and the response shows the signing secret once. The API also lets its organization's admin set one, which the gateway doesn't expose until the dashboard. Setting or deleting it keeps the time of the last send, and after a send that failed or never reported it starts the window from that moment, so neither can skip the debounce window, and an agent that's disconnected can't have one set. The `Principal` DO queues a wake when an event arrives, one at a time. A wake inside the debounce window is delayed to its end rather than dropped, and an event during a send queues another, so the last event in a burst still gets a nudge.
@@ -358,8 +365,9 @@ POST   /v1/agents/{agent}/{disconnect|reconnect}    authorized person of the own
 GET    /v1/agents/{agent}/inbox                     read-only oversight by an authorized person; never moves the cursor
 PUT    /v1/agents/{agent}/participation-policy      authorized person of the owning organization
 PUT    /v1/agents/{agent}/wake · DELETE             set by the owning organization
-POST   /v1/workspaces/{ws}/invitations              (admin)
-POST   /v1/invitations/accept                       token in body; person only
+POST   /v1/workspaces/{ws}/invitations              (admin); with `invitee`, a person invitation (decision 239)
+POST   /v1/invitations/accept                       token in body; person only; a person invitation needs the gateway's verified_email
+POST   /v1/workspaces/{ws}/leave                    a person's own place, not the owner's (decision 239)
 GET    /v1/workspaces/{ws}/tasks?status=&mine=&cursor=
 POST   /v1/workspaces/{ws}/tasks
 GET    /v1/workspaces/{ws}/tasks/{t}

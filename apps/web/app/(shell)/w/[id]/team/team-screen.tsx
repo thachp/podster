@@ -15,7 +15,9 @@ import { CommandNotice, useCommands, type Send } from "./commands";
 import { ConfirmAction } from "./confirm-action";
 import { AccessSheet } from "./access-sheet";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { accessLabel, isExternal, PRESET_LABELS, PRESET_SUMMARIES, roleLabel, type Member, type PendingInvitation, type RoleRead, type Viewer } from "./model";
+import { LeaveWorkroom } from "./leave-workroom";
+import { accessLabel, isExternal, isOutsidePerson, PRESET_LABELS, PRESET_SUMMARIES, roleLabel, type Member, type PendingInvitation, type RoleRead, type Viewer } from "./model";
+import { PersonInvitation } from "./person-invitation";
 import { RoleOpenings, RoleSheet } from "./role-openings";
 
 export type AgentOption = { id: string; name: string; org_id: string };
@@ -26,6 +28,8 @@ export type TeamProps = {
   roomName: string;
   archived?: boolean;
   owner: string;
+  /** The room's own organization, when the read says. A person held through another one is never offered admin. */
+  roomOrg?: string | null;
   /** Null unless the server says this viewer may manage access. */
   policyVersion: number | null;
   members: Member[];
@@ -45,7 +49,7 @@ export type TeamProps = {
 };
 
 export function TeamScreen(props: TeamProps) {
-  const { roomId, roomName, archived = false, owner, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations, roles = { roles: [], external: false } } = props;
+  const { roomId, roomName, archived = false, owner, roomOrg = null, policyVersion, members, viewer, names, orgNames, orgs, agents, agentsPartial = false, invitations, roles = { roles: [], external: false } } = props;
   const canManage = policyVersion !== null;
   const isOwner = viewer.id === owner;
   const commands = useCommands(policyVersion);
@@ -84,6 +88,7 @@ export function TeamScreen(props: TeamProps) {
               <li key={member.principal_id} className="flex flex-wrap items-center justify-between gap-2 p-3">
                 <div id={nameId} className="min-w-0 flex-1 basis-56">
                   <AuthorLine author={{ name, kind: member.kind, organization: orgLabel(member.org_id), viewer: self }} external={isExternal(member.org_id, viewer)} />
+                  {isOutsidePerson(member, roomOrg) && !isExternal(member.org_id, viewer) ? <p className="text-sm text-muted-foreground">Here from another organization than this workroom's</p> : null}
                 </div>
                 <Badge variant="secondary">{accessLabel(member)}</Badge>
                 <div className="flex flex-wrap gap-2">
@@ -94,7 +99,7 @@ export function TeamScreen(props: TeamProps) {
                       </SheetLink>
                     </Button>
                   ) : null}
-                  {member.kind === "person" && isOwner && !archived && member.role !== "admin" ? (
+                  {member.kind === "person" && isOwner && !archived && member.role !== "admin" && !isOutsidePerson(member, roomOrg) ? (
                     <ConfirmAction
                       label="Make admin"
                       describedBy={nameId}
@@ -129,12 +134,13 @@ export function TeamScreen(props: TeamProps) {
                       action={() => send(`${base}/members/${encodeURIComponent(member.principal_id)}`, {}, "Access revoked.", { method: "DELETE" })}
                     />
                   ) : null}
+                  {member.kind === "person" && self ? <LeaveWorkroom base={base} room={room} describedBy={nameId} orgAdmin={viewer.adminOrgs.some((org) => org !== roomOrg)} /> : null}
                 </div>
               </li>
             );
           })}
         </ul>
-        {members.length === 0 && canManage && !archived ? <p className="text-muted-foreground">Nobody else is here yet. Add an agent from your organization, or invite another organization.</p> : null}
+        {members.length === 0 && canManage && !archived ? <p className="text-muted-foreground">Nobody else is here yet. Add an agent from your organization, invite a person by email, or invite another organization's agents.</p> : null}
         {members.length === 0 && !canManage ? <p className="text-muted-foreground">Nobody else is listed for you here.</p> : null}
         {canManage ? null : <p className="text-sm text-muted-foreground">Only this workroom's owner and appointed admins can change who's here.</p>}
       </section>
@@ -181,7 +187,7 @@ function AddParticipants({ base, isOwner, canAdd, orgs, agents, agentsPartial, o
         <h2 id="add-participants" className="text-lg font-medium">
           Add from your organization
         </h2>
-        <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. An invitation below brings in another organization's agents, never its people, so someone from elsewhere joins this organization first and is then added here as a person.</p>
+        <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. Below, invite a person from another organization by email, or invite another organization's agents.</p>
       </div>
       <form ref={agentForm} onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
@@ -338,8 +344,9 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
         <h2 id="invitations" className="text-lg font-medium">
           Invitations
         </h2>
-        <p className="text-sm text-muted-foreground">An admin of the invited organization accepts and picks which of its agents join. Inviting doesn't add anyone by itself, and it never adds the admin who accepts: an agent being here doesn't let its owner see the workroom.</p>
+        <p className="text-sm text-muted-foreground">There are two kinds. A person invitation is for one person, by email, and brings in only them. An organization's invitation is accepted by one of its admins, who picks which of its agents join; it never adds the admin who accepts, and an agent being here doesn't let its owner see the workroom. Inviting doesn't add anyone by itself.</p>
       </div>
+      {archived ? null : <PersonInvitation base={base} send={send} focusAfter={focusAfter} />}
       {link ? (
         <div className="space-y-2 rounded-lg border bg-status-amber-surface p-3 text-status-amber">
           <label className="block space-y-1 text-sm">
@@ -368,7 +375,7 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
         <p className="text-sm text-muted-foreground">New invitations wait until this workroom is brought back. Links below can't be used until then, but you can still withdraw them.</p>
       ) : (
       <form ref={early} onSubmit={create} className="space-y-3 rounded-lg border p-3">
-        <h3 className="font-medium">Create an invitation</h3>
+        <h3 className="font-medium">Invite an organization's agents</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="space-y-1 text-sm">
             <span>Role for agents who join</span>
@@ -429,7 +436,7 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
                     <Badge variant="outline">{archived ? "Paused" : "Pending"}</Badge>
                   </p>
                   <p className="break-words text-muted-foreground">
-                    {roleLabel(invitation.role)} · {invitation.workRole ? `Opening: ${openingName(invitation.workRole)} · ` : ""}{invitation.invitedOrg ? `Only ${plainName(orgLabel(invitation.invitedOrg))}` : "Any organization"} · Created by {label(invitation.createdBy)} · Expires {new Date(invitation.expiresAt).toUTCString()}
+                    {roleLabel(invitation.role)} · {invitation.workRole ? `Opening: ${openingName(invitation.workRole)} · ` : ""}{invitation.email ? `Person: ${invitation.email}` : invitation.invitedOrg ? `Only ${plainName(orgLabel(invitation.invitedOrg))}` : "Any organization"} · Created by {label(invitation.createdBy)} · Expires {new Date(invitation.expiresAt).toUTCString()}
                   </p>
                 </div>
                 <ConfirmAction

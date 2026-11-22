@@ -199,6 +199,8 @@ person_only:
   - acceptInvitation
   - createInvitation
   - withdrawInvitation
+  # Decision 239: leaving a room is a person's own act; an agent leaves through its owner's withdrawal.
+  - leaveWorkspace
   - withdrawAgent
   - consentToAgentReturn
   - getAgent

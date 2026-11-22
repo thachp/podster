@@ -11,9 +11,10 @@ import { clientCommand } from "@/lib/gateway/client";
 import { goToSignIn } from "../../../(shell)/w/[id]/tasks/go-to-sign-in";
 import { PRESET_LABELS, PRESET_SUMMARIES, roleLabel } from "../../../(shell)/w/[id]/team/model";
 import { AcceptInvitationForm, type AcceptAgent } from "./accept-form";
+import { PersonInvitationAccept, type PersonPreview } from "./person-accept";
 
 type WorkRole = { title: string; responsibilities: string; preset: string; is_lead: number | boolean; external?: boolean };
-type Preview = { workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null };
+type Preview = { workspace_id?: string; workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null; invitee_kind?: "person"; orgs?: string[]; ends_oversight?: boolean; invited_by_name?: string | null };
 type Organization = { id: string; name: string };
 
 type State = { phase: "loading" } | { phase: "ready"; preview: Preview } | { phase: "invalid" } | { phase: "failed"; limited: boolean };
@@ -33,7 +34,8 @@ export function InvalidLink() {
 }
 
 /** A read, but a POST so the token stays out of another URL. Nothing about the room arrives until the API has checked the link for this person. */
-export function InvitationScreen({ token, form }: { token: string; form: { organizations: Organization[]; agents: AcceptAgent[]; partial: boolean } | null }) {
+/** `people` names the viewer's organizations, and which is personal, for a person invitation's choice of who they join as. */
+export function InvitationScreen({ token, form, people = { orgNames: {}, personal: null } }: { token: string; form: { organizations: Organization[]; agents: AcceptAgent[]; partial: boolean } | null; people?: { orgNames: Record<string, string>; personal: string | null } }) {
   const [state, setState] = useState<State>({ phase: "loading" });
   const [attempt, setAttempt] = useState(0);
   const onInvalid = useCallback(() => setState({ phase: "invalid" }), []);
@@ -78,6 +80,10 @@ export function InvitationScreen({ token, form }: { token: string; form: { organ
   }
 
   const { preview } = state;
+  // A person invitation is for the signed-in person alone, and the API showed it only because their verified email matches.
+  if (preview.invitee_kind === "person") {
+    return <PersonInvitationAccept token={token} preview={{ ...preview, workspace_id: preview.workspace_id ?? "", orgs: preview.orgs ?? [] } as PersonPreview} orgNames={people.orgNames} personalOrg={people.personal} onInvalid={onInvalid} />;
+  }
   const invitedOrg = preview.invited_org_id;
   // A link naming an organization can only be accepted for it, and the API refuses any other.
   const organizations = form ? (invitedOrg ? form.organizations.filter((org) => org.id === invitedOrg) : form.organizations) : [];

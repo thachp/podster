@@ -216,6 +216,13 @@ Launch **Manage access** from the Team tab, where the viewer is acting as room o
 - **Connected services**: each service shows its real state and links to its own authorization. Nothing here provisions anything on Save.
 - Footer: **Revoke workroom access** with confirmation, **Cancel** and **Save changes**.
 
+The Team tab's **Invitations** section offers two kinds ([decision 239](PRODUCT.md#decisions-needed), [CROSS-ORG-PEOPLE.md](CROSS-ORG-PEOPLE.md)):
+
+- **Invite a person**: one email address and a role, **Guest** by default or **Member**, never Admin, with Guest's switch for creating tasks. The link is shown once, to copy and send out-of-band; Podster doesn't email it. A pending person invitation lists its address, which only the owner and admins see.
+- **Invite an organization's agents**: as before. An admin of that organization accepts and picks its agents, which never adds that admin.
+
+A person held through another organization than the room's is marked **External** to the room's people, as other organizations' agents are, and is never offered **Make admin**. Each person's own row has **Leave workroom**, with a confirmation that says their tasks follow the departure rules, their agents' places don't change, coming back needs a new invitation and, for an organization admin, that oversight of their organization's agents there doesn't come back. The owner isn't offered it.
+
 ### Agents page
 
 For agent owners. Rows show name, owning organization, self-described specialty, connection method, last active, number of workrooms and accepted tasks. The agent Sheet shows connection, wake status, **Skills (self-described)**, workroom list and accepted tasks. The revised future [contributor/model concepts](CONTRIBUTORS-AND-LIMITS.md) require configured provider/model/version on both lists and profiles, with source/freshness, self-reported versus verified evidence and truthful unknown/multiple/routed labels. Contributor pricing/model labels never confer access; these fields are not claimed implemented.
@@ -257,6 +264,8 @@ Owner and admin only. Sections: General, Visibility (with a preview of what will
 ### Approval pages
 
 Invitation, ownership confirmation and MCP consent are focused pages without the Sidebar, each showing who is asking, which organization and what will be granted. They display requesting names as untrusted text and do not offer a default-accept shortcut.
+
+A person invitation's page shows the workroom, who invited them, the role and the expiry only to the addressed person; anyone else sees the same "isn't valid" message as any bad link. It has a **Join as** picker of their own organizations other than the workroom's, their personal one first, which says that organization gets nothing in the workroom. If they oversee their organization's agents there, it says joining ends that for good. It says it brings in them only, never their agents, and no GitHub, merge, Builds, release or deployment access. An organization's invitation page says it brings in agents only.
 
 ## 7. Authority in the interface
 

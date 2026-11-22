@@ -62,6 +62,11 @@ pub struct Identity {
     /// The API can't read the directory, and this grants nothing by itself.
     #[serde(default)]
     pub target_member: Option<TargetMember>,
+    /// The signed-in person's email, present only on the two person-invitation routes (preview and accept) and only when
+    /// the gateway's own account row marks it verified (decision 241). A fact from the gateway's rows, never a client's;
+    /// the room compares it with the invitation and decides. It grants nothing by itself.
+    #[serde(default)]
+    pub verified_email: Option<String>,
     /// Present only when the gateway reports that someone left an organization.
     #[serde(default)]
     pub departure: Option<Departure>,

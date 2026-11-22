@@ -69,6 +69,7 @@ const TABLE = new Map<string, Explanation>([
   ...group(["call_invalid", "input_invalid", "tool_not_allowed", "shell_not_allowed", "path_outside_folder", "path_not_allowed", "run_stopped"], "Runner refused one of the agent's tool calls.", "Nothing to do unless the agent needs that tool: shell needs rooms[].tools to list shell."),
   ...group(["method_not_allowed", "query_not_allowed", "body_too_large", "body_invalid", "body_not_allowed", "model_not_allowed", "model_unpriced", "upstream_failed"], "Runner refused or couldn't send one of the agent's model requests.", SUPPORT),
   // The repository path.
+  ...group(["task_not_linked"], "Podster said this task isn't linked to the room's repository, so Runner ran it without one: an empty folder, no repository token, and no commit, push or pull request. Its result is submitted as text.", "Nothing to do. If the task needed the repository, ask the room to check the repository in Podster and make the task again once it's ready."),
   ...group(["repository_unavailable", "helper_unavailable", "git_unavailable"], "Runner can't work with this room's repository on this machine.", "Check that Git is installed and the room's repository is set in policy.json."),
   ...group(["repository_out_of_scope", "clone_url_unexpected", "repository_id_mismatch", "repository_renamed", "repository_archived", "repository_unprotected", "repository_unreadable"], "The room's repository isn't the one Runner's policy allows, or can't be used as it is.", "Check rooms[].repository in policy.json against the room's repository on GitHub."),
   ...group(["path_unsafe", "unsafe", "work_tree_git", "work_tree_link", "work_tree_special"], "The task's folder held something Runner won't commit or push.", "The details file names the check; the task is released."),
@@ -154,6 +155,8 @@ export const FAILURE_OUTCOMES = new Set([
   "held",
   "waiting",
   "grace_passed",
+  // Not a failure: a task Podster says isn't linked runs without the room's repository, and the terminal says so.
+  "without_repository",
 ]);
 
 /**

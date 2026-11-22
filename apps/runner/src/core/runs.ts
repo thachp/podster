@@ -127,6 +127,8 @@ export type RunEntry = {
   ran_hash: string | null;
   /** What Runner last pushed for this task, or null; absent in a record from before step 10. */
   published?: Published | null;
+  /** True once Podster answered that this task has no linked repository (`task_not_linked`): it runs without a checkout. */
+  unlinked?: boolean | null;
   /** A blocked run's report, while it's owed; null or absent otherwise. */
   report?: BlockedReport | null;
   /** What the last blocked run answered on; cleared by a person's message on the task. Null or absent otherwise. */
@@ -297,6 +299,7 @@ export function checkRuns(v: unknown): string | null {
         (rep.start_failed !== undefined && !orNull(rep.start_failed, isCode)))
     )
       return `${at}.report`;
+    if (e.unlinked !== undefined && e.unlinked !== null && typeof e.unlinked !== "boolean") return `${at}.unlinked`;
     const blocked = e.blocked;
     if (blocked !== undefined && blocked !== null && (!isObj(blocked) || !isHash(blocked.input_hash) || !isHash(blocked.facts_hash))) return `${at}.blocked`;
     const give = e.give_up;

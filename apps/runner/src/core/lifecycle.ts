@@ -532,7 +532,7 @@ export class Lifecycle {
     const config = await readConfig(this.deps.config);
     const parsed = parsePolicyConfig(config, homeOf(this.deps));
     if (parsed.ok && parsed.value.owner_org !== this.ownerOrg) return { outcome: "refuse", reason: "config_invalid", ...ids };
-    return this.policy.evaluate({
+    const decision = this.policy.evaluate({
       config,
       provenance: detail.provenance,
       prompt: detail.prompt?.shape ?? null,
@@ -542,6 +542,10 @@ export class Lifecycle {
       ...homeOf(this.deps),
       now: this.now(),
     });
+    // Podster said this task has no linked repository (`task_not_linked`, the owner's ruling of 2026-11-22): it runs as a
+    // task in a room without one, in an empty folder, with no token, commit, push or pull request. Only a server answer
+    // sets this, never the task's words; everything else the room's policy says is unchanged.
+    return entry.unlinked === true && decision.facts && decision.facts.repository !== null ? { ...decision, facts: { ...decision.facts, repository: null } } : decision;
   }
 
   /** A new event for a task, or a wait that's over: a fresh read and a fresh evaluation. */
@@ -555,7 +559,7 @@ export class Lifecycle {
       this.log("lifecycle.decision", "waiting", known, { code: "attempts_exhausted" });
       return;
     }
-    const entry: RunEntry = { ...known, marker, attempts: { day: today, count: attempts.count + (counted ? 1 : 0) }, retry_at: null, decision: null, consumed: null, reservation: null, accept_key: null, expected_version: null, run_ref: null, give_up: null, after_stop: null, submission: null };
+    let entry: RunEntry = { ...known, marker, attempts: { day: today, count: attempts.count + (counted ? 1 : 0) }, retry_at: null, decision: null, consumed: null, reservation: null, accept_key: null, expected_version: null, run_ref: null, give_up: null, after_stop: null, submission: null };
     const detail = await this.read(offer.workspace_id, offer.task_id);
     const task = detail?.task;
     if (!detail || !task || task.assignee !== this.deps.poller.agentId || (task.status !== "offered" && task.status !== "accepted")) {
@@ -563,6 +567,8 @@ export class Lifecycle {
       await this.put({ ...entry, phase: "done", outcome: task ? `task_${task.status}` : "not_readable" });
       return;
     }
+    // A new offer asks Podster afresh whether the task is linked: it may have been linked since.
+    if (task.status === "offered" && entry.unlinked) entry = { ...entry, unlinked: null };
     if (onlyIfOffered && task.status !== "offered") {
       // An edit to a task that isn't an offer any more: nothing to evaluate. A running run's check-in sees edits itself.
       await this.put({ ...known, marker, attempts: entry.attempts });
@@ -886,6 +892,17 @@ export class Lifecycle {
     } catch (error) {
       if (signal.aborted) return "aborted";
       if (!(error instanceof RepoPathError)) throw error;
+      if (error.code === "task_not_linked" && error.detail.stage === "access") {
+        // Podster's own answer to `get_repo_access`: this task has no linked repository. Not released: the decision is
+        // dropped, and the task evaluated again at once without the repository, so it runs with no checkout.
+        this.log("lifecycle.repository", "without_repository", entry, { code: error.code });
+        this.diagnose("lifecycle.repository", entry, error.code);
+        path.forget(entry.workspace_id, entry.task_id);
+        const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
+        this.state = { ...this.state, ledger };
+        await this.put({ ...entry, phase: "waiting", outcome: error.code, unlinked: true, decision: null, reservation: null, expected_version: null, retry_at: this.now() });
+        return null;
+      }
       this.log("lifecycle.repository", error.transient ? "unavailable" : "refused", entry, { code: error.code, stage: error.detail.stage });
       this.diagnose("lifecycle.repository", entry, error.code, error);
       if (error.transient) {
@@ -1275,7 +1292,7 @@ export class Lifecycle {
       await this.put({ ...this.current(entry), submission: sub });
     }
     const words: NoteWords = !result || !cleaned ? { kind: "lost" } : !cleaned.ok ? { kind: "secret_hidden" } : sub.sharing === "share" || sub.sharing === "approved" ? { kind: "shared", ...cleaned } : { kind: "withheld" };
-    const note = composeNote({ task_id: entry.task_id, pull_request: pr, words });
+    const note = composeNote({ task_id: entry.task_id, pull_request: pr, words, unlinked: pr === null && this.current(entry).unlinked === true });
     const noteHash = await sha256Hex(new TextEncoder().encode(note));
     if (sub.key === null || sub.note_hash !== noteHash) {
       // Stored before it's first sent. A different note gets a new key, so a replay never carries another body.

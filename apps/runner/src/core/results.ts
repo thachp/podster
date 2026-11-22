@@ -191,7 +191,7 @@ function agentSection(summary: string, files: string[]): string {
  * The submission's note, as Markdown: Runner's fixed words, and the agent's only when shared, only in a code block and
  * code spans under Runner's headings, so none of theirs can read as Runner's or become anything but text.
  */
-export function composeNote(input: { task_id: string; pull_request: NotePullRequest | null; words: NoteWords }): string {
+export function composeNote(input: { task_id: string; pull_request: NotePullRequest | null; words: NoteWords; unlinked?: boolean }): string {
   const pr = input.pull_request;
   const words = input.words;
   const linked = pr && isFullName(pr.full_name) && Number.isSafeInteger(pr.number) && pr.number > 0;
@@ -204,7 +204,7 @@ export function composeNote(input: { task_id: string; pull_request: NotePullRequ
           `- Branch: ${codeSpan(pr.branch)}`,
           `- Commit: ${codeSpan(pr.commit)}`,
         ]
-      : ["- Repository: none in this room, so nothing was pushed."]),
+      : [input.unlinked ? "- Repository: Podster said this task isn't linked to the room's repository, so Runner ran it without a checkout and pushed nothing." : "- Repository: none in this room, so nothing was pushed."]),
     "- Tests: not run by Runner. Anything the agent says about tests is its own claim, not verified.",
   ];
   if (words.kind === "shared" && words.redactions > 0) facts.push(`- Secrets: ${words.redactions} thing${words.redactions === 1 ? "" : "s"} that looked like secrets ${words.redactions === 1 ? "is" : "are"} written as ${codeSpan(REDACTED)}.`);

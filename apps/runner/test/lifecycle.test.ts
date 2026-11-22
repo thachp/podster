@@ -1050,6 +1050,73 @@ describe("step 10: the repository path in the lifecycle", () => {
     expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
   });
 
+  it("the owner's ruling of 2026-11-22: a task Podster says isn't linked runs without a checkout and submits as text", async () => {
+    const t = await repoSetup();
+    t.prompter.reviewAnswers = ["approve"];
+    t.repo.prepareError = new RepoPathError("task_not_linked", false, { stage: "access" });
+    t.offer(detail("tsk_free"));
+    await t.pass();
+    // Not released: evaluated again without the repository, and run in the room's policy otherwise unchanged.
+    expect(t.entry("tsk_free")).toMatchObject({ phase: "waiting", outcome: "task_not_linked", unlinked: true, decision: null, reservation: null });
+    expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
+    await t.pass();
+    await t.pass();
+    // One ask of Podster for the repository, and none after its answer: no checkout, no publication.
+    expect(t.repo.prepared).toHaveLength(1);
+    expect(t.repo.published).toHaveLength(0);
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.adapter.starts[0].facts.repository).toBeNull();
+    const issues = t.policyCalls.filter((c) => c.fn === "issue").map((c) => (c.returned as { record: RunDecisionRecord }).record);
+    const consumed = (t.policyCalls.filter((c) => c.fn === "consume").at(-1)?.returned as { record: RunDecisionRecord }).record;
+    expect([issues[0].repository_id, consumed.repository_id, consumed.base_commit]).toEqual(["9001", null, null]);
+    // The room's tools, network and every other fact are as they were with the repository.
+    const { repository: before, ...rest } = JSON.parse(issues[0].facts_key);
+    const { repository: after, ...same } = JSON.parse(consumed.facts_key);
+    expect([before?.provider_repo_id, after, same]).toEqual([9001, null, rest]);
+    expect(t.commands("release_task")).toHaveLength(0);
+    const sent = t.commands("submit_task");
+    expect(sent).toHaveLength(1);
+    expect(Object.keys(sent[0].arguments).sort()).toEqual(["idempotency_key", "note", "task_id", "version", "workspace_id"]);
+    expect(String(sent[0].arguments.note)).toContain("isn't linked to the room's repository");
+    expect(t.entry("tsk_free")).toMatchObject({ phase: "finished", outcome: "submitted", unlinked: true });
+    // One ID-only line says it ran without the repository.
+    const lines = t.logged.map((l) => JSON.parse(l));
+    expect(lines.find((l) => l.outcome === "without_repository")).toEqual({ at: "lifecycle.repository", outcome: "without_repository", agent: AGENT, workspace: ROOM, task: "tsk_free", code: "task_not_linked" });
+  });
+
+  it("the same code at another stage, and every other refusal, still releases as before", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("task_not_linked");
+    t.offer(detail("tsk_a"));
+    await t.pass();
+    await t.pass();
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_a", reason: "repo_task_not_linked" });
+    for (const code of ["repo_not_ready", "grant_required", "grant_expired", "task_not_active"]) {
+      const u = await repoSetup();
+      u.repo.prepareError = new RepoPathError(code, false, { stage: "access" });
+      u.offer(detail("tsk_b"));
+      await u.pass();
+      await u.pass();
+      expect([code, u.adapter.starts.length, u.commands("release_task")[0]?.arguments.reason]).toEqual([code, 0, `repo_${code}`]);
+      expect(u.entry("tsk_b").unlinked ?? null).toBeNull();
+    }
+  });
+
+  it("asks Podster afresh when an unlinked task is offered again", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("task_not_linked", false, { stage: "access" });
+    t.offer(detail("tsk_again"));
+    await t.pass();
+    expect(t.entry("tsk_again").unlinked).toBe(true);
+    t.repo.prepareError = null;
+    const d = detail("tsk_again");
+    d.task.version = 7;
+    t.offer(d, "task.offered");
+    await t.pass();
+    expect(t.repo.prepared).toHaveLength(2);
+    expect(t.adapter.starts.at(-1)?.facts.repository).toEqual({ ...SCOPE, branch: "podster/tsk_again" });
+  });
+
   it("ruling 6: a crash between the pin and the consume is picked up after a restart, on the same base", async () => {
     const t = await repoSetup();
     t.hooks.beforeConsume = () => {

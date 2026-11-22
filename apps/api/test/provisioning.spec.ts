@@ -2035,7 +2035,7 @@ describe("linking the room's tasks once its repository is ready", () => {
     await ask(r);
     const tasks = await everyStatus(r, agent);
     expect((await settled(r)).request.state).toBe("failed");
-    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_link_open_tasks_again (x INTEGER)"));
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
     await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
     expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
     expect(await linkEvents(r.id)).toEqual([]);
@@ -2060,19 +2060,49 @@ describe("linking the room's tasks once its repository is ready", () => {
     await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
     expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
     // Its next start does, before the first request, a read included. The test stands for a start with this table.
-    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_link_open_tasks_again (x INTEGER)"));
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
     await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
     expect(await flags(r.id, tasks)).toEqual({ open: 1, offered: 1, accepted: 1, submitted: 0, completed: 0, canceled: 0 });
     expect((await linkEvents(r.id)).map((e) => e.task_id).sort()).toEqual([tasks.open, tasks.offered, tasks.accepted].sort());
-    // Idempotent: looking again, however often, links nothing more and records nothing more.
-    for (let n = 0; n < 3; n++) await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    // Idempotent: further starts, however many, link nothing more and record nothing more.
+    for (let n = 0; n < 3; n++) {
+      await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
+      await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    }
     expect(await linkEvents(r.id)).toHaveLength(3);
     expect((await eventTypes(r.id)).length).toBe(before + 3);
     // With managed repositories off it links nothing.
     await inRoom(r.id, (sql) => void sql.exec("UPDATE task SET has_linked_repository = 0 WHERE id = ?", tasks.open));
     await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_managed_repositories_on"));
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
     await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
     expect(await linkedOf(r.id, tasks.open)).toBe(0);
+    expect(await linkEvents(r.id)).toHaveLength(3);
+  });
+
+  it("rolls a failed link pass back whole, answers the request anyway, and tries again on the next one", async () => {
+    const r = await room();
+    const agent = await memberAgent(r);
+    const tasks = await everyStatus(r, agent);
+    await inRoom(r.id, (sql) => {
+      sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_1', 'ready', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", r.owner.id);
+      sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", IDS.next(), r.owner.id);
+      // A start, and a pass that fails after linking its first task.
+      sql.exec("CREATE TABLE test_room_restart (x INTEGER)");
+      sql.exec("CREATE TABLE test_fail_link_open_tasks (x INTEGER)");
+    });
+    const read = await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect(read.status, read.text).toBe(200);
+    // Nothing of it stays: no task linked, no event.
+    expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(await linkEvents(r.id)).toEqual([]);
+    // Still failing, each request tries again and leaves nothing.
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
+    expect(await linkEvents(r.id)).toEqual([]);
+    // Once it can, the next request links them, with no new start.
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_fail_link_open_tasks"));
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
+    expect(await flags(r.id, tasks)).toEqual({ open: 1, offered: 1, accepted: 1, submitted: 0, completed: 0, canceled: 0 });
     expect(await linkEvents(r.id)).toHaveLength(3);
   });
 });

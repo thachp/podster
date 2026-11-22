@@ -99,6 +99,17 @@ pub(super) fn links_new_tasks(sql: &SqlStorage, switched_on: bool) -> R<bool> {
     Ok(switched_on && link(sql)?.is_some_and(|link| link.status == Some(LinkStatus::Ready)))
 }
 
+/// Test builds only: whether the room holds a table of this name.
+#[cfg(feature = "failpoints")]
+fn has_table(sql: &SqlStorage, name: &str) -> bool {
+    rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![name.into()],
+    )
+    .is_ok_and(|found| !found.is_empty())
+}
+
 /// The event a task gets when it's linked after it was made: its ID, and nothing else.
 pub(super) const LINKED_LATER: &str = "task_change.repository_linked";
 
@@ -139,6 +150,9 @@ pub(super) fn link_open_tasks(sql: &SqlStorage, switched_on: bool, now: i64) -> 
     if status != Some(LinkStatus::Ready) {
         return Ok(vec![]);
     }
+    // Test builds only: a room holding this table fails after linking its first task, so a test sees it all rolled back.
+    #[cfg(feature = "failpoints")]
+    let fails = has_table(sql, "test_fail_link_open_tasks");
     let mut linked = Vec::new();
     for row in rows(
         sql,
@@ -152,6 +166,10 @@ pub(super) fn link_open_tasks(sql: &SqlStorage, switched_on: bool, now: i64) -> 
         if let (true, Some(id)) = (due, text(&row["id"])) {
             link_task(sql, &id, now)?;
             linked.push(id);
+            #[cfg(feature = "failpoints")]
+            if fails {
+                return Err(ApiError::internal("forced link failure"));
+            }
         }
     }
     Ok(linked)
@@ -176,20 +194,16 @@ impl Workspace {
     /// it's idempotent by its state, since a linked task is never due again. A room that isn't made or still has to
     /// migrate is left for its next request, and one that fails is tried again on it. Logs carry IDs and a count.
     pub(super) fn link_open_tasks_once(&self) {
+        // Test builds only: a room holding this table is taken as started afresh, once, and the table goes.
         #[cfg(feature = "failpoints")]
-        let again = {
+        {
             let sql = self.state.storage().sql();
-            !rows(
-                &sql,
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_link_open_tasks_again'",
-                vec![],
-            )
-            .unwrap_or_default()
-            .is_empty()
-        };
-        #[cfg(not(feature = "failpoints"))]
-        let again = false;
-        if self.open_tasks_linked.get() && !again {
+            if has_table(&sql, "test_room_restart") {
+                let _ = exec(&sql, "DROP TABLE test_room_restart", vec![]);
+                self.open_tasks_linked.set(false);
+            }
+        }
+        if self.open_tasks_linked.get() {
             return;
         }
         let sql = self.state.storage().sql();

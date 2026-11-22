@@ -4704,6 +4704,9 @@ impl Workspace {
                 let fresh = self
                     .read_for_command(&identity, &target, &verb, &body, switched_on)
                     .await;
+                // Test builds only: holds the command between its read and its transaction, so a test can change the room.
+                #[cfg(feature = "failpoints")]
+                self.test_hold(&sql, "test_hold_task_command").await;
                 let context = changes::Context {
                     switched_on,
                     fresh,

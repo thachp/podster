@@ -137,7 +137,7 @@ flowchart LR
 
 A command returns the resulting object, so a caller gets its new `version` without a second read.
 
-**Queries** such as `get_task` and `list_tasks` have no side effects and need no idempotency key. They still pass through `crates/policy`, so a guest's results are filtered on every read.
+**Queries** such as `get_task` and `list_tasks` have no side effects and need no idempotency key. They still pass through `crates/policy`, so a guest's results are filtered on every read. The one exception is a system pass, not the query's: once each time a room's Durable Object starts, before it handles any request, a read included, it links the room's due tasks to its ready repository ([which tasks](#managed-repositories-and-merge-m5)), as a room migrates before its first request. It's a transaction of its own, rolled back whole if it fails and tried again on the next request, it never authorizes anything, and no caller can ask for it or change what it does.
 
 | Read model | Lives in | Updated | Consistency |
 | --- | --- | --- | --- |

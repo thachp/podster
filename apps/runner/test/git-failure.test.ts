@@ -2,7 +2,7 @@
 // the diagnostics file and the log carry the cause and the stage.
 import { describe, expect, it } from "vitest";
 import { explain } from "../src/core/explain.js";
-import { gitFailureCause, gitFailureCode, gitVersionSupported, MIN_GIT_VERSION, parseGitVersion, RepoPathError, type GitCause } from "../src/core/repository.js";
+import { fetchArgs, gitFailureCause, gitFailureCode, gitVersionSupported, MIN_GIT_VERSION, NO_FETCH_HEAD_VERSION, parseGitVersion, RepoPathError, type GitCause } from "../src/core/repository.js";
 import { logLine } from "../src/core/runtime.js";
 import { diagnosticLine, whyLines } from "../src/node/diagnostics.js";
 
@@ -77,20 +77,24 @@ describe("gitFailureCode", () => {
       expect([code, explain(code).known]).toEqual([code, true]);
       expect([code, explain(`repo_${code}`)]).toEqual([code, explain(code)]);
     }
-    expect(explain("repo_fetch_git_too_old").todo).toContain("2.29");
+    expect(explain("repo_fetch_git_too_old").todo).toContain("2.25");
     expect(explain("repo_fetch_failed").what).not.toBe(explain("repo_anything_else").what);
   });
 });
 
 describe("Git's version", () => {
-  it("reads git --version's usual line, and holds it to 2.29", () => {
-    expect(MIN_GIT_VERSION).toEqual([2, 29]);
+  it("reads git --version's usual line, holds it to 2.25, and gives --no-write-fetch-head only to 2.29 or later", () => {
+    expect(MIN_GIT_VERSION).toEqual([2, 25]);
+    expect(NO_FETCH_HEAD_VERSION).toEqual([2, 29]);
     expect(parseGitVersion("git version 2.50.1 (Apple Git-155)\n")).toEqual([2, 50]);
     expect(parseGitVersion("git version 2.25.1\n")).toEqual([2, 25]);
     expect(parseGitVersion("git version 2.43.0.windows.1")).toEqual([2, 43]);
     expect(parseGitVersion("hub version 2.14")).toBeNull();
     expect(parseGitVersion("")).toBeNull();
-    for (const [v, ok] of [[[2, 25], false], [[2, 28], false], [[2, 29], true], [[2, 43], true], [[3, 0], true], [[1, 99], false]] as const) expect(gitVersionSupported(v)).toBe(ok);
+    for (const [v, ok] of [[[2, 24], false], [[2, 25], true], [[2, 28], true], [[2, 29], true], [[3, 0], true], [[1, 99], false]] as const) expect(gitVersionSupported(v)).toBe(ok);
+    for (const [v, ok] of [[[2, 25], false], [[2, 28], false], [[2, 29], true], [[2, 43], true]] as const) expect(gitVersionSupported(v, NO_FETCH_HEAD_VERSION)).toBe(ok);
+    expect(fetchArgs("podsterdev/todo-app", "main", "refs/runner/start")).toContain("--no-write-fetch-head");
+    expect(fetchArgs("podsterdev/todo-app", "main", "refs/runner/start", false)).toEqual(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "https://github.com/podsterdev/todo-app.git", "refs/heads/main:refs/runner/start"]);
   });
 });
 
@@ -105,7 +109,7 @@ describe("the stage, in the log and the diagnostics file", () => {
     const line = JSON.parse(diagnosticLine({ at: "lifecycle.repository", code: error.code, workspace: "wsp_1", task: "tsk_1", error }, 0)) as Record<string, unknown>;
     expect(line).toMatchObject({ code: "fetch_git_too_old", stage: "fetch", exit_code: 129, transient: 0, message: "repository path: fetch_git_too_old" });
     const why = whyLines("tsk_1", line, "/h/logs/errors.jsonl");
-    expect(why[0]).toContain("at lifecycle.repository (stage fetch): This machine's Git is older than 2.29");
+    expect(why[0]).toContain("at lifecycle.repository (stage fetch): This machine's Git is older than 2.25");
     expect(why[0]).toContain("(code fetch_git_too_old)");
     expect(whyLines("tsk_1", { ...line, stage: "fetch\u001b[2J" }, "/f")[0]).not.toContain("stage");
   });

@@ -38,6 +38,7 @@ import {
   hardening,
   isCommit,
   locate,
+  NO_FETCH_HEAD_VERSION,
   parseGitVersion,
   pushArgs,
   readAccess,
@@ -151,6 +152,8 @@ export type RepoPathDeps = {
   app_origin?: string | null;
   /** How long Git may take to list the folders it ignores; `IGNORED_LIST_TIMEOUT_MS` unless a test sets it. */
   ignored_list_timeout_ms?: number;
+  /** Whether Git takes `fetch --no-write-fetch-head` (2.29 or later, read at setup); true unless set. */
+  fetch_head?: boolean;
   /** The most one publish commits; `COMMIT_LIMITS` unless a test sets it. */
   commit_limits?: { files: number; bytes: number; file_bytes: number };
 };
@@ -338,7 +341,7 @@ export class GitRepositoryPath implements RepositoryPath {
   async prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }> {
     await this.apart(task);
     const scope = scopeOf(task);
-    const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
+    const access = await inStage("access", () => this.deps.broker.access(task.workspace_id, task.task_id, scope));
     // GitHub's API, before any Git command: a failure here is the facts check's, not the fetch's (#520).
     const { start, from } = await inStage("facts", () => this.startOf(task, access, signal));
     const branch = task.repository.branch;
@@ -353,7 +356,7 @@ export class GitRepositoryPath implements RepositoryPath {
       // No templates, so no sample hooks or anything else from the system's Git is copied in.
       if ((await this.git(task, ["init", "--quiet", "--template="], { signal })).code !== 0) throw new RepoPathError("git_init_failed");
       await this.excludeCaches(task);
-      const fetched = await this.git(task, fetchArgs(scope.full_name, from, "refs/runner/start"), { secret: access.token, signal });
+      const fetched = await this.git(task, fetchArgs(scope.full_name, from, "refs/runner/start", this.deps.fetch_head ?? true), { secret: access.token, signal });
       if (fetched.code !== 0) throw this.gitFailure(task, fetched, "fetch");
       // Pinned and verified: the commit fetched must be the one GitHub's API named; a branch that moved between is retried.
       if ((await this.head(task, signal, "refs/runner/start")) !== start) throw new RepoPathError("base_moved", true);
@@ -596,13 +599,15 @@ export async function hostRepositoryPath(home: string, request: AgentRequest, cl
     log("repo.setup", "unavailable", { code: "git_unavailable" });
     return null;
   }
-  // A Git older than `MIN_GIT_VERSION` refuses an option every fetch passes (#520): said once here, by its code, rather
-  // than as each task's failed fetch. An answer that isn't Git's usual line is let through; the fetch then says why.
+  // Git 2.25 or later (#520, #525): an older one is refused once here, by its code, rather than as each task's failed
+  // fetch; one older than 2.29 is not given `--no-write-fetch-head`. An answer that isn't Git's usual line is let
+  // through as a current Git; a fetch it refuses then says `fetch_git_too_old`.
   const version = await git(["--version"], { timeout_ms: GIT_VERSION_TIMEOUT_MS }).catch(() => null);
   const parsed = version && version.code === 0 ? parseGitVersion(version.stdout) : null;
   if (parsed && !gitVersionSupported(parsed)) {
     log("repo.setup", "unavailable", { code: "git_too_old" });
     return null;
   }
-  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git, github, helper, log, app_origin: opts.app_origin ?? null });
+  const fetch_head = parsed === null || gitVersionSupported(parsed, NO_FETCH_HEAD_VERSION);
+  return new GitRepositoryPath({ home, broker: new RepoBroker(request, clock, log), git, github, helper, log, app_origin: opts.app_origin ?? null, fetch_head });
 }

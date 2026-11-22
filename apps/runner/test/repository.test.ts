@@ -499,7 +499,7 @@ const RAW_NAMES = await (async () => {
 const sh = (cwd: string, ...args: string[]) => execFileSync(realGit as string, args, { cwd, env: { PATH: "/usr/bin:/bin", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString().trim();
 
 /** A "GitHub": a local bare repository with `main`, and an API answering for it. */
-async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: { files: number; bytes: number; file_bytes: number } } = {}) {
+async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: { files: number; bytes: number; file_bytes: number }; fetch_head?: boolean } = {}) {
   const root = await temp();
   const home = join(root, "home");
   await mkdir(home, { mode: 0o700 });
@@ -1545,7 +1545,10 @@ describe.skipIf(realGit === null)("#520: a failed checkout says why, by stage an
     });
   }
 
-  it("names the facts stage for GitHub's API answers before any Git command, and the checkout stage for host Git on this machine", async () => {
+  it("names the access stage for Podster's get_repo_access, the facts stage for GitHub's API answers before any Git command, and the checkout stage for host Git on this machine", async () => {
+    const u = await world();
+    await expect(u.path.prepare({ ...u.task, repository: { ...u.task.repository, full_name: "podsterdev/other" }, continue_from: null }, u.signal)).rejects.toMatchObject({ code: "repository_out_of_scope", detail: { stage: "access" } });
+    expect(u.gitCalls).toEqual([]);
     const w = await world();
     w.api.rules = [];
     await expect(w.path.prepare({ ...w.task, continue_from: null }, w.signal)).rejects.toMatchObject({ code: "repository_unprotected", detail: { stage: "facts" } });
@@ -1567,8 +1570,8 @@ describe.skipIf(realGit === null)("#520: a failed checkout says why, by stage an
   });
 });
 
-describe.skipIf(realGit === null)("#520: Runner's setup refuses a Git too old for its fetch", () => {
-  /** A Git that answers as Ubuntu 20.04's 2.25.1 does: its version, and exit 129 for `--no-write-fetch-head`. */
+describe.skipIf(realGit === null)("#520, #525: Runner's setup refuses a Git older than 2.25, and gives an older one no --no-write-fetch-head", () => {
+  /** A Git that answers its version as given, and exit 129 for `--no-write-fetch-head`, as 2.25.1 does (see old-git.test.ts). */
   async function oldGit(version: string): Promise<string> {
     const dir = await temp();
     const path = join(dir, "git");
@@ -1580,8 +1583,8 @@ describe.skipIf(realGit === null)("#520: Runner's setup refuses a Git too old fo
   const request = async () => ({});
   const clock = { now: () => NOW, idle: async () => undefined };
 
-  it("logs git_too_old and gives no repository path for Git 2.25; 2.29 and this machine's Git pass; an odd answer is let through", async () => {
-    for (const [version, ok] of [["git version 2.25.1", false], ["git version 2.28.0", false], ["git version 2.29.0", true], ["git version 2.43.0", true], ["git version 3.0.0", true], ["not git at all", true]] as const) {
+  it("logs git_too_old and gives no repository path below 2.25; 2.25 and later, this machine's Git, and an odd answer pass", async () => {
+    for (const [version, ok] of [["git version 2.24.4", false], ["git version 1.9.0", false], ["git version 2.25.1", true], ["git version 2.28.0", true], ["git version 2.29.0", true], ["git version 3.0.0", true], ["not git at all", true]] as const) {
       const home = await temp();
       const logged: string[] = [];
       const path = await hostRepositoryPath(home, request, clock, lineLogger((l) => logged.push(l)), { git: await oldGit(version), github });
@@ -1591,6 +1594,16 @@ describe.skipIf(realGit === null)("#520: Runner's setup refuses a Git too old fo
     const logged: string[] = [];
     expect(await hostRepositoryPath(await temp(), request, clock, lineLogger((l) => logged.push(l)), { git: realGit, github })).not.toBeNull();
     expect(logged).toEqual([]);
+  });
+
+  it("checks out with a Git older than 2.29 by leaving --no-write-fetch-head out", async () => {
+    const w = await world({ fetch_head: false });
+    await w.path.prepare({ ...w.task, continue_from: null }, w.signal);
+    const fetch = w.gitCalls.find((c) => c.args.includes("fetch"));
+    expect(fetch?.args).not.toContain("--no-write-fetch-head");
+    const v = await world();
+    await v.path.prepare({ ...v.task, continue_from: null }, v.signal);
+    expect(v.gitCalls.find((c) => c.args.includes("fetch"))?.args).toContain("--no-write-fetch-head");
   });
 
   it("would have answered fetch_git_too_old, not fetch_failed, had the old Git reached a fetch", async () => {

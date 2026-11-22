@@ -34,11 +34,11 @@ export type RepoAccess = { token: string; expires_at: number; repository: string
 export type AccessDetail = { names?: string; count?: number; length?: number; prefix?: "yes" | "no"; type?: string; stage?: RepoStage; exit_code?: number };
 
 /**
- * Where on the repository path a failure happened (#520): `facts`, GitHub's API answers read before any Git command
+ * Where on the repository path a failure happened (#520): `access`, Podster's `get_repo_access` and its check; `facts`, GitHub's API answers read before any Git command
  * (the repository, its rules, the start ref); `fetch` and `push`, host Git against GitHub; `checkout`, host Git on this
  * machine only. A fixed word, for the log and the local diagnostics file.
  */
-export type RepoStage = "facts" | "fetch" | "checkout" | "push";
+export type RepoStage = "access" | "facts" | "fetch" | "checkout" | "push";
 
 const KEY_NAME = /^[a-z_]{1,40}$/;
 
@@ -372,10 +372,15 @@ export function locate(git_dir: string, work_tree: string): string[] {
 }
 
 /**
- * The oldest Git Runner works with: 2.29, the first with `fetch --no-write-fetch-head` (`fetchArgs`). An older Git
- * refuses that option with its usage text and exit 129, which before #520 read only as `fetch_failed`.
+ * The oldest Git Runner works with: 2.25, Ubuntu 20.04's, which WSL installs (the coordinator's ruling on #525). Checked
+ * on a real 2.25 in `test/old-git.test.ts`. Below it Runner refuses at startup (`git_too_old`).
  */
-export const MIN_GIT_VERSION: readonly [number, number] = [2, 29];
+export const MIN_GIT_VERSION: readonly [number, number] = [2, 25];
+/**
+ * The first Git with `fetch --no-write-fetch-head`. An older one is not given it, and writes `FETCH_HEAD` into the task's
+ * Git folder in Runner's home, which no container mounts; it names a commit and the URL, never a credential.
+ */
+export const NO_FETCH_HEAD_VERSION: readonly [number, number] = [2, 29];
 
 /** `git --version`'s major and minor, or null when the answer isn't Git's usual `git version X.Y…` line. */
 export function parseGitVersion(text: string): [number, number] | null {
@@ -383,8 +388,8 @@ export function parseGitVersion(text: string): [number, number] | null {
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** Whether a version read by `parseGitVersion` is at least `MIN_GIT_VERSION`. */
-export const gitVersionSupported = (v: readonly [number, number]) => v[0] > MIN_GIT_VERSION[0] || (v[0] === MIN_GIT_VERSION[0] && v[1] >= MIN_GIT_VERSION[1]);
+/** Whether `v` is at least `min` (by default `MIN_GIT_VERSION`). */
+export const gitVersionSupported = (v: readonly [number, number], min: readonly [number, number] = MIN_GIT_VERSION) => v[0] > min[0] || (v[0] === min[0] && v[1] >= min[1]);
 
 /**
  * Why a host Git command against GitHub failed, read from its exit code and its words (#520). The words are matched
@@ -399,7 +404,8 @@ export const gitVersionSupported = (v: readonly [number, number]) => v[0] > MIN_
  * - `dns`, `network`, `tls`: the name didn't resolve; the connection failed, was reset or timed out (and Runner's own
  *   time limit, exit 124); the TLS handshake or the certificate check failed.
  * - `too_large`, `rejected`: a push GitHub or the way to it refused for its size, or as not a fast-forward.
- * - `git_too_old`: Git didn't know an option Runner passes (exit 129, `unknown option`, its usage text).
+ * - `git_too_old`: Git didn't know an option Runner passes (exit 129, `unknown option`, its usage text): a Git older than
+ *   `MIN_GIT_VERSION`, or one whose version Runner couldn't read.
  * - `https_unavailable`: this Git can't speak HTTPS (no `git-remote-https`).
  * - `local_write`: Git couldn't write Runner's own Git folder (a lock, a permission, a full or read-only disk).
  * - `unknown`: none of these.
@@ -473,10 +479,13 @@ export function gitFailureCode(cause: GitCause, op: "fetch" | "push"): { code: s
   return { code: codes[cause], transient: passing, revoke: cause === "auth" || cause === "access_denied" };
 }
 
-/** Fetches exactly one branch into one local ref: no tags, no submodules, no other refs. */
-export function fetchArgs(full_name: string, branch: string, into: string): string[] {
+/**
+ * Fetches exactly one branch into one local ref: no tags, no submodules, no other refs. `fetch_head` false leaves out
+ * `--no-write-fetch-head`, for a Git older than `NO_FETCH_HEAD_VERSION`, which refuses it.
+ */
+export function fetchArgs(full_name: string, branch: string, into: string, fetch_head = true): string[] {
   if (!isFullName(full_name) || !isBranch(branch) || !/^refs\/runner\/[a-z]+$/.test(into)) throw new RepoPathError("fetch_invalid");
-  return ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", cloneUrl(full_name), `refs/heads/${branch}:${into}`];
+  return ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", ...(fetch_head ? ["--no-write-fetch-head"] : []), cloneUrl(full_name), `refs/heads/${branch}:${into}`];
 }
 
 /**

@@ -15,7 +15,7 @@ Runner pairs your machine with one of your Podster agents, then polls that agent
   - Windows, only inside a WSL2 Linux distro with Docker Desktop's WSL integration ([Windows (WSL2)](#windows-wsl2)). Runner refuses native Windows.
 
   On any other system Runner refuses to run tasks (`platform_unverified`), and pairing and polling still work.
-- Git 2.29 or later at `/usr/bin/git`, `/opt/homebrew/bin/git` or `/usr/local/bin/git`. Ubuntu 20.04's Git is 2.25, too old: Runner then logs `git_too_old` at startup and runs no task in a room with a repository.
+- Git 2.25 or later (Ubuntu 20.04's) at `/usr/bin/git`, `/opt/homebrew/bin/git` or `/usr/local/bin/git`. With an older Git, Runner logs `git_too_old` at startup and runs no task in a room with a repository.
 
 ## Commands
 

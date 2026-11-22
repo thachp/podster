@@ -105,8 +105,8 @@
 // Exit 1 if anything is found that isn't allowed, or an entry doesn't match; 2 if esbuild isn't installed.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "acorn";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
@@ -120,10 +120,22 @@ const isTestFile = (path) => {
   return file.startsWith(`${WEB}/test/`) || /\.test\.tsx?$/.test(file);
 };
 
+/**
+ * A package e2e/package.json pins, from e2e's node_modules, or else from the current folder's: apps/api's and
+ * apps/gateway's `npm test` run this check, and those packages pin the same acorn and esbuild. Null if neither has it.
+ */
+async function load(name) {
+  const mod = await import(name).catch(() => import(pathToFileURL(createRequire(join(process.cwd(), "package.json")).resolve(name)).href)).catch(() => null);
+  return mod && (mod.default ?? mod);
+}
+const acorn = await load("acorn");
+if (!acorn) throw new Error("test-timing-check needs acorn: run `npm ci` in e2e, apps/api or apps/gateway first.");
+const { parse } = acorn;
+
 let build;
 /** The esbuild e2e/package.json pins; null if it isn't installed. */
 async function esbuild() {
-  if (build === undefined) build = await import("esbuild").catch(() => null);
+  if (build === undefined) build = await load("esbuild");
   return build;
 }
 
@@ -711,7 +723,7 @@ async function selfTest() {
   // run to run only through esbuild. Its absence is said once, as the check itself says it, not as a failure per case.
   const tool = await esbuild();
   if (!tool) {
-    console.error("test-timing-check self-test needs esbuild: run `npm ci` in e2e first. No case was run.");
+    console.error("test-timing-check self-test needs esbuild: run `npm ci` in e2e, apps/api or apps/gateway first. No case was run.");
     return 2;
   }
   /** The titles of the cases that failed, named again at the end so a cut-off log still places them. */
@@ -949,7 +961,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const files = named.length ? named.map((name) => resolve(process.cwd(), name)) : ROOTS.flatMap((dir) => specs(join(root, dir)));
   const all = await check(files);
   if (all === null) {
-    console.error("test-timing-check needs esbuild: run `npm ci` in e2e first.");
+    console.error("test-timing-check needs esbuild: run `npm ci` in e2e, apps/api or apps/gateway first.");
     process.exit(2);
   }
   const list = JSON.parse(readFileSync(ALLOW, "utf8"));

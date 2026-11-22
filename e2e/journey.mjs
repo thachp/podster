@@ -513,8 +513,10 @@ async function acceptance() {
 
   await check("AC-03", "people outside the room and agents can't reach access commands, whatever their label", async () => {
     const tools = await lead.tools();
-    // Filling an opening is an agent's own act, needs an owner's or admin's invite, and M1-ROLES tests it. Nothing else may match.
-    const fillingAnOpening = ["list_role_openings", "claim_role", "release_role"];
+    // Filling an opening is an agent's own act, needs an owner's or admin's invite, and M1-ROLES tests it. Turning down its own
+    // invite (`decline_role`, issue 522) is the agent's own act too: it ends only the invite naming it and grants nothing, and
+    // apps/api's role-invites spec tests it. Nothing else may match.
+    const fillingAnOpening = ["list_role_openings", "claim_role", "decline_role", "release_role"];
     ok(!tools.some((t) => !fillingAnOpening.includes(t) && /member|invit|role|revoke|disconnect|withdraw|admin|grant|scope/.test(t)), `an access tool is exposed: ${tools.join(", ")}`);
     rejected(await guest.execute("add_member", { workspace_id: room }), "an unknown capability");
     for (const [method, path, body] of [

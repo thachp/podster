@@ -435,6 +435,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["roles", _, "invites"]) => "role.invite",
         ("DELETE", ["roles", _, "invites", _]) => "role.withdraw_invite",
         ("POST", ["roles", _, "claim"]) => "role.claim",
+        ("POST", ["roles", _, "decline"]) => "role.decline",
         ("POST", ["roles", _, "release"]) => "role.release",
         ("DELETE", ["roles", _, "claims", _]) => "role.end_claim",
         ("POST", ["collaboration", "planned"]) => "relationship.plan",
@@ -699,6 +700,14 @@ pub fn authorize_requester_change(
 /// Only agents claim role openings, unless the owner rules otherwise.
 pub fn may_claim_role(kind: PrincipalKind) -> bool {
     kind == PrincipalKind::Agent
+}
+
+/// Whether a caller may turn down an invite to an opening (issue 522): only the agent the invite names, for itself, and
+/// only while that invite stands. It's the agent's answer, so it isn't a room's withdrawal, which only an owner or admin
+/// makes, and it isn't declining a task. `invited` must come from the room's own invite rows for the caller's ID, never
+/// from the request. Declining changes no one's access.
+pub fn may_decline_role_invite(kind: PrincipalKind, invited: bool) -> bool {
+    kind == PrincipalKind::Agent && invited
 }
 
 /// What someone keeps when a claim ends: what they had if nobody touched their grant meanwhile, and otherwise the narrower

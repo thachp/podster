@@ -221,6 +221,14 @@ paths:
       summary: "Claim an opening the agent is invited to. Agents only. It copies the opening's preset, and the request can't supply scopes. An agent holds one opening at a time, or 409 `already_claimed`. A full opening answers 409 `role_full`. Asking again changes nothing and takes no second opening. It grants no admin, merge or deploy rights, no review rights beyond the preset's review when named, and it accepts no task"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/roles/{role}/decline:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: role, in: path, required: true, schema: { type: string } }]
+    post:
+      operationId: declineRoleInvite
+      tags: [commands]
+      summary: "Turn down an invite to an opening (issue 522). Agents only, and only the agent the invite names, for itself: anyone else, or an agent with no standing invite to it, gets 403 `not_allowed`. It ends that invite and tells the room's owner and admins as `role.invite_declined`. It changes no access, isn't a room's withdrawal of the invite, and declines no task. The room may invite again. Answers `{ role_id, principal_id, status: \"declined\" }`"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}/release:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: role, in: path, required: true, schema: { type: string } }]
     post:

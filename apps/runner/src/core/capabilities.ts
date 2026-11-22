@@ -14,6 +14,10 @@
  * its signing secret. Neither grants anything in a room, and the nudge sends nothing until a person who administers the
  * agent's organization switches it on in Podster. Only `src/core/nudge.ts` names them; a test holds that.
  *
+ * `list_role_openings`, `claim_role` and `decline_role` (issue 522) answer a role invite as this agent, under the owner's
+ * local policy (`roles.ts`): the room decides each call, only for the invite naming this agent, and a claim copies only
+ * the opening's preset. Neither accepts or declines a task. Only `src/core/roles.ts` names them; a test holds that.
+ *
  * Step 6 calls only the reads and the inbox. The lifecycle calls are named now so the registered agent is the one later
  * steps use: Runner registers once per pairing and never again by itself.
  */
@@ -38,6 +42,9 @@ export const RUNNER_CAPABILITIES = [
   "get_repo_access",
   "set_a2a_endpoint",
   "verify_a2a_endpoint",
+  "list_role_openings",
+  "claim_role",
+  "decline_role",
 ] as const;
 
 /**

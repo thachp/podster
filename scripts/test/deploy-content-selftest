@@ -146,7 +146,7 @@ for arg in "$@"; do [[ "$arg" == *"$expected"* ]] && echo "TOKEN-IN-ARGV curl" >
 first=no; [ "${1:-}" = -q ] && first=yes
 leaks=none
 [ -n "${HTTPS_PROXY:-}${https_proxy:-}${HTTP_PROXY:-}${ALL_PROXY:-}${CURL_HOME:-}${SELFTEST_CANARY:-}" ] && leaks=caller-env
-explicit="" implied=GET out=/dev/null headers=/dev/null url="" config=false extra=""
+explicit="" implied=GET out=/dev/null headers=/dev/null url="" config=false extra="" max_time=none
 while [ $# -gt 0 ]; do
   case "$1" in
     -X | --request) explicit=$2; shift ;;
@@ -160,7 +160,8 @@ while [ $# -gt 0 ]; do
     -D) headers=$2; shift ;;
     -H) extra=$2; shift ;;
     --config) [ "$2" = - ] && config=true; shift ;;
-    -w | --proto | --max-time) shift ;;
+    --max-time) max_time=$2; shift ;;
+    -w | --proto) shift ;;
     http://* | https://*) url=$1 ;;
   esac
   shift
@@ -208,12 +209,20 @@ case "$url" in
     if [ -f "$fix/probe-hangs" ]; then
       exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/probing" # one process; see the note above the stand-ins
     fi
+    echo "max-time $key $max_time" >> "$fix/calls"
     # A queue in $fix/<key>.before: each line is answered once, in turn, before the configured answer. It stands for
-    # Cloudflare's own answers while a new route isn't in effect yet: a 52x with no Worker headers, or no answer.
+    # Cloudflare's own answers while a new route isn't in effect yet: a 52x with no Worker headers, or no answer. `slow`
+    # is a try that never answers in time: it waits out the --max-time it was given, at most 5 s, and gets no answer.
     if [ -s "$fix/$key.before" ]; then
       status=$(head -n 1 "$fix/$key.before")
       tail -n +2 "$fix/$key.before" > "$fix/$key.before.rest" && mv "$fix/$key.before.rest" "$fix/$key.before"
       if [ "$status" = unreachable ]; then printf 000; exit 6; fi
+      if [ "$status" = slow ]; then
+        wait_for=$max_time; [[ "$wait_for" =~ ^[0-9]+$ ]] && [ "$wait_for" -le 5 ] || wait_for=5
+        /bin/sleep "$wait_for"
+        printf 000
+        exit 28
+      fi
       printf 'HTTP/2 %s\r\ncontent-type: text/plain\r\n\r\n' "$status" > "$headers"
       printf 'error code: %s\n' "$status" > "$out"
       printf '%s' "$status"
@@ -229,10 +238,12 @@ case "$url" in
 esac
 EOF
 
-# sleep: records how long it was asked to wait and returns at once, so the wait for the route takes no real time.
+# sleep: records how long it was asked to wait, then waits that long. The wait for the route is bounded by the clock, so
+# its pauses must take real time.
 stub sleep <<'EOF'
 #!/usr/bin/env bash
 echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
+exec /bin/sleep "$@"
 EOF
 
 # --- what Cloudflare and the content domain answer when all is well ---
@@ -758,7 +769,13 @@ check "  the token is in no output" no_token
 fresh; printf 'unreachable\n530\n' > "$fix/probe-unknown.before"; at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "no answer, then 530, then the Worker's not-found: exit 0, after two waits" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 2 ] && grep -q 'HTTP 000), trying again' '$tmp/out' && grep -q 'HTTP 530), trying again' '$tmp/out'"
 fresh; probe probe-unknown 522 "error code: 522"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a route that never answers: 15 tries, 14 waits, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 14 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 16 ] && grep -q '^wait    the route still isn.t answering after 15 tries and [0-9]* s (HTTP 522): probing anyway' '$tmp/out' && grep -q 'FAIL    an unknown host: HTTP 522' '$tmp/out' && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
+check "a route that never answers: waits, stops at the clock's bound, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^sleep 2$' '$fix/calls' && grep -q '^wait    the route still isn.t answering after [0-9]* tries and [0-9]* s (HTTP 522): probing anyway' '$tmp/out' && grep -q 'FAIL    an unknown host: HTTP 522' '$tmp/out' && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
+check "  each try while waiting gave curl 5 s, and the probes their own 30 s" bash -c "n=\$(grep -c '^probe GET https://<host>/ ' '$fix/calls'); [ \$(grep -c '^max-time probe-unknown 5$' '$fix/calls') -eq \$((n - 1)) ] && [ \$(grep -c '^max-time probe-unknown 30$' '$fix/calls') -eq 1 ] && ! grep -q '^max-time probe-[a-z]* none$' '$fix/calls' && [ -z \"\$(grep '^max-time probe-' '$fix/calls' | grep -v -E '^max-time probe-[a-z]+ (5|30)$')\" ]"
+# Every try slow: each uses its whole 5 s, so the clock, not a count of tries, ends the wait. At 5 s a try and 2 s a
+# pause, a try may start only while it and its pause end within 30 s of the first: no more than 4. Then the first probe
+# meets one more slow answer, given at most 5 s by the stand-in, and fails.
+fresh; printf 'slow\nslow\nslow\nslow\nslow\nslow\nslow\nslow\n' > "$fix/probe-unknown.before"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "every try slow: the wait ends by the clock, within 4 tries, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && t=\$(grep -o -E 'still isn.t answering after [0-9]+ tries' '$tmp/out' | grep -o -E '[0-9]+'); [ -n \"\$t\" ] && [ \"\$t\" -ge 1 ] && [ \"\$t\" -le 4 ] && [ \$(grep -c '^max-time probe-unknown 5$' '$fix/calls') -eq \"\$t\" ] && grep -q 'FAIL    an unknown host: HTTP 000' '$tmp/out'"
 fresh; probe probe-unknown 503 "busy"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "a 503, which isn't the route's 52x, is no reason to wait: exit 4 with no wait" bash -c "[ $LAST -eq 4 ] && ! grep -q '^sleep ' '$fix/calls' && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ]"
 probe_fails "plain HTTP not redirected" probe-http 200 hello

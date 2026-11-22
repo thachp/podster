@@ -1067,19 +1067,6 @@
    "reason": "Owed: `<= after + 5_000` is a fixed bound, not one that loosens with time. It holds only because queued_at is normally stamped before `after` is read, and the 5 s is a margin a late stamp could use up. What would remove it: bracket queued_at between readings taken before and after the action, with no number added."
   },
   {
-   "file": "apps/api/test/kernel.spec.ts",
-   "rule": "margin",
-   "where": "directory cards > gives up on a room that hangs, and keeps every other row and the next page",
-   "category": "L",
-   "owed": true,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    7135
-   ],
-   "code": "expect(Date.now() - started).toBeLessThan(5_000);",
-   "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
-  },
-  {
    "file": "apps/api/test/task-change.spec.ts",
    "rule": "margin",
    "where": "the refresh job > stops reading an answer at its bound instead of waiting for the rest (M5 security review F5)",

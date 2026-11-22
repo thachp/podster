@@ -192,6 +192,11 @@ export interface RepositoryPath {
   publish(task: RepoTask & { base_commit: string } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication>;
   /** Drops what it holds for the task, its token included. */
   forget(workspace_id: string, task_id: string): void;
+  /**
+   * Before a run of a task Podster says isn't linked: the task's folder, exactly `workspace_root/workspace/task`, and its
+   * Git folder are removed without following any link, so the run starts in an empty folder.
+   */
+  clear(task: { workspace_id: string; task_id: string; task_folder: string; workspace_root: string }): Promise<void>;
 }
 
 export type LifecyclePoller = Pick<Poller, "agentId" | "authorityFresh" | "request" | "endAuthority" | "record" | "graceMs">;
@@ -800,7 +805,7 @@ export class Lifecycle {
         // refuses the consume with `facts_changed` (ruling 7 on #462).
         fresh = await this.evaluateFresh(detail, entry, this.deps.poller.authorityFresh(), decision.reserved_micro_usd);
         if (signal.aborted) return "aborted" as const;
-      }
+      } else if (entry.unlinked === true && decision.repository_id === null && prompt && fresh.outcome !== "refuse" && !(await this.clearUnlinked(entry, fresh.facts))) return null;
       const binding: RunBinding = { task_id: entry.task_id, workspace_id: entry.workspace_id, task_version: version, input_hash: prompt?.hash ?? "", repository_id: pinned.repository_id, base_commit: pinned.base_commit };
       const consumed = prompt ? this.policy.consumeRunDecision(pinned, fresh, binding, this.now()) : ({ ok: false, reason: "binding_changed" } as const);
       if (!consumed.ok) {
@@ -858,6 +863,22 @@ export class Lifecycle {
       // Whatever went wrong, a run that may still be going is never left looking like nothing is (M2 on #458).
       await this.holdOrphan(running, "run_interrupted");
       throw error;
+    }
+  }
+
+  /** An unlinked task's run starts in an empty folder: what an earlier run left is removed first. False when given up. */
+  private async clearUnlinked(entry: RunEntry, facts: RunFacts): Promise<boolean> {
+    try {
+      await this.deps.repository?.clear({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, workspace_root: facts.workspace_root });
+      return true;
+    } catch (error) {
+      if (!(error instanceof RepoPathError)) throw error;
+      this.log("lifecycle.repository", "refused", entry, { code: error.code });
+      this.diagnose("lifecycle.repository", entry, error.code, error);
+      const ledger = settle(this.state.ledger, entry.reservation, 0, this.now());
+      this.state = { ...this.state, ledger };
+      await this.giveUp({ ...entry, decision: null, reservation: null, expected_version: null }, "accepted", `repo_${error.code}`);
+      return false;
     }
   }
 

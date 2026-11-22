@@ -573,6 +573,35 @@ async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: {
 }
 
 describe.skipIf(realGit === null)("the repository path on real Git (no network)", () => {
+  it("the ruling of 2026-11-22: an unlinked task's run starts in an empty folder, whatever an earlier linked run left, and no link is followed", async () => {
+    const w = await world();
+    const workRoot = join(w.root, "work");
+    await w.path.prepare({ ...w.task, continue_from: null }, w.signal);
+    await writeFile(join(w.taskFolder, "left-behind.txt"), "an earlier run's work\n");
+    expect((await readdir(w.taskFolder)).sort()).toEqual(["README.md", "left-behind.txt"]);
+    const tokens = w.tokens.length;
+    await w.path.clear({ workspace_id: ROOM, task_id: TASK, task_folder: w.taskFolder, workspace_root: workRoot });
+    await expect(lstat(w.taskFolder)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(w.home, "git", ROOM, TASK))).rejects.toMatchObject({ code: "ENOENT" });
+    // Nothing asked of Podster, and a folder that isn't there yet is fine.
+    expect(w.tokens).toHaveLength(tokens);
+    await w.path.clear({ workspace_id: ROOM, task_id: TASK, task_folder: w.taskFolder, workspace_root: workRoot });
+    // A task folder that is a link is refused, and what it points at is untouched.
+    const outside = join(w.root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep.txt"), "keep\n");
+    await symlink(outside, w.taskFolder);
+    await expect(w.path.clear({ workspace_id: ROOM, task_id: TASK, task_folder: w.taskFolder, workspace_root: workRoot })).rejects.toMatchObject({ code: "task_folder_unsafe" });
+    expect(await readdir(outside)).toEqual(["keep.txt"]);
+    await rm(w.taskFolder);
+    // So is a room folder that is a link, and a task folder that isn't exactly workspace_root/workspace/task.
+    await rm(join(workRoot, ROOM), { recursive: true });
+    await symlink(outside, join(workRoot, ROOM));
+    await expect(w.path.clear({ workspace_id: ROOM, task_id: TASK, task_folder: w.taskFolder, workspace_root: workRoot })).rejects.toMatchObject({ code: "task_folder_unsafe" });
+    await expect(w.path.clear({ workspace_id: ROOM, task_id: TASK, task_folder: outside, workspace_root: workRoot })).rejects.toMatchObject({ code: "task_folder_unsafe" });
+    expect(await readdir(outside)).toEqual(["keep.txt"]);
+  });
+
   it("checks out the default branch's head, verified, with its Git folder in Runner's home and none in the task folder", async () => {
     const w = await world();
     const main = w.head("main");

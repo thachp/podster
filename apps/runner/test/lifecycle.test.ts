@@ -993,6 +993,13 @@ describe("step 10: the repository path in the lifecycle", () => {
     forget() {
       this.forgotten++;
     }
+    cleared: { task_folder: string; workspace_root: string }[] = [];
+    clearError: RepoPathError | null = null;
+    async clear(task: { workspace_id: string; task_id: string; task_folder: string; workspace_root: string }) {
+      this.timeline.push("repo:clear");
+      this.cleared.push({ task_folder: task.task_folder, workspace_root: task.workspace_root });
+      if (this.clearError) throw this.clearError;
+    }
   }
 
   async function repoSetup(config: unknown | (() => unknown) = repoConfig()) {
@@ -1064,6 +1071,9 @@ describe("step 10: the repository path in the lifecycle", () => {
     // One ask of Podster for the repository, and none after its answer: no checkout, no publication.
     expect(t.repo.prepared).toHaveLength(1);
     expect(t.repo.published).toHaveLength(0);
+    // The run starts in an emptied folder: cleared before the adapter starts, and only the task's own folder.
+    expect(t.repo.cleared).toEqual([{ task_folder: `/work/podster/${ROOM}/tsk_free`, workspace_root: "/work/podster" }]);
+    expect(t.timeline.filter((x) => /^(repo:|adapter:start)/.test(x))).toEqual(["repo:prepare", "repo:clear", "adapter:start"]);
     expect(t.adapter.starts).toHaveLength(1);
     expect(t.adapter.starts[0].facts.repository).toBeNull();
     const issues = t.policyCalls.filter((c) => c.fn === "issue").map((c) => (c.returned as { record: RunDecisionRecord }).record);
@@ -1100,6 +1110,34 @@ describe("step 10: the repository path in the lifecycle", () => {
       expect([code, u.adapter.starts.length, u.commands("release_task")[0]?.arguments.reason]).toEqual([code, 0, `repo_${code}`]);
       expect(u.entry("tsk_b").unlinked ?? null).toBeNull();
     }
+  });
+
+  it("releases an unlinked task whose folder can't be emptied, and runs nothing", async () => {
+    const t = await repoSetup();
+    t.repo.prepareError = new RepoPathError("task_not_linked", false, { stage: "access" });
+    t.repo.clearError = new RepoPathError("task_folder_unsafe");
+    t.offer(detail("tsk_link"));
+    for (let i = 0; i < 3; i++) await t.pass();
+    expect(t.adapter.starts).toHaveLength(0);
+    expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_link", reason: "repo_task_folder_unsafe" });
+    expect(budgetOf(t.lifecycle.record.ledger, t.clock.now()).reserved_micro_usd).toBe(0);
+  });
+
+  it("asks the owner again in an ask-first room after `task_not_linked`, since the facts changed", async () => {
+    const askConfig = policyConfig("ask", { rooms: [{ room_id: ROOM, mode: "ask", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE }] });
+    const t = await repoSetup(askConfig);
+    t.prompter.answers = ["approve", "approve"];
+    t.repo.prepareError = new RepoPathError("task_not_linked", false, { stage: "access" });
+    t.offer(detail("tsk_ask"));
+    for (let i = 0; i < 3; i++) await t.pass();
+    expect(t.prompter.asked).toHaveLength(2);
+    expect(t.prompter.asked[0].repository).toEqual({ ...SCOPE, branch: "podster/tsk_ask" });
+    expect(t.prompter.asked[1].repository).toBeNull();
+    const issues = t.policyCalls.filter((c) => c.fn === "issue").map((c) => (c.returned as { record: RunDecisionRecord }).record);
+    expect(issues).toHaveLength(2);
+    expect(issues[0].facts_key).not.toBe(issues[1].facts_key);
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(t.adapter.starts[0].facts.repository).toBeNull();
   });
 
   it("asks Podster afresh when an unlinked task is offered again", async () => {

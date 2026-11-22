@@ -5,13 +5,21 @@
  * taken from them, each checked for its shape; a task's title, instructions and everything else it says are dropped here,
  * so they never reach the record or a log.
  */
-import { isId, type Offer, type RunnerState } from "./state.js";
+import { isId, type Offer, type RoleCheck, type RunnerState } from "./state.js";
 
 /** Most offers kept. Past this, those least recently changed are dropped first. */
 export const OFFERS_KEPT = 5000;
 const TYPE = /^[a-z][a-z0-9_.]{0,63}$/;
 /** Event types that put a task in the record. Any other event only updates a task already there. */
 const STARTS = new Set(["task.offered", "task.changes_requested"]);
+/**
+ * Event types with no task that Runner records (issue 522): an invite to one of a room's role openings. The event names
+ * only the room, so the room is recorded to be read with `list_role_openings`. Any other event with no task moves only
+ * the cursor, as before.
+ */
+export const ROLE_NOTICES = new Set(["role.invited"]);
+/** Most rooms kept to read for role invites. Past this, those least recently changed are dropped first. */
+export const ROLE_CHECKS_KEPT = 500;
 /** Task statuses the listing reports for a task Runner may have to act on. */
 export const LISTED = new Set(["offered", "accepted"]);
 
@@ -52,17 +60,31 @@ function bounded(offers: Record<string, Offer>): Record<string, Offer> {
  */
 export function applyEvents(state: RunnerState, events: InboxEvent[], now: number): RunnerState {
   const offers = { ...state.offers };
+  let checks = state.role_checks ?? {};
   let cursor = state.inbox_cursor;
   for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
     if (event.seq <= cursor) continue;
     cursor = event.seq;
+    // A role invite has no task: it's recorded by its room, in the same save as the cursor, so it's never acknowledged
+    // unrecorded (issue 522).
+    if (!event.task_id && event.workspace_id && ROLE_NOTICES.has(event.type)) checks = markRoleCheck(checks, event.workspace_id, event.seq, now);
     if (!event.task_id || !event.workspace_id) continue;
     const id = key(event.workspace_id, event.task_id);
     const known = offers[id];
     if (known) offers[id] = { ...known, last: event.type, seq: event.seq, updated_at: now };
     else if (STARTS.has(event.type)) offers[id] = { workspace_id: event.workspace_id, task_id: event.task_id, source: "inbox", seq: event.seq, last: event.type, version: null, recorded_at: now, updated_at: now };
   }
-  return { ...state, inbox_cursor: cursor, offers: bounded(offers) };
+  return { ...state, inbox_cursor: cursor, offers: bounded(offers), ...(checks === state.role_checks ? {} : { role_checks: checks }) };
+}
+
+/** The rooms to read for role invites, with this one due. Bounded: those least recently changed go first. */
+export function markRoleCheck(checks: Record<string, RoleCheck>, workspaceId: string, seq: number | null, now: number): Record<string, RoleCheck> {
+  const known = checks[workspaceId];
+  const next = { ...checks, [workspaceId]: { workspace_id: workspaceId, seq: seq ?? known?.seq ?? null, due: true, recorded_at: known?.recorded_at ?? now, updated_at: now } };
+  const entries = Object.entries(next);
+  if (entries.length <= ROLE_CHECKS_KEPT) return next;
+  entries.sort(([, a], [, b]) => b.updated_at - a.updated_at);
+  return Object.fromEntries(entries.slice(0, ROLE_CHECKS_KEPT));
 }
 
 export type ListedTask = { id: string; status: string; version: number | null; assignee: string | null };

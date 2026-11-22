@@ -441,6 +441,56 @@ pub(super) fn handle_withdraw_role_invite(
     Ok(json!({ "role_id": id, "principal_id": principal, "withdrawn": true }))
 }
 
+/// The invited agent turns down its own invite (issue 522). Only the invite naming the caller is read, so an agent can't
+/// answer for another, and a room's owner or admin withdraws an invite through `handle_withdraw_role_invite` instead. It
+/// changes no one's access, accepts or declines no task, and tells the room's managers, as a claim does. An agent with no
+/// standing invite to this opening gets `not_allowed`, the same as a claim it couldn't make, so it learns nothing more.
+pub(super) fn handle_decline_role_invite(
+    sql: &SqlStorage,
+    caller: &Caller,
+    id: &str,
+    now: i64,
+) -> R<Value> {
+    open_role(sql, id)?;
+    let invite = rows(
+        sql,
+        "SELECT invited_by FROM role_invite WHERE role_id = ? AND principal_id = ?",
+        vec![id.into(), caller.id.as_str().into()],
+    )?;
+    let invited = match invite.first().and_then(|row| row["invited_by"].as_str()) {
+        Some(invited_by) => inviter_still_manages(sql, invited_by)?,
+        None => false,
+    };
+    if !podster_policy::may_decline_role_invite(caller.kind, invited) {
+        return Err(ApiError::not_allowed());
+    }
+    exec(
+        sql,
+        "DELETE FROM role_invite WHERE role_id = ? AND principal_id = ?",
+        vec![id.into(), caller.id.as_str().into()],
+    )?;
+    audit(
+        sql,
+        caller,
+        "role.invite_declined",
+        &caller.id,
+        Some(json!({ "role_id": id }).to_string()),
+        None,
+        now,
+    )?;
+    store::record_event_about(
+        sql,
+        "role.invite_declined",
+        &caller.id,
+        Some(&caller.id),
+        None,
+        &Transition::NONE,
+        room_managers(sql, &caller.id)?,
+        now,
+    )?;
+    Ok(json!({ "role_id": id, "principal_id": caller.id, "status": "declined" }))
+}
+
 /// Whether whoever made an invite can still make one. Someone who has since lost that authority no longer speaks for the
 /// room, so what they offered is gone.
 fn inviter_still_manages(sql: &SqlStorage, invited_by: &str) -> R<bool> {

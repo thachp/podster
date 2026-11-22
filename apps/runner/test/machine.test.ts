@@ -297,6 +297,13 @@ describe("Runner's own source", () => {
     for (const { file, text } of await sources()) expect([file, /\bonServer\b/.test(text)]).toEqual([file, file === NUDGE_LISTENER_FILE]);
   });
 
+  it("names the role calls only where role invites are answered (issue 522)", async () => {
+    for (const { file, text } of await sources()) {
+      const named = /["'](claim_role|decline_role|list_role_openings)["']/.test(text);
+      expect([file, named]).toEqual([file, file === "core/capabilities.ts" || file === "core/roles.ts"]);
+    }
+  });
+
   it("names the endpoint calls only where the nudge registers, and closes the listener when run stops (step 14)", async () => {
     for (const { file, text } of await sources()) {
       const named = /["'](set_a2a_endpoint|verify_a2a_endpoint)["']/.test(text);
@@ -402,12 +409,14 @@ describe("Runner's own source", () => {
     // still 18 capabilities and 3,029 bytes. Each more capability as long as `get_repo_access` costs its grant's JSON
     // twice over (hex): 104 bytes, so about 5 more fit; shorter names fit more. Measured again 2026-11-19 for step 14,
     // which adds `set_a2a_endpoint` and `verify_a2a_endpoint`: 20 capabilities, 3,243 of 3,584 bytes, 341 left, so 3 more
-    // as long as `get_repo_access` fit.
-    expect(RUNNER_CAPABILITIES).toHaveLength(20);
+    // as long as `get_repo_access` fit. Measured again 2026-11-21 for issue 522, which adds `list_role_openings`,
+    // `claim_role` and `decline_role`: 23 capabilities, 3,539 of 3,584 bytes, 45 left, so no more as long as
+    // `get_repo_access` fit. A further capability needs the stored grant list made smaller first.
+    expect(RUNNER_CAPABILITIES).toHaveLength(23);
     expect(RUNNER_CAPABILITIES).toEqual(expect.arrayContaining(["submit_task", "send_message", "set_a2a_endpoint", "verify_a2a_endpoint"]));
     const perCapability = 2 * Buffer.byteLength(`${JSON.stringify({ capability: "get_repo_access", status: "active" })},`);
-    expect(line).toBe(3_243);
-    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBe(3);
+    expect(line).toBe(3_539);
+    expect(Math.floor((MAC_LINE_LIMIT - line) / perCapability)).toBe(0);
   });
 
   it("leaves room in the macOS keychain line for the nudge's registration at its longest URL (step 14)", async () => {

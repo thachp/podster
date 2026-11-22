@@ -52,11 +52,14 @@ import { callApi, clientKey, createAgent, createAuth, denied, json, linkOnce, pe
  * this deployment doesn't list is left out, so `get_repo_access` only where managed repositories are switched on.
  * `set_a2a_endpoint` and `verify_a2a_endpoint` are Runner's inbound nudge (M7 step 14): registering an endpoint grants
  * nothing, and a nudge endpoint sends nothing until a person who administers the agent's organization switches it on.
+ * `list_role_openings`, `claim_role` and `decline_role` (issue 522) let Runner answer a role invite as its own agent,
+ * under its owner's local policy: the room decides each call, a claim needs the room's invite naming this agent and copies
+ * only the opening's preset, and a decline ends only that invite. Neither accepts a task or grants a person anything.
  */
 export const RUNNER_CAPABILITIES = [
   "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "read_inbox", "ack_inbox", "list_tasks", "get_task",
   "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "create_upload", "get_asset_link", "list_assets",
-  "get_repo_access", "set_a2a_endpoint", "verify_a2a_endpoint",
+  "get_repo_access", "set_a2a_endpoint", "verify_a2a_endpoint", "list_role_openings", "claim_role", "decline_role",
 ] as const;
 
 /** Redemptions one network may make, per minute and per day, counted exactly. */

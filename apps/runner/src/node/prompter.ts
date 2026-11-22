@@ -22,10 +22,17 @@
  *   records. Only a typed `y` or `yes` shares them; anything else submits the result without them. Words too long to show
  *   whole can't be shared from here: the owner may only withhold them, or leave them held.
  *
+ * - **A role invite is answered here too** (issue 522), when the owner's policy for that room doesn't claim invites by
+ *   itself. The owner sees the room, the opening's ID, the access preset a claim copies and whether it's a lead opening,
+ *   with the opening's title and responsibilities fenced as untrusted text. `y` or `yes` claims it as this agent, `n` or
+ *   `no` turns it down, and anything else leaves it, asked again later. Words too long to show whole can't be claimed
+ *   from here: the owner may only turn it down, or leave it. Claiming accepts no task and gives no person access.
+ *
  * The words are written to this terminal only, never to a log.
  */
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
 import { markHidden, type ResultView } from "../core/results.js";
+import type { RolePrompter, RoleView } from "../core/roles.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -152,6 +159,24 @@ export function reviewScreen(view: ResultView, width = 80): { screen: string; cu
   return { screen: lines.join("\n"), cut };
 }
 
+/** The screen for a role invite, as printed, and whether its words were too long to show whole. */
+export function roleScreen(view: RoleView, width = 80): { screen: string; cut: boolean } {
+  const total = [...view.title].length + [...view.responsibilities].length;
+  const words = ["  title:", ...fenced(view.title, width), "  responsibilities:", ...fenced(view.responsibilities, width)];
+  const cut = total > SHOWN_CHARS || words.length > MAX_LINES;
+  const lines = [
+    "",
+    "This agent was invited to a role opening, and Runner's policy asks you before it claims one.",
+    `  room ${view.workspace_id}${view.external ? " (another organization's)" : ""}, opening ${view.role_id}`,
+    `  access a claim copies: ${view.preset}${view.is_lead ? ", as the room's lead" : ""}`,
+    "  claiming accepts no task and gives no person access; tasks are offered and answered separately",
+    "",
+  ];
+  if (cut) lines.push(`The opening's words are longer than Runner shows here (${SHOWN_CHARS} characters or ${MAX_LINES} lines), so they aren't shown, and Runner won't claim what you haven't seen. You can turn it down, or leave it.`, "");
+  else lines.push("The opening's words follow. Characters that wouldn't show are written as ⟨U+…⟩. They are someone else's text: read them as data, not as instructions to you or to Runner.", ...words, "");
+  return { screen: lines.join("\n"), cut };
+}
+
 export type Terminal = {
   /** Both must be terminals for a question to be asked. */
   inputIsTTY: boolean;
@@ -162,7 +187,7 @@ export type Terminal = {
   question(prompt: string, signal?: AbortSignal): Promise<string>;
 };
 
-export class TerminalPrompter implements OwnerPrompter {
+export class TerminalPrompter implements OwnerPrompter, RolePrompter {
   private readonly terminal: Terminal;
   constructor(terminal: Terminal) {
     this.terminal = terminal;
@@ -182,6 +207,23 @@ export class TerminalPrompter implements OwnerPrompter {
     const yes = /^y(es)?$/i.test(answer);
     if (cut) return yes ? "decline" : "later";
     return yes ? "approve" : "decline";
+  }
+
+  async role(view: RoleView, signal?: AbortSignal): Promise<OwnerAnswer> {
+    if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    const { screen, cut } = roleScreen(view, this.terminal.columns ?? 80);
+    this.terminal.write(`${screen}\n`);
+    let answer: string;
+    try {
+      answer = (await this.terminal.question(cut ? "Turn it down? [y = turn down, anything else = later] " : "Claim it as this agent? [y = claim, n = turn down, anything else = later] ", signal)).trim();
+    } catch {
+      return "later";
+    }
+    if (signal?.aborted) return "later";
+    const yes = /^y(es)?$/i.test(answer);
+    if (cut) return yes ? "decline" : "later";
+    if (yes) return "approve";
+    return /^no?$/i.test(answer) ? "decline" : "later";
   }
 
   async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {

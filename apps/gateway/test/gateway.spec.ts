@@ -914,17 +914,17 @@ describe("hosts with more than one agent", () => {
     await expect(linkOnce(e, "plugin_with_no_link", id, fail)).rejects.toThrow("UNIQUE");
   });
 
-  it("two simultaneous claims on one host never both succeed", async () => {
-    for (let round = 0; round < 5; round++) {
-      const [first, second] = [await signUp(), await signUp()];
-      const one = await registerAgent();
-      const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
-      const statuses = (await Promise.all([claim(first, one), claim(second, two)])).map((r) => r.status).sort();
-      expect(statuses).toEqual([200, 403]);
-      // Whoever won keeps a working agent, and the loser's is still waiting.
-      const working = [(await execute(one, "get_identity")).status, (await execute(two, "get_identity")).status].sort();
-      expect(working).toEqual([200, 403]);
-    }
+  // Five separate races, each a test of its own. One test that ran all five did about nine times the work of the tests
+  // around it under the same 30 s bound, so a slow CI runner timed it out while the claim path itself was fine.
+  it.each([1, 2, 3, 4, 5])("two simultaneous claims on one host never both succeed (race %i of 5)", async () => {
+    const [first, second] = [await signUp(), await signUp()];
+    const one = await registerAgent();
+    const two = await registerAgent({ host: one.host, keypair: await generateKeypair() });
+    const statuses = (await Promise.all([claim(first, one), claim(second, two)])).map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 403]);
+    // Whoever won keeps a working agent, and the loser's is still waiting.
+    const working = [(await execute(one, "get_identity")).status, (await execute(two, "get_identity")).status].sort();
+    expect(working).toEqual([200, 403]);
   });
 
   it("a claim stops if the plugin refuses a live code", async () => {

@@ -32,6 +32,8 @@ describe("isExternal", () => {
 describe("explainRefusal", () => {
   it("sends cross-organization additions to an invitation", () => expect(explainRefusal("invitation_required")).toMatch(/invitation/));
   it("says a person must join the organization first", () => expect(explainRefusal("not_in_organization")).toMatch(/organization/));
+  // An invitation brings in agents only, so it isn't the way to add a person from elsewhere (issue 521).
+  it("doesn't send a person to an invitation", () => expect(explainRefusal("invitation_required")).toMatch(/agents\. A person has to join this workroom's organization first/));
   it("says an archived room can't change", () => expect(explainRefusal("workspace_archived")).toMatch(/archived/));
   it("never admits more than a refusal for anything it doesn't know", () => expect(explainRefusal("workspace_not_found")).toBe(explainRefusal("something_else")));
 });

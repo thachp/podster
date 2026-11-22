@@ -1,6 +1,6 @@
 # Deploying the content Worker
 
-The content Worker, `apps/content`, serves rooms' apps on the content domain ([ADR 0010](adr/0010-release-and-the-content-domain.md), [M6 plan, step 4(b)](m6-plan.md#step-4b-the-content-worker-the-build-plan)). It deploys to **the second Cloudflare account** ([decision 217](spec/PRODUCT.md#decisions-needed)), never to the one that holds `podster.dev`. It deploys only through `scripts/deploy-content`, and that script has never been run against Cloudflare.
+The content Worker, `apps/content`, serves rooms' apps on the content domain ([ADR 0010](adr/0010-release-and-the-content-domain.md), [M6 plan, step 4(b)](m6-plan.md#step-4b-the-content-worker-the-build-plan)). It deploys to **the second Cloudflare account** ([decision 217](spec/PRODUCT.md#decisions-needed)), never to the one that holds `podster.dev`. It deploys only through `scripts/deploy-content`. **First real deploy, 2026-11-22,** from `main` at `177043db`: one probe, the unknown host, failed with HTTP `522` while the route took effect, and passed when checked by hand moments later. That is why the script now [waits for the route](#after-a-deploy) before its probes.
 
 `scripts/deploy-staging` doesn't know this package, and `apps/content/wrangler.jsonc` can deploy nothing anywhere ([why](m6-plan.md#step-4b-the-content-worker-the-build-plan)).
 
@@ -146,7 +146,9 @@ The temporary folder is deleted in every case.
 
 ## After a deploy
 
-The script probes one random host on the content domain, signed out:
+**First it waits up to 30 s for the route** (added 2026-11-22). The first real deploy, on 2026-11-22, failed its first probe with HTTP `522`: the new route `*.<content domain>/*` hadn't taken effect, and the same check passed by hand seconds later. So the script now sends the unknown-host request on its own first, and again every 2 s while the answer is no answer, `520` to `529` or `530`. The clock bounds the wait, not a count of tries: each try gives curl 5 s, so one slow `522` can't use up the window, and a try starts only if it ends within 30 s of the first. Any other answer ends the wait at once, the Worker's own `404` and a wrong answer alike: a wrong answer is never asked again, and the probes below judge it. If the route never answers in time, the probes run anyway and fail as before. No probe's pass criteria changed.
+
+Then the script probes one random host on the content domain, signed out:
 
 - **An unknown host** gets the Worker's own `404`, `not_found`, with its fixed headers: `nosniff`, `no-referrer`, HSTS, `no-store`, and the sandbox policy.
 - **Plain HTTP** gets a `301` to the same host and path over HTTPS. That can be the zone's redirect or the Worker's own: both must send the same place.

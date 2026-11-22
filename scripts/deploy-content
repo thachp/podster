@@ -164,8 +164,12 @@ It refuses, before changing anything, unless:
       the dispatch namespace and the KV namespace exist on that account
     Any error, or an answer of any other shape, refuses.
 
-After a deploy it probes the content domain signed out: on a random host, an unknown host gets the
-Worker's own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
+After a deploy it waits up to 30 s, by the clock, for the route: until a new route takes effect,
+Cloudflare answers a host on it with a 52x or not at all, so it sends the first probe's request,
+each try allowed 5 s, every 2 s while that is the answer. Any other answer ends the wait, and if the
+route never answers the probes run anyway, with their own timeouts.
+Then it probes the content domain signed out: on a random host, an unknown host gets the Worker's
+own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
 a request with a Service-Worker header gets 403; and the content domain itself serves nothing. A
 host two labels deep is not shown: the zone's certificate covers one level.
 
@@ -560,14 +564,15 @@ host="$label.$domain"
 probe_failures=0
 pass() { echo "PASS    $*"; }
 fail() { echo "FAIL    $*"; probe_failures=$((probe_failures + 1)); }
-# fetch METHOD URL [HEADER]: leaves the headers in $work/h and the body in $work/b, and prints the status.
+# fetch METHOD URL [HEADER [MAX-TIME]]: leaves the headers in $work/h and the body in $work/b, and prints the status.
+# curl gives up after MAX-TIME seconds, 30 unless given.
 fetch() {
-  local extra=()
+  local extra=() max_time=${4:-30}
   : > "$work/h"
   : > "$work/b"
   [ -n "${3:-}" ] && extra=(-H "$3")
   local got
-  got=$(curl_clean --silent --proto =https,http --max-time 30 -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null) || true
+  got=$(curl_clean --silent --proto =https,http --max-time "$max_time" -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null) || true
   [[ "$got" =~ ^[0-9]{3}$ ]] || got=000
   printf '%s' "$got"
 }
@@ -583,6 +588,37 @@ fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own
   echo "        $1: missing or wrong: ${missing[*]}"
   return 1
 }
+
+# Waiting for the route. A new route can take some seconds to take effect: until it does, Cloudflare answers the random
+# host itself, with a 52x (522 when it reaches no origin, as on the first deploy, 2026-11-22) or not at all. So the
+# unknown host's request below is sent first on its own, again every 2 s while the answer is no answer, 520 to 529 or
+# 530. The clock bounds it: each try gives curl 5 s, so one slow 522 can't use up the window, and a try starts only if
+# it and the pause before it end within 30 s of the first. Any other answer ends the wait at once, the Worker's own and
+# a wrong one alike: a wrong answer is never asked again, and the probes judge it. If the route never answers, the
+# probes run anyway, with their own 30 s timeouts, and fail as they would have. No probe's criteria change.
+route_wait_limit=30
+route_wait_every=2
+route_wait_try_time=5
+route_wait_start=$SECONDS
+tries=0
+while :; do
+  status=$(fetch GET "https://$host/" "" "$route_wait_try_time")
+  tries=$((tries + 1))
+  case "$status" in
+    000 | 52[0-9] | 530) ;;
+    *)
+      echo "ok      the route answers (HTTP $status, try $tries)"
+      break
+      ;;
+  esac
+  waited=$((SECONDS - route_wait_start))
+  if [ $((waited + route_wait_every + route_wait_try_time)) -gt "$route_wait_limit" ]; then
+    echo "wait    the route still isn't answering after $tries tries and ${waited} s (HTTP $status): probing anyway"
+    break
+  fi
+  echo "wait    the route isn't answering yet (HTTP $status), trying again in ${route_wait_every} s"
+  sleep "$route_wait_every"
+done
 
 status=$(fetch GET "https://$host/")
 if [ "$status" = 404 ] && [ "$(cat "$work/b")" = not_found ] && fixed_headers "an unknown host"; then pass "an unknown host gets the Worker's own not-found, with its fixed headers"; else fail "an unknown host: HTTP $status"; fi

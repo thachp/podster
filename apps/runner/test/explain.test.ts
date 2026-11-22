@@ -58,6 +58,9 @@ describe("the fixed table", () => {
     expect(e.what).toContain("paired before it could answer role invitations");
     expect(e.todo).toContain("`npx podster@test pair --agent <agt_…>`");
     expect(e.todo).toContain("`forget`");
+    expect(e.todo).toContain("makes a new agent with a new ID");
+    expect(e.todo).toContain("keeps its place until you remove it");
+    expect(e.todo).not.toContain("for this agent");
   });
 
   it("explains templated codes by their prefix: a Docker step's exit, a Podster refusal, a repository step", () => {

@@ -101,7 +101,7 @@ export class Poller {
   /** A poller for a connected Runner. Refuses one that isn't paired, or that stopped and needs its owner. */
   static async open(deps: PollerDeps): Promise<Poller> {
     const state = await deps.state.load();
-    if (state.stopped === "revoked") throw new Error("This agent's connection ended in Podster. Pair again from Podster to go on.");
+    if (state.stopped === "revoked") throw new Error("This agent's connection ended in Podster. Pair again from Podster to go on: that makes a new agent with a new ID, to add to its rooms again.");
     if (state.stopped !== null) throw new Error("Pairing didn't finish. Start a new pairing in Podster, then run `pair` again.");
     if (state.phase !== "connected" || !isId(state.agent_id) || !isId(state.plugin_agent_id)) throw new Error("This Runner isn't paired yet. Run `pair` first.");
     if (state.gateway !== deps.origin) throw new Error("This Runner is paired with another gateway.");

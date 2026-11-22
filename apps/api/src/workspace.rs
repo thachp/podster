@@ -1266,6 +1266,10 @@ fn handle_change_role(
     if role == "admin" && member["kind"].as_str() != Some("person") {
         return Err(ApiError::invalid_argument());
     }
+    // Admin stays with the room's organization: a person who holds their place through another one is never made admin.
+    if role == "admin" && member["org_id"].as_str() != Some(room_owner_org(sql)?.as_str()) {
+        return Err(ApiError::invalid_argument());
+    }
     if role == "admin" || member["role"].as_str() == Some("admin") {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::AppointAdmin))?;
     }

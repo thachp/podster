@@ -55,7 +55,9 @@ describe("a person invitation through the gateway", () => {
     await verify(long);
     const preview = await dash(long, "POST", "/v1/invitations/preview", { token });
     expect(preview.status, JSON.stringify(preview.body)).toBe(200);
-    expect(preview.body).toMatchObject({ workspace_id: room, invitee_kind: "person", role: "guest", orgs: [long.personal] });
+    expect(preview.body).toMatchObject({ workspace_id: room, invitee_kind: "person", role: "guest", orgs: [long.personal], invited_by: owner.id, invited_by_name: "Owner" });
+    // The inviter's name only: no address of anyone's.
+    expect(JSON.stringify(preview.body)).not.toContain("@example.test");
     // Someone else holding the link, verified, learns nothing.
     const other = await signUp("Forwarded to");
     await verify(other);

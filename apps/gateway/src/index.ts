@@ -543,6 +543,23 @@ async function withVerifiedEmail(env: Env, identity: Identity, method: string, p
   return email ? { ...identity, verifiedEmail: email } : identity;
 }
 
+/**
+ * A person invitation's preview, which the API answers only to its addressee, gets the inviter's name from our own rows
+ * (decision 241: who invited them). The name only, never an email. It's what that person calls themselves, so the page
+ * shows it as untrusted text. Anything else passes through untouched.
+ */
+async function withInviterName(env: Env, method: string, path: string, response: Response): Promise<Response | null> {
+  if (method !== "POST" || path !== "/v1/invitations/preview" || response.status !== 200) return null;
+  const body = await response.json<Record<string, unknown>>().catch(() => null);
+  if (!body) return json({ error: { code: "internal_error", message: "internal_error" } }, 502);
+  const inviter = typeof body.invited_by === "string" && body.invited_by.startsWith("per_") ? body.invited_by.slice("per_".length) : null;
+  if (body.invitee_kind === "person" && inviter) {
+    const row = await env.DB.prepare(`SELECT name FROM "user" WHERE id = ?`).bind(inviter).first<{ name: string }>();
+    body.invited_by_name = row?.name || null;
+  }
+  return json(body, 200);
+}
+
 function addedPerson(body: string | undefined) {
   try {
     const target = JSON.parse(body ?? "") as { kind?: unknown; principal_id?: unknown };
@@ -1351,6 +1368,8 @@ const appHandler = {
     // A person's public read gets the same field filter as everyone else's.
     const publicRead = await publicPassthrough(path, response);
     if (publicRead) return publicRead;
+    const named = await withInviterName(env, request.method, path, response);
+    if (named) return named;
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
   },
 };

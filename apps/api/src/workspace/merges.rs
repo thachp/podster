@@ -305,6 +305,7 @@ fn decide_merge<T>(
         link_repo_id: link_repo_id.unwrap_or(0),
         delegation_holder: holder,
         through_public_claim: public_claims::is_public_participant(sql, &caller.id)?,
+        outside_person: repositories::is_outside_person(sql, &caller.id)?,
         now,
     };
     // A self-reviewed merge rests on the room's visibility and the approval on record, both from this transaction.

@@ -403,6 +403,8 @@ struct Inputs {
     link: Option<(LinkStatus, i64, String)>,
     held: Option<(String, i64, String)>,
     public: bool,
+    /// A person here through another organization than the room's. Push is an agent's alone, so this only says so twice.
+    outside_person: bool,
 }
 
 fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str, now: i64) -> R<Option<Inputs>> {
@@ -449,6 +451,7 @@ fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str, now: i64) -> R<Opti
         link,
         held,
         public: public_claims::is_public_participant(sql, agent)?,
+        outside_person: repositories::is_outside_person(sql, agent)?,
     }))
 }
 
@@ -492,6 +495,7 @@ fn decide_now(
         link_repo_id: link_repo_id.unwrap_or(0),
         delegation_holder: holder,
         through_public_claim: inputs.public,
+        outside_person: inputs.outside_person,
         now,
     };
     if let Err(denial) = authorize_repo_access(caller, &inputs.task, &policy) {

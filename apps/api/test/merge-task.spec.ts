@@ -286,6 +286,17 @@ describe("asking for a merge", () => {
     expect((await github()).calls).toEqual([]);
   });
 
+  // Decision 239 (CROSS-ORG-PEOPLE.md): a merge grant that somehow exists on a person here through another organization
+  // counts for nothing. No command writes such a row yet, so the test writes the one an accepted person invitation will.
+  it("refuses a person here through another organization, whatever merge grant their row holds, and records nothing", async () => {
+    const r = await approved();
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET org_id = 'org_mt_elsewhere' WHERE principal_id = ?", MERGER.id));
+    const got = await merge({ ...MERGER, org: "org_mt_elsewhere" }, r.id, r.task);
+    expect([got.status, got.code], got.text).toEqual([403, "not_allowed"]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_requested_by: null });
+    expect((await github()).calls).toEqual([]);
+  });
+
   it("answers a hidden room and a hidden task as missing ones, before anything else", async () => {
     const r = await approved();
     const outside = await merge(OUTSIDER, r.id, r.task);
@@ -659,6 +670,8 @@ describe("the job checks everything again", () => {
       // who is now in the room through a public claim, are refused as the request would refuse them.
       ["requester's access narrowed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE access_grant SET tasks = 'own' WHERE principal_id = ?", MERGER.id)), "task_not_found"],
       ["requester now there through a public claim", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", MERGER.id)), "public_participant"],
+      // Decision 239: a person whose place is now held through another organization uses no grant.
+      ["requester now a person here through another organization", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET org_id = 'org_mt_elsewhere' WHERE principal_id = ?", MERGER.id)), "not_allowed"],
       // The approving review, as the room's record has it, turns out not to be independent of the submitter (A1).
       ["review not independent", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_person = ?", LINKER.id)), "self_review"],
       // The owner, who gave the grant, has left the organization, and the room hasn't been told. Last, since it's the owner's own record.

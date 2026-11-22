@@ -218,6 +218,9 @@ describe("who may ask (podster_policy::release::authorize_release_request)", () 
       ["the owner, with no grant of their own", () => undefined, (r) => r.owner, [403, "grant_required"]],
       ["an admin, with no grant of their own", () => undefined, (r) => r.admin, [403, "grant_required"]],
       ["someone removed from the room", (r) => inRoom(r.room, (s) => void s.exec("UPDATE member SET revoked_at = 1 WHERE principal_id = ?", r.requester.id)), (r) => r.requester, [403, "access_revoked"]],
+      // Decision 239 (CROSS-ORG-PEOPLE.md): a person here through another organization never releases, whatever deploy
+      // grant their row holds. No command writes such a row yet, so the test writes the one a person invitation will.
+      ["a person here through another organization, with a live deploy grant", (r) => inRoom(r.room, (s) => void s.exec("UPDATE member SET org_id = 'org_rq_elsewhere' WHERE principal_id = ?", r.requester.id)), (r) => ({ ...r.requester, org: "org_rq_elsewhere" }), [403, "not_allowed"]],
     ];
     for (const [why, change, who, want] of cases) {
       const r = await room();

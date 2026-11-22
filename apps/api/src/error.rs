@@ -41,6 +41,10 @@ impl ApiError {
     pub fn not_allowed() -> ApiError {
         ApiError::api(403, "not_allowed")
     }
+    /// An agent naming itself as a task's assignee (decision 248).
+    pub fn self_assignment() -> ApiError {
+        ApiError::api(403, "self_assignment")
+    }
     pub fn task_not_found() -> ApiError {
         ApiError::api(404, "task_not_found")
     }

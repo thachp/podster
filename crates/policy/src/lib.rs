@@ -473,6 +473,7 @@ pub fn is_authority_refusal(action: &str, code: &str) -> bool {
         | "workspace_not_found"
         | "task_not_found"
         | "self_sign_off"
+        | "self_assignment"
         | "self_merge"
         | "grant_required"
         | "grant_expired"
@@ -688,6 +689,15 @@ pub fn authorize_task(caller: &Caller, task: &Task, action: TaskAction) -> Verdi
     } else {
         Verdict::Forbidden
     }
+}
+
+/// Whether the caller may name `assignee` as a task's assignee, by creating the task or offering it (decision 248, the owner's
+/// ruling of 2026-11-22). An agent never names itself, a coordinator included: work an agent hands itself waits on a Runner
+/// nobody may be running, so it must offer the work to another agent. A person may name anyone the room allows, and an
+/// agent named by someone else still accepts its own offer, which is acceptance and not this. Checked from the request's
+/// assignee and the caller's current identity, after the caller's authority over the task or room.
+pub fn may_assign_to(caller: &Caller, assignee: &str) -> bool {
+    !(caller.kind == PrincipalKind::Agent && caller.id == assignee)
 }
 
 /// Who can change a task's requester: an owner or admin, or a member with the Coordinator's scope taking over for itself a

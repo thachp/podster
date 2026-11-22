@@ -20,6 +20,7 @@ const props = (over: Partial<GrantsProps> = {}): GrantsProps => ({
     { principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" },
     { principal_id: "per_m", kind: "person", org_id: "org_a", role: "member" },
   ],
+  ownerId: null,
   names: { agt_1: "Code Agent", per_m: "Mia" },
   ...over,
 });
@@ -173,6 +174,33 @@ describe("giving a grant", () => {
     await userEvent.selectOptions(screen.getByLabelText("Participant"), "agt_1");
     await userEvent.click(screen.getByRole("button", { name: "Grant" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Choose a participant who joined by invitation or was added directly.");
+  });
+
+  it("offers the room's owner, who isn't in the members list, as themselves, and sends their own merge grant", async () => {
+    render(<RepositoryGrants {...props({ grants: [], ownerId: "per_owner" })} />);
+    const participant = screen.getByLabelText("Participant");
+    expect(within(participant).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual(["", "per_owner", "agt_1", "per_m"]);
+    expect(within(participant).getByRole("option", { name: "per_owner · You (owner)" })).toBeInTheDocument();
+    await userEvent.selectOptions(participant, "per_owner");
+    await userEvent.click(screen.getByLabelText("Merge"));
+    await userEvent.click(screen.getByRole("button", { name: "Grant" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]?.body).toEqual({ policy_version: 7, principal_id: "per_owner", action: "merge" });
+    expect(await screen.findByText("Granted merge to You.")).toBeInTheDocument();
+  });
+
+  it("names the owner to an admin, offers them once, and offers no owner the room records as having left", () => {
+    const members: GrantsProps["members"] = [
+      { principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" },
+      { principal_id: "per_o", kind: "person", org_id: "org_a", role: "member" },
+    ];
+    const { unmount } = render(<RepositoryGrants {...props({ grants: [], viewerId: "per_adm", ownerId: "per_o", members, names: { per_o: "Olga" } })} />);
+    const options = within(screen.getByLabelText("Participant")).getAllByRole("option");
+    expect(options.map((option) => option.getAttribute("value"))).toEqual(["", "per_o", "agt_1"]);
+    expect(options[1]).toHaveTextContent("per_o · Olga (owner)");
+    unmount();
+    render(<RepositoryGrants {...props({ grants: [], ownerId: null })} />);
+    expect(within(screen.getByLabelText("Participant")).getAllByRole("option").map((option) => option.getAttribute("value"))).toEqual(["", "agt_1", "per_m"]);
   });
 
   it("shows hostile names as text", () => {

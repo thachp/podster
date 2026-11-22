@@ -422,6 +422,7 @@ describe("UI-09: recent activity (issue 547)", () => {
   };
   const inboxReads = () => calls.filter((call) => call.url.includes("/inbox")).map((call) => call.url);
   const rows = () => within(screen.getByRole("list", { name: "Recent activity, newest first" })).getAllByRole("listitem");
+  const rawSeqs = () => within(screen.getByRole("list", { name: "Raw events" })).getAllByRole("listitem").map((item) => Number(item.textContent!.split(" · ")[0]));
 
   it("shows the newest 10 first as readable rows, with titles only from rooms the viewer is in, and only ever reads", async () => {
     const events = [
@@ -530,6 +531,29 @@ describe("UI-09: recent activity (issue 547)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
     await waitFor(() => expect(rows()).toHaveLength(12));
     expect(screen.queryByText("Couldn't load older activity.")).toBeNull();
+  });
+
+  it("a refetch of the same agent starts older activity over from the new first page, leaving no gap", async () => {
+    let events = Array.from({ length: 12 }, (_, index) => made(index + 1));
+    let roomsFail = true;
+    special = (url) => (url === "/api/v1/agents/agt_1/rooms" && roomsFail ? new Response("{}", { status: 503 }) : paged(events)(url));
+    render(<Screen />);
+    await opened();
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(rows()).toHaveLength(12));
+    expect(screen.getByText("No older activity.")).toBeInTheDocument();
+    // 15 more arrive, and the Sheet reads the agent again.
+    events = Array.from({ length: 27 }, (_, index) => made(index + 1));
+    roomsFail = false;
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(rawSeqs()[0]).toBe(27));
+    expect(rawSeqs()).toEqual([27, 26, 25, 24, 23, 22, 21, 20, 19, 18]);
+    expect(screen.queryByText("No older activity.")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(rows()).toHaveLength(20));
+    expect(rawSeqs()).toEqual(Array.from({ length: 20 }, (_, index) => 27 - index));
+    expect(inboxReads().at(-1)).toBe("/api/v1/agents/agt_1/inbox?before=18&limit=10");
+    expect(commands()).toEqual([]);
   });
 
   it("pages through 48 events, ten at a time, each once and newest first, without touching the cursor", async () => {

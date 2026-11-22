@@ -137,6 +137,18 @@ export function InboxOversight({ agent, name, openable, roomNames }: { agent: { 
   const askedRooms = useRef(new Set<string>());
 
   const page = agent.inbox;
+  // A refetch of the same agent brings a new first page. Older pages read below the last one would leave a gap under it,
+  // so they start over from the new page's own cursor. The ref lets an older read still in flight see it's stale.
+  const [shownPage, setShownPage] = useState(page);
+  const currentPage = useRef(page);
+  currentPage.current = page;
+  if (shownPage !== page) {
+    setShownPage(page);
+    setOlder([]);
+    setNextBefore(page?.next_before ?? null);
+    setLoading(false);
+    setFailed(false);
+  }
   const first = page?.events ?? [];
   const seen = new Set<number>();
   // A page can overlap the one before if new events arrived between reads, so each event shows once.
@@ -162,9 +174,11 @@ export function InboxOversight({ agent, name, openable, roomNames }: { agent: { 
 
   async function loadOlder() {
     if (nextBefore === null) return;
+    const from = page;
     setLoading(true);
     setFailed(false);
     const result = await readInbox(agent.id, nextBefore).catch(() => null);
+    if (currentPage.current !== from) return;
     setLoading(false);
     if (!result?.ok) return setFailed(true);
     setOlder((previous) => [...previous, ...result.data.events]);

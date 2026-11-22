@@ -5,7 +5,7 @@
 // API request goes through `allow` first. A GET may read anywhere on the API. Anything else must name something of
 // the spike's own form, on the configured account, namespace or zone:
 // - a KV value: only a spike key (`pure.mjs` `spikeKey`); the stop key only with the spike's own value, only when the
-//   run's gate allowed it, and deleted only when the spike owns what is there;
+//   run's gate allowed it, and deleted only right after a read found a spike's value there;
 // - a release script in the dispatch namespace, its upload session, and the assets upload: only a spike script name;
 // - one Worker outside the namespace, `spike-g-probe-<run>`, and its workers.dev switch;
 // - a TXT record on the DNS zone: only a spike name, with exactly type, name, content and TTL 60; deleted only by an
@@ -18,7 +18,7 @@ const HEX32 = /^[0-9a-f]{32}$/;
 
 /**
  * Throws unless the request may be sent.
- * `ctx`: { account, kv, ns, domain, run, stopAllowed, stopOwned, dnsZone, dnsZoneId, madeDns }.
+ * `ctx`: { account, kv, ns, domain, run, stopAllowed, stopReadSpike, dnsZone, dnsZoneId, madeDns }.
  */
 export function allow(method, url, body, ctx) {
   const u = new URL(url);
@@ -37,7 +37,8 @@ export function allow(method, url, body, ctx) {
     if (spikeKey(key, domain) && (method === "PUT" || method === "DELETE")) return;
     if (key === STOP_KEY) {
       if (method === "PUT" && ctx.stopAllowed === true && body === stopValue(ctx.run)) return;
-      if (method === "DELETE" && ctx.stopOwned === true) return;
+      // Only right after a read that found a spike's value there (`isSpikeStop`), which the runner says by this flag.
+      if (method === "DELETE" && ctx.stopReadSpike === true) return;
     }
     throw new Error("refusing: a KV key that isn't the spike's");
   }

@@ -201,12 +201,13 @@ export function parseArgs(argv) {
   const out = { command, flags: new Set() };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
+    // Never echo an argument's text: a stray token pasted here would land in a terminal's scrollback or a log.
+    const at = `argument ${i + 2}`;
     if (FLAGS.has(a)) {
       out.flags.add(a.slice(2));
       continue;
     }
-    if (a.includes("=")) throw new Error("give an option's path after a space, never with `=`");
-    if (!OPTIONS.has(a)) throw new Error(`unknown option ${JSON.stringify(a.slice(0, 40))}`);
+    if (!OPTIONS.has(a)) throw new Error(`${at} isn't an option this spike takes (an option's path goes after a space, never with \`=\`)`);
     const value = rest[++i];
     if (value === undefined || value.startsWith("--")) throw new Error(`${a} needs a file path`);
     // A path, never a token: a token passed here would be refused as no file, but say so before it is looked up.
@@ -238,7 +239,8 @@ export function checkConfig(c) {
 /** Hides every secret, every 32-hex ID, every UUID and every JWT. */
 export function redact(text, secrets = []) {
   let out = String(text);
-  for (const s of secrets) if (s && s.length >= 6) out = out.split(s).join("<secret>");
+  // Every configured name and secret, whatever its length; an empty or non-string one is skipped.
+  for (const s of secrets) if (typeof s === "string" && s.length > 0) out = out.split(s).join("<secret>");
   return out
     .replace(/cfwau_[A-Za-z0-9._-]+/g, "<session-token>")
     .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, "<jwt>")
@@ -252,7 +254,8 @@ export function redact(text, secrets = []) {
 export const BOUNDS = {
   run: { ms: 20 * 60_000, api: 900, edge: 5_000, probe: 400 },
   cursor: { ms: 13 * 60_000, api: 120, edge: 0, probe: 0 },
-  cleanup: { ms: 3 * 60_000, api: 200, edge: 0, probe: 0 },
+  /** Also the clean-up's own bound, apart from the command's, at the end of every command. */
+  cleanup: { ms: 5 * 60_000, api: 400, edge: 0, probe: 0 },
 };
 /** How long one phase of the takedown is watched before it is recorded as not seen. */
 export const PHASE_WATCH_MS = 120_000;
@@ -285,9 +288,9 @@ export function plan(command, n, c) {
     add("Ends, and on Ctrl-C, by deleting all of the above, listing again, and recording what is left.");
   } else if (command === "cursor") {
     add(`Run ${n.run}: at most ${BOUNDS.cursor.ms / 60_000} min, ${BOUNDS.cursor.api} API calls.`);
-    add(`Writes ${n.listKeys.length} keys ${n.listKeys[0]} … ${n.listKeys.at(-1)} (KV token), lists them 10 at a time, and uses the first page's cursor again at ${CURSOR_AGES_MS.map((t) => `${t / 1000} s`).join(", ")}. Then deletes them and lists again.`);
+    add(`Writes ${n.listKeys.length} keys ${n.listKeys[0]} … ${n.listKeys.at(-1)} (KV token), lists them 10 at a time, and uses the first page's cursor again at ${CURSOR_AGES_MS.map((t) => `${t / 1000} s`).join(", ")}. Then the shared clean-up deletes them, with every other spike key it lists, and lists again. Never at the same time as \`run\`.`);
   } else if (command === "cleanup") {
-    add("Lists and deletes: KV keys of the spike's forms; the spike's release scripts in the namespace; spike-g-probe-* Workers; _spike-g-* TXT records on the DNS zone (with a DNS token); and the stop key only if it holds a spike's value. Then lists again.");
+    add(`Lists and deletes: KV keys of the spike's forms; the spike's release scripts in the namespace; spike-g-probe-* Workers; _spike-g-* TXT records on the DNS zone (with a DNS token); and the stop key only if a read finds a spike's value in it. Every list is read to its last page. Then lists again. At most ${BOUNDS.cleanup.ms / 60_000} min and ${BOUNDS.cleanup.api} calls.`);
   }
   return lines;
 }

@@ -127,6 +127,7 @@ const ctx = {
   run: RUN,
   stopAllowed: false,
   stopOwned: false,
+  stopReadSpike: false,
   dnsZone: config.dns_zone,
   dnsZoneId: null,
   madeDns: new Set(),
@@ -163,6 +164,13 @@ function spend(kind) {
     throw new Bound(`the ${kind} bound of ${bounds[kind]} calls`);
   }
 }
+/** The clean-up's own bound, apart from the command's: BOUNDS.cleanup's time and calls, from its first call. */
+const cleanupUse = { api: 0, from: null };
+function spendCleanup() {
+  cleanupUse.from ??= Date.now();
+  if (++cleanupUse.api > BOUNDS.cleanup.api) throw new Bound(`the clean-up's bound of ${BOUNDS.cleanup.api} calls`);
+  if (Date.now() - cleanupUse.from > BOUNDS.cleanup.ms) throw new Bound(`the clean-up's bound of ${BOUNDS.cleanup.ms / 60_000} min`);
+}
 /** Waits for every part to finish, so nothing is still writing when the clean-up lists; then throws the first error. */
 async function settle(parts) {
   const out = await Promise.allSettled(parts);
@@ -182,15 +190,19 @@ const sleep = (ms) =>
   });
 const deadline = setTimeout(() => stopAll("time bound"), bounds.ms);
 deadline.unref();
-process.on("SIGINT", () => {
-  if (stopping === "Ctrl-C") {
+const onSignal = (signal) => () => {
+  if (stopping === "Ctrl-C" || stopping === signal) {
     console.error("spike G: second Ctrl-C, leaving now. Run `node spike.mjs cleanup …` to delete what may be left.");
     process.exit(130);
   }
-  stopping = "Ctrl-C";
+  stopping = signal;
   halt.abort();
-  console.error("spike G: Ctrl-C: stopping and cleaning up. Ctrl-C again to leave without cleaning up.");
-});
+  console.error(`spike G: ${signal}: stopping and cleaning up. The same signal again leaves without cleaning up.`);
+};
+// SIGTERM and SIGHUP (a closed terminal) clean up as Ctrl-C does.
+process.on("SIGINT", onSignal("Ctrl-C"));
+process.on("SIGTERM", onSignal("SIGTERM"));
+process.on("SIGHUP", onSignal("SIGHUP"));
 
 // ---- Cloudflare's API ----
 
@@ -208,7 +220,8 @@ async function api(method, path, { token, bearer, body = null, type = null, clea
     stopAll("the guard refused a call");
     throw e;
   }
-  if (!cleanup) spend("api");
+  if (cleanup) spendCleanup();
+  else spend("api");
   const auth = bearer ?? tokens[token];
   if (!auth) throw new Error(`no ${token} token for this call`);
   const headers = { authorization: `Bearer ${auth}`, accept: "application/json" };
@@ -368,12 +381,12 @@ async function preflight() {
 }
 
 /** Every key in the namespace, by pages, held in memory only. Returns the count of keys that aren't the spike's. */
-async function allKeys(prefix = "") {
+async function allKeys(prefix = "", cleanup = false) {
   const keys = [];
   let cursor = "";
   for (let page = 0; page < 20; page++) {
     const q = new URLSearchParams({ limit: "1000", ...(prefix ? { prefix } : {}), ...(cursor ? { cursor } : {}) });
-    const r = await api("GET", `${acc()}/storage/kv/namespaces/${ctx.kv}/keys?${q}`, { token: "kv", cleanup: true });
+    const r = await api("GET", `${acc()}/storage/kv/namespaces/${ctx.kv}/keys?${q}`, { token: "kv", cleanup });
     if (r.status !== 200 || !r.json?.success) return { error: answer(r) };
     keys.push(...r.json.result.map((k) => k.name));
     cursor = r.json.result_info?.cursor ?? "";
@@ -560,6 +573,32 @@ async function cycle(label, scripts, tag) {
   }
 }
 
+/**
+ * Deletes the stop key only if a read just now found a spike's value there. The guard refuses the delete without that
+ * read (`ctx.stopReadSpike`), and the flag is spent by the one delete. Anything else there is left, and reported.
+ */
+async function deleteStopIfOurs(step, cleanup = false) {
+  const read = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup });
+  if (read.status === 404) {
+    ctx.stopOwned = false;
+    record(step, { read: answer(read), deleted: false, note: "absent" });
+    return null;
+  }
+  if (read.status !== 200 || !isSpikeStop(read.text)) {
+    record(step, { read: answer(read), deleted: false, note: read.status === 200 ? "not a spike's value: left in place" : "unreadable: left in place" });
+    return null;
+  }
+  ctx.stopReadSpike = true;
+  try {
+    const del = await api("DELETE", kvPath(STOP_KEY), { token: "kv", cleanup });
+    if (del.status === 200) ctx.stopOwned = false;
+    record(step, { read: answer(read), deleted: del.status === 200, delete: { ...answer(del), result: del.json?.result ?? null } });
+    return del;
+  } finally {
+    ctx.stopReadSpike = false;
+  }
+}
+
 async function stopPart(label, scripts) {
   if (!ctx.stopAllowed) return;
   const key = n.host(label);
@@ -567,16 +606,23 @@ async function stopPart(label, scripts) {
   const seen = await watch(label, "v1", w.done);
   record("stop-setup", { provider: answer(w), at_host: timeline(seen, "v1", w.done) });
   const expect = { v1: scripts.v1, v2: scripts.v2, stop: stopValue(RUN) };
-  ctx.stopOwned = true; // before the write: if its answer is lost, the clean-up still removes it
+  // The gate again, right before the write: anything that isn't the spike's that appeared since closes it.
+  await gate();
+  if (!ctx.stopAllowed) {
+    record("stop-skipped", { note: "the gate closed before the stop's write" });
+    await api("DELETE", kvPath(key), { token: "kv" });
+    return;
+  }
+  ctx.stopOwned = true; // before the write: if its answer is lost, the clean-up still looks for it
   const put = await api("PUT", kvPath(STOP_KEY), { token: "kv", body: stopValue(RUN), type: "text/plain" });
   const [down, backSet] = await settle([watch(label, "absent", put.done), readBack(STOP_KEY, put.done, expect)]);
   record("stop-set", { provider: { ...answer(put), result: put.json?.result ?? null }, at_host: timeline(down, "absent", put.done), read_back: backSet });
-  const del = await api("DELETE", kvPath(STOP_KEY), { token: "kv" });
-  const [up, backGone] = await settle([watch(label, "v1", del.done), readBack(STOP_KEY, del.done, expect)]);
-  record("stop-removed", { provider: { ...answer(del), result: del.json?.result ?? null }, at_host: timeline(up, "v1", del.done), read_back: backGone });
-  const again = await api("DELETE", kvPath(STOP_KEY), { token: "kv" });
-  record("stop-delete-again", answer(again));
-  if (again.status === 200 || again.status === 404) ctx.stopOwned = false;
+  ctx.stopAllowed = false; // one write of the stop, no more
+  const del = await deleteStopIfOurs("stop-delete");
+  if (del) {
+    const [up, backGone] = await settle([watch(label, "v1", del.done), readBack(STOP_KEY, del.done, expect)]);
+    record("stop-removed", { at_host: timeline(up, "v1", del.done), read_back: backGone });
+  }
   await api("DELETE", kvPath(key), { token: "kv" });
 }
 
@@ -652,22 +698,41 @@ async function lists() {
 
 // ---- clean-up, by listing ----
 
+/**
+ * Every entry of a Cloudflare list, page after page: by `cursor` when the answer gives one, else by `page` while
+ * `total_pages` says there are more. At most 50 pages; `complete` is false if that ran out or an answer failed.
+ */
+async function listAll(path, token, { perPage = null } = {}) {
+  const out = [];
+  const sep = path.includes("?") ? "&" : "?";
+  let query = perPage ? `${sep}per_page=${perPage}` : "";
+  for (let page = 1; page <= 50; page++) {
+    const r = await api("GET", `${path}${query}`, { token, cleanup: true });
+    if (r.status !== 200 || !Array.isArray(r.json?.result)) return { items: out, complete: false, info: r.json?.result_info ?? null };
+    out.push(...r.json.result);
+    const info = r.json.result_info ?? {};
+    const pp = perPage ? `&per_page=${perPage}` : "";
+    if (typeof info.cursor === "string" && info.cursor) query = `${sep}cursor=${encodeURIComponent(info.cursor)}${pp}`;
+    else if (typeof info.total_pages === "number" && page < info.total_pages) query = `${sep}page=${page + 1}${pp}`;
+    else return { items: out, complete: true, info };
+    if (r.json.result.length === 0) return { items: out, complete: false, info };
+  }
+  return { items: out, complete: false, info: null };
+}
+
+const txtRecords = () => listAll(`/zones/${ctx.dnsZoneId}/dns_records?type=TXT`, "dns", { perPage: 100 });
+
 async function cleanup() {
   const left = {};
-  const kvKeys = await allKeys("spikeg");
+  const kvKeys = await allKeys("spikeg", true);
   for (const k of kvKeys.keys ?? []) if (spikeKey(k, ctx.domain)) await api("DELETE", kvPath(k), { token: "kv", cleanup: true });
-  const stop = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup: true });
-  if (stop.status === 200 && isSpikeStop(stop.text)) ctx.stopOwned = true;
-  if (ctx.stopOwned) {
-    const d = await api("DELETE", kvPath(STOP_KEY), { token: "kv", cleanup: true });
-    if (d.status === 200) ctx.stopOwned = false;
-  }
+  await deleteStopIfOurs("cleanup-stop", true);
   if (tokens.scripts) {
-    const listed = await api("GET", dispatchPath(), { token: "scripts", cleanup: true });
-    for (const s of listed.json?.result ?? []) if (SPIKE_SCRIPT.test(s.id)) named.add(s.id);
+    const listed = await listAll(dispatchPath(), "scripts");
+    for (const s of listed.items) if (SPIKE_SCRIPT.test(s.id)) named.add(s.id);
     for (const name of named) await api("DELETE", `${dispatchPath()}/${name}?force=true`, { token: "scripts", cleanup: true });
-    const workers = await api("GET", `${acc()}/workers/scripts`, { token: "scripts", cleanup: true });
-    for (const s of workers.json?.result ?? []) if (PROBE_SCRIPT.test(s.id)) await api("DELETE", `${acc()}/workers/scripts/${s.id}`, { token: "scripts", cleanup: true });
+    const workers = await listAll(`${acc()}/workers/scripts`, "scripts");
+    for (const s of workers.items) if (PROBE_SCRIPT.test(s.id)) await api("DELETE", `${acc()}/workers/scripts/${s.id}`, { token: "scripts", cleanup: true });
   }
   if (tokens.dns) {
     if (!ctx.dnsZoneId) {
@@ -675,8 +740,8 @@ async function cleanup() {
       if (zone.json?.result?.[0]?.name === ctx.dnsZone) ctx.dnsZoneId = zone.json.result[0].id;
     }
     if (ctx.dnsZoneId) {
-      const recs = await api("GET", `/zones/${ctx.dnsZoneId}/dns_records?type=TXT&per_page=100`, { token: "dns", cleanup: true });
-      for (const r of recs.json?.result ?? []) if (spikeTxtName(r.name, ctx.dnsZone)) ctx.madeDns.add(r.id);
+      const recs = await txtRecords();
+      for (const r of recs.items) if (spikeTxtName(r.name, ctx.dnsZone)) ctx.madeDns.add(r.id);
       for (const id of [...ctx.madeDns]) {
         const d = await api("DELETE", `/zones/${ctx.dnsZoneId}/dns_records/${id}`, { token: "dns", cleanup: true });
         if (d.status === 200 || d.status === 404) ctx.madeDns.delete(id);
@@ -684,33 +749,32 @@ async function cleanup() {
     }
   }
   await new Promise((r) => setTimeout(r, 5_000));
-  // Listed again: what is left.
-  const after = await allKeys("spikeg");
-  left.kv_spike_keys = after.keys ? after.keys.filter((k) => spikeKey(k, ctx.domain)).length : "not listed";
+  // Listed again: what is left. A list that didn't finish is reported as such, never as nothing left.
+  const after = await allKeys("spikeg", true);
+  left.kv_spike_keys = after.keys && !after.incomplete ? after.keys.filter((k) => spikeKey(k, ctx.domain)).length : "not fully listed";
   const stopAfter = await api("GET", kvPath(STOP_KEY), { token: "kv", cleanup: true });
   left.stop_key = stopAfter.status === 404 ? "absent" : stopAfter.status === 200 ? (isSpikeStop(stopAfter.text) ? "the spike's, still there" : "someone else's, not touched") : `unknown (${stopAfter.status})`;
   if (tokens.scripts) {
-    const listed = await api("GET", dispatchPath(), { token: "scripts", cleanup: true });
-    const ids = Array.isArray(listed.json?.result) ? listed.json.result.map((s) => s.id) : null;
-    left.spike_scripts = ids ? ids.filter((id) => SPIKE_SCRIPT.test(id)).length : "not listed";
-    left.scripts_list_info = listed.json?.result_info ?? null;
+    const listed = await listAll(dispatchPath(), "scripts");
+    left.spike_scripts = listed.complete ? listed.items.filter((s) => SPIKE_SCRIPT.test(s.id)).length : "not fully listed";
+    left.scripts_list_info = listed.info;
     let readable = 0;
     for (const name of named) {
       const r = await api("GET", `${dispatchPath()}/${name}`, { token: "scripts", cleanup: true });
       if (!(r.status === 200 && r.json?.result?.script === null) && r.status !== 404) readable++;
     }
     left.named_scripts_still_readable = readable;
-    const workers = await api("GET", `${acc()}/workers/scripts`, { token: "scripts", cleanup: true });
-    left.probe_workers = Array.isArray(workers.json?.result) ? workers.json.result.filter((s) => PROBE_SCRIPT.test(s.id)).length : "not listed";
+    const workers = await listAll(`${acc()}/workers/scripts`, "scripts");
+    left.probe_workers = workers.complete ? workers.items.filter((s) => PROBE_SCRIPT.test(s.id)).length : "not fully listed";
   } else left.scripts = "not checked: no scripts token";
   if (tokens.dns && ctx.dnsZoneId) {
-    const recs = await api("GET", `/zones/${ctx.dnsZoneId}/dns_records?type=TXT&per_page=100`, { token: "dns", cleanup: true });
-    left.txt_records = Array.isArray(recs.json?.result) ? recs.json.result.filter((r) => spikeTxtName(r.name, ctx.dnsZone)).length : "not listed";
+    const recs = await txtRecords();
+    left.txt_records = recs.complete ? recs.items.filter((r) => spikeTxtName(r.name, ctx.dnsZone)).length : "not fully listed";
   } else left.txt_records = "not checked";
   const clean = Object.entries(left).every(
     ([k, v]) => k === "scripts_list_info" || v === 0 || v === "absent" || v === "someone else's, not touched" || String(v).startsWith("not checked"),
   );
-  record("cleanup", { left, clean });
+  record("cleanup", { left, clean, calls: cleanupUse.api });
   return clean;
 }
 

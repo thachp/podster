@@ -26,7 +26,7 @@ const API = "https://api.cloudflare.com/client/v4";
 const account = "a".repeat(32);
 const kv = "b".repeat(32);
 const zoneId = "c".repeat(32);
-const ctx = (more = {}) => ({ account, kv, ns: "apps-ns", domain: "podster.site", run: "abc123", stopAllowed: false, stopOwned: false, dnsZone: "opster.dev", dnsZoneId: zoneId, madeDns: new Set(["d".repeat(32)]), ...more });
+const ctx = (more = {}) => ({ account, kv, ns: "apps-ns", domain: "podster.site", run: "abc123", stopAllowed: false, stopReadSpike: false, dnsZone: "opster.dev", dnsZoneId: zoneId, madeDns: new Set(["d".repeat(32)]), ...more });
 const value = (key) => `${API}/accounts/${account}/storage/kv/namespaces/${kv}/values/${key}`;
 const script = `spikegabc123c1.rel_${"e".repeat(32)}`;
 const dispatch = (name, q = "") => `${API}/accounts/${account}/workers/dispatch/namespaces/apps-ns/scripts/${name}${q}`;
@@ -50,13 +50,14 @@ test("a KV write or delete only for the spike's own keys", () => {
   assert.throws(() => allow("PUT", `${API}/accounts/${"f".repeat(32)}/storage/kv/namespaces/${kv}/values/spikegabc123c1.podster.site`, "x", ctx()));
 });
 
-test("the stop key only with the gate open and the spike's value, and deleted only when the spike owns it", () => {
+test("the stop key only with the gate open and the spike's value, and deleted only right after a read found a spike's value", () => {
   assert.throws(() => allow("PUT", value("_stop"), stopValue("abc123"), ctx()));
   allow("PUT", value("_stop"), stopValue("abc123"), ctx({ stopAllowed: true }));
   assert.throws(() => allow("PUT", value("_stop"), "stopped", ctx({ stopAllowed: true })));
   assert.throws(() => allow("PUT", value("_stop"), stopValue("ffffff"), ctx({ stopAllowed: true })));
   assert.throws(() => allow("DELETE", value("_stop"), null, ctx({ stopAllowed: true })));
-  allow("DELETE", value("_stop"), null, ctx({ stopOwned: true }));
+  assert.throws(() => allow("DELETE", value("_stop"), null, ctx({ stopOwned: true })), "owning it isn't enough without the read");
+  allow("DELETE", value("_stop"), null, ctx({ stopReadSpike: true }));
 });
 
 test("namespace scripts only by a spike name, with the API's own query", () => {
@@ -167,6 +168,19 @@ test("arguments take file paths only, and the configuration only its six keys", 
   assert.throws(() => parseArgs(["run", "--kv-token-file", "AbCdEf0123456789xyzTOKEN"]));
   assert.throws(() => parseArgs(["run", "--kv-token"]));
   assert.throws(() => parseArgs(["deploy"]));
+  // A stray token on the command line is never echoed: the error names its position only.
+  const stray = "AbCdEf0123456789xyzSTRAYTOKEN";
+  for (const argv of [["run", stray], ["run", "--config", "./c.json", `--kv-token-file=${stray}`], ["run", `--${stray}`], [stray]]) {
+    let message = "";
+    try {
+      parseArgs(argv);
+    } catch (e) {
+      message = e.message;
+    }
+    assert.ok(message, "refused");
+    assert.ok(!message.includes(stray) && !message.includes(stray.slice(0, 8)), message);
+  }
+  assert.match((() => { try { parseArgs(["run", "--config", "./c.json", stray]); } catch (e) { return e.message; } })(), /argument 4/);
   const c = { account_id: account, kv_namespace_id: kv, dispatch_namespace: "ns", content_worker: "podster-content", content_domain: "podster.site", dns_zone: "opster.dev" };
   assert.equal(checkConfig(c), c);
   assert.throws(() => checkConfig({ ...c, content_domain: "podster.dev" }));
@@ -177,6 +191,7 @@ test("arguments take file paths only, and the configuration only its six keys", 
 
 test("redaction hides secrets, IDs, UUIDs and tokens, and the plan prints none", () => {
   const out = redact(`k=sekrit-value a=${account} u=123e4567-e89b-12d3-a456-426614174000 s=cfwau_eyJabc.def j=eyJhbGciOiJI.eyJzdWIiOiIx.sig`, ["sekrit-value"]);
+  assert.equal(redact("ns=ab here", ["ab", "", null]), "ns=<secret> here", "a configured name of any length; empty ones skipped");
   assert.ok(!out.includes("sekrit") && !out.includes(account) && !out.includes("123e4567") && !out.includes("cfwau_") && !out.includes("eyJ"), out);
   const c = { account_id: account, kv_namespace_id: kv, dispatch_namespace: "ns", content_worker: "podster-content", content_domain: "podster.site", dns_zone: "opster.dev" };
   const text = ["run", "cursor", "cleanup"].flatMap((cmd) => plan(cmd, names("abc123", "podster.site"), c)).join("\n");

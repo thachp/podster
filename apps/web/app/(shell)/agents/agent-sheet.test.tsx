@@ -10,7 +10,8 @@ type Handler = (url: string, init: RequestInit) => Response | Promise<Response> 
 
 const AGENT = { id: "agt_1", org_id: "org_1", name: "Code Agent", generation: 1, status: "active", inbox_unread: 2, wake: null };
 const EVENT = { seq: 3, event_id: "e3", workspace_id: "ws_other", type: "task.offered", task_id: "tsk_9", actor_id: "per_9", created_at: Date.now() - 120_000 };
-const INBOX = { events: [{ ...EVENT, seq: 2, event_id: "e2" }, EVENT], acked_seq: 2, unread: 1, dropped: 0 };
+// Newest first, as the sheet asks for it.
+const INBOX = { events: [EVENT, { ...EVENT, seq: 2, event_id: "e2" }], acked_seq: 2, unread: 1, dropped: 0, next_before: null };
 const ROOMS = [
   { workspace_id: "ws_mine", workspace_name: "Platform", role: "member", status: "active", left: false },
   { workspace_id: "ws_other", workspace_name: "Their room", role: "guest", status: "active", left: false },
@@ -304,7 +305,7 @@ describe("the agent's workrooms", () => {
   it("come from the rooms route, with no 'may be incomplete' and no reads of each room", async () => {
     render(<Screen />);
     await opened();
-    expect(calls.map((call) => call.url).sort()).toEqual(["/api/agents/agt_1", "/api/v1/agents/agt_1/inbox?after=0&limit=50", "/api/v1/agents/agt_1/rooms", "/api/v1/workspaces"]);
+    expect(calls.map((call) => call.url).sort()).toEqual(["/api/agents/agt_1", "/api/v1/agents/agt_1/inbox?order=newest&limit=10", "/api/v1/agents/agt_1/rooms", "/api/v1/workspaces"]);
     expect(screen.queryByText(/may be incomplete/)).toBeNull();
     expect(screen.queryByText(/list was cut/)).toBeNull();
   });
@@ -405,49 +406,154 @@ describe("the agent's workrooms", () => {
   });
 });
 
-describe("UI-09: inbox oversight", () => {
-  it("is labeled, shows the cursor and unread, and only ever reads", async () => {
+describe("UI-09: recent activity (issue 547)", () => {
+  type Event = Omit<typeof EVENT, "task_id"> & { task_id: string | null };
+  const at = (index: number) => Date.now() - (100 - index) * 60_000;
+  const made = (seq: number, extra: Partial<Event> = {}): Event => ({ ...EVENT, seq, event_id: `e${seq}`, created_at: at(seq), ...extra });
+  /** An inbox that answers newest-first reads by `before`, as the API does, `size` at a time. */
+  const paged = (events: Event[], page: Partial<typeof INBOX> = {}) => (url: string) => {
+    if (!url.startsWith("/api/v1/agents/agt_1/inbox")) return undefined;
+    const query = new URL(url, "https://x").searchParams;
+    const before = Number(query.get("before") ?? Infinity);
+    const limit = Number(query.get("limit"));
+    const below = events.filter((event) => event.seq < before).toSorted((a, b) => b.seq - a.seq);
+    const shown = below.slice(0, limit);
+    return Response.json({ ...INBOX, ...page, events: shown, next_before: below.length > limit ? shown.at(-1)!.seq : null });
+  };
+  const inboxReads = () => calls.filter((call) => call.url.includes("/inbox")).map((call) => call.url);
+  const rows = () => within(screen.getByRole("list", { name: "Recent activity, newest first" })).getAllByRole("listitem");
+
+  it("shows the newest 10 first as readable rows, with titles only from rooms the viewer is in, and only ever reads", async () => {
+    const events = [
+      ...Array.from({ length: 11 }, (_, index) => made(index + 1, { type: "task.updated", task_id: null })),
+      made(12, { workspace_id: "ws_other", task_id: "tsk_9" }),
+      made(13, { workspace_id: "ws_mine", task_id: "tsk_1" }),
+    ];
+    special = (url) => (url === "/api/v1/workspaces/ws_mine/tasks?cursor=&order=newest" ? Response.json({ tasks: [{ id: "tsk_1", title: "Build the Hello World app" }], next_cursor: null }) : paged(events, { acked_seq: 11, unread: 2 })(url));
     render(<Screen />);
     await opened();
-    expect(screen.getByRole("heading", { name: "Viewing as: Code Agent · read-only oversight" })).toBeInTheDocument();
-    expect(screen.getByText("Unread").nextSibling).toHaveTextContent("1");
-    expect(screen.getByText("Cursor position").nextSibling).toHaveTextContent("2");
-    const reads = calls.filter((call) => call.url.includes("/inbox"));
-    expect(reads).toEqual([{ url: "/api/v1/agents/agt_1/inbox?after=0&limit=50", method: "GET" }]);
+    expect(screen.getByRole("heading", { name: "Recent activity" })).toBeInTheDocument();
+    expect(screen.getByText("2 unread")).toBeInTheDocument();
+    expect(inboxReads()).toEqual(["/api/v1/agents/agt_1/inbox?order=newest&limit=10"]);
+    expect(rows()).toHaveLength(10);
+    await waitFor(() => expect(rows()[0]).toHaveTextContent("Offered · Build the Hello World app"));
+    expect(rows()[0]).toHaveTextContent(/^Offered · Build the Hello World appPlatform · 1 hour ago · Unread$/);
+    expect(within(rows()[0]).getByRole("link", { name: "Platform" })).toHaveAttribute("href", "/w/ws_mine/overview");
+    // Another organization's room is named from the agent's listing, isn't a link, and its tasks aren't read.
+    expect(rows()[1]).toHaveTextContent(/^Offered · a taskTheir room · 1 hour ago · Unread$/);
+    expect(within(rows()[1]).queryByRole("link")).toBeNull();
+    expect(rows()[2]).toHaveTextContent(/^EditedTheir room · 1 hour ago$/);
+    expect(calls.some((call) => call.url.includes("/workspaces/ws_other/tasks"))).toBe(false);
+    // Raw types, IDs and the cursor are folded away.
+    const details = screen.getByText("Technical details").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByText("Cursor position").nextSibling).toHaveTextContent("11");
+    expect(details).toHaveTextContent("13 · task.offered · e13 · workroom ws_mine · task tsk_1 · by per_9");
     expect(commands()).toEqual([]);
     expect(calls.some((call) => /ack/.test(call.url))).toBe(false);
   });
 
-  it("a room the viewer can't open isn't a link", async () => {
-    render(<Screen />);
-    await opened();
-    expect(screen.queryByRole("link", { name: "ws_other" })).toBeNull();
-    expect(screen.getAllByText("ws_other").length).toBeGreaterThan(0);
-  });
-
-  it("warns about dropped events, and paging moves past what it has without touching the cursor", async () => {
-    const full = Array.from({ length: 50 }, (_, index) => ({ ...EVENT, seq: index + 1, event_id: `e${index + 1}` }));
+  it("loads older activity without duplicates, and says when there's no more", async () => {
+    const events = Array.from({ length: 15 }, (_, index) => made(index + 1));
     special = (url) => {
-      if (url.endsWith("after=0&limit=50")) return Response.json({ events: full, acked_seq: 0, unread: 51, dropped: 2 });
-      if (url.includes("/inbox")) return Response.json({ events: [{ ...EVENT, seq: 51, event_id: "e51", type: "task.last" }], acked_seq: 0, unread: 51, dropped: 2 });
-      return undefined;
+      // New events arrived between reads, so the older page repeats one already shown.
+      if (url.includes("before=")) return Response.json({ ...INBOX, events: [made(6), made(5), made(4), made(3), made(2), made(1)], next_before: null });
+      return paged(events)(url);
     };
     render(<Screen />);
     await opened();
-    expect(screen.getByText(/2 unread events were dropped/)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("task.last")).toBeInTheDocument();
-    expect(calls.map((call) => call.url)).toContain("/api/v1/agents/agt_1/inbox?after=50&limit=50");
-    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(rows()).toHaveLength(10);
+    expect(screen.queryByText("No older activity.")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(rows()).toHaveLength(15));
+    expect(inboxReads()).toEqual(["/api/v1/agents/agt_1/inbox?order=newest&limit=10", "/api/v1/agents/agt_1/inbox?before=6&limit=10"]);
+    const seqs = within(screen.getByText("Technical details").closest("details")!).getAllByRole("listitem").map((item) => Number(item.textContent!.split(" · ")[0]));
+    expect(seqs).toEqual([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(screen.queryByRole("button", { name: "Load older activity" })).toBeNull();
+    expect(screen.getByText("No older activity.")).toBeInTheDocument();
     expect(commands()).toEqual([]);
   });
 
-  it("a failed inbox read doesn't look like an empty inbox", async () => {
+  it("at the end of history on the first page, offers nothing older", async () => {
+    special = paged([made(1), made(2)]);
+    render(<Screen />);
+    await opened();
+    expect(rows()).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Load older activity" })).toBeNull();
+    expect(screen.getByText("No older activity.")).toBeInTheDocument();
+  });
+
+  it("an empty inbox says so, with no unread badge", async () => {
+    special = paged([], { acked_seq: 0, unread: 0 });
+    render(<Screen />);
+    await opened();
+    expect(screen.getByRole("heading", { name: "Recent activity" })).toBeInTheDocument();
+    expect(screen.queryByText(/unread$/)).toBeNull();
+    expect(screen.getByText("No recent activity.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load older activity" })).toBeNull();
+    expect(screen.queryByText("No older activity.")).toBeNull();
+  });
+
+  it("shows that older activity is loading, and can't be asked for twice", async () => {
+    const events = Array.from({ length: 12 }, (_, index) => made(index + 1));
+    let release: () => void = () => undefined;
+    special = (url) => (url.includes("before=") ? (new Promise<Response>((resolve) => (release = () => resolve(paged(events)(url)!))) as unknown as Response) : paged(events)(url));
+    render(<Screen />);
+    await opened();
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    const busy = await screen.findByRole("button", { name: "Loading older activity…" });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute("aria-busy", "true");
+    await act(async () => release());
+    await waitFor(() => expect(rows()).toHaveLength(12));
+    expect(inboxReads().filter((url) => url.includes("before="))).toHaveLength(1);
+  });
+
+  it("a failed first read doesn't look like an empty inbox", async () => {
     special = (url) => (url.includes("/inbox") ? new Response("{}", { status: 503 }) : undefined);
     render(<Screen />);
     await opened();
-    expect(screen.getByText("Couldn't read this inbox.")).toHaveAttribute("role", "alert");
-    expect(screen.queryByText("This inbox is empty.")).toBeNull();
+    expect(screen.getByText("Couldn't read this agent's recent activity.")).toHaveAttribute("role", "alert");
+    expect(screen.queryByText("No recent activity.")).toBeNull();
+  });
+
+  it("a failed older read says so, keeps what's shown, and can be tried again", async () => {
+    const events = Array.from({ length: 12 }, (_, index) => made(index + 1));
+    let fail = true;
+    special = (url) => (url.includes("before=") && fail ? new Response("{}", { status: 503 }) : paged(events)(url));
+    render(<Screen />);
+    await opened();
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("Couldn't load older activity.")).toHaveAttribute("role", "alert");
+    expect(rows()).toHaveLength(10);
+    fail = false;
+    await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+    await waitFor(() => expect(rows()).toHaveLength(12));
+    expect(screen.queryByText("Couldn't load older activity.")).toBeNull();
+  });
+
+  it("pages through 48 events, ten at a time, each once and newest first, without touching the cursor", async () => {
+    const events = Array.from({ length: 48 }, (_, index) => made(index + 1, { type: "task.message" }));
+    special = paged(events, { acked_seq: 48, unread: 0, dropped: 2 });
+    render(<Screen />);
+    await opened();
+    expect(screen.getByText(/2 unread events were dropped/)).toBeInTheDocument();
+    expect(screen.queryByText(/\d+ unread$/)).toBeNull();
+    for (let page = 0; page < 4; page++) {
+      await userEvent.click(screen.getByRole("button", { name: "Load older activity" }));
+      await waitFor(() => expect(rows()).toHaveLength(Math.min(48, 20 + page * 10)));
+    }
+    expect(screen.queryByRole("button", { name: "Load older activity" })).toBeNull();
+    const seqs = within(screen.getByText("Technical details").closest("details")!).getAllByRole("listitem").map((item) => Number(item.textContent!.split(" · ")[0]));
+    expect(seqs).toEqual(Array.from({ length: 48 }, (_, index) => 48 - index));
+    expect(inboxReads()).toEqual([
+      "/api/v1/agents/agt_1/inbox?order=newest&limit=10",
+      "/api/v1/agents/agt_1/inbox?before=39&limit=10",
+      "/api/v1/agents/agt_1/inbox?before=29&limit=10",
+      "/api/v1/agents/agt_1/inbox?before=19&limit=10",
+      "/api/v1/agents/agt_1/inbox?before=9&limit=10",
+    ]);
+    expect(commands()).toEqual([]);
   });
 });
 

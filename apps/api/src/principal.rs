@@ -663,16 +663,38 @@ struct InboxQuery {
     after: Option<i64>,
     limit: i64,
     ack: bool,
+    /// Newest first, oversight only: `order=newest`, or `before`, which reads below that sequence (issue 547).
+    newest: bool,
+    before: Option<i64>,
 }
 
-fn parse_inbox_query(url: &Url) -> R<InboxQuery> {
+/// `order` and `before` are read only for oversight. An agent's own inbox ignores them, as it always has.
+fn parse_inbox_query(url: &Url, oversight: bool) -> R<InboxQuery> {
     let mut query = InboxQuery {
         after: None,
         limit: PAGE_DEFAULT,
         ack: false,
+        newest: false,
+        before: None,
     };
+    let mut order = None;
     for (name, value) in url.query_pairs() {
         match name.as_ref() {
+            "order" if oversight => {
+                order = match value.as_ref() {
+                    "oldest" => Some(false),
+                    "newest" => Some(true),
+                    _ => return Err(ApiError::invalid_argument()),
+                };
+            }
+            "before" if oversight => {
+                let before = value
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|before| *before >= 1)
+                    .ok_or_else(ApiError::invalid_argument)?;
+                query.before = Some(before);
+            }
             "after" => {
                 let after = value
                     .parse::<i64>()
@@ -695,6 +717,11 @@ fn parse_inbox_query(url: &Url) -> R<InboxQuery> {
             }
             _ => {}
         }
+    }
+    // `before` is a newest-first cursor. With `after` it would mean two cursors, and with oldest first, the wrong order.
+    query.newest = order == Some(true) || query.before.is_some();
+    if (query.newest && query.after.is_some()) || (order == Some(false) && query.before.is_some()) {
+        return Err(ApiError::invalid_argument());
     }
     Ok(query)
 }
@@ -738,6 +765,36 @@ fn read_inbox(sql: &SqlStorage, query: &InboxQuery, now: i64) -> R<Value> {
     }
     Ok(
         json!({ "events": events, "acked_seq": cursor, "unread": unread_count(sql, cursor, now)?, "dropped": dropped }),
+    )
+}
+
+/// Oversight's newest-first page (issue 547). It only reads: no expiry, no cursor. One extra row says whether anything
+/// older follows, so `next_before` is null at the end of history even on a full page.
+fn read_inbox_newest(sql: &SqlStorage, query: &InboxQuery, now: i64) -> R<Value> {
+    let (acked, _, dropped) = inbox_state(sql)?;
+    let dropped = dropped + expired_unread(sql, acked, now)?;
+    let mut events = if inbox_exists(sql)? {
+        rows(sql, "SELECT seq, event_id, workspace_id, type, task_id, actor_id, created_at FROM inbox_event
+          WHERE seq < ? AND ((seq > ? AND created_at >= ?) OR (seq <= ? AND created_at >= ?)) ORDER BY seq DESC LIMIT ?", vec![
+            query.before.unwrap_or(i64::MAX).into(),
+            acked.into(),
+            (now - UNREAD_KEPT_MS).into(),
+            acked.into(),
+            (now - ACKED_KEPT_MS).into(),
+            (query.limit + 1).into(),
+        ])?
+    } else {
+        vec![]
+    };
+    let more = events.len() as i64 > query.limit;
+    events.truncate(query.limit as usize);
+    let next_before = if more {
+        events.last().map(|oldest| oldest["seq"].clone())
+    } else {
+        None
+    };
+    Ok(
+        json!({ "events": events, "acked_seq": acked, "unread": unread_count(sql, acked, now)?, "dropped": dropped, "next_before": next_before }),
     )
 }
 
@@ -2516,7 +2573,7 @@ impl Principal {
         let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         match (segments.as_slice(), req.method()) {
             (["v1", "inbox"], Method::Get) => {
-                let query = parse_inbox_query(&req.url()?)?;
+                let query = parse_inbox_query(&req.url()?, false)?;
                 let (store, now) = (sql.clone(), now_ms());
                 return self.in_transaction(move || read_inbox(&store, &query, now));
             }
@@ -2686,9 +2743,12 @@ impl Principal {
                 Ok(json!({ "rooms": rooms, "truncated": truncated }))
             }
             (Method::Get, Some("inbox")) => {
-                let query = parse_inbox_query(&req.url()?)?;
+                let query = parse_inbox_query(&req.url()?, true)?;
                 if query.ack {
                     return Err(ApiError::invalid_argument());
+                }
+                if query.newest {
+                    return read_inbox_newest(&sql, &query, now_ms());
                 }
                 read_inbox(&sql, &query, now_ms())
             }

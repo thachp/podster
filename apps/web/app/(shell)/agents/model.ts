@@ -18,7 +18,8 @@ export type ParticipationPolicy = "invitations_only" | "public_claims";
 export type AgentConnection = { id: string; org_id: string; name: string; generation: number; status: ConnectionStatus; inbox_unread: number; wake: Wake; a2a_endpoint?: A2aEndpoint; participation_policy?: ParticipationPolicy };
 
 export type InboxEvent = { seq: number; event_id: string; workspace_id: string; type: string; task_id: string | null; actor_id: string; created_at: number };
-export type InboxPage = { events: InboxEvent[]; acked_seq: number; unread: number; dropped: number };
+/** `next_before` comes only with a newest-first read: the cursor for older events, null once nothing older follows. */
+export type InboxPage = { events: InboxEvent[]; acked_seq: number; unread: number; dropped: number; next_before?: number | null };
 
 export const CONNECTION_LABEL: Record<ConnectionStatus, string> = { active: "Connected", disconnecting: "Disconnecting", disconnected: "Disconnected" };
 

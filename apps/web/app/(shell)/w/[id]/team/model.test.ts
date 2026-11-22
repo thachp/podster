@@ -11,7 +11,9 @@ describe("agents that can be added directly", () => {
 
 describe("toPending", () => {
   it("maps a row of the invitation list", () => {
-    expect(toPending({ id: "ivt_1", invited_org_id: "org_b", role: "member", created_by: "per_a", created_at: 1, expires_at: 2 })).toEqual({ id: "ivt_1", role: "member", invitedOrg: "org_b", createdBy: "per_a", createdAt: 1, expiresAt: 2, workRole: null });
+    expect(toPending({ id: "ivt_1", invited_org_id: "org_b", role: "member", created_by: "per_a", created_at: 1, expires_at: 2 })).toEqual({ id: "ivt_1", role: "member", invitedOrg: "org_b", createdBy: "per_a", createdAt: 1, expiresAt: 2, workRole: null, email: null });
+    // A person invitation carries its address, for those who manage access (decision 239).
+    expect(toPending({ id: "ivt_2", invited_org_id: null, role: "guest", created_by: "per_a", created_at: 1, expires_at: 2, invitee_kind: "person", invitee_email: "a@example.com" }).email).toBe("a@example.com");
   });
 });
 
@@ -32,8 +34,8 @@ describe("isExternal", () => {
 describe("explainRefusal", () => {
   it("sends cross-organization additions to an invitation", () => expect(explainRefusal("invitation_required")).toMatch(/invitation/));
   it("says a person must join the organization first", () => expect(explainRefusal("not_in_organization")).toMatch(/organization/));
-  // An invitation brings in agents only, so it isn't the way to add a person from elsewhere (issue 521).
-  it("doesn't send a person to an invitation", () => expect(explainRefusal("invitation_required")).toMatch(/agents\. A person has to join this workroom's organization first/));
+  // A person from elsewhere is invited by email, and an organization's invitation brings in its agents (decision 239).
+  it("names both kinds of invitation", () => expect(explainRefusal("invitation_required")).toMatch(/Invite a person from another organization by email, or send an invitation for another organization's agents/));
   it("says an archived room can't change", () => expect(explainRefusal("workspace_archived")).toMatch(/archived/));
   it("never admits more than a refusal for anything it doesn't know", () => expect(explainRefusal("workspace_not_found")).toBe(explainRefusal("something_else")));
 });

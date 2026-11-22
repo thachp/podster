@@ -130,14 +130,18 @@ export type Viewer = { id: string; orgs: string[]; adminOrgs: string[] };
 
 export type AuditRow = { id: string; actor_id: string; actor_kind: string; action: string; target_id: string; outcome: string; prior_json: string | null; new_json: string | null; policy_version: number; created_at: number };
 
-export type PendingInvitation = { id: string; role: string; invitedOrg: string | null; createdBy: string; createdAt: number; expiresAt: number; workRole: string | null };
+/** `email` is a person invitation's address (decision 239), shown only to those who manage access. Null for an organization's. */
+export type PendingInvitation = { id: string; role: string; invitedOrg: string | null; createdBy: string; createdAt: number; expiresAt: number; workRole: string | null; email?: string | null };
 
 export const membersOf = (room: Pick<Workroom, "members">) => (room.members ?? []) as Member[];
 
 /** A row of the invitation list. Pending only, and it never holds a token. */
-export type InvitationRow = { id: string; invited_org_id: string | null; work_role_id?: string | null; role: string; created_by: string; created_at: number; expires_at: number };
+export type InvitationRow = { id: string; invited_org_id: string | null; work_role_id?: string | null; role: string; created_by: string; created_at: number; expires_at: number; invitee_kind?: "organization" | "person"; invitee_email?: string | null };
 
-export const toPending = (row: InvitationRow): PendingInvitation => ({ id: row.id, role: row.role, invitedOrg: row.invited_org_id, createdBy: row.created_by, createdAt: row.created_at, expiresAt: row.expires_at, workRole: row.work_role_id ?? null });
+export const toPending = (row: InvitationRow): PendingInvitation => ({ id: row.id, role: row.role, invitedOrg: row.invited_org_id, createdBy: row.created_by, createdAt: row.created_at, expiresAt: row.expires_at, workRole: row.work_role_id ?? null, email: row.invitee_kind === "person" ? (row.invitee_email ?? null) : null });
+
+/** A person here through another organization than the room's (decision 239). Only what to offer: Rust refuses them admin. */
+export const isOutsidePerson = (member: Pick<Member, "kind" | "org_id">, roomOrg: string | null | undefined) => member.kind === "person" && typeof roomOrg === "string" && member.org_id !== roomOrg;
 
 /** Only the room's own organization can be added directly. Anyone else needs an invitation, and the server refuses them here. */
 export const addableAgents = (agents: { id: string; name: string; org_id: string; revoked_at: number | null }[], roomOrg: string) => agents.filter((agent) => agent.org_id === roomOrg && agent.revoked_at === null).map(({ id, name, org_id }) => ({ id, name, org_id }));
@@ -162,7 +166,7 @@ export function explainRefusal(code: string, status = 400) {
   if (status >= 500) return "We can't tell whether this saved. Refresh before trying again.";
   switch (code) {
     case "invitation_required":
-      return "Only the workroom's own organization can be added directly. Send an invitation for another organization's agents. A person has to join this workroom's organization first. Nothing changed.";
+      return "Only the workroom's own organization can be added directly. Invite a person from another organization by email, or send an invitation for another organization's agents. Nothing changed.";
     case "not_in_organization":
       return "That person isn't in this workroom's organization, so they couldn't act on the role. Invite them to the organization first. Nothing changed.";
     case "workspace_archived":

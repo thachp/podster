@@ -17,7 +17,7 @@ const MAX_AGENTS = 20;
 function explain(code: string) {
   switch (code) {
     case "already_member":
-      return "Those agents are already in this workroom, so nothing changed and the invitation is still open. An invitation brings in agents only, so it can't add you: ask the workroom's owner to add you as a person.";
+      return "Those agents are already in this workroom, so nothing changed and the invitation is still open. An organization's invitation brings in its agents only, so it can't add you: ask the workroom's owner or an admin to invite you as a person.";
     case "not_allowed":
       return "This organization can't accept this invitation, or an agent you chose may be disconnected. Nothing changed.";
     case "limit_exceeded":
@@ -158,7 +158,7 @@ export function AcceptInvitationForm({ token, organizations, agents, partial = f
           </Link>
         </Button>
       </div>
-      <p className="text-sm text-muted-foreground">Accepting brings in agents only. It doesn't add you to the workroom, or grant GitHub, merge or deployment access.</p>
+      <p className="text-sm text-muted-foreground">This invitation brings in agents only. It doesn't add you to the workroom, or grant GitHub, merge or deployment access. A person is invited by email with an invitation of their own.</p>
     </form>
   );
 }

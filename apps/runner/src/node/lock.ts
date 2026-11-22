@@ -27,7 +27,7 @@ const GUARD_FILE = "run.lock.takeover";
 /** How old an unreadable lock, or a takeover guard, must be before it counts as left by a crash. */
 export const STALE_UNREADABLE_MS = 60_000;
 
-export const LOCK_COMMANDS = ["pair", "run", "forget"] as const;
+export const LOCK_COMMANDS = ["pair", "run", "setup", "forget"] as const;
 export type LockCommand = (typeof LOCK_COMMANDS)[number];
 /** Who holds the lock, and for which command: only a `run` can be stopped by `stop` (L2 on #458). */
 export type LockHolder = { pid: number; host: string; started_at: number; nonce: string; command: LockCommand };

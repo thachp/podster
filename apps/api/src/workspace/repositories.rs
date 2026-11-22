@@ -11,18 +11,19 @@ use podster_core::provider_deliveries::{
     decide, is_well_formed, Arrival, EventKind, Nudge, NudgeOutcome, DELIVERY_RETENTION_MS,
 };
 use podster_core::repo_grants::{
-    decide_grant, decide_revoke, grants_ended_by_ownership_change, grants_ended_by_removal, Grant,
-    GrantPlan, GrantRefusal, RevokePlan,
+    check_grant, decide_grant, decide_revoke, grants_ended_by_ownership_change,
+    grants_ended_by_removal, Grant, GrantPlan, GrantRefusal, GrantUse, RevokePlan,
 };
 use podster_core::repositories::GrantAction;
 use podster_policy::repositories::{
     authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
-    may_receive_grant, sees_grant, RepoDenial,
+    may_receive_grant, sees_grant, setup_view, RepoDenial,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
-/// a person who sees the whole room, never an agent: the contract lists it as person-only, and an agent will learn of the
-/// repository through `get_repo_access`, once step 6 builds it. It's a read of current state and authorizes nothing.
+/// a person who sees the whole room, never an agent: the contract lists it as person-only. An agent learns of the
+/// repository through `get_repo_access`, and, while it holds a live `push` grant, its name and ID in the room read's
+/// `setup` (issue 523, [`with_setup_facts`]). It's a read of current state and authorizes nothing.
 ///
 /// `may_request` says whether the caller could ask for the repository or retry its setup as far as who they are goes:
 /// a person who is the room's owner or a room admin, whom this deployment lets ask. It's for a screen to show the
@@ -52,6 +53,90 @@ pub(super) fn read(
         }));
     let may_request = requesters.authorize(&who.caller).is_ok();
     Ok(json!({ "request": request, "repository": repository, "may_request": may_request }))
+}
+
+/// The room read's `setup` (issue 523, narrowed by the architect's ruling of 2026-11-22), for an agent that could receive
+/// a grant here, so its owner's Runner can offer a starter run policy with no ID copied by hand. It tells only what the
+/// agent could already see (`setup_view`): `org_id` when the room is the agent's own organization's or the agent sees the
+/// whole room's member rows, and `repository`, the linked repository's full name and GitHub's numeric ID, only while the
+/// agent holds a live `push` grant on it, which is what a token would name anyway. A part not told is left out, and a
+/// reader takes it as unknown, never as "none": so with managed repositories switched off `repository` is left out too.
+/// Nothing of the request, the link's state or other grants. Anyone else gets no `setup` at all. It's a read of current
+/// state and authorizes nothing: a token still needs everything `get_repo_access` checks.
+pub(super) fn with_setup_facts(
+    sql: &SqlStorage,
+    who: &Participant,
+    mut read: Value,
+    managed: bool,
+    now: i64,
+) -> R<Value> {
+    let public = super::public_claims::is_public_participant(sql, who.caller.id.as_str())?;
+    let room = rows(sql, "SELECT id, owner_org_id FROM workspace", vec![])?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    let own = room["owner_org_id"].as_str() == Some(who.org.as_str());
+    let live = managed && holds_live_push(sql, who.caller.id.as_str(), now)?;
+    let Some(view) = setup_view(&who.caller, public, own, live) else {
+        return Ok(read);
+    };
+    let mut setup = json!({ "room_id": room["id"] });
+    if view.org {
+        setup["org_id"] = room["owner_org_id"].clone();
+    }
+    if view.repository {
+        if let Some(link) = rows(
+            sql,
+            "SELECT provider_repo_id, full_name FROM repo_link",
+            vec![],
+        )?
+        .first()
+        {
+            setup["repository"] = json!({ "full_name": link["full_name"], "provider_repo_id": link["provider_repo_id"] });
+        }
+    }
+    read["setup"] = setup;
+    Ok(read)
+}
+
+/// Whether an agent holds a `push` grant on the room's linked repository that counts now, as `check_grant` counts it,
+/// with the giver's standing as the room records it. For showing only: a use also asks the giver's `Principal`.
+fn holds_live_push(sql: &SqlStorage, agent: &str, now: i64) -> R<bool> {
+    let Some(link_repo_id) = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
+        .first()
+        .and_then(|l| l["provider_repo_id"].as_i64())
+    else {
+        return Ok(false);
+    };
+    let found = rows(
+        sql,
+        "SELECT id, delegated_by, provider_repo_id, expires_at, revoked_at FROM provider_grant WHERE principal_id = ? AND action = 'push' AND revoked_at IS NULL AND provider_repo_id = ?",
+        vec![agent.into(), link_repo_id.into()],
+    )?;
+    for row in &found {
+        let (Some(id), Some(giver)) = (row["id"].as_str(), row["delegated_by"].as_str()) else {
+            continue;
+        };
+        let grant = Grant {
+            id,
+            principal: agent,
+            provider_repo_id: link_repo_id,
+            action: GrantAction::Push,
+            delegated_by: giver,
+            expires_at: row["expires_at"].as_i64(),
+            revoked_at: row["revoked_at"].as_i64(),
+        };
+        let holder = recorded_holder(sql, giver)?;
+        let usage = GrantUse {
+            principal: agent,
+            action: GrantAction::Push,
+            link_repo_id,
+            delegation_holder: holder.as_deref(),
+            now,
+        };
+        if check_grant(Some(&grant), &usage).is_ok() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The Worker's call for a provider's webhook delivery. Reached only from `crate::provider`, which has verified the

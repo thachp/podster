@@ -13,6 +13,7 @@
 //! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
 //! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter; and the commit's approving review came from someone the submitter's person doesn't control ([`independent_review`]). Or, in a private room only, the person who controls the submitting agent and approved its reviewed commit themselves, with the same grant: a self-reviewed merge ([`self_reviewed_merge`], decision 186 as amended 2026-11-20). Never an agent for its own controller's work |
 //! | See the room's repository and its state | A person who sees the whole room |
+//! | See the room's setup facts (issue 523; narrowed 2026-11-22): its organization, and its linked repository's full name and numeric ID | An agent that could receive a grant here, a current participant not there through a public claim, and only what it could already see ([`setup_view`]): the organization when the room is its own organization's or it sees the whole room's member rows; the repository only while it holds a live `push` grant on it |
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
 //!
@@ -437,6 +438,38 @@ pub fn sees_every_grant(caller: &Caller) -> bool {
 /// row at the time.
 pub fn sees_join_source(caller: &Caller) -> bool {
     caller.role != Role::None && is_human_admin(caller)
+}
+
+/// What the room read's `setup` tells an agent (issue 523, narrowed by the architect's ruling of 2026-11-22). Each part
+/// is told only where it adds nothing the agent couldn't already see; a part not told is unknown to the reader, never
+/// "none".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetupView {
+    /// The room's organization: when the room is in the agent's own organization, or the agent sees the whole room,
+    /// whose member rows carry each member's organization.
+    pub org: bool,
+    /// The linked repository's full name and numeric ID: only while the agent holds a live `push` grant on it, as
+    /// `get_repo_access` would count it apart from the task, so it is what a token would name anyway.
+    pub repository: bool,
+}
+
+/// Whether an agent gets the room read's `setup`, and which parts. Only an agent that could receive a grant here: a
+/// current participant not there through a public claim. Never a person, who has the repository read. `room_in_own_org`
+/// is the room's organization against the agent's own; `holds_live_push` is the room's current grant rows, checked as
+/// `repo_grants::check_grant` checks them, with the giver's standing as the room records it. It shows and never
+/// authorizes: a token still needs everything `get_repo_access` checks.
+pub fn setup_view(
+    caller: &Caller,
+    through_public_claim: bool,
+    room_in_own_org: bool,
+    holds_live_push: bool,
+) -> Option<SetupView> {
+    (caller.kind == PrincipalKind::Agent
+        && may_receive_grant(caller.role, through_public_claim, false).is_ok())
+    .then(|| SetupView {
+        org: room_in_own_org || sees_whole_room(caller),
+        repository: holds_live_push,
+    })
 }
 
 /// Who is shown a task's change: its pull request and what Podster observed of it (M5 step 7a). People who can see the

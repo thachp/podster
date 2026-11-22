@@ -16,12 +16,13 @@ import type { LoopOutcome, Poller } from "../core/poller.js";
 import { SupervisedAdapter, type ProgressEvent, type SupervisedDeps } from "../core/run-interface.js";
 import type { Clock, Diagnostics, Logger } from "../core/runtime.js";
 import { FileRunStore } from "./file-runs.js";
-import { policyFile } from "./policy-file.js";
+import { policyFile, policyText } from "./policy-file.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
 import { appOriginFor } from "../core/pull-text.js";
 import { hostRepositoryPath } from "./repo-path.js";
 import { retryTransient, STOPPED } from "../core/retry.js";
 import { RoleInvites } from "../core/roles.js";
+import { RoomFacts } from "../core/room-facts.js";
 
 /** What runs tasks: a driver per agent SDK, the task container, and the provider transports that hold the keys. */
 export type RunEngine = Pick<SupervisedDeps, "drivers" | "sandbox" | "transports">;
@@ -66,6 +67,10 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   // only ends the loop's wait early so the answer is used soon.
   const bell = deps.bell;
   const roles = new RoleInvites({ poller: deps.poller, config: policyFile(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log, ...(bell ? { wake: () => bell.ring() } : {}) });
+  // Room changes after setup (issue 523): a repository Podster newly names for a room, or names differently, is asked
+  // about on this terminal; nothing is ever removed on what Podster doesn't say. Read off the same policy file, and never
+  // waited for before task work.
+  const rooms = new RoomFacts({ poller: deps.poller, policy: policyText(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log, ...(bell ? { wake: () => bell.ring() } : {}) });
   // Opening asks Podster who this agent is. A brief network failure, a server failure or a rate limit there is waited
   // out like the poll loop's own, never a reason to exit (the 2026-11-21 report); an authority error, a refusal or a
   // policy problem still ends `run` here. The open changes nothing until that answer is in, so trying it again is safe.
@@ -80,6 +85,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
         ...(repository ? { repository } : {}),
         prompter,
         roles,
+        rooms,
         clock: deps.clock,
         log: deps.log,
         ...(deps.diagnostics ? { diagnostics: deps.diagnostics } : {}),

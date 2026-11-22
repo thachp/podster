@@ -14,6 +14,9 @@
  *                                                     Also take Podster's nudges (M7 step 14), off unless both are
  *                                                     given: listen on loopback at the port, register the public HTTPS
  *                                                     address the owner's proxy or tunnel forwards to, and prove control.
+ *   setup   [--room <ws_…>] [--workspace-root <folder>]
+ *                                                     Preview a starter run policy from a room's settings (issue 523),
+ *                                                     and save it only on the owner's typed yes. Never replaces one.
  *   stop                                              Stop the Runner running from this home, and any run, at once.
  *   status                                            Show what this Runner's record says, by IDs.
  *   forget                                            Delete this Runner's keys and record. The agent stays connected in Podster.
@@ -21,7 +24,7 @@
  * Every command takes `--home <folder>`, Runner's own folder (default `~/.podster-runner`). What the owner reads goes to
  * standard output in fixed words; log lines, IDs only, go to standard error.
  *
- * `pair`, `run` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
+ * `pair`, `run`, `setup` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
  * runs. `run` with `--provider-key-file` builds the Claude engine (`claude-engine.ts`: the pinned SDK, the Docker task
  * container, the key's transport), reaps what a previous process left, then opens the lifecycle (`run-command.ts`).
  * Without a key file it opens no lifecycle and accepts nothing it couldn't run.
@@ -45,6 +48,8 @@ import { clearStop, requestStop, watchStop } from "./local-stop.js";
 import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
 import { alongsidePolling, nudgeOptions, openNudge } from "./nudge-command.js";
 import { processTerminal, runInbox } from "./run-command.js";
+import { policyText } from "./policy-file.js";
+import { runSetup } from "./setup-command.js";
 
 const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through the Claude Agent SDK)
 
@@ -63,6 +68,13 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
                                                    unchanged), and proves it holds the address's secret. An admin of
                                                    the agent's organization then switches the nudge on in Podster.
                                                    A nudge only makes Runner poll sooner. Polling stays on.
+  setup   [--room <ws_…>] [--workspace-root <folder>]
+                                                   Make a starter run policy from a room's settings: its ID, and
+                                                   its organization and repository where Podster tells this agent,
+                                                   come from Podster, and you approve what's saved. Asks first, holds outputs, no shell
+                                                   or network, low limits. Never replaces a policy: adds a room to
+                                                   it, or updates a room's repository once you say yes. Default
+                                                   workspace root for a new policy: ~/podster-work
   stop                                             Stop the Runner running from this home at once, and any run.
                                                    It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
@@ -124,7 +136,7 @@ async function main(argv: string[]) {
     return 0;
   }
 
-  if (command !== "pair" && command !== "run" && command !== "forget") {
+  if (command !== "pair" && command !== "run" && command !== "setup" && command !== "forget") {
     say(USAGE);
     return 2;
   }
@@ -204,6 +216,23 @@ async function locked(command: string, args: string[], home: string, state: File
     } finally {
       input.close();
     }
+  }
+
+  if (command === "setup") {
+    const record = await state.load();
+    if (!record.gateway) throw new Error("This Runner isn't paired yet. Run `pair` first.");
+    const poller = await Poller.open({ origin: record.gateway, fetch: globalThis.fetch, secrets: keys.store, state, clock: systemClock, log });
+    const room = option(args, "room");
+    const root = option(args, "workspace-root");
+    return runSetup({
+      home,
+      poller,
+      policy: policyText(home),
+      terminal: processTerminal(),
+      ...(room === undefined ? {} : { room }),
+      workspace_root: root === undefined ? join(homedir(), "podster-work") : resolve(root),
+      say,
+    });
   }
 
   if (command === "run") {

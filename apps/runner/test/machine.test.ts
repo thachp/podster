@@ -333,16 +333,16 @@ describe("Runner's own source", () => {
     expect(Object.keys(CLAUDE_PROFILE.headers).map((h) => h.toLowerCase())).not.toContain("anthropic-beta");
   });
 
-  it("takes the home's lock for pair, run and forget, before anything else they do (decision 227)", async () => {
+  it("takes the home's lock for pair, run, setup and forget, before anything else they do (decision 227)", async () => {
     const cli = await readFile(new URL("apps/runner/src/node/cli.ts", repo), "utf8");
     const main = cli.slice(cli.indexOf("async function main("), cli.indexOf("async function locked("));
-    expect(main).toMatch(/command !== "pair" && command !== "run" && command !== "forget"/);
+    expect(main).toMatch(/command !== "pair" && command !== "run" && command !== "setup" && command !== "forget"/);
     expect(main.indexOf("acquireLock(home, { command })")).toBeGreaterThan(-1);
     expect(main.indexOf("acquireLock(home, { command })")).toBeLessThan(main.indexOf("locked(command"));
     // Every command that touches keys or the records is inside `locked`, after the lock.
     const after = cli.slice(cli.indexOf("async function locked("));
-    for (const command of ["forget", "pair", "run"]) expect(after).toContain(`command === "${command}"`);
-    expect(main).not.toMatch(/command === "(forget|pair|run)"/);
+    for (const command of ["forget", "pair", "run", "setup"]) expect(after).toContain(`command === "${command}"`);
+    expect(main).not.toMatch(/command === "(forget|pair|run|setup)"/);
   });
 
   it("keeps every file in src/core free of the machine, so it runs as tested against the real gateway (Standards Low 1 on #458)", async () => {

@@ -1825,3 +1825,41 @@ fn a_self_reviewed_merge_is_only_the_approving_controllers_in_a_private_room_wit
         &private
     ));
 }
+
+#[test]
+fn an_agent_is_told_only_the_setup_facts_it_could_already_see() {
+    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        for own in [false, true] {
+            for push in [false, true] {
+                let agent = caller("a", Agent, role);
+                let view =
+                    setup_view(&agent, false, own, push).expect("an agent that could hold a grant");
+                // The organization: its own room's, or a room whose member rows it sees whole.
+                assert_eq!(
+                    view.org,
+                    own || sees_whole_room(&agent),
+                    "{role:?} own={own}"
+                );
+                // The repository: only with a live push grant on it.
+                assert_eq!(view.repository, push, "{role:?} push={push}");
+                // Through a public claim it can never hold a grant, so it gets nothing; a person neither.
+                assert_eq!(setup_view(&agent, true, own, push), None);
+                assert_eq!(
+                    setup_view(&caller("p", Person, role), false, own, push),
+                    None
+                );
+            }
+        }
+    }
+    // A guest sees only its own row, so another organization's room isn't named to it.
+    assert!(
+        !setup_view(&caller("a", Agent, Role::Guest), false, false, false)
+            .unwrap()
+            .org
+    );
+    // Not in the room: nothing.
+    assert_eq!(
+        setup_view(&caller("a", Agent, Role::None), false, true, true),
+        None
+    );
+}

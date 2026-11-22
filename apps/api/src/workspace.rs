@@ -2442,7 +2442,9 @@ mod queries {
             "access": access_json(caller.kind, caller.role, caller.scopes),
             "policy_version": manages.then(|| room["policy_version"].clone()), "members": listed,
         });
-        // Who has left and why, and which organization holds the room, are for those who manage its access.
+        // Who has left and why, and which organization holds the room, are for those who manage its access. An agent that
+        // could hold the repository grant is also told the room's organization in `setup`, only when the room is its own
+        // organization's or it sees the whole room's member rows (issue 523, `repositories::with_setup_facts`).
         if manages {
             answer["owner_org"] = room["owner_org_id"].clone();
             answer["owner_left_at"] = room["owner_left_at"].clone();
@@ -4621,7 +4623,10 @@ impl Workspace {
                 return Ok(read);
             }
             return match tail {
-                [] => queries::get_workspace(&sql, &who),
+                [] => queries::get_workspace(&sql, &who).and_then(|read| {
+                    let managed = provisioning::enabled(&self.env, &sql)?;
+                    repositories::with_setup_facts(&sql, &who, read, managed, now_ms())
+                }),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["plan"] => plan::read(&sql, &who.caller, &url),

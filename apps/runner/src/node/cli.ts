@@ -155,7 +155,7 @@ async function locked(command: string, args: string[], home: string, state: File
     // Refused while a run may still be going or budget is reserved; the day's spend is kept (L5 on #458).
     const blocked = await forgetRuns(new FileRunStore(home));
     if (blocked) {
-      say(`Runner won't forget this agent while it has ${blocked}. Start it again with \`run\`: it keeps checking a held run until its stop is confirmed, then releases it and settles the budget. If this agent's connection has ended, pair again from Podster first, then \`run\`. Once nothing is held or reserved, \`forget\` goes through.`);
+      say(`Runner won't forget this agent while it has ${blocked}. Start it again with \`run\`: it keeps checking a held run until its stop is confirmed, then releases it and settles the budget. If this agent's connection has ended, pair again from Podster first (that makes a new agent with a new ID), then \`run\`. Once nothing is held or reserved, \`forget\` goes through.`);
       return 1;
     }
     await new RunnerStorage(keys.store).deleteAll();

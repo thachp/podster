@@ -420,7 +420,9 @@ describe("the room's recheck of a release", () => {
       // anyone different. What was learned of the first requester must not be taken as said of the second.
       ["the requester, with the grant moved to the new one", (h) => [`UPDATE release SET requested_by = '${h.admin.id}'`, `UPDATE provider_grant SET principal_id = '${h.admin.id}'`]],
       ["the grant's giver", (h) => [`UPDATE provider_grant SET delegated_by = '${h.admin.id}'`]],
-      ["the room's organization", () => ["UPDATE workspace SET owner_org_id = 'org_rr_other'"]],
+      // Its people move with it: a person whose place is held through another organization than the room's never
+      // releases (decision 239), which the room's rows would decide on their own.
+      ["the room's organization", () => ["UPDATE workspace SET owner_org_id = 'org_rr_other'", "UPDATE member SET org_id = 'org_rr_other' WHERE kind = 'person'"]],
       // The delegation is held for a provider. What was read for one says nothing of another.
       ["the provider the room's repository is with", () => ["UPDATE repo_link SET provider = 'another'", "UPDATE provider_grant SET provider = 'another'"]],
     ];
@@ -454,7 +456,9 @@ describe("the room's recheck of a release", () => {
     // Asked about one place in the room, and by the transaction the rows give them another: the same person, in
     // another organization, or in a place that began at another time. The answer was about the first place.
     promoted.push(
-      ["the approver's place moved to another organization in between", async () => {}, () => ["UPDATE workspace SET owner_org_id = 'org_rr_moved', created_at = created_at"]],
+      // The room's people move with it, since a person held through another organization than the room's never releases
+      // (decision 239), which the room's own rows would decide.
+      ["the approver's place moved to another organization in between", async () => {}, () => ["UPDATE workspace SET owner_org_id = 'org_rr_moved', created_at = created_at", "UPDATE member SET org_id = 'org_rr_moved' WHERE kind = 'person'"]],
       ["the requester's place begun again in between", async () => {}, (h) => [`UPDATE member SET added_at = added_at + 5 WHERE principal_id = '${h.requester.id}'`]],
     );
     for (const [what, before, statements] of promoted) {

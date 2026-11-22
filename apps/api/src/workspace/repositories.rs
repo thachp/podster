@@ -458,6 +458,19 @@ impl GrantRow {
     }
 }
 
+/// Whether this is a person whose place here is held through another organization than the room's (decision 239,
+/// CROSS-ORG-PEOPLE.md). They get no repository or release rights: no grant is given to them, and none is used by them.
+/// An agent never is, whichever organization holds it.
+pub(super) fn is_outside_person(sql: &SqlStorage, principal: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT m.principal_id FROM member m, workspace w
+           WHERE m.principal_id = ? AND m.kind = 'person' AND m.org_id IS NOT w.owner_org_id",
+        vec![principal.into()],
+    )?
+    .is_empty())
+}
+
 fn grant_rows(sql: &SqlStorage, filter: &str, bindings: Vec<V>) -> R<Vec<GrantRow>> {
     Ok(rows(
         sql,
@@ -753,6 +766,7 @@ pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now:
     may_receive_grant(
         role,
         super::public_claims::is_public_participant(sql, &principal)?,
+        is_outside_person(sql, &principal)?,
     )
     .map_err(denied)?;
 

@@ -65,6 +65,7 @@ fn standing<'a>(grant: Option<&'a Grant<'a>>) -> GrantStanding<'a> {
         link_repo_id: REPO,
         delegation_holder: Some("owner"),
         through_public_claim: false,
+        outside_person: false,
         now: NOW,
     }
 }
@@ -433,19 +434,73 @@ fn a_grant_is_taken_back_by_the_owner_an_admin_an_organization_admin_or_its_hold
 #[test]
 fn a_grant_goes_only_to_a_participant_who_isnt_there_through_a_public_claim() {
     for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
-        assert_eq!(may_receive_grant(role, false), Ok(()), "{role:?}");
+        assert_eq!(may_receive_grant(role, false, false), Ok(()), "{role:?}");
         assert_eq!(
-            may_receive_grant(role, true),
+            may_receive_grant(role, true, false),
             Err(RepoDenial::GranteePublic),
             "{role:?}"
         );
     }
     for public in [false, true] {
         assert_eq!(
-            may_receive_grant(Role::None, public),
+            may_receive_grant(Role::None, public, false),
             Err(RepoDenial::GranteeNotParticipant)
         );
     }
+}
+
+/// Decision 239 (CROSS-ORG-PEOPLE.md): a person here through another organization than the room's gets no repository
+/// rights, as a member or a guest. Another organization's agent isn't one, and may still be given a grant.
+#[test]
+fn an_outside_person_is_given_no_grant() {
+    for role in [Role::Member, Role::Guest] {
+        assert_eq!(
+            may_receive_grant(role, false, true),
+            Err(RepoDenial::NotAllowed),
+            "{role:?}"
+        );
+        assert_eq!(RepoDenial::NotAllowed.code(), "not_allowed");
+    }
+    // Someone not in the room is told that first, whatever else holds.
+    assert_eq!(
+        may_receive_grant(Role::None, false, true),
+        Err(RepoDenial::GranteeNotParticipant)
+    );
+}
+
+/// Decision 239, at use: a grant that somehow exists on an outside person's row counts for nothing, merge or push, and
+/// the answer is the same with no grant at all.
+#[test]
+fn an_outside_person_uses_no_grant() {
+    let task = task();
+    let merge = grant("per_x", GrantAction::Merge);
+    let person = caller("per_x", Person, Role::Member);
+    for held in [Some(&merge), None] {
+        let outside = GrantStanding {
+            outside_person: true,
+            ..standing(held)
+        };
+        assert_eq!(
+            authorize_merge(
+                &person,
+                Some("per_x"),
+                &task,
+                &SUBMITTER,
+                &outside,
+                &SelfReview::default()
+            ),
+            Err(RepoDenial::NotAllowed)
+        );
+    }
+    let push = grant("asg", GrantAction::Push);
+    let outside = GrantStanding {
+        outside_person: true,
+        ..standing(Some(&push))
+    };
+    assert_eq!(
+        authorize_repo_access(&caller("asg", Agent, Role::Guest), &task, &outside),
+        Err(RepoDenial::NotAllowed)
+    );
 }
 
 /// AC-24, at use: someone in the room through a public claim uses no grant, even a row given before that was so.

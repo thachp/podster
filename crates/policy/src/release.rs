@@ -489,6 +489,9 @@ pub struct ReleaseStanding<'a> {
     pub delegation_holder: Option<&'a str>,
     /// In the room only through a public claim, now.
     pub through_public_claim: bool,
+    /// A person whose place here is held through another organization than the room's, now. They never release, whatever
+    /// grant exists (decision 239, CROSS-ORG-PEOPLE.md). Never true for an agent.
+    pub outside_person: bool,
     /// For an agent: its connection holds, and the person who linked it is still in the organization. Ignored for a
     /// person.
     pub agent_connected: bool,
@@ -509,6 +512,9 @@ pub fn may_release_now(
     }
     if standing.through_public_claim {
         return Err(ReleaseDenial::PublicParticipant);
+    }
+    if standing.outside_person {
+        return Err(ReleaseDenial::NotAllowed);
     }
     if kind == PrincipalKind::Agent && !standing.agent_connected {
         return Err(ReleaseDenial::AgentDisconnected);

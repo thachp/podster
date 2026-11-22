@@ -27,12 +27,14 @@
  *   with the opening's title and responsibilities fenced as untrusted text. `y` or `yes` claims it as this agent, `n` or
  *   `no` turns it down, and anything else leaves it, asked again later. Words too long to show whole can't be claimed
  *   from here: the owner may only turn it down, or leave it. Claiming accepts no task and gives no person access.
+ *   Runner doesn't wait for this answer before task work (issue 528), so a task's question or a result's review may need
+ *   the terminal while it's open: the role question is then set aside (`QuestionInterrupted`) and asked again after.
  *
  * The words are written to this terminal only, never to a log.
  */
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
 import { markHidden, type ResultView } from "../core/results.js";
-import type { RolePrompter, RoleView } from "../core/roles.js";
+import { QuestionInterrupted, type RolePrompter, type RoleView } from "../core/roles.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -189,12 +191,26 @@ export type Terminal = {
 
 export class TerminalPrompter implements OwnerPrompter, RolePrompter {
   private readonly terminal: Terminal;
+  /** The role question on the terminal now, which a task's question or a result's review sets aside. */
+  private roleQuestion: { controller: AbortController; done: Promise<unknown> } | null = null;
   constructor(terminal: Terminal) {
     this.terminal = terminal;
   }
 
+  /** Ends an open role question, unanswered, and waits until it has let go of the terminal. */
+  private async takeTerminal() {
+    const open = this.roleQuestion;
+    if (!open) return;
+    open.controller.abort();
+    await open.done;
+  }
+
   async ask(view: AskView, signal?: AbortSignal): Promise<OwnerAnswer> {
     if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    if (this.roleQuestion) {
+      await this.takeTerminal();
+      if (signal?.aborted) return "later";
+    }
     const { screen, cut } = askScreen(view, this.terminal.columns ?? 80);
     this.terminal.write(`${screen}\n`);
     let answer: string;
@@ -211,15 +227,31 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter {
 
   async role(view: RoleView, signal?: AbortSignal): Promise<OwnerAnswer> {
     if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    // Set up with no wait when the terminal is free, so a question that comes right after finds this one to set aside.
+    // Task questions and reviews come only from the loop's own pass, never while one of them is open.
+    if (this.roleQuestion) await this.takeTerminal();
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    signal?.addEventListener("abort", stop, { once: true });
     const { screen, cut } = roleScreen(view, this.terminal.columns ?? 80);
     this.terminal.write(`${screen}\n`);
+    const question = this.terminal.question(cut ? "Turn it down? [y = turn down, anything else = later] " : "Claim it as this agent? [y = claim, n = turn down, anything else = later] ", controller.signal);
+    const open = { controller, done: question.catch(() => undefined) };
+    this.roleQuestion = open;
     let answer: string;
     try {
-      answer = (await this.terminal.question(cut ? "Turn it down? [y = turn down, anything else = later] " : "Claim it as this agent? [y = claim, n = turn down, anything else = later] ", signal)).trim();
+      answer = (await question).trim();
     } catch {
-      return "later";
+      answer = "";
+    } finally {
+      signal?.removeEventListener("abort", stop);
+      if (this.roleQuestion === open) this.roleQuestion = null;
     }
     if (signal?.aborted) return "later";
+    if (controller.signal.aborted) {
+      this.terminal.write("\nThe role invite question is set aside for now. Runner asks it again shortly.\n");
+      throw new QuestionInterrupted();
+    }
     const yes = /^y(es)?$/i.test(answer);
     if (cut) return yes ? "decline" : "later";
     if (yes) return "approve";
@@ -228,6 +260,10 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter {
 
   async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {
     if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    if (this.roleQuestion) {
+      await this.takeTerminal();
+      if (signal?.aborted) return "later";
+    }
     const { screen, cut } = reviewScreen(view, this.terminal.columns ?? 80);
     this.terminal.write(`${screen}\n`);
     let answer: string;

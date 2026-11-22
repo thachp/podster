@@ -62,7 +62,10 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   const repository = deps.repository !== undefined ? deps.repository : await hostRepositoryPath(deps.home, (capability, args) => deps.poller.request(capability, args), deps.clock, deps.log, { app_origin: appOriginFor(deps.poller.origin) });
   const prompter = new TerminalPrompter(deps.terminal);
   // Role invites are answered by the same owner, on the same terminal, under the same local policy file (issue 522).
-  const roles = new RoleInvites({ poller: deps.poller, config: policyFile(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log });
+  // The owner's answer is waited for off the poll loop, so a question never holds up task work (issue 528); the bell, when on,
+  // only ends the loop's wait early so the answer is used soon.
+  const bell = deps.bell;
+  const roles = new RoleInvites({ poller: deps.poller, config: policyFile(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log, ...(bell ? { wake: () => bell.ring() } : {}) });
   // Opening asks Podster who this agent is. A brief network failure, a server failure or a rate limit there is waited
   // out like the poll loop's own, never a reason to exit (the 2026-11-21 report); an authority error, a refusal or a
   // policy problem still ends `run` here. The open changes nothing until that answer is in, so trying it again is safe.

@@ -10,7 +10,7 @@ import { InvitationScreen } from "./invitation-screen";
 const goToSignIn = vi.hoisted(() => vi.fn());
 vi.mock("../../../(shell)/w/[id]/tasks/go-to-sign-in", () => ({ goToSignIn }));
 
-const PREVIEW = { workspace_id: "ws_1", workspace_name: "Launch room", invitee_kind: "person", work_role: null, role: "guest", guest_can_create: false, invited_org_id: null, invited_by: "per_a", expires_at: Date.UTC(2026, 10, 29), orgs: ["org_team", "org_me"], ends_oversight: false };
+const PREVIEW = { workspace_id: "ws_1", workspace_name: "Launch room", invitee_kind: "person", work_role: null, role: "guest", guest_can_create: false, invited_org_id: null, invited_by: "per_a", expires_at: Date.UTC(2026, 10, 29), orgs: ["org_team", "org_me"], ends_oversight: false, invited_by_name: "Patrick" };
 const people = { orgNames: { org_me: "Long", org_team: "Long's team" }, personal: "org_me" };
 
 let replies: (() => Response)[];
@@ -30,12 +30,26 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("a person invitation", () => {
+  it("shows an authority-sounding inviter name as their own choice, and a neutral line when there's none", async () => {
+    replies = [json(200, { ...PREVIEW, invited_by_name: "Podster Admin" })];
+    const { unmount } = render(<InvitationScreen token="inv_t" form={null} people={people} />);
+    expect(await screen.findByText("Name chosen by the person who invited you")).toBeInTheDocument();
+    unmount();
+    replies = [json(200, { ...PREVIEW, invited_by_name: null })];
+    render(<InvitationScreen token="inv_t" form={null} people={people} />);
+    expect(await screen.findByText("This workroom's owner or an admin")).toBeInTheDocument();
+  });
+
+
   it("offers their organizations, personal first, and joins as the one chosen", async () => {
     render(<InvitationScreen token="inv_t" form={null} people={people} />);
     const select = await screen.findByLabelText("Join as");
     expect([...select.querySelectorAll("option")].map((o) => o.textContent)).toEqual(["Long (personal)", "Long's team"]);
     expect(screen.getByText(/Guest: you see only tasks you're part of/)).toBeInTheDocument();
     expect(screen.getByText(/never your agents/)).toBeInTheDocument();
+    // Who invited them, by name, never the raw ID.
+    expect(screen.getByText("Patrick")).toBeInTheDocument();
+    expect(screen.queryByText("per_a")).not.toBeInTheDocument();
     replies = [json(200, { status: "accepted", principal_id: "per_long", org_id: "org_team", role: "guest" })];
     await userEvent.selectOptions(select, "org_team");
     await userEvent.click(screen.getByRole("button", { name: "Join workroom" }));

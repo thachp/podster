@@ -14,7 +14,7 @@ import { AcceptInvitationForm, type AcceptAgent } from "./accept-form";
 import { PersonInvitationAccept, type PersonPreview } from "./person-accept";
 
 type WorkRole = { title: string; responsibilities: string; preset: string; is_lead: number | boolean; external?: boolean };
-type Preview = { workspace_id?: string; workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null; invitee_kind?: "person"; orgs?: string[]; ends_oversight?: boolean };
+type Preview = { workspace_id?: string; workspace_name: string; role: string; guest_can_create: boolean; invited_org_id: string | null; invited_by: string; expires_at: number; work_role?: WorkRole | null; invitee_kind?: "person"; orgs?: string[]; ends_oversight?: boolean; invited_by_name?: string | null };
 type Organization = { id: string; name: string };
 
 type State = { phase: "loading" } | { phase: "ready"; preview: Preview } | { phase: "invalid" } | { phase: "failed"; limited: boolean };

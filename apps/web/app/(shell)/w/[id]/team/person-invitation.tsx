@@ -35,8 +35,9 @@ export function PersonInvitation({ base, send, focusAfter }: { base: string; sen
     setLink(null);
     setCopied(false);
     const body = { role, invitee: { kind: "person", email: email.trim() }, ...(role === "guest" ? { guest_can_create: guestCanCreate } : {}) };
-    // A retry's stored answer never repeats the secret, so there would be nothing to copy: withdraw it below and invite again.
-    const success = (created: Created) => (created.token ? "Invitation created. Copy its link now and send it to them yourself: it's shown only once." : "The invitation was created, but its link is shown only once and that answer was lost. Withdraw it below and invite them again.");
+    // A retry's stored answer never repeats the secret, so there would be nothing to copy. A new invitation for the same
+    // address replaces the pending one, so inviting them again is all it takes.
+    const success = (created: Created) => (created.token ? "Invitation created. Copy its link now and send it to them yourself: it's shown only once." : "The invitation was created, but its link is shown only once and that answer was lost. Invite them again: a new invitation replaces this one, and its link stops working.");
     await send<Created>(`${base}/invitations`, body, success, {
       onOk: (created) => {
         if (created.token) {
@@ -51,7 +52,7 @@ export function PersonInvitation({ base, send, focusAfter }: { base: string; sen
         code === "limit_exceeded"
           ? "This workroom has as many person invitations as it can have for now: 20 pending, and 20 a day. Nothing changed."
           : code === "invalid_argument"
-            ? "Check the email address and try again. Nothing changed."
+            ? "Podster couldn't take that invitation. Check the address and the role: a person can be invited as a guest or a member. Nothing changed."
             : status === 403
               ? "Only this workroom's owner and admins can invite people. Nothing changed."
               : "That didn't save, and nothing changed.",

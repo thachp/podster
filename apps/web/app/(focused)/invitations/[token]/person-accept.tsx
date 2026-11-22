@@ -12,7 +12,8 @@ import { FIELD, MOBILE_TARGET } from "../../../(shell)/w/[id]/team/field";
 import { roleLabel } from "../../../(shell)/w/[id]/team/model";
 
 /** What a person invitation offers its addressee (decision 239). Only they get it: anyone else is told the link isn't valid. */
-export type PersonPreview = { workspace_id: string; workspace_name: string; role: string; guest_can_create: boolean; invited_by: string; expires_at: number; orgs: string[]; ends_oversight?: boolean };
+/** `invited_by_name` is what the inviter calls themselves, from the gateway's own rows: shown as untrusted text, never an email. */
+export type PersonPreview = { workspace_id: string; workspace_name: string; role: string; guest_can_create: boolean; invited_by: string; invited_by_name?: string | null; expires_at: number; orgs: string[]; ends_oversight?: boolean };
 
 const ROLE_MEANING: Record<string, string> = { guest: "you see only tasks you're part of, and their threads", member: "you see every task and thread" };
 
@@ -85,7 +86,7 @@ export function PersonInvitationAccept({ token, preview, orgNames, personalOrg, 
         <RequesterName name={preview.workspace_name} chosenBy="whoever made this workroom" />
       </dd>
       <dt className="text-muted-foreground">Invited by</dt>
-      <dd className="break-all">{preview.invited_by}</dd>
+      <dd className="min-w-0">{preview.invited_by_name ? <RequesterName name={preview.invited_by_name} chosenBy="the person who invited you" /> : "This workroom's owner or an admin"}</dd>
       <dt className="text-muted-foreground">You join as</dt>
       <dd>
         {roleLabel(preview.role)}

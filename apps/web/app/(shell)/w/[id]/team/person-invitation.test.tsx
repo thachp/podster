@@ -75,6 +75,23 @@ describe("inviting a person", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("20 pending, and 20 a day");
   });
 
+  it("says a lost link is fixed by inviting again, which replaces it", async () => {
+    reply = { status: 200, body: { id: "ivt_2", invitee_kind: "person", role: "guest", expires_at: 1 } };
+    render(<TeamScreen {...props} />);
+    await userEvent.type(within(personForm()).getByLabelText("Email"), "long@example.com");
+    await userEvent.click(within(personForm()).getByRole("button", { name: "Invite person" }));
+    expect(await screen.findByText(/a new invitation replaces this one/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/Their invitation link/)).not.toBeInTheDocument();
+  });
+
+  it("doesn't blame the address alone for a refused invitation", async () => {
+    reply = { status: 400, body: { error: { code: "invalid_argument" } } };
+    render(<TeamScreen {...props} />);
+    await userEvent.type(within(personForm()).getByLabelText("Email"), "long@example.com");
+    await userEvent.click(within(personForm()).getByRole("button", { name: "Invite person" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Check the address and the role");
+  });
+
   it("lists a pending person invitation by its address, to those who manage access", () => {
     render(<TeamScreen {...props} />);
     expect(within(row("ivt_p")).getByText(/Person: long@example\.com/)).toBeInTheDocument();

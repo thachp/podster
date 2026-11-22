@@ -261,7 +261,7 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter, RoomChange
   }
 
   /**
-   * A room change that gives tasks more (issue 523): a repository linked or replaced. Only `y` or `yes` writes it; `n` or
+   * A room change (issue 523): a repository Podster now names for a room, or names differently. Only `y` or `yes` writes it; `n` or
    * `no` keeps the policy as it is; anything else leaves it, asked again later. Set aside like a role question when a
    * task or a role invite needs the terminal. Its words are Runner's own around checked IDs and a checked GitHub name.
    */
@@ -295,9 +295,9 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter, RoomChange
     return /^no?$/i.test(answer) ? "decline" : "later";
   }
 
-  /** A narrowing Runner already wrote: shown, with no question. */
-  roomNotice(view: RoomChangeView): void {
-    this.terminal.write(`${changeScreen(view.change, view.room)}\n`);
+  /** A policy write that raced another writer: said in fixed words, so the owner looks before Runner asks again. */
+  policyRaced(path: string): void {
+    this.terminal.write(`\n${path} changed while Runner was writing it, so Runner's change may not be what's there now. Check the file; Runner reads the room again and asks you again shortly.\n`);
   }
 
   async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {

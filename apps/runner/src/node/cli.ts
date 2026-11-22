@@ -69,9 +69,9 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
                                                    the agent's organization then switches the nudge on in Podster.
                                                    A nudge only makes Runner poll sooner. Polling stays on.
   setup   [--room <ws_…>] [--workspace-root <folder>]
-                                                   Make a starter run policy from a room's settings: its ID, its
-                                                   organization and its linked repository come from Podster, and
-                                                   you approve what's saved. Asks first, holds outputs, no shell
+                                                   Make a starter run policy from a room's settings: its ID, and
+                                                   its organization and repository where Podster tells this agent,
+                                                   come from Podster, and you approve what's saved. Asks first, holds outputs, no shell
                                                    or network, low limits. Never replaces a policy: adds a room to
                                                    it, or updates a room's repository once you say yes. Default
                                                    workspace root for a new policy: ~/podster-work

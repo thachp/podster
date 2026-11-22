@@ -2,16 +2,20 @@
  * Room changes after setup (issue 523, the owner's clarification): while `run` goes on, Runner reads each room in the
  * owner's policy again now and then, and compares Podster's facts with the room's entry (`setup.ts`).
  *
- * - **Widening waits for the owner.** A repository linked to a room, or replaced, is shown at this terminal with what the
- *   room keeps, and written only on a typed `y`. The answer is tied to exactly what was shown: it's used only if, on a
+ * - **Every change waits for the owner.** A repository Podster now names for a room, or names differently, is shown at
+ *   this terminal with what the room keeps, and written only on a typed `y`. The answer is tied to exactly what was shown: it's used only if, on a
  *   fresh read, Podster still says the same and the policy file is still the text it was asked about. Anything else sets
  *   the answer aside and asks again. A `no` holds until Podster's facts change again or Runner restarts; no terminal, or
  *   no answer, writes nothing.
- * - **Narrowing is written at once, and shown.** A repository unlinked from a room takes access away, so its entry's
- *   `repository` becomes null with no question, and the owner is told.
+ * - **Unknown is "ask later", never "none".** Podster names a room's repository only while this agent holds a live push
+ *   grant on it, and its organization only where the agent could already see it. A part it leaves out is unknown, and
+ *   Runner never removes or narrows anything on it: a repository the room no longer links is refused by
+ *   `get_repo_access`, and the owner edits the entry.
  * - **Nothing else moves.** Only that room's `repository` and the policy's `revision` change; every other limit and
  *   permission the owner wrote stays. Podster's facts are data: checked IDs and a checked GitHub name, never text to act
  *   on, and never a source for `mode`, `allowed_orgs`, tools, network or acknowledgments.
+ * - **A write that races is never silent.** The file is written only while it still holds the text the question was
+ *   about, and read back after; if it holds anything else then, the owner is told and asked again on a later pass.
  * - **Unknown isn't a change.** A room Podster won't describe to this agent, or describes in a way that doesn't check out,
  *   is left as the owner wrote it.
  * - **A question never holds up task work.** As with role invites (issue 528), the answer is waited for off the poll loop,
@@ -23,7 +27,7 @@ import { parsePolicyConfig, type RoomPolicy } from "./policy.js";
 import { AuthorityEnded } from "./poller.js";
 import { QuestionInterrupted } from "./roles.js";
 import type { Clock, Logger } from "./runtime.js";
-import { applyRoomChange, changeKey, readRoomFacts, roomChange, widens, type RoomChange } from "./setup.js";
+import { applyRoomChange, changeKey, readRoomFacts, roomChange, type RoomChange } from "./setup.js";
 
 /** How often each room's facts are read again. */
 export const ROOM_CHECK_MS = 10 * 60 * 1000;
@@ -36,17 +40,25 @@ export const ROOM_CHECKS_PER_PASS = 10;
 
 export type RoomChangeView = { change: RoomChange; room: RoomPolicy };
 
-/** Asks the owner about a widening change. Rejects with `QuestionInterrupted` when set aside. */
+/** Asks the owner about a change. Rejects with `QuestionInterrupted` when set aside. */
 export interface RoomChangePrompter {
   roomChange?(view: RoomChangeView, signal?: AbortSignal): Promise<OwnerAnswer>;
-  /** Tells the owner about a narrowing Runner already wrote. */
-  roomNotice?(view: RoomChangeView): void;
+  /** Tells the owner, in fixed words, that a write raced another change to the file and wasn't kept as theirs. */
+  policyRaced?(path: string): void;
 }
+
+/**
+ * How a guarded write ended. `written`: the file held `expected` and now holds the new text, read back. `changed`: it
+ * didn't hold `expected`, so nothing was written. `raced`: it held `expected` when checked, but read back after the write
+ * it holds something else, because another writer got in between; the owner must look.
+ */
+export type WriteOutcome = "written" | "changed" | "raced";
 
 /** The policy file: its text now (null when there's none), and a write that happens only if the text is still `expected`. */
 export type PolicyText = {
+  readonly path?: string;
   read(): Promise<string | null>;
-  write(text: string, expected: string | null): Promise<boolean>;
+  write(text: string, expected: string | null): Promise<WriteOutcome>;
 };
 
 export type RoomFactsDeps = {
@@ -159,11 +171,6 @@ export class RoomFacts {
     // The policy as it is now: an answer counts only for the text it was asked about.
     const text = await this.readText();
     if (text === null) return;
-    if (!widens(change)) {
-      if (this.asking?.room === workspace) this.asking.controller.abort();
-      await this.write(change, room, text, "narrowed");
-      return;
-    }
     if (heard && heard.key === key && heard.text === text) {
       if (heard.choice === "approve") {
         await this.write(change, room, text, "widened_by_owner");
@@ -198,14 +205,21 @@ export class RoomFacts {
 
   private async write(change: RoomChange, room: RoomPolicy, text: string, outcome: string) {
     const next = applyRoomChange(text, change, this.deps.home);
-    if (next === null || !(await this.deps.policy.write(next.text, text))) {
+    const written = next === null ? "changed" : await this.deps.policy.write(next.text, text);
+    if (written === "changed") {
       // The owner edited the file meanwhile: nothing written, and read again next time.
       this.log("policy_changed_meanwhile", room.room_id, change.kind);
       return;
     }
+    if (written === "raced") {
+      // Something else wrote the file as Runner did: the owner is told, and the room is read and asked about again.
+      this.log("policy_write_raced", room.room_id, change.kind);
+      this.deps.prompter.policyRaced?.(this.deps.policy.path ?? "policy.json");
+      this.nextCheckAt = Math.min(this.nextCheckAt, this.deps.clock.now() + ROOM_RETRY_MS);
+      return;
+    }
     this.later.delete(changeKey(change));
     this.log(outcome, room.room_id, change.kind);
-    if (!widens(change)) this.deps.prompter.roomNotice?.({ change, room });
   }
 
   private ask(workspace: string, key: string, text: string, view: RoomChangeView, signal: AbortSignal) {

@@ -2,7 +2,7 @@
  * `setup` (issue 523): a starter run policy from a workroom's settings, previewed and saved only on the owner's typed yes.
  *
  * Runner reads, as its paired agent, who it is (`get_identity`: `owner_org` is that organization, never the room's) and
- * the chosen room (`get_workspace`'s `setup`: the room's organization and linked repository). It shows the proposal and
+ * the chosen room (`get_workspace`'s `setup`: only what the agent could already see; a part left out is unknown). It shows the proposal and
  * what it allows, and writes `policy.json` only after `y` or `yes` at a terminal. It never replaces a policy: a room the
  * policy lacks is added to it with everything else kept; a room it has is checked for a repository change, as `run`
  * does; a file Runner can't use, or one for another organization, is explained and left alone. Facts Podster won't give,
@@ -15,8 +15,8 @@
 import { join } from "node:path";
 import { GatewayError, meaningOf } from "../core/errors.js";
 import { isPolicyId, type RoomPolicy } from "../core/policy.js";
-import type { PolicyText } from "../core/room-facts.js";
-import { applyRoomChange, changeScreen, factsProblemText, isExternal, planSetup, previewScreen, readRoomFacts, roomChange, widens, type RoomFacts } from "../core/setup.js";
+import type { PolicyText, WriteOutcome } from "../core/room-facts.js";
+import { applyRoomChange, changeScreen, factsProblemText, isExternal, planSetup, previewScreen, readRoomFacts, roomChange, type RoomFacts } from "../core/setup.js";
 import { POLICY_FILE } from "./policy-file.js";
 import { fenced, type Terminal } from "./prompter.js";
 
@@ -90,7 +90,11 @@ export async function runSetup(deps: SetupDeps): Promise<number> {
   const plan0 = planSetup({ existing, owner_org: ownerOrg, facts, workspace_root: deps.workspace_root, allow_room_org: false, runner_home: deps.home });
   if (plan0.kind === "refuse") return refuse(say, plan0.reason, plan0.detail, path);
   if (plan0.kind === "room_present") return await refreshRoom(deps, facts, plan0.room, existing as string, path);
-  if (isExternal(facts, ownerOrg)) {
+  if (isExternal(facts, ownerOrg) && facts.org_id === undefined) {
+    // Podster names the organization only where this agent could already see it: never guessed, never asked about.
+    say("");
+    say(`Room ${facts.room_id} belongs to another organization, which Podster doesn't name to this agent, so Runner can't propose it for allowed_orgs. Its tasks are refused until you add that organization's org_… ID to the room's allowed_orgs yourself.`);
+  } else if (isExternal(facts, ownerOrg)) {
     say("");
     say(`Room ${facts.room_id} belongs to another organization, ${facts.org_id}. Runner refuses its tasks unless you allow that organization for this room: asking before each run doesn't allow it by itself.`);
     if (atTerminal) allowRoomOrg = yes(await terminal.question(`Allow tasks from ${facts.org_id} in this room? [y/N] `));
@@ -107,12 +111,16 @@ export async function runSetup(deps: SetupDeps): Promise<number> {
     say("Nothing was saved. Your policy is as it was.");
     return 1;
   }
-  if (!(await deps.policy.write(plan.text, existing))) {
-    say(`${path} changed while you were reading, so nothing was saved. Run setup again.`);
-    return 1;
-  }
+  if (!saved(say, path, await deps.policy.write(plan.text, existing))) return 1;
   say(`Saved ${path}. Unattended runs stay off. Start Runner with \`run\`.`);
   return 0;
+}
+
+/** Says why a write wasn't kept; true when it was. A race is never silent: the owner checks the file and runs setup again. */
+function saved(say: (line: string) => void, path: string, outcome: WriteOutcome): boolean {
+  if (outcome === "changed") say(`${path} changed while you were reading, so nothing was saved. Run setup again.`);
+  if (outcome === "raced") say(`${path} changed while Runner was writing it, so what's there now may not be what you approved. Check the file, then run setup again.`);
+  return outcome === "written";
 }
 
 function refuse(say: (line: string) => void, reason: string, detail: string, path: string): number {
@@ -127,7 +135,9 @@ async function refreshRoom(deps: SetupDeps, facts: RoomFacts, room: RoomPolicy, 
   const { say, terminal } = deps;
   const change = roomChange(room, facts);
   if (change === null) {
-    say(`Room ${facts.room_id} is already in your run policy, and its repository matches Podster's. Nothing was changed.`);
+    say(facts.repository === undefined
+      ? `Room ${facts.room_id} is already in your run policy. Podster names its repository only while this agent holds a push grant on it, so there's nothing to compare yet. Nothing was changed.`
+      : `Room ${facts.room_id} is already in your run policy, and its repository matches Podster's. Nothing was changed.`);
     return 0;
   }
   const next = applyRoomChange(existing, change, deps.home);
@@ -135,17 +145,12 @@ async function refreshRoom(deps: SetupDeps, facts: RoomFacts, room: RoomPolicy, 
     say("Runner couldn't apply the change to your policy. Nothing was changed.");
     return 1;
   }
-  say(changeScreen(change, room).replace("this takes access away, so Runner has already written it", "this takes access away, so Runner writes it now"));
-  if (widens(change)) {
-    if (!(terminal.inputIsTTY && terminal.outputIsTTY) || !yes(await terminal.question("Update this room's repository in Runner's policy? [y/N] "))) {
-      say("Nothing was saved. Your policy is as it was.");
-      return 1;
-    }
-  }
-  if (!(await deps.policy.write(next.text, existing))) {
-    say(`${path} changed while you were reading, so nothing was saved. Run setup again.`);
+  say(changeScreen(change, room));
+  if (!(terminal.inputIsTTY && terminal.outputIsTTY) || !yes(await terminal.question("Update this room's repository in Runner's policy? [y/N] "))) {
+    say("Nothing was saved. Your policy is as it was.");
     return 1;
   }
+  if (!saved(say, path, await deps.policy.write(next.text, existing))) return 1;
   say(`Saved ${path}.`);
   return 0;
 }

@@ -82,34 +82,51 @@ const link = (id: string, repoId = REPO_ID, name = "podsterx/engineering") => in
   sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, ?, 'public', 'main', 'ready', ?, 1000, 2000, 2000)", repoId, name, OWNER.id);
 });
 const unlink = (id: string) => inRoom(id, (sql) => void sql.exec("DELETE FROM repo_link"));
+const give = async (id: string, who: Who) => {
+  const given = await api(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: who.id, action: "push" });
+  expect(given.status, given.text).toBe(200);
+  return given.body;
+};
 const setup = async (who: Who, id: string) => {
   const read = await api(who, "GET", `/v1/workspaces/${id}`);
   expect(read.status, read.text).toBe(200);
   return read.body.setup;
 };
+const REPO = { full_name: "podsterx/engineering", provider_repo_id: REPO_ID };
 
 describe("the room read's setup facts", () => {
-  it("tells a member agent and a guest agent the room's organization and linked repository, and follows a change", async () => {
+  it("tells an agent its own organization's room, and the repository only while it holds a live push grant", async () => {
     const id = await room();
-    for (const who of [AGENT, GUEST_AGENT]) expect(await setup(who, id), who.id).toEqual({ room_id: id, org_id: ORG, repository: null });
+    // No link, and a link without a grant: the repository is left out, which is unknown, never "none".
+    for (const who of [AGENT, GUEST_AGENT]) expect(await setup(who, id), who.id).toEqual({ room_id: id, org_id: ORG });
     await link(id);
-    for (const who of [AGENT, GUEST_AGENT]) expect(await setup(who, id), who.id).toEqual({ room_id: id, org_id: ORG, repository: { full_name: "podsterx/engineering", provider_repo_id: REPO_ID } });
-    // Replaced, then removed: the read is current state, every time.
+    for (const who of [AGENT, GUEST_AGENT]) expect(await setup(who, id), who.id).toEqual({ room_id: id, org_id: ORG });
+    await give(id, AGENT);
+    expect(await setup(AGENT, id)).toEqual({ room_id: id, org_id: ORG, repository: REPO });
+    // Another agent's grant tells this one nothing.
+    expect((await setup(GUEST_AGENT, id)).repository).toBeUndefined();
+    // Replaced: the grant was on the old repository, so the new one isn't told.
     await link(id, 99, "podsterx/other");
-    expect((await setup(AGENT, id)).repository).toEqual({ full_name: "podsterx/other", provider_repo_id: 99 });
+    expect((await setup(AGENT, id)).repository).toBeUndefined();
+    // Expired, or the link gone: unknown again.
+    await link(id);
+    expect((await setup(AGENT, id)).repository).toEqual(REPO);
+    await inRoom(id, (sql) => void sql.exec("UPDATE provider_grant SET expires_at = 1"));
+    expect((await setup(AGENT, id)).repository).toBeUndefined();
+    await inRoom(id, (sql) => void sql.exec("UPDATE provider_grant SET expires_at = NULL"));
     await unlink(id);
-    expect((await setup(AGENT, id)).repository).toBeNull();
+    expect((await setup(AGENT, id)).repository).toBeUndefined();
   });
 
-  it("tells another organization's agent the room's organization, which isn't its own", async () => {
+  it("doesn't name another organization's room to an agent that sees only its own tasks", async () => {
     const id = await room();
     await link(id);
-    const facts = await setup(EXTERNAL_AGENT, id);
-    expect(facts).toEqual({ room_id: id, org_id: ORG, repository: { full_name: "podsterx/engineering", provider_repo_id: REPO_ID } });
+    await give(id, EXTERNAL_AGENT);
+    expect(await setup(EXTERNAL_AGENT, id)).toEqual({ room_id: id, repository: REPO });
     expect((await api(EXTERNAL_AGENT, "GET", `/v1/workspaces/${id}`)).body.brief_external).toBe(true);
   });
 
-  it("tells nothing to an agent there through a public claim, or to a person, so a reader takes it as unknown", async () => {
+  it("tells nothing to an agent there through a public claim, or to a person", async () => {
     const id = await room();
     await link(id);
     expect(await setup(PUBLIC_AGENT, id)).toBeUndefined();
@@ -118,9 +135,11 @@ describe("the room read's setup facts", () => {
     expect((await api(AGENT, "GET", `/v1/workspaces/${id}/repository`)).code).toBe("not_allowed");
   });
 
-  it("says no repository while managed repositories are switched off, even with a link left from before", async () => {
-    const id = await room({ managed: false });
+  it("leaves the repository out while managed repositories are switched off, even with a link and grant left from before", async () => {
+    const id = await room();
     await link(id);
-    expect(await setup(AGENT, id)).toEqual({ room_id: id, org_id: ORG, repository: null });
+    await give(id, AGENT);
+    await inRoom(id, (sql) => void sql.exec("DROP TABLE test_managed_repositories_on"));
+    expect(await setup(AGENT, id)).toEqual({ room_id: id, org_id: ORG });
   });
 });

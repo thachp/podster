@@ -67,8 +67,9 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
   // only ends the loop's wait early so the answer is used soon.
   const bell = deps.bell;
   const roles = new RoleInvites({ poller: deps.poller, config: policyFile(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log, ...(bell ? { wake: () => bell.ring() } : {}) });
-  // Room changes after setup (issue 523): a repository linked or replaced is asked about on this terminal, one unlinked
-  // is written at once and shown. Read off the same policy file, and never waited for before task work.
+  // Room changes after setup (issue 523): a repository Podster newly names for a room, or names differently, is asked
+  // about on this terminal; nothing is ever removed on what Podster doesn't say. Read off the same policy file, and never
+  // waited for before task work.
   const rooms = new RoomFacts({ poller: deps.poller, policy: policyText(deps.home), home: deps.home, prompter, clock: deps.clock, log: deps.log, ...(bell ? { wake: () => bell.ring() } : {}) });
   // Opening asks Podster who this agent is. A brief network failure, a server failure or a rate limit there is waited
   // out like the poll loop's own, never a reason to exit (the 2026-11-21 report); an authority error, a refusal or a

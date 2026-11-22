@@ -545,6 +545,8 @@ describe("Runner's core against the gateway", () => {
   });
 
   it("reads a room's setup facts as its own agent and makes a starter policy the lifecycle loads, with no change found after (issue 523)", async () => {
+    // The repository part needs a live push grant, which needs managed repositories and a link: covered in apps/api's
+    // setup-facts spec. Here, the real path through the gateway and Runner's own reading of it.
     const person = await signUp();
     const { agent, code } = await startPairing(person);
     const clock = new PersonClock();
@@ -569,7 +571,8 @@ describe("Runner's core against the gateway", () => {
     expect(await poller.pollOnce()).toBe("ok");
     const identity = (await poller.request("get_identity")) as { org_id: string };
     const read = readRoomFacts(id, await poller.request("get_workspace", { workspace_id: id }));
-    expect(read).toEqual({ ok: true, facts: { room_id: id, org_id: person.org, repository: null } });
+    // Its own organization's room: the organization is told. It holds no push grant, so the repository isn't: unknown.
+    expect(read).toEqual({ ok: true, facts: { room_id: id, org_id: person.org } });
     if (!read.ok) return;
     const plan = planSetup({ existing: null, owner_org: identity.org_id, facts: read.facts, workspace_root: "/work/podster", allow_room_org: false, runner_home: "/home/owner/.podster-runner" });
     expect(plan.kind).toBe("new");
@@ -579,7 +582,7 @@ describe("Runner's core against the gateway", () => {
     let text: string = plan.text;
     const config = () => JSON.parse(text) as unknown;
     const adapter: RunAdapter = { start: async () => Promise.reject(new Error("no runs here")), confirmStopped: async () => true };
-    const rooms = new RoomFacts({ poller, policy: { read: async () => text, write: async (next, expected) => (expected === text ? ((text = next), true) : false) }, home: "/home/owner/.podster-runner", prompter: {}, clock, log: machine.deps.log });
+    const rooms = new RoomFacts({ poller, policy: { read: async () => text, write: async (next, expected) => (expected === text ? ((text = next), "written" as const) : ("changed" as const)) }, home: "/home/owner/.podster-runner", prompter: {}, clock, log: machine.deps.log });
     const lifecycle = await Lifecycle.open({ poller, runs: new MemoryRunStore(), config, adapter, prompter: { ask: async () => "later" as const }, rooms, clock, log: machine.deps.log });
     const before = text;
     expect(await lifecycle.tick(new AbortController().signal)).toBe("idle");

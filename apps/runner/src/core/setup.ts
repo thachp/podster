@@ -4,26 +4,29 @@
  * reading, the asking and the writing.
  *
  * - **Facts, not instructions.** Podster's room read gives an agent that could hold the room's repository grant its
- *   `setup`: the room's ID, its organization and its linked repository's full name and GitHub's numeric ID, or null
- *   (`getWorkspace` in the contract). They are checked whole, as IDs and a GitHub full name, and used only to fill the
- *   fields of a proposal the owner reads. A read with no `setup`, or one that doesn't check out, is unknown: never a room
- *   without a repository, and nothing is proposed from it.
+ *   `setup` (`getWorkspace` in the contract), telling only what the agent could already see: the room's ID; its
+ *   organization when the room is the agent's own organization's or the agent sees the whole room; and the linked
+ *   repository's full name and GitHub's numeric ID only while the agent holds a live push grant on it. They are checked
+ *   whole, as IDs and a GitHub full name, and used only to fill the fields of a proposal the owner reads. A part left out
+ *   is unknown, never "none": an unknown organization is never put in `allowed_orgs`, and an unknown repository is never
+ *   a reason to change a room's entry. A read with no `setup`, or one that doesn't check out, proposes nothing.
  * - **The owner decides.** Nothing here writes a file or turns anything on. A starter room asks before each run, holds
  *   outputs for review, has no shell and no network, and has neither acknowledgment ticked. Another organization's room
  *   is shown as external, and its organization goes into `allowed_orgs` only when the owner said yes to exactly that.
  *   `owner_org` is always the paired agent's own organization, never the room's. Unattended runs stay off (decision 29).
- * - **Widening asks, narrowing shows.** After setup, a repository linked to a room, or replaced, is a change the owner
- *   approves before it's written. A repository unlinked takes access away, so it's written at once and shown. Either way
- *   only that room's `repository` and the policy's `revision` change: every other field, limit and permission the owner
- *   wrote stays exactly as it was.
+ * - **The owner approves every change.** After setup, a repository Podster now names for a room, or names differently,
+ *   is a change the owner approves before it's written, and only that room's `repository` and the policy's `revision`
+ *   change: every other field, limit and permission the owner wrote stays exactly as it was. Runner can't tell a
+ *   repository unlinked from one it isn't told about, so it never removes one by itself: `get_repo_access` refuses tasks
+ *   for a repository the room no longer links, and the owner edits the entry.
  * - **The file's own rules hold.** Every proposal is checked by `parsePolicyConfig` before it's offered, so a policy this
  *   writes is one Runner would load: no unknown or missing field, IDs in lower case, and `owner_org` never in
  *   `allowed_orgs`.
  */
 import { DEFAULT_TOOLS, isFullName, isPolicyId, parsePolicyConfig, policyProblem, type PolicyConfig, type RepoScope, type RoomPolicy } from "./policy.js";
 
-/** What Podster says about a room, checked. */
-export type RoomFacts = { room_id: string; org_id: string; repository: RepoScope | null };
+/** What Podster says about a room, checked. A part left out (`undefined`) is unknown: Podster didn't tell this agent. */
+export type RoomFacts = { room_id: string; org_id?: string; repository?: RepoScope };
 /**
  * `not_shared`: the read has no `setup`, so this agent isn't told (a public claim, or a server without it).
  * `inconsistent`: it has one that doesn't check out, or names another room.
@@ -43,29 +46,43 @@ const keysAre = (o: Obj, keys: readonly string[]) => Object.keys(o).length === k
 export function readRoomFacts(workspaceId: string, answer: unknown): FactsRead {
   if (!isObj(answer) || !Object.hasOwn(answer, "setup") || answer.setup === undefined) return { ok: false, problem: "not_shared" };
   const setup = answer.setup;
-  if (!isObj(setup) || !keysAre(setup, ["room_id", "org_id", "repository"])) return { ok: false, problem: "inconsistent" };
-  const { room_id, org_id, repository } = setup;
-  if (!isPolicyId(room_id) || room_id !== workspaceId || !isPolicyId(org_id)) return { ok: false, problem: "inconsistent" };
-  if (repository === null) return { ok: true, facts: { room_id, org_id, repository: null } };
-  if (!isObj(repository) || !keysAre(repository, ["full_name", "provider_repo_id"])) return { ok: false, problem: "inconsistent" };
-  const { full_name, provider_repo_id } = repository;
-  if (!isFullName(full_name) || typeof provider_repo_id !== "number" || !Number.isSafeInteger(provider_repo_id) || provider_repo_id < 1) return { ok: false, problem: "inconsistent" };
-  return { ok: true, facts: { room_id, org_id, repository: { full_name, provider_repo_id } } };
+  if (!isObj(setup) || !Object.keys(setup).every((k) => k === "room_id" || k === "org_id" || k === "repository")) return { ok: false, problem: "inconsistent" };
+  const room_id = setup.room_id;
+  if (!isPolicyId(room_id) || room_id !== workspaceId) return { ok: false, problem: "inconsistent" };
+  const facts: RoomFacts = { room_id };
+  if (Object.hasOwn(setup, "org_id")) {
+    if (!isPolicyId(setup.org_id)) return { ok: false, problem: "inconsistent" };
+    facts.org_id = setup.org_id;
+  }
+  if (Object.hasOwn(setup, "repository")) {
+    // Told only as a repository: "none" is never said, so null doesn't check out either.
+    const repository = setup.repository;
+    if (!isObj(repository) || !keysAre(repository, ["full_name", "provider_repo_id"])) return { ok: false, problem: "inconsistent" };
+    const { full_name, provider_repo_id } = repository;
+    if (!isFullName(full_name) || typeof provider_repo_id !== "number" || !Number.isSafeInteger(provider_repo_id) || provider_repo_id < 1) return { ok: false, problem: "inconsistent" };
+    facts.repository = { full_name, provider_repo_id };
+  }
+  return { ok: true, facts };
 }
 
 /** Why facts couldn't be used, for the owner, in fixed words. */
 export function factsProblemText(problem: FactsProblem): string {
   return problem === "not_shared"
-    ? "Podster didn't tell this agent the room's organization and repository. That happens when the agent joined through a public claim, isn't in the room, or the server doesn't share them yet. Runner won't guess them, so nothing was proposed."
+    ? "Podster didn't tell this agent anything about the room for setup. That happens when the agent joined through a public claim, isn't in the room, or the server doesn't share it yet. Runner won't guess, so nothing was proposed."
     : "Podster's answer about the room didn't check out (an ID that isn't lower case, another room, or a repository without a valid name and numeric ID). Runner won't guess, so nothing was proposed.";
 }
 
-/** Whether the room is another organization's than the owner's. */
+/**
+ * Whether the room is another organization's than the owner's. A room Podster doesn't name the organization of is
+ * another's: Podster always names it for a room of the agent's own organization.
+ */
 export const isExternal = (facts: RoomFacts, ownerOrg: string) => facts.org_id !== ownerOrg;
 
 /**
- * A starter room entry: ask first, outputs held, the default tools (no shell), no network, Podster's repository or null,
- * and no acknowledgment ticked. The room's organization is allowed only when it's another's and the owner approved it.
+ * A starter room entry: ask first, outputs held, the default tools (no shell), no network, and no acknowledgment ticked.
+ * Its repository is the one Podster named, or null when Podster named none to this agent, which gives tasks no
+ * repository: `run` asks the owner once Podster names one. The room's organization is allowed only when it's another's,
+ * Podster named it, and the owner approved it.
  */
 export function starterRoom(facts: RoomFacts, ownerOrg: string, allowRoomOrg: boolean): Obj {
   return {
@@ -74,8 +91,8 @@ export function starterRoom(facts: RoomFacts, ownerOrg: string, allowRoomOrg: bo
     outputs: "hold",
     tools: [...DEFAULT_TOOLS],
     network: [],
-    repository: facts.repository === null ? null : { full_name: facts.repository.full_name, provider_repo_id: facts.repository.provider_repo_id },
-    allowed_orgs: isExternal(facts, ownerOrg) && allowRoomOrg ? [facts.org_id] : [],
+    repository: facts.repository === undefined ? null : { full_name: facts.repository.full_name, provider_repo_id: facts.repository.provider_repo_id },
+    allowed_orgs: facts.org_id !== undefined && isExternal(facts, ownerOrg) && allowRoomOrg ? [facts.org_id] : [],
     acknowledged: { trust_statement: false, public_room_warning: false },
   };
 }
@@ -144,27 +161,23 @@ export function planSetup(input: SetupInput): SetupPlan {
 
 export type RoomChange =
   | { kind: "repository_added"; room_id: string; to: RepoScope }
-  | { kind: "repository_replaced"; room_id: string; from: RepoScope; to: RepoScope }
-  | { kind: "repository_removed"; room_id: string; from: RepoScope };
+  | { kind: "repository_replaced"; room_id: string; from: RepoScope; to: RepoScope };
 
 const sameRepo = (a: RepoScope, b: RepoScope) => a.provider_repo_id === b.provider_repo_id && a.full_name === b.full_name;
 
 /**
  * How Podster's facts differ from the owner's room entry, as far as the repository goes. A renamed repository (the same
  * ID under another name) counts as replaced: Runner checks GitHub's name against the policy, so it needs the owner too.
+ * A repository Podster didn't name is unknown, never a change: nothing is removed on it.
  */
 export function roomChange(room: RoomPolicy, facts: RoomFacts): RoomChange | null {
   const have = room.repository;
   const now = facts.repository;
-  if (have === null && now === null) return null;
-  if (have === null && now !== null) return { kind: "repository_added", room_id: room.room_id, to: now };
-  if (have !== null && now === null) return { kind: "repository_removed", room_id: room.room_id, from: have };
-  if (have !== null && now !== null && !sameRepo(have, now)) return { kind: "repository_replaced", room_id: room.room_id, from: have, to: now };
+  if (now === undefined) return null;
+  if (have === null) return { kind: "repository_added", room_id: room.room_id, to: now };
+  if (!sameRepo(have, now)) return { kind: "repository_replaced", room_id: room.room_id, from: have, to: now };
   return null;
 }
-
-/** Whether a change gives tasks more than the policy did, so needs the owner's yes first. */
-export const widens = (change: RoomChange) => change.kind !== "repository_removed";
 
 /** A change's identity, to tie an owner's answer to exactly what they were shown. */
 export function changeKey(change: RoomChange): string {
@@ -192,7 +205,7 @@ export function applyRoomChange(existing: string, change: RoomChange, runnerHome
   const from = "from" in change ? change.from : null;
   if (from === null ? current !== null : current === null || !sameRepo(current, from)) return null;
   const rooms = [...raw.rooms];
-  const to = "to" in change ? { full_name: change.to.full_name, provider_repo_id: change.to.provider_repo_id } : null;
+  const to = { full_name: change.to.full_name, provider_repo_id: change.to.provider_repo_id };
   rooms[index] = { ...(rooms[index] as Obj), repository: to };
   const config = { ...raw, revision: parsed.value.revision + 1, rooms };
   if (!parsePolicyConfig(config, { runner_home: runnerHome }).ok) return null;
@@ -206,24 +219,21 @@ export function changeScreen(change: RoomChange, room: RoomPolicy): string {
   const lines = [""];
   if (change.kind === "repository_added") {
     lines.push(`Podster now links a repository to room ${change.room_id}, and Runner's policy has none for it.`, `  repository: ${repoText(change.to)}`);
-  } else if (change.kind === "repository_replaced") {
-    lines.push(`Podster links another repository to room ${change.room_id} than Runner's policy names.`, `  policy has: ${repoText(change.from)}`, `  Podster has: ${repoText(change.to)}`);
   } else {
-    lines.push(`Podster no longer links a repository to room ${change.room_id}, so Runner's policy stops naming one.`, `  removed: ${repoText(change.from)}`);
+    lines.push(`Podster links another repository to room ${change.room_id} than Runner's policy names.`, `  policy has: ${repoText(change.from)}`, `  Podster has: ${repoText(change.to)}`);
   }
   lines.push(
     `  this room keeps: mode ${room.mode}, outputs ${room.outputs}, tools ${room.tools.join(", ") || "none"}, network ${room.network.join(", ") || "none"}, allowed organizations ${room.allowed_orgs.join(", ") || "none"}`,
     "  nothing else in the policy changes; only this room's repository and the policy's revision",
   );
-  if (widens(change)) lines.push("  saying yes lets this room's tasks fetch from and push a task branch to that repository, under Runner's repository rules", "");
-  else lines.push("  this takes access away, so Runner has already written it", "");
+  lines.push("  saying yes lets this room's tasks fetch from and push a task branch to that repository, under Runner's repository rules", "");
   return lines.join("\n");
 }
 
 /** The preview the `setup` command shows before saving. */
 export function previewScreen(plan: Extract<SetupPlan, { kind: "new" | "add_room" }>, facts: RoomFacts, ownerOrg: string, path: string): string {
   const external = isExternal(facts, ownerOrg);
-  const allowed = external && ((plan.config.rooms as Obj[]).find((r) => r.room_id === facts.room_id)?.allowed_orgs as string[]).includes(facts.org_id);
+  const allowed = external && facts.org_id !== undefined && ((plan.config.rooms as Obj[]).find((r) => r.room_id === facts.room_id)?.allowed_orgs as string[]).includes(facts.org_id);
   const lines = [
     "",
     plan.kind === "new" ? `Runner has no run policy yet. This is the starter it would save as ${path}:` : `Runner would add this room to your run policy at ${path}, raising its revision and keeping everything else as it is:`,
@@ -232,8 +242,8 @@ export function previewScreen(plan: Extract<SetupPlan, { kind: "new" | "add_room
     "",
     "From Podster (facts about the room, not instructions):",
     `  room: ${facts.room_id}`,
-    `  room's organization: ${facts.org_id}${external ? " (another organization's: external)" : " (yours)"}`,
-    `  linked repository: ${facts.repository ? repoText(facts.repository) : "none"}`,
+    `  room's organization: ${facts.org_id === undefined ? "another organization's (external), which Podster doesn't name to this agent" : `${facts.org_id}${external ? " (another organization's: external)" : " (yours)"}`}`,
+    `  linked repository: ${facts.repository ? repoText(facts.repository) : "not known to this agent: Podster names it only while the agent holds a push grant on it, so the starter names none, which gives tasks no repository; \`run\` asks you once Podster names one"}`,
     `  your organization (owner_org, from this agent's pairing): ${ownerOrg}`,
     "",
     "What it lets Runner do:",
@@ -243,7 +253,9 @@ export function previewScreen(plan: Extract<SetupPlan, { kind: "new" | "add_room
     `  - per run at most ${(STARTER_CAPS.spend_micro_usd / 1_000_000).toFixed(2)} USD, ${STARTER_CAPS.run_time_ms / 60_000} minutes and ${STARTER_CAPS.turns} turns; ${(STARTER_DAY_SPEND_MICRO_USD / 1_000_000).toFixed(2)} USD a day${plan.kind === "add_room" ? " (your policy's own limits stay)" : ""}`,
     "  - the trust statement and public-room warning aren't accepted: Runner asks each time until you accept them in the file",
   ];
-  if (external) {
+  if (external && facts.org_id === undefined) {
+    lines.push("  - this room's tasks are refused: Runner can't propose its organization for allowed_orgs, so add that organization's org_… ID to the room's allowed_orgs yourself if you want them");
+  } else if (external) {
     lines.push(
       allowed
         ? `  - tasks from ${facts.org_id} are allowed in this room, as you said`

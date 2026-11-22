@@ -25,7 +25,7 @@
  *   is read and asked about afresh. An owner's answer that arrives after a newer notice is set aside the same way.
  * - **An older pairing.** A pairing registered before these capabilities were Runner's doesn't hold them, and calling one
  *   would read as an authority error. Runner checks its stored grants first and, missing any, leaves invites alone and
- *   says once that pairing again enables this.
+ *   says once that only a new pairing, which makes a new agent, can answer them.
  */
 import { GatewayError, meaningOf } from "./errors.js";
 import type { OwnerAnswer } from "./lifecycle.js";

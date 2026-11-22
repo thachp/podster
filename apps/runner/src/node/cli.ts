@@ -258,7 +258,7 @@ async function locked(command: string, args: string[], home: string, state: File
       await clearStop(home);
     }
     if (outcome === "revoked") {
-      say("This agent's connection ended in Podster, so Runner stopped and retired its key. To go on, pair again from Podster.");
+      say("This agent's connection ended in Podster, so Runner stopped and retired its key. To go on, pair again from Podster: that makes a new agent with a new ID, to add to its rooms and give its roles and grants again.");
       return 1;
     }
     say("Stopped.");

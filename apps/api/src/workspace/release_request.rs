@@ -383,6 +383,7 @@ pub(super) fn standing(sql: &SqlStorage, who: &Participant, reads: &RequestReads
         link_repo_id,
         delegation_holder: holder,
         through_public_claim: public_claims::is_public_participant(sql, &caller.id)?,
+        outside_person: repositories::is_outside_person(sql, &caller.id)?,
         // Ignored for a person. The Worker checked an agent's connection at this generation for this request.
         agent_connected,
         now,

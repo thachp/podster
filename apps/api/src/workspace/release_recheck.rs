@@ -503,6 +503,7 @@ fn gather(
         link_repo_id,
         delegation_holder: holder,
         through_public_claim: public_claims::is_public_participant(sql, &requester)?,
+        outside_person: repositories::is_outside_person(sql, &requester)?,
         agent_connected,
         now,
     };

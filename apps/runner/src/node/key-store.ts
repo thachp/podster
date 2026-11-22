@@ -38,7 +38,7 @@ export const KEY_STORE_LINES: Readonly<Record<KeyStoreKind, string>> = Object.fr
 
 export const SECRET_TOOL = "/usr/bin/secret-tool";
 const MARKER = "key-store";
-/** The most one item may hold. Runner's largest, an agent connection, is about 2 KB. **Proposed** figure. */
+/** The most one item may hold. Runner's largest, the nudge registration, is under 2 KB. **Proposed** figure. */
 export const MAX_ITEM_BYTES = 256 * 1024;
 
 const ownUid = () => (typeof process.getuid === "function" ? process.getuid() : -1);

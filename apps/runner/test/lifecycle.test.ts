@@ -12,7 +12,8 @@ import { Poller, type PollerDeps } from "../src/core/poller.js";
 import { sha256Hex } from "../src/core/prompt.js";
 import { budgetOf, DAY_MS, MemoryRunStore, reserve, rolled, settle, emptyRuns } from "../src/core/runs.js";
 import type { ResultView } from "../src/core/results.js";
-import { MemoryStateStore } from "../src/core/state.js";
+import { emptyState, MemoryStateStore, type RunnerState } from "../src/core/state.js";
+import { ROLE_CAPABILITIES, RoleInvites } from "../src/core/roles.js";
 import type { FailureRecord } from "../src/core/runtime.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock, type Detail } from "./fake-gateway.js";
@@ -117,7 +118,7 @@ class FakePrompter {
   };
 }
 
-async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath } = {}) {
+async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath; roles?: { pass(signal: AbortSignal): Promise<void> } } = {}) {
   const clock = new TestClock();
   const gateway = new FakeGateway(clock);
   const secrets = new MemorySecretStore();
@@ -343,6 +344,47 @@ describe("the serialised policy calls and the reservation ledger", () => {
 });
 
 describe("ask mode, run mode and refusals", () => {
+  it("issue 528: a role invite waiting for the owner's answer doesn't hold up a task offer", async () => {
+    // A room with an invite to this agent, read through its own record, and an owner who hasn't answered yet.
+    let record: RunnerState = { ...emptyState(), role_checks: { [ROOM]: { workspace_id: ROOM, seq: 1, due: true, recorded_at: 0, updated_at: 0 } } };
+    const calls: string[] = [];
+    let answer: (a: OwnerAnswer) => void = () => undefined;
+    let questions = 0;
+    const roles = new RoleInvites({
+      poller: {
+        agentId: AGENT,
+        get record() {
+          return record;
+        },
+        authorityFresh: () => true,
+        granted: async () => new Set<string>(ROLE_CAPABILITIES),
+        updateRecord: async (change) => void (record = change(record)),
+        request: async (capability) => {
+          calls.push(capability);
+          return capability === "list_role_openings" ? { roles: [{ id: "rol_dev", mine: "invited", title: WORDS, responsibilities: WORDS }], external: false } : { status: "active" };
+        },
+      },
+      config: null,
+      prompter: { role: () => (questions++, new Promise<OwnerAnswer>((resolve) => (answer = resolve))) },
+      clock: { now: () => 0, idle: async () => undefined },
+      log: () => undefined,
+    });
+    const t = await setup(policyConfig(), { roles });
+    t.offer(detail("tsk_one"));
+    expect(await t.pass()).toBe("idle");
+    // The owner is still being asked, and the task was picked up and run all the same.
+    expect(questions).toBe(1);
+    expect(t.entry("tsk_one")).toMatchObject({ phase: "finished", outcome: "succeeded" });
+    expect(t.adapter.starts).toHaveLength(1);
+    expect(record.role_answers?.[`${ROOM}/rol_dev`]).toMatchObject({ state: "later", asked_at: null });
+    // The answer, when it comes, is used on the next pass after the room is read again.
+    answer("approve");
+    await new Promise((resolve) => setImmediate(resolve));
+    await t.pass();
+    expect(calls).toEqual(["list_role_openings", "list_role_openings", "claim_role"]);
+    expect(questions).toBe(1);
+  });
+
   it("asks the owner on this machine, then issues with approved_by_owner after a fresh read that still matches", async () => {
     const t = await setup(policyConfig("ask"));
     t.offer(detail("tsk_one"));

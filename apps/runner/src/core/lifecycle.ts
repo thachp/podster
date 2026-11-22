@@ -337,7 +337,7 @@ export class Lifecycle {
     await this.save({ ...this.state, ledger, next_reservation: nextReservation, entries: { ...this.state.entries, [key]: { ...entry, updated_at: this.now() } } });
   }
 
-  private log(at: string, outcome: string, entry: { workspace_id: string; task_id: string }, extra: { code?: string; status?: number; count?: number } = {}) {
+  private log(at: string, outcome: string, entry: { workspace_id: string; task_id: string }, extra: { code?: string; status?: number; count?: number; stage?: string } = {}) {
     this.deps.log(at, outcome, { agent: this.deps.poller.agentId, workspace: entry.workspace_id, task: entry.task_id, ...extra });
   }
 
@@ -886,7 +886,7 @@ export class Lifecycle {
     } catch (error) {
       if (signal.aborted) return "aborted";
       if (!(error instanceof RepoPathError)) throw error;
-      this.log("lifecycle.repository", error.transient ? "unavailable" : "refused", entry, { code: error.code });
+      this.log("lifecycle.repository", error.transient ? "unavailable" : "refused", entry, { code: error.code, stage: error.detail.stage });
       this.diagnose("lifecycle.repository", entry, error.code, error);
       if (error.transient) {
         // Passing: the decision is dropped and the task evaluated afresh at its next turn, with a new checkout.

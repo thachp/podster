@@ -471,7 +471,7 @@ describe("Runner's own source", () => {
       "|",
     ]);
     expect(job).toContain('RUNNER_LINUX_DOCKER: "1"');
-    expect(job).toMatch(/r\.numPassedTests === 14 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
+    expect(job).toMatch(/r\.numPassedTests === 16 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|publish|secrets\./);
     // merge-gate requires every job ci.yml has, this one included.
     expect(await read("scripts/merge-gate")).toMatch(/^CI_JOBS=".* runner .*"$/m);

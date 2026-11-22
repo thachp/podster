@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { plainName } from "@/components/agent-content/text";
 import { Button } from "@/components/ui/button";
 import { clientQuery } from "@/lib/gateway/client";
@@ -141,7 +141,10 @@ export function InboxOversight({ agent, name, openable, roomNames }: { agent: { 
   // so they start over from the new page's own cursor. The ref lets an older read still in flight see it's stale.
   const [shownPage, setShownPage] = useState(page);
   const currentPage = useRef(page);
-  currentPage.current = page;
+  // Set once the page is committed, not during render, so a render React throws away can't move it.
+  useLayoutEffect(() => {
+    currentPage.current = page;
+  }, [page]);
   if (shownPage !== page) {
     setShownPage(page);
     setOlder([]);

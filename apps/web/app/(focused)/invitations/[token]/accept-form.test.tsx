@@ -53,7 +53,8 @@ describe("accepting an invitation", () => {
 
   it.each([
     ["not_allowed", 403, /can't accept this invitation/],
-    ["already_member", 409, /already in this workroom/],
+    // An agent being here doesn't add its owner, so the answer says the invitation can't add the person (issue 521).
+    ["already_member", 409, /already in this workroom.*can't add you/],
   ])("explains %s", async (code, status, text) => {
     reply = { status, body: { error: { code } } };
     render(<AcceptInvitationForm onInvalid={onInvalid} token="inv_t" organizations={orgs} agents={agents} />);

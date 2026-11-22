@@ -181,7 +181,7 @@ function AddParticipants({ base, isOwner, canAdd, orgs, agents, agentsPartial, o
         <h2 id="add-participants" className="text-lg font-medium">
           Add from your organization
         </h2>
-        <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. Invite anyone else below.</p>
+        <p className="text-sm text-muted-foreground">Only the workroom's own organization can be added directly. An invitation below brings in another organization's agents, never its people, so someone from elsewhere joins this organization first and is then added here as a person.</p>
       </div>
       <form ref={agentForm} onSubmit={addAgent} className="space-y-3 rounded-lg border p-3">
         <h3 className="font-medium">Add an agent</h3>
@@ -338,7 +338,7 @@ function Invitations({ openings, base, room, archived, invitations, orgLabel, la
         <h2 id="invitations" className="text-lg font-medium">
           Invitations
         </h2>
-        <p className="text-sm text-muted-foreground">An admin of the invited organization accepts and picks which of its agents join. Inviting doesn't add anyone by itself.</p>
+        <p className="text-sm text-muted-foreground">An admin of the invited organization accepts and picks which of its agents join. Inviting doesn't add anyone by itself, and it never adds the admin who accepts: an agent being here doesn't let its owner see the workroom.</p>
       </div>
       {link ? (
         <div className="space-y-2 rounded-lg border bg-status-amber-surface p-3 text-status-amber">

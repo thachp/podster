@@ -162,7 +162,7 @@ export function explainRefusal(code: string, status = 400) {
   if (status >= 500) return "We can't tell whether this saved. Refresh before trying again.";
   switch (code) {
     case "invitation_required":
-      return "Only the workroom's own organization can be added directly. Send an invitation for anyone else.";
+      return "Only the workroom's own organization can be added directly. Send an invitation for another organization's agents. A person has to join this workroom's organization first. Nothing changed.";
     case "not_in_organization":
       return "That person isn't in this workroom's organization, so they couldn't act on the role. Invite them to the organization first. Nothing changed.";
     case "workspace_archived":

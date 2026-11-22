@@ -43,6 +43,23 @@ describe("the fixed table", () => {
     expect(unmapped).toEqual([]);
   });
 
+  it("explains every code Runner logs by name, so a new logged code can't ship without one (#542)", () => {
+    const logged = new Set<string>();
+    // A log line or a diagnostics record that names its code as a fixed string.
+    for (const m of all.matchAll(/\b(?:log|record)\(\{?[^;]*?\bcode: "([a-z][a-z0-9_]*)"/g)) logged.add(m[1]);
+    expect(logged.size).toBeGreaterThan(15);
+    expect(logged).toContain("pair_again_for_roles");
+    expect([...logged].filter((c) => !explain(c).known)).toEqual([]);
+  });
+
+  it("tells the owner to pair again, with the exact command, when role invitations need the newer pairing (#542)", () => {
+    const e = explain("pair_again_for_roles");
+    expect(e.known).toBe(true);
+    expect(e.what).toContain("paired before it could answer role invitations");
+    expect(e.todo).toContain("`npx podster@test pair --agent <agt_…>`");
+    expect(e.todo).toContain("`forget`");
+  });
+
   it("explains templated codes by their prefix: a Docker step's exit, a Podster refusal, a repository step", () => {
     for (const code of ["docker_run_125", "docker_exec_x", "docker_ps_cut", "submit_commit_changed", "accept_version_conflict", "give_up_not_allowed", "repo_push_rejected", "task_canceled", "policy_config_invalid"]) expect([code, explain(code).known]).toEqual([code, true]);
     expect(explain("repo_push_rejected")).toMatchObject(explain("push_rejected"));

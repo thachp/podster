@@ -124,6 +124,33 @@ const toldOfRevocation = (id: string) => inRoom(id, (sql) => sql.exec("SELECT o.
 const flush = (id: string) => runInDurableObject(stub(id), (instance: any, state: any) => runAlarm(instance, state));
 
 describe("giving a grant", () => {
+  // Decision 239 (CROSS-ORG-PEOPLE.md): a person whose place here is held through another organization gets no repository
+  // rights. No command writes such a row yet, so the test writes the one an accepted person invitation will.
+  it("gives a person here through another organization no grant of any action, and writes nothing", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET org_id = 'org_rg_elsewhere' WHERE principal_id IN (?, ?)", MEMBER.id, GUEST.id));
+    const before = await footprint(id);
+    for (const who of [MEMBER, GUEST]) {
+      for (const action of ["push", "merge"]) {
+        const refused = await give(id, who.id, action);
+        expect([refused.status, refused.code], `${who.id} ${action}`).toEqual([403, "not_allowed"]);
+      }
+      // A deploy grant has no route at all, so it's refused as malformed before anyone is looked at.
+      expect((await give(id, who.id, "deploy")).code).toBe("invalid_argument");
+    }
+    expect(await footprint(id)).toEqual(before);
+  });
+
+  it("still gives another organization's agent a grant, and leaves the one it holds", async () => {
+    const id = await room();
+    const push = await give(id, AGENT.id, "push");
+    expect(push.status, push.text).toBe(200);
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET org_id = 'org_rg_elsewhere' WHERE principal_id = ?", AGENT.id));
+    const merge = await give(id, AGENT.id, "merge");
+    expect(merge.status, merge.text).toBe(200);
+    expect((await grantRows(id)).filter((g) => g.principal_id === AGENT.id && g.revoked_at === null).map((g) => g.action).sort()).toEqual(["merge", "push"]);
+  });
+
   it("lets the room's owner give a participant one action on the room's repository, audited and told to them", async () => {
     const id = await room();
     const before = await version(id);

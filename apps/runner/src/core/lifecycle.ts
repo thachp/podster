@@ -223,7 +223,7 @@ export type LifecycleDeps = {
   /** Idempotency keys and run IDs. */
   newId?: () => string;
   checkInMs?: number;
-  /** Role invites (issue 522, `roles.ts`), answered at the start of each pass. Left out, invites are only recorded. */
+  /** Role invites (issue 522, `roles.ts`), seen to at the start of each pass without waiting for the owner (issue 528). Left out, invites are only recorded. */
   roles?: { pass(signal: AbortSignal): Promise<void> };
 };
 

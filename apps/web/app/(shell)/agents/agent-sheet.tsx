@@ -27,6 +27,8 @@ export type AgentDetail = AgentConnection & {
   roomsTruncated: boolean;
   /** The rooms the viewer belongs to, which open as themselves. Null when the read failed, and then nothing is offered. */
   ownRooms: string[] | null;
+  /** Names the viewer can already read: the agent's room listing, where a room it left has its old name, then their own rooms, whose current name wins. */
+  roomNames: Record<string, string>;
 };
 
 const outage = (result: GatewayResult<unknown>) => !result.ok && (result.status >= 500 || result.status === 429);
@@ -40,9 +42,9 @@ async function loadAgent(id: string, signal: AbortSignal): Promise<AgentDetail |
     return null;
   }
   const [inbox, rooms, own] = await Promise.all([
-    readInbox(id, 0, signal),
+    readInbox(id, null, signal),
     clientQuery<{ rooms: AgentRoom[]; truncated: boolean }>(`/api/v1/agents/${encodeURIComponent(id)}/rooms`, { signal }),
-    clientQuery<{ workspaces: { workspace_id: string }[] }>("/api/v1/workspaces", { signal }),
+    clientQuery<{ workspaces: { workspace_id: string; workspace_name?: string }[] }>("/api/v1/workspaces", { signal }),
   ]);
   return {
     ...agent.data,
@@ -50,6 +52,7 @@ async function loadAgent(id: string, signal: AbortSignal): Promise<AgentDetail |
     rooms: rooms.ok ? rooms.data.rooms : null,
     roomsTruncated: rooms.ok && rooms.data.truncated,
     ownRooms: own.ok ? own.data.workspaces.map((room) => room.workspace_id) : null,
+    roomNames: Object.fromEntries([...(rooms.ok ? rooms.data.rooms : []), ...(own.ok ? own.data.workspaces : [])].flatMap((room) => (typeof room.workspace_name === "string" ? [[room.workspace_id, room.workspace_name]] : []))),
   };
 }
 
@@ -322,7 +325,7 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
         <p className="text-xs text-muted-foreground">Workroom scopes are managed by each workroom's owner and admins.</p>
       </section>
 
-      <InboxOversight key={agent.id} agent={agent} name={name} openable={agent.ownRooms ?? []} />
+      <InboxOversight key={agent.id} agent={agent} name={name} openable={agent.ownRooms ?? []} roomNames={agent.roomNames} />
 
       <AlertDialog open={confirming !== null}>
         <AlertDialogContent

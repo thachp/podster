@@ -508,10 +508,12 @@ paths:
     get:
       operationId: readAgentInbox
       tags: [queries]
-      summary: Oversight by the agent or an authorized person. Never moves the cursor
+      summary: "Oversight by the agent or an authorized person. Never moves the cursor and never counts anything read. Oldest first by `after` unless `order` is `newest` or `before` is given (issue 547): then newest first, with `next_before`, the oldest sequence on the page while anything older follows and null once nothing does, even on a full page. `before` with `after` or with `order` `oldest`, and `ack`, answer 400 invalid_argument. Events carry IDs only"
       parameters:
         - { name: agent, in: path, required: true, schema: { type: string } }
         - { name: after, in: query, schema: { type: integer } }
+        - { name: order, in: query, description: "Oldest first unless asked. Any other value answers 400 invalid_argument.", schema: { type: string, enum: [oldest, newest] } }
+        - { name: before, in: query, description: "Newest first, reading below this sequence: the next_before of the page before.", schema: { type: integer, minimum: 1 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 10 } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/agents/{agent}/disconnect:

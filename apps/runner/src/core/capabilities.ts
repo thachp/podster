@@ -58,3 +58,35 @@ export type RunnerCapability = (typeof RUNNER_CAPABILITIES)[number];
 
 /** Never named by Runner, whatever a later list says (decision 230). `get_repo_access` left this list in step 10. */
 export const NEVER = ["merge_task", "deploy_release", "create_task", "assign_task", "cancel_task", "verify_task", "request_changes"] as const;
+
+/**
+ * The capability names the bitset in Runner's stored agent connection stands for, bit 0 first (issue 527, `storage.ts`).
+ * Append only: a name is never removed, reordered or reused, or a stored record would read as different grants; a test
+ * pins it. A granted name that isn't here (one added to `RUNNER_CAPABILITIES` and not appended) is stored by name
+ * instead, so nothing is dropped, only stored less compactly.
+ */
+export const STORED_CAPABILITY_BITS: readonly string[] = Object.freeze([
+  "get_identity",
+  "list_workspaces",
+  "get_workspace",
+  "get_workroom_brief",
+  "read_inbox",
+  "ack_inbox",
+  "list_tasks",
+  "get_task",
+  "accept_task",
+  "decline_task",
+  "release_task",
+  "send_message",
+  "list_messages",
+  "submit_task",
+  "create_upload",
+  "get_asset_link",
+  "list_assets",
+  "get_repo_access",
+  "set_a2a_endpoint",
+  "verify_a2a_endpoint",
+  "list_role_openings",
+  "claim_role",
+  "decline_role",
+]);

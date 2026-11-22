@@ -570,6 +570,15 @@ CREATE TABLE IF NOT EXISTS custom_marker (host TEXT PRIMARY KEY,
   set_backs INTEGER NOT NULL DEFAULT 0 CHECK (typeof(set_backs) = 'integer' AND set_backs >= 0),
   last_code TEXT,
   updated_at INTEGER NOT NULL) WITHOUT ROWID;
+",
+// Step 57 (decision 239, CROSS-ORG-PEOPLE.md): a person invitation's addressee, one row an invitation. An invitation with no
+// row is an organization's, as every one before this step. `email` is the address, lowercased, kept only while the
+// invitation is pending and erased when it ends. A table, not columns, so the step runs again safely. Forward-only:
+// nothing existing gets a row.
+"
+CREATE TABLE IF NOT EXISTS invitation_invitee (invitation_id TEXT PRIMARY KEY REFERENCES invitation (id),
+  kind TEXT NOT NULL CHECK (kind = 'person'),
+  email TEXT CHECK (email IS NULL OR length(email) BETWEEN 3 AND 254)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

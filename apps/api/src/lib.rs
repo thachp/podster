@@ -38,11 +38,9 @@ use worker::*;
 
 pub const CALLER_HEADER: &str = "x-podster-caller";
 const CARDS_PER_PAGE: u32 = 20;
-const CARD_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    3_000
-};
+/// How long each room has to answer for its card. Tests keep it: shortening it for every room made a healthy room that was
+/// slow to wake on a loaded runner lose its card.
+const CARD_TIMEOUT_MS: u64 = 3_000;
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
@@ -77,6 +75,9 @@ pub struct Caller {
     pub org_since: std::collections::HashMap<String, i64>,
     #[serde(default)]
     pub target_member: Option<podster_assertion::TargetMember>,
+    /// The person's verified email, passed on only for a person invitation's preview and acceptance.
+    #[serde(default)]
+    pub verified_email: Option<String>,
     pub gen: Option<u64>,
     /// For an agent, who linked the credential this request came with. Recorded when it sets an A2A endpoint.
     #[serde(default)]
@@ -211,10 +212,10 @@ async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value
     let workspace = row["workspace_id"].as_str()?;
     let mut listed = json!({ "workspace_id": workspace, "workspace_name": row["workspace_name"], "role": row["role"], "status": row["workspace_status"], "card": null });
     let read = async {
-        // Tests can't otherwise make a room hang.
+        // Tests can't otherwise make a room hang. It never answers, so only the timeout can end its read.
         #[cfg(feature = "failpoints")]
         if workspace.starts_with("ws_hang_") {
-            Delay::from(Duration::from_millis(CARD_TIMEOUT_MS * 20)).await;
+            std::future::pending::<()>().await;
         }
         let mut caller = caller.clone();
         caller.workspace_id = workspace.to_string();
@@ -231,7 +232,13 @@ async fn workspace_card(env: &Env, caller: &Caller, row: &Value) -> Option<Value
         };
         Ok::<_, ApiError>((response.status_code(), card))
     };
-    let timeout = Delay::from(Duration::from_millis(CARD_TIMEOUT_MS));
+    // A room made to hang gives up at once, so a test needn't wait out the real budget, and every other room keeps it.
+    let budget = if cfg!(feature = "failpoints") && workspace.starts_with("ws_hang_") {
+        0
+    } else {
+        CARD_TIMEOUT_MS
+    };
+    let timeout = Delay::from(Duration::from_millis(budget));
     match select(Box::pin(read), timeout).await {
         Either::Left((Ok((_, Some(card))), _)) => listed["card"] = card,
         Either::Left((Ok((403 | 404, None)), _)) => return None,
@@ -428,6 +435,7 @@ async fn route(
     let now = (Date::now().as_millis() / 1000) as i64;
     let identity = verify(&token, &keys, now).map_err(|_| ApiError::invalid_assertion())?;
     let is_agent = identity.kind == Kind::Agent;
+    let verified_email = identity.verified_email.clone().filter(|_| !is_agent);
     let departure = identity.departure.clone();
     let identity_replay = identity.agent_jti.clone();
     let identity_replay_exp = identity.agent_jti_exp.unwrap_or(identity.exp);
@@ -439,6 +447,8 @@ async fn route(
         admin_orgs: identity.admin_orgs,
         org_since: identity.org_since,
         target_member: identity.target_member,
+        // Only the two invitation routes below pass it on, so no other route ever sees an email.
+        verified_email: None,
         gen: identity.gen,
         // Only an agent's credential has a linker.
         linker: identity.linker.filter(|_| is_agent),
@@ -667,6 +677,7 @@ async fn route(
                 .as_str()
                 .and_then(workspace::workspace_of_token)
                 .ok_or_else(ApiError::invitation_not_found)?;
+            caller.verified_email = verified_email;
             (workspace, INTERNAL_PREVIEW_PATH.to_string())
         }
         ["v1", "invitations", "accept"] if method == Method::Post => {
@@ -680,6 +691,7 @@ async fn route(
                 .ok_or_else(ApiError::invalid_argument)?;
             let workspace =
                 workspace::workspace_of_token(token).ok_or_else(ApiError::invitation_not_found)?;
+            caller.verified_email = verified_email;
             (workspace, INTERNAL_ACCEPT_PATH.to_string())
         }
         ["v1", "workspaces", ws, ..] => ((*ws).to_string(), path.clone()),

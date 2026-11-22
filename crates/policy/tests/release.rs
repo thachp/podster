@@ -34,6 +34,7 @@ fn standing<'a>(grant: Option<&'a DeployGrant<'a>>) -> ReleaseStanding<'a> {
         link_repo_id: REPO,
         delegation_holder: Some("per_owner"),
         through_public_claim: false,
+        outside_person: false,
         agent_connected: true,
         now: NOW,
     }
@@ -531,6 +532,42 @@ fn may_release_now_is_the_jobs_test_too() {
     assert_eq!(
         may_release_now("agt_a", Agent, Role::Member, &later),
         Err(ReleaseDenial::Grant(GrantRefusal::GrantExpired))
+    );
+}
+
+/// Decision 239: a person here through another organization than the room's never releases, even with a deploy grant
+/// that would otherwise count. Another organization's agent isn't one, and keeps releasing with its grant.
+#[test]
+fn an_outside_person_never_releases_with_any_grant() {
+    let p = grant("per_x");
+    let outside = ReleaseStanding {
+        outside_person: true,
+        agent_connected: false,
+        ..standing(Some(&p))
+    };
+    for role in [Role::Member, Role::Guest] {
+        assert_eq!(
+            may_release_now("per_x", Person, role, &outside),
+            Err(ReleaseDenial::NotAllowed)
+        );
+        assert_eq!(
+            authorize_deploy_release(&caller("per_x", Person, role), &ReleaseRoom::OPEN, &outside),
+            Err(ReleaseDenial::NotAllowed)
+        );
+    }
+    // The same answer with no grant at all, so it says nothing about what rows exist.
+    let no_grant = ReleaseStanding {
+        grant: None,
+        ..outside
+    };
+    assert_eq!(
+        may_release_now("per_x", Person, Role::Member, &no_grant),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    let g = grant("agt_a");
+    assert_eq!(
+        may_release_now("agt_a", Agent, Role::Guest, &standing(Some(&g))),
+        Ok(())
     );
 }
 

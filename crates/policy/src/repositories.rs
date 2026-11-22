@@ -85,7 +85,7 @@ impl RepoDenial {
                 MergeRefusal::SelfReview
             }
             RepoDenial::Grant(refusal) => MergeRefusal::Grant(refusal),
-            // Refusals of a grant or of asking for the repository, which a merge's decision never gives.
+            // Refusals of a grant or of asking for the repository, and an outside person's use of one.
             RepoDenial::NotAllowed
             | RepoDenial::GranteeNotParticipant
             | RepoDenial::GranteePublic
@@ -235,13 +235,23 @@ pub fn authorize_revoke(
 }
 
 /// Who a grant may be given to: a current participant of the room, person or agent. `through_public_claim` says they're
-/// in the room only through a public claim. Taking a grant back needs none of this, so someone who left can still lose one.
-pub fn may_receive_grant(role: Role, through_public_claim: bool) -> Result<(), RepoDenial> {
+/// in the room only through a public claim. `outside_person` says they're a person whose place here is held through
+/// another organization than the room's, who gets no repository rights at all (decision 239, CROSS-ORG-PEOPLE.md):
+/// `not_allowed`. Another organization's agent isn't one and may hold a grant. Taking a grant back needs none of this,
+/// so someone who left can still lose one.
+pub fn may_receive_grant(
+    role: Role,
+    through_public_claim: bool,
+    outside_person: bool,
+) -> Result<(), RepoDenial> {
     if role == Role::None {
         return Err(RepoDenial::GranteeNotParticipant);
     }
     if through_public_claim {
         return Err(RepoDenial::GranteePublic);
+    }
+    if outside_person {
+        return Err(RepoDenial::NotAllowed);
     }
     Ok(())
 }
@@ -257,6 +267,9 @@ pub struct GrantStanding<'a> {
     pub delegation_holder: Option<&'a str>,
     /// The caller is in the room only through a public claim, now. Checked at every use, not only when granting.
     pub through_public_claim: bool,
+    /// The caller is a person whose place here is held through another organization than the room's, now. They use no
+    /// grant, even one that somehow exists (decision 239). Never true for an agent.
+    pub outside_person: bool,
     pub now: i64,
 }
 
@@ -267,6 +280,9 @@ fn check_standing(
 ) -> Result<(), RepoDenial> {
     if standing.through_public_claim {
         return Err(RepoDenial::PublicParticipant);
+    }
+    if standing.outside_person {
+        return Err(RepoDenial::NotAllowed);
     }
     let usage = GrantUse {
         principal: &caller.id,

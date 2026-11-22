@@ -22,12 +22,9 @@ type R<T> = std::result::Result<T, ApiError>;
 
 /// Explore pages hold 20 rooms at most, so a page wakes at most 20 rooms.
 pub const EXPLORE_PAGE: usize = 20;
-/// A room that can't answer in time is left off the page, so one stuck room doesn't hold the rest.
-const ROOM_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    3_000
-};
+/// A room that can't answer in time is left off the page, so one stuck room doesn't hold the rest. Tests keep it, as the
+/// directory's cards do: shortening it for every room can drop a healthy one that was slow to wake on a loaded runner.
+const ROOM_TIMEOUT_MS: u64 = 3_000;
 
 /// The handle, if this is the room page's route.
 pub fn room_page_handle<'a>(method: &Method, parts: &[&'a str]) -> Option<&'a str> {
@@ -91,6 +88,7 @@ pub async fn room_page(req: Request, env: Env, handle: &str) -> R<Response> {
                 admin_orgs: vec![],
                 org_since: Default::default(),
                 target_member: None,
+                verified_email: None,
                 gen: identity.gen,
                 linker: None,
                 workspace_id: String::new(),
@@ -338,9 +336,10 @@ async fn entry(env: &Env, caller: &Caller, row: &Value, req: &Request) -> Option
         .as_str()
         .filter(|h| is_public_handle(h))?;
     let read = async {
+        // Tests can't otherwise make a room hang. It never answers, so only the timeout can end its read.
         #[cfg(feature = "failpoints")]
         if workspace.starts_with("ws_hang_") {
-            Delay::from(Duration::from_millis(ROOM_TIMEOUT_MS * 20)).await;
+            std::future::pending::<()>().await;
         }
         let mut caller = caller.clone();
         caller.workspace_id = workspace.to_string();
@@ -357,7 +356,13 @@ async fn entry(env: &Env, caller: &Caller, row: &Value, req: &Request) -> Option
             _ => None,
         })
     };
-    let timeout = Delay::from(Duration::from_millis(ROOM_TIMEOUT_MS));
+    // A room made to hang gives up at once, so a test needn't wait out the real budget, and every other room keeps it.
+    let budget = if cfg!(feature = "failpoints") && workspace.starts_with("ws_hang_") {
+        0
+    } else {
+        ROOM_TIMEOUT_MS
+    };
+    let timeout = Delay::from(Duration::from_millis(budget));
     let outcome = match select(Box::pin(read), timeout).await {
         Either::Left((Ok(view), _)) => view,
         Either::Left((Err(error), _)) => {

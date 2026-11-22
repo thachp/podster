@@ -433,6 +433,22 @@ describe("Runner's key store on Linux", () => {
     expect(await file.getHostIdentity()).toBeNull();
   });
 
+  it("the file store holds an agent connection compactly, and reads one an earlier Runner stored in the slim form (issue 527)", async () => {
+    const home = await temp();
+    const store = new FileSecretStore(home);
+    const storage = new RunnerStorage(store);
+    const keypair = { publicKey: { kty: "OKP", crv: "Ed25519", x: "x", kid: "k" }, privateKey: { kty: "OKP", crv: "Ed25519", x: "x", d: "d", kid: "k" } };
+    const slim = { agentId: "agt_1", hostId: "h", providerName: "podster", issuer: "https://podster.dev/api/auth", mode: "delegated" as const, agentKeypair: keypair, capabilityGrants: [{ capability: "get_task", status: "active" as const }], createdAt: 1 };
+    await store.set("agents", JSON.stringify(["agt_1"]));
+    await store.set("agent:agt_1", JSON.stringify(slim));
+    expect(await storage.getAgentConnection("agt_1")).toEqual(slim);
+    await storage.setAgentConnection("agt_1", slim);
+    expect(JSON.parse((await store.get("agent:agt_1")) as string)).toMatchObject({ v: 2, k: keypair.privateKey });
+    expect(await storage.listAgentConnections()).toEqual([slim]);
+    await storage.deleteAll();
+    expect(await storage.getAgentConnection("agt_1")).toBeNull();
+  });
+
   it("the file store never follows a link planted at an item, and never reads a FIFO or an item past its bound (L3)", async () => {
     const home = await temp();
     const store = new FileSecretStore(home);

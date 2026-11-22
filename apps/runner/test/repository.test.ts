@@ -15,6 +15,8 @@ import {
   cloneUrl,
   COMMIT_LIMITS,
   fetchArgs,
+  gitFailureCause,
+  gitFailureCode,
   GITHUB,
   hardening,
   isAccessToken,
@@ -35,7 +37,7 @@ import { pullText } from "../src/core/pull-text.js";
 import { lineLogger } from "../src/core/runtime.js";
 import { checkedHelper, findGit, GIT_OUTPUT_CUT, GIT_TIMED_OUT, gitCli, gitEnv, HELPER_PATH, PACKAGE_ROOT, type GitExec, type GitResult } from "../src/node/git.js";
 import { githubApi, type GitHubCall } from "../src/node/github-api.js";
-import { checkWorkTree, GitRepositoryPath, IGNORED_LIST_TIMEOUT_MS, nameOf, RepoBroker, touchesWorkflows, wholeFolders } from "../src/node/repo-path.js";
+import { checkWorkTree, GitRepositoryPath, hostRepositoryPath, IGNORED_LIST_TIMEOUT_MS, nameOf, RepoBroker, touchesWorkflows, wholeFolders } from "../src/node/repo-path.js";
 
 const OWNER = "org_owner";
 const ROOM = "room_1";
@@ -497,7 +499,7 @@ const RAW_NAMES = await (async () => {
 const sh = (cwd: string, ...args: string[]) => execFileSync(realGit as string, args, { cwd, env: { PATH: "/usr/bin:/bin", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString().trim();
 
 /** A "GitHub": a local bare repository with `main`, and an API answering for it. */
-async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: { files: number; bytes: number; file_bytes: number } } = {}) {
+async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: { files: number; bytes: number; file_bytes: number }; fetch_head?: boolean } = {}) {
   const root = await temp();
   const home = join(root, "home");
   await mkdir(home, { mode: 0o700 });
@@ -540,11 +542,12 @@ async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: {
   const real = gitCli(realGit as string, gitHome, { PATH: "/usr/bin:/bin" });
   const gitCalls: { args: string[]; secret: boolean }[] = [];
   /** What the next push answers instead of pushing, as Git prints a refused credential. */
-  const fakes: { push: { code: number; stdout: string; stderr: string } | null; extraCommit: boolean; list: GitResult | null } = { push: null, extraCommit: false, list: null };
+  const fakes: { push: { code: number; stdout: string; stderr: string } | null; fetch: GitResult | null; extraCommit: boolean; list: GitResult | null } = { push: null, fetch: null, extraCommit: false, list: null };
   const git: GitExec = async (args, opts) => {
     gitCalls.push({ args, secret: opts.secret !== undefined });
     expect(args.join(" ")).not.toContain(TOKEN);
     if (args.includes("push") && fakes.push) return fakes.push;
+    if (args.includes("fetch") && fakes.fetch) return fakes.fetch;
     if (args.includes("ls-files") && args.includes("--ignored") && fakes.list) return fakes.list;
     if (args.includes("commit") && fakes.extraCommit) {
       // Something other than Runner's one commit lands first: what the `HEAD^` check is there for.
@@ -1506,5 +1509,109 @@ describe("the work tree check", () => {
     // A `.git` look-alike at the top of a skipped folder still refuses: host Git looks there for a nested repository.
     await mkdir(join(dir, "deps", ".GIT"));
     await expect(checkWorkTree(dir, 10, new Set(["deps"]))).rejects.toMatchObject({ code: "work_tree_git" });
+  });
+});
+
+describe.skipIf(realGit === null)("#520: a failed checkout says why, by stage and cause, and never with Git's words", () => {
+  const URL_IN_TEXT = "https://github.com/podsterdev/todo-app.git";
+  const cases: [string, GitResult, string, boolean][] = [
+    // Git 2.25 (Ubuntu 20.04's), which has no `--no-write-fetch-head`: the cause #520's hypothesis names.
+    ["old Git", { code: 129, stdout: "", stderr: "error: unknown option `no-write-fetch-head'\nusage: git fetch [<options>] [<repository> [<refspec>...]]\n" }, "fetch_git_too_old", false],
+    ["missing ref", { code: 128, stdout: "", stderr: "fatal: couldn't find remote ref refs/heads/main\n" }, "fetch_ref_missing", true],
+    ["refused credential", { code: 128, stdout: "", stderr: `remote: Invalid username or password.\nfatal: Authentication failed for '${URL_IN_TEXT}/'\n` }, "fetch_auth_failed", false],
+    ["403", { code: 128, stdout: "", stderr: `remote: Permission to podsterdev/todo-app.git denied to podster[bot].\nfatal: unable to access '${URL_IN_TEXT}/': The requested URL returned error: 403\n` }, "fetch_access_denied", false],
+    ["not found via the App's token", { code: 128, stdout: "", stderr: `remote: Repository not found.\nfatal: repository '${URL_IN_TEXT}/' not found\n` }, "fetch_repository_not_found", false],
+    ["DNS", { code: 128, stdout: "", stderr: `fatal: unable to access '${URL_IN_TEXT}/': Could not resolve host: github.com\n` }, "fetch_dns_failed", true],
+    ["TLS", { code: 128, stdout: "", stderr: `fatal: unable to access '${URL_IN_TEXT}/': server certificate verification failed. CAfile: none CRLfile: none\n` }, "fetch_tls_failed", true],
+    ["connect", { code: 128, stdout: "", stderr: `fatal: unable to access '${URL_IN_TEXT}/': Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server\n` }, "fetch_unreachable", true],
+    ["Runner's time limit", { code: GIT_TIMED_OUT, stdout: "", stderr: "" }, "fetch_unreachable", true],
+    ["no HTTPS helper", { code: 128, stdout: "", stderr: "fatal: unable to find remote helper for 'https'\n" }, "fetch_https_unavailable", false],
+    ["local write", { code: 1, stdout: "", stderr: "error: cannot lock ref 'refs/runner/start': Unable to create '/h/git/r/t/refs/runner/start.lock': Permission denied\n" }, "fetch_local_write_failed", false],
+    ["unknown", { code: 128, stdout: "", stderr: "fatal: something Runner has never seen\n" }, "fetch_failed", false],
+  ];
+
+  for (const [name, result, code, transient] of cases) {
+    it(`reads ${name} as ${code}, at the fetch stage, with Git's exit code and none of its words`, async () => {
+      const w = await world();
+      w.fakes.fetch = result;
+      const error = await w.path.prepare({ ...w.task, continue_from: null }, w.signal).then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(RepoPathError);
+      expect(error).toMatchObject({ code, transient, detail: { stage: "fetch", exit_code: result.code } });
+      expect(String((error as Error).message)).toBe(`repository path: ${code}`);
+      const logged = w.logged.join("\n");
+      for (const word of ["unknown option", "couldn't", "Permission", "Repository not found", "resolve", "certificate", "remote helper", "lock", "never seen", "github.com/"]) expect(logged).not.toContain(word);
+      // A refused credential drops the token, so the next use asks Podster again; nothing else does.
+      expect(w.broker.size).toBe(code === "fetch_auth_failed" || code === "fetch_access_denied" ? 0 : 1);
+    });
+  }
+
+  it("names the access stage for Podster's get_repo_access, the facts stage for GitHub's API answers before any Git command, and the checkout stage for host Git on this machine", async () => {
+    const u = await world();
+    await expect(u.path.prepare({ ...u.task, repository: { ...u.task.repository, full_name: "podsterdev/other" }, continue_from: null }, u.signal)).rejects.toMatchObject({ code: "repository_out_of_scope", detail: { stage: "access" } });
+    expect(u.gitCalls).toEqual([]);
+    const w = await world();
+    w.api.rules = [];
+    await expect(w.path.prepare({ ...w.task, continue_from: null }, w.signal)).rejects.toMatchObject({ code: "repository_unprotected", detail: { stage: "facts" } });
+    expect(w.gitCalls).toEqual([]);
+    const v = await world();
+    v.fakes.fetch = { code: 0, stdout: "", stderr: "" };
+    // A fetch that "succeeds" without writing the start ref leaves nothing to verify: the checkout's own stage.
+    await expect(v.path.prepare({ ...v.task, continue_from: null }, v.signal)).rejects.toMatchObject({ code: "checkout_unverified", detail: { stage: "checkout" } });
+  });
+
+  it("keeps a push's codes from before, and names the causes it had none for", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "a.txt"), "a\n");
+    w.fakes.push = { code: 129, stdout: "", stderr: "error: unknown option `porcelain'\n" };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_git_too_old", transient: false, detail: { stage: "push", exit_code: 129 } });
+    w.fakes.push = { code: 128, stdout: "", stderr: `remote: Repository not found.\nfatal: repository '${URL_IN_TEXT}/' not found\n` };
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "push_repository_not_found" });
+  });
+});
+
+describe.skipIf(realGit === null)("#520, #525: Runner's setup refuses a Git older than 2.25, and gives an older one no --no-write-fetch-head", () => {
+  /** A Git that answers its version as given, and exit 129 for `--no-write-fetch-head`, as 2.25.1 does (see old-git.test.ts). */
+  async function oldGit(version: string): Promise<string> {
+    const dir = await temp();
+    const path = join(dir, "git");
+    await writeFile(path, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${version}"; exit 0; fi\nfor a in "$@"; do if [ "$a" = "--no-write-fetch-head" ]; then echo "error: unknown option \\\`no-write-fetch-head'" >&2; exit 129; fi; done\nexec ${realGit} "$@"\n`);
+    await chmod(path, 0o700);
+    return path;
+  }
+  const github: GitHubCall = async () => ({ status: 404, body: null });
+  const request = async () => ({});
+  const clock = { now: () => NOW, idle: async () => undefined };
+
+  it("logs git_too_old and gives no repository path below 2.25; 2.25 and later, this machine's Git, and an odd answer pass", async () => {
+    for (const [version, ok] of [["git version 2.24.4", false], ["git version 1.9.0", false], ["git version 2.25.1", true], ["git version 2.28.0", true], ["git version 2.29.0", true], ["git version 3.0.0", true], ["not git at all", true]] as const) {
+      const home = await temp();
+      const logged: string[] = [];
+      const path = await hostRepositoryPath(home, request, clock, lineLogger((l) => logged.push(l)), { git: await oldGit(version), github });
+      expect([version, path !== null]).toEqual([version, ok]);
+      if (!ok) expect(logged).toEqual([JSON.stringify({ at: "repo.setup", outcome: "unavailable", code: "git_too_old" })]);
+    }
+    const logged: string[] = [];
+    expect(await hostRepositoryPath(await temp(), request, clock, lineLogger((l) => logged.push(l)), { git: realGit, github })).not.toBeNull();
+    expect(logged).toEqual([]);
+  });
+
+  it("checks out with a Git older than 2.29 by leaving --no-write-fetch-head out", async () => {
+    const w = await world({ fetch_head: false });
+    await w.path.prepare({ ...w.task, continue_from: null }, w.signal);
+    const fetch = w.gitCalls.find((c) => c.args.includes("fetch"));
+    expect(fetch?.args).not.toContain("--no-write-fetch-head");
+    const v = await world();
+    await v.path.prepare({ ...v.task, continue_from: null }, v.signal);
+    expect(v.gitCalls.find((c) => c.args.includes("fetch"))?.args).toContain("--no-write-fetch-head");
+  });
+
+  it("would have answered fetch_git_too_old, not fetch_failed, had the old Git reached a fetch", async () => {
+    const dir = await temp();
+    await mkdir(join(dir, "home"), { mode: 0o700 });
+    const git = gitCli(await oldGit("git version 2.25.1"), join(dir, "home"), { PATH: "/usr/bin:/bin" });
+    const fetched = await git([...hardening(null), ...locate(join(dir, "gd"), join(dir, "wt")), ...fetchArgs(SCOPE.full_name, "main", "refs/runner/start")], {});
+    expect(fetched.code).toBe(129);
+    expect(gitFailureCode(gitFailureCause(fetched, "fetch"), "fetch")).toEqual({ code: "fetch_git_too_old", transient: false, revoke: false });
   });
 });

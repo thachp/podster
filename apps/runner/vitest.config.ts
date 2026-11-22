@@ -6,5 +6,6 @@ import { configDefaults, defineConfig } from "vitest/config";
 // real half, the subprocess escape suite and the injections against the real provider. S-47's Linux Docker proof runs
 // only in CI's Linux job, through vitest.linux.config.ts, with the egress proxy's real proof (test/egress-docker.test.ts),
 // which also runs on a Mac with RUNNER_EGRESS_DOCKER=1, and the toolchain images' real proof
-// (test/toolchains-docker.test.ts), which runs on a Mac with RUNNER_TOOLCHAIN_DOCKER=1.
-export default defineConfig({ test: { include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, "test/claude-real.test.ts", "test/hostile-real.test.ts", "test/linux-docker.test.ts", "test/egress-docker.test.ts", "test/toolchains-docker.test.ts"], testTimeout: 10000 } });
+// (test/toolchains-docker.test.ts), which runs on a Mac with RUNNER_TOOLCHAIN_DOCKER=1, and Runner on a real Git 2.25
+// (test/old-git.test.ts), which runs on a Mac with RUNNER_OLD_GIT_DOCKER=1.
+export default defineConfig({ test: { include: ["test/**/*.test.ts"], exclude: [...configDefaults.exclude, "test/claude-real.test.ts", "test/hostile-real.test.ts", "test/linux-docker.test.ts", "test/egress-docker.test.ts", "test/toolchains-docker.test.ts", "test/old-git.test.ts"], testTimeout: 10000 } });

@@ -43,6 +43,8 @@ export type LogFields = {
   count?: number;
   status?: number;
   code?: string;
+  /** Where on the repository path a failure happened (`RepoStage`, #520): a fixed lower-case word. */
+  stage?: string;
   /** Key names a refused answer carried: comma-joined, each `[a-z_]{1,40}` or `?`, at most 10. */
   names?: string;
   /** A refused token's length. */
@@ -61,6 +63,7 @@ const NAMES_VALUE = /^[a-z_?]{1,40}(,[a-z_?]{1,40}){0,9}$/;
 const PREFIX_VALUE = /^(yes|no)$/;
 /** A lower-case DNS name of two or more labels whose last starts with a letter, so never an IP address. */
 const HOST_VALUE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const STAGE_VALUE = /^[a-z]{1,16}$/;
 const TYPE_VALUE = /^(null|array|object|string|number|boolean|undefined|bigint|symbol|function)$/;
 const NUMBER_FIELDS = new Set(["seq", "count", "status", "length"]);
 const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id", "run"]);
@@ -76,6 +79,7 @@ export function logLine(at: string, outcome: string, fields: LogFields = {}): st
     else if (name === "prefix" && typeof value === "string" && PREFIX_VALUE.test(value)) line[name] = value;
     else if (name === "type" && typeof value === "string" && TYPE_VALUE.test(value)) line[name] = value;
     else if (name === "code" && typeof value === "string" && CODE_VALUE.test(value)) line[name] = value;
+    else if (name === "stage" && typeof value === "string" && STAGE_VALUE.test(value)) line[name] = value;
   }
   return JSON.stringify(line);
 }

@@ -63,7 +63,12 @@ export function diagnosticLine(failure: FailureRecord, now: number): string {
       if (typeof error.detail.stderr === "string") line.stderr_tail = scrub(error.detail.cut ? cutEdge(error.detail.stderr) : error.detail.stderr, MAX_FIELD_BYTES, "tail");
       if (typeof error.detail.errno === "string") line.errno = scrub(error.detail.errno, 64);
     }
-    if (error instanceof RepoPathError) line.transient = error.transient ? 1 : 0;
+    if (error instanceof RepoPathError) {
+      line.transient = error.transient ? 1 : 0;
+      // Where on the repository path, and Git's exit code (#520): fixed words and a number, never Git's own output.
+      if (error.detail.stage !== undefined && /^[a-z]{1,16}$/.test(error.detail.stage)) line.stage = error.detail.stage;
+      if (typeof error.detail.exit_code === "number" && Number.isSafeInteger(error.detail.exit_code)) line.exit_code = error.detail.exit_code;
+    }
   } else if (error !== undefined) {
     line.message = scrub(String(error));
   }
@@ -157,6 +162,7 @@ export class FileDiagnostics implements Diagnostics {
 const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const AT = /^[a-z][a-z0-9_.]{0,63}$/;
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const STAGE = /^[a-z]{1,16}$/;
 /** A field read back from the file, shown only when it has its fixed shape. */
 const shaped = (v: unknown, re: RegExp) => (typeof v === "string" && re.test(v) ? v : "invalid");
 
@@ -170,7 +176,7 @@ export function whyLines(task: string, entry: Record<string, unknown> | null, fi
   const code = shaped(entry.code, FAILURE_CODE);
   const e = explain(code);
   return [
-    `${shaped(entry.time, TIME)} at ${shaped(entry.at, AT)}: ${e.what} ${e.todo} (code ${code})`,
+    `${shaped(entry.time, TIME)} at ${shaped(entry.at, AT)}${typeof entry.stage === "string" && STAGE.test(entry.stage) ? ` (stage ${entry.stage})` : ""}: ${e.what} ${e.todo} (code ${code})`,
     `From ${file}, local to this machine and redacted:`,
     markHidden(JSON.stringify(entry, null, 2)),
   ];

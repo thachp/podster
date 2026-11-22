@@ -1286,6 +1286,7 @@ class FakeRepository implements RepositoryPath {
   forget() {
     this.forgotten++;
   }
+  async clear() {}
 }
 
 describe("step 10: a hostile Podster and injected words in a room with a repository", () => {

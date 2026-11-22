@@ -223,6 +223,8 @@ export type LifecycleDeps = {
   /** Idempotency keys and run IDs. */
   newId?: () => string;
   checkInMs?: number;
+  /** Role invites (issue 522, `roles.ts`), answered at the start of each pass. Left out, invites are only recorded. */
+  roles?: { pass(signal: AbortSignal): Promise<void> };
 };
 
 export type TickOutcome = "idle" | "revoked" | "stopped";
@@ -386,6 +388,7 @@ export class Lifecycle {
     this.busy = true;
     this.tickSignal = signal;
     try {
+      await this.deps.roles?.pass(signal);
       return await this.work(signal);
     } catch (error) {
       if (error instanceof AuthorityEnded) {

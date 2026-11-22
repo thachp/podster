@@ -44,6 +44,38 @@ export type Offer = {
   updated_at: number;
 };
 
+/**
+ * A room whose inbox told Runner of a role invite (`role.invited`), or that a reconciliation listed, to be read with
+ * `list_role_openings` (issue 522). The inbox event names only the room, so the opening is learned from that read. IDs only.
+ */
+export type RoleCheck = {
+  workspace_id: string;
+  /** The inbox sequence it came with, or null from a reconciliation. */
+  seq: number | null;
+  /** Whether the room's openings still need reading. */
+  due: boolean;
+  recorded_at: number;
+  updated_at: number;
+};
+
+/**
+ * Runner's answer to one invite, by IDs, recorded before anything is sent (issue 522). A claim or decline under way keeps
+ * its idempotency key, so a lost answer is asked again with the same key. Forgotten once the room no longer lists the invite.
+ */
+export type RoleAnswer = {
+  workspace_id: string;
+  role_id: string;
+  /**
+   * `claiming` or `declining`: sent, or about to be, with `key`. `later`: the owner left it, asked again after a wait.
+   * `refused`: Podster refused the claim or decline, with `code`; not tried again while the same invite stands.
+   */
+  state: "claiming" | "declining" | "later" | "refused";
+  key: string | null;
+  code: string | null;
+  asked_at: number | null;
+  updated_at: number;
+};
+
 export type RunnerState = {
   version: 1;
   /** The gateway's origin. */
@@ -63,6 +95,10 @@ export type RunnerState = {
   inbox_cursor: number;
   /** Offers, keyed `workspace/task`. */
   offers: Record<string, Offer>;
+  /** Rooms to read for role invites, keyed by room. Missing in a record from before issue 522. */
+  role_checks?: Record<string, RoleCheck>;
+  /** Answers to role invites, keyed `workspace/role`. Missing in a record from before issue 522. */
+  role_answers?: Record<string, RoleAnswer>;
   /** The last time a call to the gateway was answered, in milliseconds. */
   last_contact_at: number | null;
   reconciled_at: number | null;
@@ -80,6 +116,8 @@ export const emptyState = (): RunnerState => ({
   retired: [],
   inbox_cursor: 0,
   offers: {},
+  role_checks: {},
+  role_answers: {},
   last_contact_at: null,
   reconciled_at: null,
 });

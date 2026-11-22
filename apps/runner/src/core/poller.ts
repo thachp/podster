@@ -25,7 +25,7 @@ import type { NudgeBell } from "./nudge.js";
 import { GatewayError, meaningOf } from "./errors.js";
 import { retire } from "./pairing.js";
 import { backoffMs } from "./retry.js";
-import { applyEvents, applyListing, readEvents, readTask, type ListedTask } from "./record.js";
+import { applyEvents, applyListing, markRoleCheck, readEvents, readTask, type ListedTask } from "./record.js";
 import type { Clock, Logger } from "./runtime.js";
 import { isId, type RunnerState, type StateStore } from "./state.js";
 import { RunnerStorage, type SecretStore } from "./storage.js";
@@ -158,6 +158,21 @@ export class Poller {
     return this.call(capability, args);
   }
 
+  /**
+   * The capabilities this agent's stored credential holds, by name, as its pairing registered them. A pairing made before
+   * a capability was in Runner's list doesn't hold it, and calling it would read as an authority error, so a caller checks
+   * here first (issue 522).
+   */
+  async granted(): Promise<ReadonlySet<string>> {
+    const connection = await this.storage.getAgentConnection(this.state.plugin_agent_id as string);
+    return new Set((connection?.capabilityGrants ?? []).filter((grant) => grant.status === "active").map((grant) => grant.capability));
+  }
+
+  /** Saves a change to the record that isn't the inbox's or a listing's: the role invites' (issue 522). */
+  async updateRecord(change: (state: RunnerState) => RunnerState): Promise<void> {
+    await this.save(change(this.state));
+  }
+
   /** Retires the key after an authority error the lifecycle met: the same stop the loop makes for its own. */
   async endAuthority(): Promise<void> {
     if (this.state.stopped === null) this.state = await retire(this.deps, this.storage, this.state, "revoked");
@@ -201,6 +216,8 @@ export class Poller {
       }
       tasks += found.length;
       state = applyListing(state, this.state.agent_id as string, workspace, found, whole, this.deps.clock.now());
+      // An invite made while Runner was off, or whose event was dropped, is found by reading the room's openings (issue 522).
+      state = { ...state, role_checks: markRoleCheck(state.role_checks ?? {}, workspace, null, this.deps.clock.now()) };
     }
     const now = this.deps.clock.now();
     await this.save({ ...state, reconciled_at: now, last_contact_at: now });

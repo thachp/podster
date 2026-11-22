@@ -137,6 +137,12 @@ export type RoomPolicy = {
   acknowledged: { trust_statement: boolean; public_room_warning: boolean };
   /** Null: the room has no repository, and a run starts in an empty folder. */
   repository: RepoScope | null;
+  /**
+   * Issue 522: what Runner does with an invite to one of this room's role openings. `ask` (the default) asks the owner on
+   * this machine; `accept` claims it as this agent with no question. Nothing from Podster sets it, and Runner never
+   * declines an invite by itself: only the owner's answer does.
+   */
+  roles: "ask" | "accept";
 };
 export type PolicyConfig = {
   version: 1;
@@ -396,7 +402,7 @@ function parseCaps(v: unknown): Parsed<Caps> {
 }
 
 function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
-  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "toolchains", "outputs", "repository"])) return fail("rooms[]");
+  if (!isObj(v) || !keysAre(v, ["room_id", "allowed_orgs", "acknowledged"], ["mode", "tools", "network", "toolchains", "outputs", "repository", "roles"])) return fail("rooms[]");
   const roomId = own(v, "room_id");
   if (!isId(roomId)) return fail("rooms[].room_id");
   const mode = Object.hasOwn(v, "mode") ? v.mode : "ask";
@@ -423,7 +429,9 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const given = Object.hasOwn(v, "repository") ? v.repository : null;
   const repository = given === null ? null : parseRepoScope(given);
   if (given !== null && repository === null) return fail("rooms[].repository");
-  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, toolchains, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository } };
+  const roles = Object.hasOwn(v, "roles") ? v.roles : "ask";
+  if (roles !== "ask" && roles !== "accept") return fail("rooms[].roles");
+  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, toolchains, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository, roles } };
 }
 
 /**

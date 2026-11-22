@@ -29,6 +29,13 @@ export const isTestEmail = (email: string) => email.toLowerCase().endsWith(TEST_
 
 const isStagingGateway = (url: string) => new URL(url).origin === STAGING_GATEWAY;
 
+/**
+ * Whether this deployment admits test people: the same switch, origin and secret the test sign-up needs, read from the
+ * configuration alone. A person invitation sends a test person's email only where this holds (decision 241).
+ */
+export const testPeopleAdmitted = (env: Env) =>
+  env.ENABLE_E2E_SIGNUP === "true" && isStagingGateway(env.BASE_URL) && (env.E2E_SIGNUP_SECRET?.length ?? 0) >= MIN_SECRET_LENGTH;
+
 /** Hashed first, because `timingSafeEqual` needs equal lengths and a length shouldn't be learned from it either. */
 async function sameSecret(given: string, expected: string) {
   const digest = (value: string) => crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));

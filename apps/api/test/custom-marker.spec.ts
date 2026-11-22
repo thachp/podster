@@ -530,8 +530,8 @@ describe("a custom hostname's marker (M6 step 8e)", () => {
     const { r, name } = await routed("org_cm_schema");
     const latest = await inRoom(r.room, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     const visit = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.room}`)).status;
-    // A room as it was before step 56: no table, one step behind.
-    await inRoom(r.room, (sql) => { sql.exec("DROP TABLE custom_marker"); sql.exec("UPDATE schema_version SET version = version - 1"); });
+    // A room as it was before step 56: no table, two steps behind (step 57, a person invitation's addressee, runs again safely).
+    await inRoom(r.room, (sql) => { sql.exec("DROP TABLE custom_marker"); sql.exec("UPDATE schema_version SET version = version - 2"); });
     expect(await visit()).toBe(200);
     expect(await inRoom(r.room, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     // A row, then the step again: the row is kept whole.
@@ -540,7 +540,7 @@ describe("a custom hostname's marker (M6 step 8e)", () => {
     await pass(r);
     const row = await markerRow(r, name);
     expect(row).toMatchObject({ served_at: T });
-    await inRoom(r.room, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
+    await inRoom(r.room, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
     expect(await visit()).toBe(200);
     expect(await markerRow(r, name)).toEqual(row);
   });

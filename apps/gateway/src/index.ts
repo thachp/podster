@@ -11,7 +11,7 @@ import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, capabilitiesFor, InvalidArguments, jsonSchema, releaseRoutesAnswered, toApiCall, zodShape, type ApiCall, type Capability, type ListingOptions } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
-import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
+import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE, testPeopleAdmitted } from "./test-people";
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
@@ -520,6 +520,27 @@ async function withTargetMember(env: Env, identity: Identity, method: string, pa
   if (!person) return identity;
   const { results } = await env.DB.prepare(`SELECT org_id, created_at FROM org_member WHERE person_id = ?`).bind(person).all<{ org_id: string; created_at: number }>();
   return results.length ? { ...identity, targetMember: { person, orgs: Object.fromEntries(results.map((r) => [r.org_id, r.created_at])) } } : identity;
+}
+
+/** The two routes a person invitation is previewed and accepted on, the only ones that carry the person's email. */
+const PERSON_INVITATION_ROUTES = new Set(["/v1/invitations/preview", "/v1/invitations/accept"]);
+
+/**
+ * The signed-in person's email, for a person invitation (decision 241): a fact from Better Auth's own row, sent only on
+ * the two invitation routes, and only when that row marks it verified. A test person's address can't be verified, so
+ * theirs is sent only where this deployment admits test people. The API compares it with the invitation and decides.
+ */
+export async function verifiedEmailFor(env: Env, userId: string): Promise<string | undefined> {
+  const row = await env.DB.prepare(`SELECT email, emailVerified FROM "user" WHERE id = ?`).bind(userId).first<{ email: string; emailVerified: number }>();
+  if (!row) return undefined;
+  if (isTestEmail(row.email)) return userId.startsWith(TEST_ID_PREFIX) && testPeopleAdmitted(env) ? row.email : undefined;
+  return row.emailVerified === 1 ? row.email : undefined;
+}
+
+async function withVerifiedEmail(env: Env, identity: Identity, method: string, path: string, userId: string): Promise<Identity> {
+  if (identity.kind !== "person" || method !== "POST" || !PERSON_INVITATION_ROUTES.has(path)) return identity;
+  const email = await verifiedEmailFor(env, userId);
+  return email ? { ...identity, verifiedEmail: email } : identity;
 }
 
 function addedPerson(body: string | undefined) {
@@ -1320,7 +1341,8 @@ const appHandler = {
     if (sensitiveCommand(request.method, path) && !(await withinLimit(env.RL_SENSITIVE, `invite-or-create:${session.user.id}`))) return rateLimited();
     const hasBody = !["GET", "HEAD"].includes(request.method);
     const text = hasBody ? await request.text() : undefined;
-    const response = await callApi(env, await withTargetMember(env, identity, request.method, path, text), {
+    const stated = await withVerifiedEmail(env, await withTargetMember(env, identity, request.method, path, text), request.method, path, session.user.id);
+    const response = await callApi(env, stated, {
       method: request.method,
       path: path + url.search,
       body: text,

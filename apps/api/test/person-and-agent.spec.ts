@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, manualAlarms } from "./alarm.ts";
 
 // Issue 521: a person whose agent is in a room, and who is then added to the room themselves. The two grants stay apart:
 // the agent's membership never shows its owner the room, and the person's own role does, whoever's agents are there.
@@ -54,6 +54,8 @@ beforeAll(async () => {
 async function roomWithAgent() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Independent Creator Demo" })).body.id;
   madeRooms.push(id);
+  // The room's alarms are the test's from here, so only alarmPass runs its jobs and none runs into another test.
+  await manualAlarms(stub(id));
   const invited = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "guest", invited_org_id: AGENT_ORG, policy_version: await version(id) });
   expect(invited.status, JSON.stringify(invited.body)).toBe(200);
   const accepted = await api(LONG, "POST", "/v1/invitations/accept", { token: invited.body.token, org_id: AGENT_ORG, agents: [AGENT.id] });

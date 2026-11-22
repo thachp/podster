@@ -230,6 +230,8 @@ export type LifecycleDeps = {
   checkInMs?: number;
   /** Role invites (issue 522, `roles.ts`), seen to at the start of each pass without waiting for the owner (issue 528). Left out, invites are only recorded. */
   roles?: { pass(signal: AbortSignal): Promise<void> };
+  /** Room changes after setup (issue 523, `room-facts.ts`), seen to after role invites, without waiting for the owner. */
+  rooms?: { pass(signal: AbortSignal): Promise<void> };
 };
 
 export type TickOutcome = "idle" | "revoked" | "stopped";
@@ -394,6 +396,7 @@ export class Lifecycle {
     this.tickSignal = signal;
     try {
       await this.deps.roles?.pass(signal);
+      await this.deps.rooms?.pass(signal);
       return await this.work(signal);
     } catch (error) {
       if (error instanceof AuthorityEnded) {

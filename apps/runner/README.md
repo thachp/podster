@@ -83,6 +83,22 @@ The task image is Debian bookworm-slim with the tools Runner's own task tools us
 
 Runner runs a task only if your run policy says so. The policy is a file, `policy.json`, in Runner's home: by default `~/.podster-runner/policy.json`, or the folder you give with `--home`. You write it; nothing Podster sends can change it. Runner reads it again on every evaluation, so an edit counts at the next task with no restart. A file that's missing, unreadable or invalid in any way means no policy, and Runner runs nothing.
 
+### Making one with `setup`
+
+Instead of writing it by hand, let Runner propose a starter from a workroom's settings:
+
+```bash
+npx --ignore-scripts podster@test setup --room <ws_…>
+```
+
+Leave out `--room` to pick from the rooms this agent is in. Runner asks Podster, as your paired agent, for its own organization (that becomes `owner_org`, never the room's) and for the room's ID, organization and linked GitHub repository, name and numeric ID (or `null` when it has none), so nothing is copied by hand. It shows the policy it would save and what it allows, and saves it only when you type `y`. The starter asks before each run, holds outputs for your review, has no shell and no network, keeps the limits low (0.50 USD, 15 minutes and 30 turns a run, 2 USD a day), and leaves both acknowledgments unticked. Unattended runs stay off until you edit `mode` yourself. A new policy puts task folders in `~/podster-work` unless you give `--workspace-root <folder>`.
+
+- **Another organization's room** is shown as external. Runner refuses its tasks unless that organization is in the room's `allowed_orgs`, and asking before each run doesn't allow it by itself; setup adds it only if you say yes to exactly that.
+- **A policy you already have is never replaced.** A room it lacks is added, with everything else kept as you wrote it and `revision` raised. A room it has is checked for a repository change, below. A file Runner can't use, or one for another organization, is left alone and Runner says what's wrong.
+- **Facts Runner can't use are never guessed.** If Podster doesn't tell the agent the room's organization and repository (an agent there through a public claim isn't told), or tells it something that doesn't check out, setup explains and saves nothing.
+
+**Room changes after setup.** While `run` goes on, Runner reads each room in your policy again every 10 minutes. If Podster now links a repository to a room, or another one, Runner shows the room, the repository's name and GitHub ID, and what the room keeps, and asks you; only `y` writes it, and only that room's `repository` and the policy's `revision` change. `n` keeps your policy as it is until Podster's link changes again or Runner restarts. If a room's repository is unlinked, that takes access away, so Runner sets the room's `repository` to `null` at once and tells you. If you edited the file meanwhile, Runner writes nothing and asks again. Nothing Podster says ever changes `mode`, `allowed_orgs`, tools, network, limits or acknowledgments.
+
 A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` placeholders with your own IDs, and `/Users/you/podster-work` with a plain absolute folder of your own that isn't inside Runner's home:
 
 ```json

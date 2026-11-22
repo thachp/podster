@@ -305,6 +305,8 @@ function keysAre(o: Obj, required: readonly string[], optional: readonly string[
   return required.every((k) => Object.hasOwn(o, k)) && keys.every((k) => required.includes(k) || optional.includes(k));
 }
 const isId = (v: unknown): v is string => typeof v === "string" && ID.test(v);
+/** A room, workspace or organization ID as the policy file holds it: lower case only (L6 on #455's review). */
+export const isPolicyId = isId;
 const isActorId = (v: unknown): v is string => typeof v === "string" && ACTOR_ID.test(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const inRange = (v: unknown, min: number, max: number): v is number => isCount(v) && v >= min && v <= max;

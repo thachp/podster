@@ -35,6 +35,8 @@
 import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
 import { markHidden, type ResultView } from "../core/results.js";
 import { QuestionInterrupted, type RolePrompter, type RoleView } from "../core/roles.js";
+import type { RoomChangePrompter, RoomChangeView } from "../core/room-facts.js";
+import { changeScreen } from "../core/setup.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -189,7 +191,7 @@ export type Terminal = {
   question(prompt: string, signal?: AbortSignal): Promise<string>;
 };
 
-export class TerminalPrompter implements OwnerPrompter, RolePrompter {
+export class TerminalPrompter implements OwnerPrompter, RolePrompter, RoomChangePrompter {
   private readonly terminal: Terminal;
   /** The role question on the terminal now, which a task's question or a result's review sets aside. */
   private roleQuestion: { controller: AbortController; done: Promise<unknown> } | null = null;
@@ -256,6 +258,46 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter {
     if (cut) return yes ? "decline" : "later";
     if (yes) return "approve";
     return /^no?$/i.test(answer) ? "decline" : "later";
+  }
+
+  /**
+   * A room change that gives tasks more (issue 523): a repository linked or replaced. Only `y` or `yes` writes it; `n` or
+   * `no` keeps the policy as it is; anything else leaves it, asked again later. Set aside like a role question when a
+   * task or a role invite needs the terminal. Its words are Runner's own around checked IDs and a checked GitHub name.
+   */
+  async roomChange(view: RoomChangeView, signal?: AbortSignal): Promise<OwnerAnswer> {
+    if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    // A role question already open keeps the terminal: this one waits its turn rather than setting it aside, so the two
+    // never take it from each other in turn.
+    if (this.roleQuestion) throw new QuestionInterrupted();
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    signal?.addEventListener("abort", stop, { once: true });
+    this.terminal.write(`${changeScreen(view.change, view.room)}\n`);
+    const question = this.terminal.question("Update this room's repository in Runner's policy? [y = update, n = keep as is, anything else = later] ", controller.signal);
+    const open = { controller, done: question.catch(() => undefined) };
+    this.roleQuestion = open;
+    let answer: string;
+    try {
+      answer = (await question).trim();
+    } catch {
+      answer = "";
+    } finally {
+      signal?.removeEventListener("abort", stop);
+      if (this.roleQuestion === open) this.roleQuestion = null;
+    }
+    if (signal?.aborted) return "later";
+    if (controller.signal.aborted) {
+      this.terminal.write("\nThe room change question is set aside for now. Runner asks it again shortly.\n");
+      throw new QuestionInterrupted();
+    }
+    if (/^y(es)?$/i.test(answer)) return "approve";
+    return /^no?$/i.test(answer) ? "decline" : "later";
+  }
+
+  /** A narrowing Runner already wrote: shown, with no question. */
+  roomNotice(view: RoomChangeView): void {
+    this.terminal.write(`${changeScreen(view.change, view.room)}\n`);
   }
 
   async review(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer> {

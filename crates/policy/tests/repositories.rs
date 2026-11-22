@@ -1825,3 +1825,26 @@ fn a_self_reviewed_merge_is_only_the_approving_controllers_in_a_private_room_wit
         &private
     ));
 }
+
+#[test]
+fn only_an_agent_that_could_hold_a_grant_is_told_the_rooms_setup_facts() {
+    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        // An agent in the room, not there through a public claim: its owner's Runner may scope the repository.
+        assert!(
+            sees_setup_facts(&caller("a", Agent, role), false),
+            "agent {role:?}"
+        );
+        // Through a public claim it can never hold a grant, so it isn't told the repository either.
+        assert!(
+            !sees_setup_facts(&caller("a", Agent, role), true),
+            "public agent {role:?}"
+        );
+        // A person has the repository read, under its own rule; the setup facts are an agent's.
+        assert!(
+            !sees_setup_facts(&caller("p", Person, role), false),
+            "person {role:?}"
+        );
+    }
+    // Not in the room: nothing.
+    assert!(!sees_setup_facts(&caller("a", Agent, Role::None), false));
+}

@@ -13,6 +13,7 @@
 //! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
 //! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter; and the commit's approving review came from someone the submitter's person doesn't control ([`independent_review`]). Or, in a private room only, the person who controls the submitting agent and approved its reviewed commit themselves, with the same grant: a self-reviewed merge ([`self_reviewed_merge`], decision 186 as amended 2026-11-20). Never an agent for its own controller's work |
 //! | See the room's repository and its state | A person who sees the whole room |
+//! | See the room's setup facts: its organization and its linked repository's full name and numeric ID, nothing else | An agent that could receive a grant here: a current participant not there through a public claim ([`sees_setup_facts`], issue 523) |
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
 //!
@@ -437,6 +438,17 @@ pub fn sees_every_grant(caller: &Caller) -> bool {
 /// row at the time.
 pub fn sees_join_source(caller: &Caller) -> bool {
     caller.role != Role::None && is_human_admin(caller)
+}
+
+/// Who is told the room's setup facts in the room read (issue 523): the room's organization and its linked repository's
+/// full name and GitHub's numeric ID, or that it has none. An agent that could receive a grant on that repository here,
+/// so a current participant not there through a public claim, which is who its owner's Runner may scope a repository
+/// for. Not a person, who has the repository read, and nothing of the request, the link's state or its grants. It shows
+/// and never authorizes: a token still needs everything `get_repo_access` checks, and the room's org says nothing of who
+/// may write a task.
+pub fn sees_setup_facts(caller: &Caller, through_public_claim: bool) -> bool {
+    caller.kind == PrincipalKind::Agent
+        && may_receive_grant(caller.role, through_public_claim, false).is_ok()
 }
 
 /// Who is shown a task's change: its pull request and what Podster observed of it (M5 step 7a). People who can see the

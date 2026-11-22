@@ -17,7 +17,7 @@ use podster_core::repo_grants::{
 use podster_core::repositories::GrantAction;
 use podster_policy::repositories::{
     authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
-    may_receive_grant, sees_grant, RepoDenial,
+    may_receive_grant, sees_grant, sees_setup_facts, RepoDenial,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
@@ -52,6 +52,43 @@ pub(super) fn read(
         }));
     let may_request = requesters.authorize(&who.caller).is_ok();
     Ok(json!({ "request": request, "repository": repository, "may_request": may_request }))
+}
+
+/// The room read's `setup` (issue 523): the room's ID, its organization and its linked repository's full name and GitHub's
+/// numeric ID, null when it has none, for an agent that could receive a grant here (`sees_setup_facts`), so its owner's
+/// Runner can offer a starter run policy with no ID copied by hand. Nothing of the request, the link's state or its
+/// grants. While managed repositories are switched off no agent can use a repository, so it's null then. Anyone else
+/// gets no `setup` at all, which a reader takes as unknown, never as a room without a repository. It's a read of current
+/// state and authorizes nothing: a token still needs everything `get_repo_access` checks.
+pub(super) fn with_setup_facts(
+    sql: &SqlStorage,
+    who: &Participant,
+    mut read: Value,
+    managed: bool,
+) -> R<Value> {
+    let public = super::public_claims::is_public_participant(sql, who.caller.id.as_str())?;
+    if !sees_setup_facts(&who.caller, public) {
+        return Ok(read);
+    }
+    let room = rows(sql, "SELECT id, owner_org_id FROM workspace", vec![])?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    let repository = if managed {
+        rows(
+            sql,
+            "SELECT provider_repo_id, full_name FROM repo_link WHERE provider = 'github'",
+            vec![],
+        )?
+        .first()
+        .map_or(
+            Value::Null,
+            |r| json!({ "full_name": r["full_name"], "provider_repo_id": r["provider_repo_id"] }),
+        )
+    } else {
+        Value::Null
+    };
+    read["setup"] =
+        json!({ "room_id": room["id"], "org_id": room["owner_org_id"], "repository": repository });
+    Ok(read)
 }
 
 /// The Worker's call for a provider's webhook delivery. Reached only from `crate::provider`, which has verified the

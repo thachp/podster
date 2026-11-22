@@ -4621,7 +4621,10 @@ impl Workspace {
                 return Ok(read);
             }
             return match tail {
-                [] => queries::get_workspace(&sql, &who),
+                [] => queries::get_workspace(&sql, &who).and_then(|read| {
+                    let managed = provisioning::enabled(&self.env, &sql)?;
+                    repositories::with_setup_facts(&sql, &who, read, managed)
+                }),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
                 ["denials"] => queries::list_denials(&sql, &who.caller, &url),
                 ["plan"] => plan::read(&sql, &who.caller, &url),

@@ -208,6 +208,17 @@ case "$url" in
     if [ -f "$fix/probe-hangs" ]; then
       exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/probing" # one process; see the note above the stand-ins
     fi
+    # A queue in $fix/<key>.before: each line is answered once, in turn, before the configured answer. It stands for
+    # Cloudflare's own answers while a new route isn't in effect yet: a 52x with no Worker headers, or no answer.
+    if [ -s "$fix/$key.before" ]; then
+      status=$(head -n 1 "$fix/$key.before")
+      tail -n +2 "$fix/$key.before" > "$fix/$key.before.rest" && mv "$fix/$key.before.rest" "$fix/$key.before"
+      if [ "$status" = unreachable ]; then printf 000; exit 6; fi
+      printf 'HTTP/2 %s\r\ncontent-type: text/plain\r\n\r\n' "$status" > "$headers"
+      printf 'error code: %s\n' "$status" > "$out"
+      printf '%s' "$status"
+      exit 0
+    fi
     status=$(cat "$fix/$key.status")
     if [ "$status" = unreachable ]; then printf 000; exit 6; fi
     sed "s|{HOST}|$host|g" "$fix/$key.headers" > "$headers"
@@ -216,6 +227,12 @@ case "$url" in
     ;;
   *) echo "stand-in curl: unexpected: $method $url" >&2; exit 97 ;;
 esac
+EOF
+
+# sleep: records how long it was asked to wait and returns at once, so the wait for the route takes no real time.
+stub sleep <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
 EOF
 
 # --- what Cloudflare and the content domain answer when all is well ---
@@ -703,8 +720,9 @@ check "  wrangler ran once: the token, nothing of the caller's (CLOUDFLARE_ACCOU
 check "  exactly one deploy" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
   quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
-check "  four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
-  bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 5 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 5 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
+check "  one request waiting for the route, then four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
+  bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
+check "  the route answered at once: no wait" bash -c "grep -q '^ok      the route answers (HTTP 404, try 1)' '$tmp/out' && ! grep -q '^sleep ' '$fix/calls'"
 check "  it says what it can't show: a host two labels deep" said "^NOT SHOWN a host two labels deep"
 check "  the token is in no argument and no output" no_token
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
@@ -726,6 +744,23 @@ probe_fails() { # probe_fails TITLE KEY STATUS BODY [EXTRA]
   check "$1: exit 4, deployed and NOT verified" bash -c "[ $LAST -eq 4 ] && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
 }
 probe_fails "an unknown host answered by something else" probe-unknown 200 "<html>parked</html>"
+check "  a wrong answer is never asked again: one request before the probes, no wait" bash -c "[ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && ! grep -q '^sleep ' '$fix/calls' && grep -q 'FAIL    an unknown host: HTTP 200' '$tmp/out'"
+probe_fails "an unknown host answered 404 with another body" probe-unknown 404 "<html>not here</html>"
+check "  the 404 ends the wait, and the probe still fails on its body" bash -c "[ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && ! grep -q '^sleep ' '$fix/calls' && grep -q 'FAIL    an unknown host: HTTP 404' '$tmp/out'"
+
+# --- the wait for the route ---
+# Lines read from a terminal end in a carriage return, so these patterns don't anchor at the end of a line.
+fresh; printf '522\n522\n' > "$fix/probe-unknown.before"; at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "the route answering 522 twice, then the Worker's not-found: exit 0, every probe passed" bash -c "[ $LAST -eq 0 ] && grep -q 'and every probe passed' '$tmp/out'"
+check "  it waited 2 s twice, saying so, and the third try ended the wait" bash -c "[ \$(grep -c '^sleep 2$' '$fix/calls') -eq 2 ] && [ \$(grep -c '^wait    the route isn.t answering yet (HTTP 522), trying again in 2 s' '$tmp/out') -eq 2 ] && grep -q '^ok      the route answers (HTTP 404, try 3)' '$tmp/out'"
+check "  three requests waiting, then the five probes, all signed out, -q first" bash -c "[ \$(grep -c '^probe GET https://<host>/ header=none host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 4 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 8 ]"
+check "  the token is in no output" no_token
+fresh; printf 'unreachable\n530\n' > "$fix/probe-unknown.before"; at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "no answer, then 530, then the Worker's not-found: exit 0, after two waits" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 2 ] && grep -q 'HTTP 000), trying again' '$tmp/out' && grep -q 'HTTP 530), trying again' '$tmp/out'"
+fresh; probe probe-unknown 522 "error code: 522"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "a route that never answers: 15 tries, 14 waits, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 14 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 16 ] && grep -q '^wait    the route still isn.t answering after 15 tries and [0-9]* s (HTTP 522): probing anyway' '$tmp/out' && grep -q 'FAIL    an unknown host: HTTP 522' '$tmp/out' && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
+fresh; probe probe-unknown 503 "busy"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "a 503, which isn't the route's 52x, is no reason to wait: exit 4 with no wait" bash -c "[ $LAST -eq 4 ] && ! grep -q '^sleep ' '$fix/calls' && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ]"
 probe_fails "plain HTTP not redirected" probe-http 200 hello
 probe_fails "plain HTTP redirected elsewhere" probe-http 301 moved_to_https "location: https://elsewhere.example/"
 probe_fails "a POST accepted" probe-post 200 ok

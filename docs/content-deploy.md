@@ -146,7 +146,9 @@ The temporary folder is deleted in every case.
 
 ## After a deploy
 
-The script probes one random host on the content domain, signed out:
+**First it waits up to 30 s for the route** (added 2026-11-22). The first real deploy, on 2026-11-22, failed its first probe with HTTP `522`: the new route `*.<content domain>/*` hadn't taken effect, and the same check passed by hand seconds later. So the script now sends the unknown-host request on its own first, and again every 2 s, up to 15 tries and 30 s, while the answer is no answer, `520` to `529` or `530`. Any other answer ends the wait at once, the Worker's own `404` and a wrong answer alike: a wrong answer is never asked again, and the probes below judge it. If the route never answers in time, the probes run anyway and fail as before. No probe's pass criteria changed.
+
+Then the script probes one random host on the content domain, signed out:
 
 - **An unknown host** gets the Worker's own `404`, `not_found`, with its fixed headers: `nosniff`, `no-referrer`, HSTS, `no-store`, and the sandbox policy.
 - **Plain HTTP** gets a `301` to the same host and path over HTTPS. That can be the zone's redirect or the Worker's own: both must send the same place.

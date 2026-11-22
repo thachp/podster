@@ -164,8 +164,11 @@ It refuses, before changing anything, unless:
       the dispatch namespace and the KV namespace exist on that account
     Any error, or an answer of any other shape, refuses.
 
-After a deploy it probes the content domain signed out: on a random host, an unknown host gets the
-Worker's own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
+After a deploy it waits up to 30 s for the route: until a new route takes effect, Cloudflare answers
+a host on it with a 52x or not at all, so it sends the first probe's request every 2 s while that is
+the answer. Any other answer ends the wait, and if the route never answers the probes run anyway.
+Then it probes the content domain signed out: on a random host, an unknown host gets the Worker's
+own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
 a request with a Service-Worker header gets 403; and the content domain itself serves nothing. A
 host two labels deep is not shown: the zone's certificate covers one level.
 
@@ -583,6 +586,36 @@ fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own
   echo "        $1: missing or wrong: ${missing[*]}"
   return 1
 }
+
+# Waiting for the route. A new route can take some seconds to take effect: until it does, Cloudflare answers the random
+# host itself, with a 52x (522 when it reaches no origin, as on the first deploy, 2026-11-22) or not at all. So the
+# unknown host's request below is sent first on its own, again every 2 s while the answer is no answer, 520 to 529 or
+# 530, for up to 30 s or 15 tries. Any other answer ends the wait at once, the Worker's own and a wrong one alike: a
+# wrong answer is never asked again, and the probes judge it. If the route never answers, the probes run anyway and
+# fail as they would have. No probe's criteria change.
+route_wait_limit=30
+route_wait_every=2
+route_wait_tries=15
+route_wait_start=$SECONDS
+tries=0
+while :; do
+  status=$(fetch GET "https://$host/")
+  tries=$((tries + 1))
+  case "$status" in
+    000 | 52[0-9] | 530) ;;
+    *)
+      echo "ok      the route answers (HTTP $status, try $tries)"
+      break
+      ;;
+  esac
+  waited=$((SECONDS - route_wait_start))
+  if [ "$tries" -ge "$route_wait_tries" ] || [ $((waited + route_wait_every)) -gt "$route_wait_limit" ]; then
+    echo "wait    the route still isn't answering after $tries tries and ${waited} s (HTTP $status): probing anyway"
+    break
+  fi
+  echo "wait    the route isn't answering yet (HTTP $status), trying again in ${route_wait_every} s"
+  sleep "$route_wait_every"
+done
 
 status=$(fetch GET "https://$host/")
 if [ "$status" = 404 ] && [ "$(cat "$work/b")" = not_found ] && fixed_headers "an unknown host"; then pass "an unknown host gets the Worker's own not-found, with its fixed headers"; else fail "an unknown host: HTTP $status"; fi

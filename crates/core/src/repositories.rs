@@ -237,6 +237,22 @@ pub fn task_block(
     coding_work_allowed(request, link).err()
 }
 
+/// Whether a task the room already holds becomes a linked task now (the owner's ruling of 2026-11-22). A task made while
+/// the room's repository is ready is linked at creation. One made earlier, while setup was pending, gets linked once the
+/// link is ready, as long as its work is still to be done: open, offered or accepted. Never one that's completed or
+/// canceled, and never one in review: its submission was made with no commit, so it stays as it was until a reviewer
+/// sends it back, when it's accepted or open again and this links it. Nothing ever unlinks a task.
+pub fn links_existing_task(
+    status: crate::TaskStatus,
+    has_linked_repository: bool,
+    link: Option<LinkStatus>,
+) -> bool {
+    use crate::TaskStatus::{Accepted, Offered, Open};
+    link == Some(LinkStatus::Ready)
+        && !has_linked_repository
+        && matches!(status, Open | Offered | Accepted)
+}
+
 /// The longest name a managed repository may have, in bytes.
 pub const MAX_REPO_NAME_BYTES: usize = 64;
 

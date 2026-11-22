@@ -1367,6 +1367,8 @@ impl Workspace {
                         store::room_admins(sql)?,
                         now,
                     )?;
+                    // Tasks made while it was degraded weren't linked. They are now, as at setup (2026-11-22).
+                    changes::link_open_tasks(sql, true, now)?;
                     json!({ "status": LinkStatus::Ready.name(), "reason": Value::Null })
                 }
             };

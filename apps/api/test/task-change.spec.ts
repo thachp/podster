@@ -397,7 +397,9 @@ describe("which tasks are linked, and the switch", () => {
     expect(await events(id)).toEqual([]);
   });
 
-  it("links only tasks made while the repository is ready, and never blocks any other (M5-15)", async () => {
+  it("links a task at creation only while the repository is ready, and never blocks any other (M5-15)", async () => {
+    // The link is written straight, so no transaction makes it ready and the room has started already: only creation links
+    // here. Linking tasks made earlier, once the link is ready, is in provisioning.spec.ts (the ruling of 2026-11-22).
     const id = await room({ link: false });
     const early = await accepted(id);
     await addLink(id, "degraded");
@@ -503,6 +505,37 @@ describe("review pins the commit", () => {
     await fake({ mode: "ok" });
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET pr_number = 7"));
     expect((await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD })).status).toBe(200);
+  });
+});
+
+describe("a submission racing the task's link (the ruling of 2026-11-22)", () => {
+  it("refuses with pull_request_unread a submission whose task was linked after its read was planned, and takes it sent again", async () => {
+    const id = await room({ link: false });
+    const t = await accepted(id);
+    expect((await taskRow(id, t.task)).has_linked_repository).toBe(0);
+    // The command is held between its read, planned for an unlinked task and so not made, and its transaction.
+    // It waits at the fake's gate for this test's repository, which `minting` and `release` watch and open.
+    await inRoom(id, (sql) => { sql.exec("CREATE TABLE test_hold_task_command (gate INTEGER)"); sql.exec("INSERT INTO test_hold_task_command VALUES (?)", REPO_ID); });
+    const body = { version: t.version, commit_sha: HEAD, pr_number: 7 };
+    const pending = submit(AGENT, id, t.task, body);
+    await minting();
+    // Meanwhile the room's repository becomes ready and the task is linked, as the ready transaction writes it.
+    await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_task_command"));
+    await addLink(id);
+    await inRoom(id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 1 WHERE id = ?", t.task));
+    await release();
+    const got = await pending;
+    expect([got.status, got.code], got.text).toEqual([409, "pull_request_unread"]);
+    // Nothing of it is kept: still accepted, no submission, no change, and nothing read.
+    expect(await taskRow(id, t.task)).toMatchObject({ status: "accepted", version: t.version });
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM submission WHERE task_id = ?", t.task).one().n)).toBe(0);
+    expect(await change(id, t.task)).toBeNull();
+    expect(await reads()).toEqual([]);
+    // Sent again, it's read and decided afresh, as a linked task's submission.
+    const again = await submit(AGENT, id, t.task, body);
+    expect(again.status, again.text).toBe(200);
+    expect(await change(id, t.task)).toMatchObject({ pr_number: 7, observed_head_sha: HEAD });
+    expect((await reads()).length).toBeGreaterThan(0);
   });
 });
 

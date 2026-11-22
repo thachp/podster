@@ -1950,3 +1950,159 @@ describe("a deployment's list of repository requesters", () => {
     }
   });
 });
+
+// The owner's ruling of 2026-11-22: a task made before the room's repository was ready is linked once it is, while its
+// work is still to do. Before it, such a task stayed unlinked for good, and its agent's repository access was refused
+// `task_not_linked`.
+describe("linking the room's tasks once its repository is ready", () => {
+  const LINKED = "task_change.repository_linked";
+  const linkedOf = (id: string, task: string) => inRoom(id, (sql) => sql.exec("SELECT has_linked_repository AS l FROM task WHERE id = ?", task).one().l as number);
+  const linkEvents = (id: string) => inRoom(id, (sql) => sql.exec("SELECT actor_id, task_id, reason, prior_status, new_status, subject_id FROM event WHERE type = ? ORDER BY seq", LINKED).toArray() as any[]);
+  const versionOf = async (r: { id: string; owner: Who }) => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+  /** One task in each status, assigned to `agent` and reviewed by the owner. */
+  async function everyStatus(r: { id: string; owner: Who }, agent: Who) {
+    const make = async (assignee?: Who) => {
+      const made = await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Code", instructions: "Change the code", ...(assignee ? { assignee: assignee.id } : {}) });
+      expect(made.status, made.text).toBe(200);
+      return made.body as { id: string; version: number; status: string };
+    };
+    const accept = async (t: { id: string; version: number }) => {
+      const done = await api(agent, "POST", `/v1/workspaces/${r.id}/tasks/${t.id}/accept`, { version: t.version });
+      expect(done.status, done.text).toBe(200);
+      return done.body as { id: string; version: number };
+    };
+    const submit = async (t: { id: string; version: number }) => {
+      const done = await api(agent, "POST", `/v1/workspaces/${r.id}/tasks/${t.id}/submit`, { version: t.version, note: "Done." });
+      expect(done.status, done.text).toBe(200);
+      return done.body as { id: string; version: number };
+    };
+    const open = await make();
+    const offered = await make(agent);
+    const accepted = await accept(await make(agent));
+    const submitted = await submit(await accept(await make(agent)));
+    const completed = await submit(await accept(await make(agent)));
+    expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks/${completed.id}/verify`, { submission_no: 1 })).status).toBe(200);
+    const canceled = await make(agent);
+    expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks/${canceled.id}/cancel`, { version: canceled.version, reason: "Not needed." })).status).toBe(200);
+    expect([open.status, offered.status]).toEqual(["open", "offered"]);
+    return { open: open.id, offered: offered.id, accepted: accepted.id, submitted: submitted.id, completed: completed.id, canceled: canceled.id };
+  }
+  const flags = async (id: string, tasks: Record<string, string>) =>
+    Object.fromEntries(await Promise.all(Object.entries(tasks).map(async ([name, task]) => [name, await linkedOf(id, task)])));
+
+  it("links a task made while setup was pending once the repository is ready, and its assignee then gets repository access", async () => {
+    const r = await room();
+    const agent = await memberAgent(r);
+    expect((await ask(r)).status).toBe(200);
+    // Made while the request is pending: none is linked, and the assignee's access is refused for it, as on 2026-11-19.
+    const tasks = await everyStatus(r, agent);
+    expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
+    const done = await settled(r);
+    expect(done.request.state).toBe("ready");
+    // Ready: the ones whose work is still to do are linked, in the link's own transaction. Not one in review, and never a
+    // completed or canceled one.
+    expect(await flags(r.id, tasks)).toEqual({ open: 1, offered: 1, accepted: 1, submitted: 0, completed: 0, canceled: 0 });
+    // One event for each, from nobody in the room, naming the task and nothing else.
+    const linked = await linkEvents(r.id);
+    expect(linked.map((e) => e.task_id).sort()).toEqual([tasks.open, tasks.offered, tasks.accepted].sort());
+    for (const e of linked) expect(e).toMatchObject({ actor_id: "system", reason: null, prior_status: null, new_status: null, subject_id: null });
+    // The assignee, holding a push grant, now gets a token for the accepted task.
+    const repo = done.repository.provider_repo_id as number;
+    await fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: repo }) });
+    const given = await api(r.owner, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await versionOf(r), principal_id: agent.id, action: "push" });
+    expect(given.status, given.text).toBe(200);
+    const linker = { linker: { person: r.owner.id, since: 1 } };
+    const token = await api(agent, "POST", `/v1/workspaces/${r.id}/tasks/${tasks.accepted}/repo-access`, {}, { key: null, claims: linker });
+    expect(token.status, token.text).toBe(200);
+    expect(token.body.repository).toBe(done.repository.full_name);
+    // The task in review keeps its submission, made with no commit, and is approved or sent back as before. Sent back, it's
+    // work to do again, and it's linked then, in the same transaction.
+    const back = await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks/${tasks.submitted}/request-changes`, { submission_no: 1, reason: "Open a pull request." });
+    expect([back.status, back.body.status], back.text).toEqual([200, "accepted"]);
+    expect(await linkedOf(r.id, tasks.submitted)).toBe(1);
+    expect((await linkEvents(r.id)).map((e) => e.task_id)).toContain(tasks.submitted);
+    // From here it's a linked task: its next submission names a commit.
+    const without = await api(agent, "POST", `/v1/workspaces/${r.id}/tasks/${tasks.submitted}/submit`, { version: back.body.version, note: "Done." });
+    expect([without.status, without.code]).toEqual([400, "invalid_argument"]);
+    // A completed or canceled task is never linked, whatever comes after.
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect([await linkedOf(r.id, tasks.completed), await linkedOf(r.id, tasks.canceled)]).toEqual([0, 0]);
+  });
+
+  it("links nothing when setup fails, and never on the room's start while it has no ready repository", async () => {
+    const r = await room({ script: { create: ["forbidden"] } });
+    const agent = await memberAgent(r);
+    await ask(r);
+    const tasks = await everyStatus(r, agent);
+    expect((await settled(r)).request.state).toBe("failed");
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(await linkEvents(r.id)).toEqual([]);
+    // The room's other work goes on as before: an unlinked task needs no commit.
+    const version = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM task WHERE id = ?", tasks.accepted).one().version as number);
+    const sent = await api(agent, "POST", `/v1/workspaces/${r.id}/tasks/${tasks.accepted}/submit`, { version, note: "Done." });
+    expect(sent.status, sent.text).toBe(200);
+  });
+
+  it("links a ready room's open tasks once after the room starts, by itself, and never again or twice", async () => {
+    const r = await room();
+    const agent = await memberAgent(r);
+    const tasks = await everyStatus(r, agent);
+    // As a room made ready before this rule: its tasks made while setup was pending, then its link, written straight.
+    await inRoom(r.id, (sql) => {
+      sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_1', 'ready', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", r.owner.id);
+      sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", IDS.next(), r.owner.id);
+    });
+    expect((await read(r)).repository).toMatchObject({ status: "ready" });
+    const before = (await eventTypes(r.id)).length;
+    // A room that has already started this time doesn't look again.
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
+    // Its next start does, before the first request, a read included. The test stands for a start with this table.
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
+    expect(await flags(r.id, tasks)).toEqual({ open: 1, offered: 1, accepted: 1, submitted: 0, completed: 0, canceled: 0 });
+    expect((await linkEvents(r.id)).map((e) => e.task_id).sort()).toEqual([tasks.open, tasks.offered, tasks.accepted].sort());
+    // Idempotent: further starts, however many, link nothing more and record nothing more.
+    for (let n = 0; n < 3; n++) {
+      await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
+      await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    }
+    expect(await linkEvents(r.id)).toHaveLength(3);
+    expect((await eventTypes(r.id)).length).toBe(before + 3);
+    // With managed repositories off it links nothing.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task SET has_linked_repository = 0 WHERE id = ?", tasks.open));
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_managed_repositories_on"));
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_room_restart (x INTEGER)"));
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect(await linkedOf(r.id, tasks.open)).toBe(0);
+    expect(await linkEvents(r.id)).toHaveLength(3);
+  });
+
+  it("rolls a failed link pass back whole, answers the request anyway, and tries again on the next one", async () => {
+    const r = await room();
+    const agent = await memberAgent(r);
+    const tasks = await everyStatus(r, agent);
+    await inRoom(r.id, (sql) => {
+      sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_1', 'ready', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", r.owner.id);
+      sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", IDS.next(), r.owner.id);
+      // A start, and a pass that fails after linking its first task.
+      sql.exec("CREATE TABLE test_room_restart (x INTEGER)");
+      sql.exec("CREATE TABLE test_fail_link_open_tasks (x INTEGER)");
+    });
+    const read = await api(r.owner, "GET", `/v1/workspaces/${r.id}/tasks`);
+    expect(read.status, read.text).toBe(200);
+    // Nothing of it stays: no task linked, no event.
+    expect(Object.values(await flags(r.id, tasks))).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(await linkEvents(r.id)).toEqual([]);
+    // Still failing, each request tries again and leaves nothing.
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
+    expect(await linkEvents(r.id)).toEqual([]);
+    // Once it can, the next request links them, with no new start.
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_fail_link_open_tasks"));
+    await api(r.owner, "GET", `/v1/workspaces/${r.id}`);
+    expect(await flags(r.id, tasks)).toEqual({ open: 1, offered: 1, accepted: 1, submitted: 0, completed: 0, canceled: 0 });
+    expect(await linkEvents(r.id)).toHaveLength(3);
+  });
+});

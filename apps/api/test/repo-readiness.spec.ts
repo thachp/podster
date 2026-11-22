@@ -612,11 +612,18 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     await ready({ settings: before });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "settings_differ" });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "settings_differ" });
+    // A task made while the link is degraded isn't linked.
+    const during = await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Code", instructions: "Change the code" });
+    const linkedOf = () => inRoom(r.id, (sql) => sql.exec("SELECT has_linked_repository AS l FROM task WHERE id = ?", during.id).one().l as number);
+    expect(await linkedOf()).toBe(0);
     // Someone with admin rights switches them off on GitHub: the next recheck finds it right and restores the link.
     await ready({ settings: { ...before, has_issues: false, has_wiki: false, has_projects: false } });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
     expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
     expect((await events(r.id)).map((e) => e.type)).toEqual(["repository.degraded", "repository.ready_again"]);
+    // Ready again, the task made meanwhile is linked in the same transaction (the ruling of 2026-11-22), with its event.
+    expect(await linkedOf()).toBe(1);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT actor_id, task_id FROM event WHERE type = 'task_change.repository_linked'").toArray())).toEqual([{ actor_id: "system", task_id: during.id }]);
   });
 
   it("leaves one that reads back right as it is, with no event, and refuses anyone but an operator", async () => {

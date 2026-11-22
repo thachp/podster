@@ -4,8 +4,10 @@
 //! Everything sits behind `MANAGED_REPOSITORIES`. With it off, a submission and an approval are exactly what they were.
 //!
 //! - **Which tasks.** A task made while the switch is on and the room's repository is ready is a linked task, for its
-//!   whole life ([`links_new_tasks`]). No other task is, and a task with no linked repository is never asked for a
-//!   pull request or blocked by the repository's state (M5-15).
+//!   whole life ([`links_new_tasks`]). One made earlier is linked once the repository is ready, while its work is still
+//!   to do ([`link_open_tasks`], the owner's ruling of 2026-11-22): in the transaction that makes the link ready, once
+//!   by the room after it starts, and when a reviewer sends it back. Nothing unlinks a task. A task with no linked
+//!   repository is never asked for a pull request or blocked by the repository's state (M5-15).
 //! - **A command's read comes before its transaction** ([`Workspace::read_for_command`]). The room first checks, on
 //!   what it holds, that the caller could make the command at all, so someone who'd be refused anyway costs no call to
 //!   GitHub. The transaction then decides again from current state, and takes what was read only as an observation:
@@ -29,7 +31,9 @@ use podster_core::release_status::{
     ReleaseReport, StopSeen,
 };
 use podster_core::repo_merge::{ObservedMerge, PullState};
-use podster_core::repositories::{task_block, LinkStatus, MergeState, RequestState};
+use podster_core::repositories::{
+    links_existing_task, task_block, LinkStatus, MergeState, RequestState,
+};
 use podster_core::task_change::{
     check_pull, check_pull_number, classify_read_failure, observe, pull_state_from_name,
     pull_state_name, read_retry_wait_ms, stops_watching, targets_default, watched, Held,
@@ -93,6 +97,144 @@ fn request_state(sql: &SqlStorage) -> R<Option<RequestState>> {
 /// Whether a task made now is a linked task: managed repositories are on, and the room's repository is ready.
 pub(super) fn links_new_tasks(sql: &SqlStorage, switched_on: bool) -> R<bool> {
     Ok(switched_on && link(sql)?.is_some_and(|link| link.status == Some(LinkStatus::Ready)))
+}
+
+/// Test builds only: whether the room holds a table of this name.
+#[cfg(feature = "failpoints")]
+fn has_table(sql: &SqlStorage, name: &str) -> bool {
+    rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![name.into()],
+    )
+    .is_ok_and(|found| !found.is_empty())
+}
+
+/// The event a task gets when it's linked after it was made: its ID, and nothing else.
+pub(super) const LINKED_LATER: &str = "task_change.repository_linked";
+
+/// The room's link status, while managed repositories are on. Off, no task is linked, as none is made linked.
+fn ready_link(sql: &SqlStorage, switched_on: bool) -> R<Option<LinkStatus>> {
+    Ok(if switched_on {
+        link(sql)?.and_then(|link| link.status)
+    } else {
+        None
+    })
+}
+
+/// Links one task, in the caller's transaction: its flag, and one event naming it, from nobody in the room. No version
+/// moves, so a command its assignee or reviewer already sent isn't refused for it.
+fn link_task(sql: &SqlStorage, task_id: &str, now: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE task SET has_linked_repository = 1 WHERE id = ? AND has_linked_repository = 0",
+        vec![task_id.into()],
+    )?;
+    record_event(
+        sql,
+        LINKED_LATER,
+        SYSTEM,
+        Some(task_id),
+        &Transition::NONE,
+        Vec::<String>::new(),
+        now,
+    )
+}
+
+/// Links every task the room holds that `core` says is due ([`links_existing_task`]): not linked yet, with its work still
+/// to do, while managed repositories are on and the room's repository is ready. Run in the transaction that makes the
+/// link ready, and once by the room after it starts ([`Workspace::link_open_tasks_once`]). Answers the IDs it linked, and
+/// nothing a second time, since a linked task is never due again.
+pub(super) fn link_open_tasks(sql: &SqlStorage, switched_on: bool, now: i64) -> R<Vec<String>> {
+    let status = ready_link(sql, switched_on)?;
+    if status != Some(LinkStatus::Ready) {
+        return Ok(vec![]);
+    }
+    // Test builds only: a room holding this table fails after linking its first task, so a test sees it all rolled back.
+    #[cfg(feature = "failpoints")]
+    let fails = has_table(sql, "test_fail_link_open_tasks");
+    let mut linked = Vec::new();
+    for row in rows(
+        sql,
+        "SELECT id, status FROM task WHERE has_linked_repository = 0 ORDER BY created_at, id",
+        vec![],
+    )? {
+        let due = row["status"]
+            .as_str()
+            .and_then(TaskStatus::from_name)
+            .is_some_and(|task_status| links_existing_task(task_status, false, status));
+        if let (true, Some(id)) = (due, text(&row["id"])) {
+            link_task(sql, &id, now)?;
+            linked.push(id);
+            #[cfg(feature = "failpoints")]
+            if fails {
+                return Err(ApiError::internal("forced link failure"));
+            }
+        }
+    }
+    Ok(linked)
+}
+
+/// The same for one task a reviewer just sent back, in that command's transaction: it wasn't linked while it was in
+/// review, and its work is to do again. Answers whether it was.
+pub(super) fn link_if_due(sql: &SqlStorage, switched_on: bool, task: &Task, now: i64) -> R<bool> {
+    if task.has_linked_repository
+        || !links_existing_task(task.status, false, ready_link(sql, switched_on)?)
+    {
+        return Ok(false);
+    }
+    link_task(sql, &task.id, now)?;
+    Ok(true)
+}
+
+impl Workspace {
+    /// Links the room's due tasks once after the room starts, before its first request, so a room whose repository was
+    /// ready before tasks were linked this way gets its open tasks linked without anyone asking (the owner's ruling of
+    /// 2026-11-22). It's a pass of the room's own, like the refresh job, so it has no caller and no idempotency record:
+    /// it's idempotent by its state, since a linked task is never due again. A room that isn't made or still has to
+    /// migrate is left for its next request, and one that fails is tried again on it. Logs carry IDs and a count.
+    pub(super) fn link_open_tasks_once(&self) {
+        // Test builds only: a room holding this table is taken as started afresh, once, and the table goes.
+        #[cfg(feature = "failpoints")]
+        {
+            let sql = self.state.storage().sql();
+            if has_table(&sql, "test_room_restart") {
+                let _ = exec(&sql, "DROP TABLE test_room_restart", vec![]);
+                self.open_tasks_linked.set(false);
+            }
+        }
+        if self.open_tasks_linked.get() {
+            return;
+        }
+        let sql = self.state.storage().sql();
+        let made = store::is_initialized(&sql).unwrap_or(false)
+            && store::needs_migration(&sql).is_ok_and(|pending| !pending);
+        if !made {
+            return;
+        }
+        let switched_on = match provisioning::enabled(&self.env, &sql) {
+            Ok(on) => on,
+            Err(_) => return,
+        };
+        match self.in_transaction(move |sql| link_open_tasks(sql, switched_on, now_ms())) {
+            Ok(linked) => {
+                self.open_tasks_linked.set(true);
+                if !linked.is_empty() {
+                    let room = objects::room_id(&sql).unwrap_or_default();
+                    console_log!(
+                        "{}",
+                        json!({ "at": "link_open_tasks", "room": room, "tasks": linked })
+                    );
+                }
+            }
+            Err(error) => {
+                console_error!(
+                    "{}",
+                    json!({ "at": "link_open_tasks", "outcome": "failed", "code": error.code() })
+                );
+            }
+        }
+    }
 }
 
 fn change_row(sql: &SqlStorage, task_id: &str) -> R<Option<Value>> {

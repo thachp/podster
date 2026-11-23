@@ -4572,6 +4572,10 @@ impl Workspace {
                 | ["releases", _, "approve" | "decline" | "rollback"]
                 | ["apps", _, "delete-data"]
         ) && crate::releases::switched_on(&self.env).await;
+        // The `deploy` action of the grant route (M6 step 6) is there only while release is switched on, as every M6
+        // route. The route itself is M5's, and is there while managed repositories are.
+        let deploy_grants_on = matches!(tail, ["repository", "grants"])
+            && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
         // recovery, which doesn't come through here, can change its owner. `command`
@@ -4667,7 +4671,7 @@ impl Workspace {
                     let facts = self.release_status_facts(&sql, &who, id).await?;
                     changes::release_status(&sql, &who, id, &facts)
                 }
-                ["repository", "grants"] => repositories::read_grants(&sql, &who),
+                ["repository", "grants"] => repositories::read_grants(&sql, &who, deploy_grants_on),
                 ["events"] => queries::list_events(
                     &sql,
                     &who.caller,
@@ -5355,7 +5359,9 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 |_: &SqlStorage, who: &Participant| repositories::may_still_grant(&who.caller),
-                move |sql, who, now| repositories::handle_grant(sql, &who.caller, &body, now),
+                move |sql, who, now| {
+                    repositories::handle_grant(sql, &who.caller, &body, deploy_grants_on, now)
+                },
             ),
             // A stored answer is replayed only to someone who may still take that grant back.
             (Method::Delete, ["repository", "grants", grant]) => {

@@ -1,7 +1,7 @@
 //! Grants on a room's repository: giving one, taking it back, and whether one counts (ADR 0009, which is proposed). No I/O.
 //!
-//! A grant lets one principal do one thing, `push` or `merge`, on one repository. Who may give or take one back is
-//! `podster_policy::repositories`. This decides what happens to the room's `provider_grant` rows, and whether a row
+//! A grant lets one principal do one thing, `push`, `merge` or `deploy`, on one repository. Who may give or take one
+//! back is `podster_policy::repositories`, and for `deploy` also `podster_policy::release::authorize_deploy_grant`. This decides what happens to the room's `provider_grant` rows, and whether a row
 //! carries authority now.
 //!
 //! The room keeps at most one row that isn't revoked for a principal, repository and action. An expired row still

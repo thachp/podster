@@ -13,7 +13,7 @@ fn every_state_reads_back_from_its_name_and_nothing_else_does() {
     for name in ["public", "private"] {
         assert_eq!(RepoVisibility::from_name(name).unwrap().name(), name);
     }
-    for name in ["push", "merge"] {
+    for name in ["push", "merge", "deploy"] {
         assert_eq!(GrantAction::from_name(name).unwrap().name(), name);
     }
     for name in ["not_requested", "requested", "succeeded", "failed"] {
@@ -26,7 +26,7 @@ fn every_state_reads_back_from_its_name_and_nothing_else_does() {
     assert_eq!(LinkStatus::from_name("Ready"), None);
     assert_eq!(LinkStatus::from_name(""), None);
     assert_eq!(GrantAction::from_name("admin"), None);
-    assert_eq!(GrantAction::from_name("deploy"), None);
+    assert_eq!(GrantAction::from_name("Deploy"), None);
     assert_eq!(RepoVisibility::from_name("internal"), None);
     assert_eq!(MergeState::from_name("merged"), None);
 }

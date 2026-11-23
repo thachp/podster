@@ -16,9 +16,9 @@
 //
 //   node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
 //
-// **Not yet run against staging,** because release isn't switched on there. It also can't run until a route gives a
-// `deploy` grant: on 2026-11-23 none does (docs/m6-plan.md, "Owed to step 6"). The run assumes M5's grant route with
-// the action `deploy` and refuses, offline and before anything is sent, while the contract doesn't list it.
+// **Not yet run against staging,** because release isn't switched on there. It gives the `deploy` grant through the
+// repository grant route, which takes that action since PR #566, and refuses, offline and before anything is sent, if
+// the contract it reads doesn't list it.
 //
 // Before anything is sent it reads the contract. Before any sign-up, signed out: staging's agent configuration answers,
 // a signed-out room list is 401, capabilities discovery lists `deploy_release` (the gateway lists it only while the API

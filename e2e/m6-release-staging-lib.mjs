@@ -22,10 +22,8 @@ export const MARKER_PATH = "/.well-known/podster-release.json";
 export const RELEASE_DIRECTORY = "site";
 
 /**
- * How the run gives a `deploy` grant. **An assumption:** on 2026-11-23 no route gives one. The grant route takes M5's
- * two actions only (`push`, `merge`), and docs/m6-plan.md lists "who may give a `deploy` grant, and the route that
- * gives one" as owed to step 6. The run assumes the route M5's grants use, with the action `deploy`, and refuses to
- * start, offline, while the contract's grant route doesn't list that action.
+ * How the run gives a `deploy` grant: the repository grant route, with the action `deploy` (PR #566). The run refuses
+ * to start, offline, if the contract it reads doesn't list that action on that route.
  */
 export const DEPLOY_GRANT = { path: "/v1/workspaces/{ws}/repository/grants", action: "deploy" };
 
@@ -109,7 +107,7 @@ scope for now: their checks always say SKIP and are listed apart.
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed. Never printed.
 
-  Refuses to start, exit 3, unless: the contract's grant route gives a deploy grant (none does on 2026-11-23);
+  Refuses to start, exit 3, unless: the contract's grant route gives a deploy grant;
   signed out, staging lists deploy_release, so RELEASES is exactly true; and ${CONTENT_DOMAIN} answers an unknown app's
   host with the content Worker's own not found. Then, after the owner's sign-up only: a room answers its release
   configuration, and a request isn't refused release_not_available, which staging answers while a provider is
@@ -165,7 +163,7 @@ export function deployGrantProblem(openapi) {
   const actions = post.match(/action: \{ type: string, enum: \[([^\]]*)\]/);
   if (!actions) return `the contract's ${DEPLOY_GRANT.path} lists no grant actions`;
   const listed = actions[1].split(",").map((name) => name.trim());
-  return listed.includes(DEPLOY_GRANT.action) ? null : `no route gives a deploy grant: the contract's ${DEPLOY_GRANT.path} takes ${listed.join(" and ")} only (docs/m6-plan.md lists the route as owed to step 6)`;
+  return listed.includes(DEPLOY_GRANT.action) ? null : `no route gives a deploy grant: the contract's ${DEPLOY_GRANT.path} takes ${listed.join(" and ")} only`;
 }
 
 /** A random label, as an app's is made, for a host no room has. */

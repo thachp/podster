@@ -62,17 +62,21 @@ const check = (passed, title) => {
 // ---- what it refuses to start without ----
 
 const contract = readFileSync(join(here, "../packages/contracts/openapi.yaml"), "utf8");
-const GRANT_ACTIONS = "action: { type: string, enum: [push, merge] }, expires_at";
+// The grant route's action list, whichever actions this checkout's contract gives it. Both fixtures are made from it,
+// so the gate is shown both ways whatever the checkout holds.
+const GRANT_ACTIONS = /action: \{ type: string, enum: \[push, merge(?:, deploy)?\] \}, expires_at/;
 const withDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, enum: [push, merge, deploy] }, expires_at");
+const withoutDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, enum: [push, merge] }, expires_at");
 {
-  check(contract.includes(GRANT_ACTIONS), "the contract's grant route is read where this self-test expects it");
-  const today = deployGrantProblem(contract);
-  check(typeof today === "string" && today.includes("no route gives a deploy grant"), "this checkout's contract gives no deploy grant, and the run says so");
+  check(GRANT_ACTIONS.test(contract) && withDeploy !== withoutDeploy, "the contract's grant route is read where this self-test expects it");
+  check(deployGrantProblem(contract) === null, "this checkout's contract gives a deploy grant on the grant route");
+  const missing = deployGrantProblem(withoutDeploy);
+  check(typeof missing === "string" && missing.includes("no route gives a deploy grant"), "a contract whose grant route takes push and merge only is refused, and the run says so");
   check(deployGrantProblem(withDeploy) === null, "a contract whose grant route takes deploy is accepted");
   check(typeof deployGrantProblem(null) === "string", "an unreadable contract is refused");
   check(typeof deployGrantProblem("openapi: 3.1.0\npaths: {}\n") === "string", "a contract without the grant route is refused");
   // Only the grant route's own action list counts: deploy named on another route isn't a deploy grant.
-  check(typeof deployGrantProblem(`${contract}\n  /v1/elsewhere:\n    post:\n      requestBody: { schema: { properties: { action: { type: string, enum: [deploy] } } } }\n`) === "string", "deploy listed on another route isn't taken for the grant route's");
+  check(typeof deployGrantProblem(`${withoutDeploy}\n  /v1/elsewhere:\n    post:\n      requestBody: { schema: { properties: { action: { type: string, enum: [deploy] } } } }\n`) === "string", "deploy listed on another route isn't taken for the grant route's");
 }
 
 {
@@ -166,6 +170,8 @@ const withDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, enum
 const scratch = mkdtempSync(join(tmpdir(), "m6-release-selftest-"));
 const fixture = join(scratch, "openapi.yaml");
 writeFileSync(fixture, withDeploy);
+const noGrant = join(scratch, "openapi-no-deploy.yaml");
+writeFileSync(noGrant, withoutDeploy);
 const SECRET = "x".repeat(40);
 /** Runs the script, with the stand-in in `mode` when given. Answers its exit code, its output and the stand-in's counts. */
 function script(args, { mode, secret = SECRET } = {}) {
@@ -186,14 +192,18 @@ try {
   }
   {
     const today = script([...base, "--dry-run"], { mode: "edge-down" });
-    check(today.code === EXIT.releaseNotOn && today.out.includes("no route gives a deploy grant") && today.requests === 0, "a dry run on this checkout's contract exits 3, naming the missing deploy grant, and sends nothing");
+    check(today.code === 0 && !today.out.includes("no route gives a deploy grant") && today.requests === 0, "a dry run on this checkout's contract gets past the deploy grant's gate, exits 0 and sends nothing");
+    const missingGrant = script([...base, "--dry-run", "--contract", noGrant], { mode: "edge-down" });
+    check(missingGrant.code === EXIT.releaseNotOn && missingGrant.out.includes("no route gives a deploy grant") && missingGrant.requests === 0, "a dry run on a contract without the deploy grant exits 3, naming it, and sends nothing");
     const dry = script([...base, "--dry-run", "--contract", fixture], { mode: "edge-down" });
     check(dry.code === 0 && dry.out.includes("Nothing was sent") && dry.requests === 0, "a dry run with a contract that gives the grant exits 0 and sends nothing");
     check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope: custom domains"), "the dry run prints every check, out-of-scope ones marked");
     const noSecret = script([...base, "--dry-run", "--contract", fixture], { mode: "edge-down", secret: null });
     check(noSecret.code === EXIT.refused && noSecret.requests === 0, "a dry run without the sign-up secret exits 2");
-    const real = script([...base], { mode: "edge-down", secret: null });
-    check(real.code === EXIT.releaseNotOn && real.requests === 0, "a real run on this checkout's contract is refused before anything is sent");
+    const real = script([...base, "--contract", noGrant], { mode: "edge-down", secret: null });
+    check(real.code === EXIT.releaseNotOn && real.requests === 0, "a real run on a contract without the deploy grant is refused before anything is sent");
+    const checkout = script([...base], { mode: "off" });
+    check(checkout.code === EXIT.releaseNotOn && checkout.signUps === 0 && checkout.out.includes("deploy_release"), "a real run on this checkout's contract stops at the next gate, release on: exit 3, no sign-up");
   }
   {
     const down = script([...base, "--contract", fixture], { mode: "edge-down" });

@@ -27,7 +27,9 @@
  * `pair`, `run`, `setup` and `forget` take the home's lock (decision 227): a second one on the same home refuses while the first
  * runs. `run` with `--provider-key-file` builds the Claude engine (`claude-engine.ts`: the pinned SDK, the Docker task
  * container, the key's transport), reaps what a previous process left, then opens the lifecycle (`run-command.ts`).
- * Without a key file it opens no lifecycle and accepts nothing it couldn't run.
+ * Without a key file it opens no lifecycle and accepts nothing it couldn't run. When policy.json names the experimental
+ * `adapter: "openai_agents"` (2026-11-22, off by default), `run` refuses to start unless `experimental_openai: true` is
+ * beside it; with it, `run` builds the OpenAI engine (`openai-engine.ts`) instead and prints `OPENAI_WARNING` first.
  */
 import { whyCommand } from "./diagnostics.js";
 import { runLogger } from "./explaining-log.js";
@@ -46,6 +48,11 @@ import { chooseKeyStore } from "./key-store.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
 import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
+import { openaiEngine } from "./openai-engine.js";
+import { adapterAtStart } from "../core/policy.js";
+import { OPENAI_WARNING } from "../core/openai-profile.js";
+import { readFile } from "node:fs/promises";
+import { POLICY_FILE } from "./policy-file.js";
 import { alongsidePolling, nudgeOptions, openNudge } from "./nudge-command.js";
 import { processTerminal, runInbox } from "./run-command.js";
 import { policyText } from "./policy-file.js";
@@ -60,6 +67,9 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
                                                    Poll the inbox until you stop it (Ctrl-C). With your Anthropic
                                                    API key in a file only you can read, run tasks the run policy
                                                    allows; without one, record offers and accept none.
+                                                   Experimental, off by default, test content only: with
+                                                   "adapter": "openai_agents" and "experimental_openai": true in
+                                                   policy.json, the key file holds an OpenAI project key instead.
           [--nudge-listen <port> --nudge-url <https://…>]
                                                    Off unless you give both. Also take Podster's nudges, so offers
                                                    are picked up sooner: Runner listens on 127.0.0.1 at the port,
@@ -246,9 +256,17 @@ async function locked(command: string, args: string[], home: string, state: File
     // The nudge's options are checked before anything is touched; without both, it stays off.
     const nudging = nudgeOptions(args);
     // The run engine is built, and what a previous process left is reaped, before the inbox is touched (M4 on #459).
-    let engine: ClaudeEngine | null = null;
+    let engine: Pick<ClaudeEngine, "drivers" | "sandbox" | "transports" | "reap"> | null = null;
     if (keyFile !== undefined) {
-      engine = await claudeEngine({ home, key_file: resolve(keyFile), log, notify: say });
+      // The adapter, from the policy file as it reads now: a missing or unreadable file keeps the Claude engine, as before.
+      const choice = adapterAtStart(await readFile(join(home, POLICY_FILE), "utf8").then((text) => JSON.parse(text) as unknown, () => null));
+      if (!choice.ok) throw new Error(choice.message);
+      if (choice.adapter === "openai_agents") {
+        say(OPENAI_WARNING);
+        engine = await openaiEngine({ home, key_file: resolve(keyFile), log, notify: say });
+      } else {
+        engine = await claudeEngine({ home, key_file: resolve(keyFile), log, notify: say });
+      }
       await engine.reap();
     }
     const poller = await Poller.open({

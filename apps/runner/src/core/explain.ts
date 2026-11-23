@@ -54,6 +54,9 @@ const TABLE = new Map<string, Explanation>([
   // A run that ended without a result to submit.
   ...group(["run_failed", "driver_failed", "sdk_error", "exec_exited", "plugins_unexpected"], "The agent's run failed before it gave a result.", "The details file has the driver's code; the task is released, and offered again by the room."),
   ...group(["run_timed_out", "run_time"], "The run used its whole time cap.", "Raise caps.run_time_ms in policy.json, or ask for a smaller task."),
+  // The experimental OpenAI adapter (2026-11-22, off by default).
+  ...group(["model_request_refused", "model_provider_refused"], "The experimental OpenAI adapter's SDK tried to reach the model some way other than the one request Runner's broker takes, or the broker refused the request, so the run stopped.", "The details file has the code. If the run's progress shows a body refusal, send it with the code to whoever supports your Runner; the adapter is experimental and not verified for support."),
+  ...group(["usage_unexpected"], "OpenAI reported usage Runner never asked for (such as a 12-hour cache write), so the request counted its worst case and the run stopped.", `Nothing to change in policy.json. ${SUPPORT}`),
   ...group(["run_budget_stopped", "spend_cap", "turns_exhausted", "output_tokens_exhausted", "max_turns"], "The run reached one of its caps on spend, turns or output.", "Raise the matching cap in policy.json's caps, or ask for a smaller task."),
   ...group(["refusal_ignored", "tool_refused_unchecked"], "The agent's SDK ran a tool call Runner had refused, so Runner stopped the run.", SUPPORT),
   ...group(["disk_bound"], "The run wrote more to disk than Runner allows.", "Ask for a smaller task."),

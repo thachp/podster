@@ -331,6 +331,8 @@ const STATUS_OF: Record<StopReason, RunStatus> = {
   spend_cap: "budget_stopped",
   turns_exhausted: "budget_stopped",
   output_tokens_exhausted: "budget_stopped",
+  // The OpenAI dialect's usage reported something Runner never asked for, such as a 12-hour cache write (2026-11-22).
+  usage_unexpected: "failed",
   run_time: "timed_out",
   refusal_ignored: "failed",
   tool_refused_unchecked: "failed",

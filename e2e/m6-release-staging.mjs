@@ -23,10 +23,15 @@
 // Before anything is sent it reads the contract. Before any sign-up, signed out: staging's agent configuration answers,
 // a signed-out room list is 401, capabilities discovery lists `deploy_release` (the gateway lists it only while the API
 // says RELEASES is exactly true), and an unknown app's host on podster.site gets the content Worker's own not found.
-// After the owner's sign-up only: the room answers its release configuration, and a request isn't refused
-// `release_not_available`, which staging answers while a provider is configured and the release path isn't complete.
-// Whether a provider is configured can't be read from outside before that: a release that never leaves the queue fails
-// M6-R06, saying so.
+// After the owner's sign-up only, before any other sign-up, repository or public room: the room answers its release
+// configuration, and a request isn't refused `release_not_available`, which staging answers while a provider is
+// configured and the release path isn't complete.
+//
+// **No read shows whether a content provider is configured.** Nothing signed out does, and nothing a test person or an
+// operator can read without changing state does either: the release configuration, capabilities discovery, the
+// operators' findings and the content Worker's own answers are the same with and without one. The checks above are the
+// earliest there are. With no provider, a release stays queued; M6-R06 then fails, saying that is the likely cause, and
+// clean-up runs as on any failure.
 //
 // People: 4 takes of staging's test sign-up, of its 6 a minute and 40 a day: the room's owner, its admin, a member who
 // holds the deploy grant, and staging's fixed test operator, who must be in the API's OPERATORS (m4-staging.mjs
@@ -58,7 +63,7 @@ import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
 import { ASKPASS_SCRIPT, gitEnv } from "./m5-staging-lib.mjs";
 import {
-  CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, maskedPath, markerProblem, MARKER_PATH, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, requestLine, resultUrlProblem,
+  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, maskedPath, markerProblem, MARKER_PATH, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, requestLine, resultUrlProblem,
   runOutcome, scrub, secretProblem, SETTLED, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_APP, STAGING_ORG, statusProblems, Tally, unknownLabel, USAGE,
 } from "./m6-release-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -360,7 +365,7 @@ async function newTask(name) {
   const accepted = await coder.must("accept_task", { ...at, version: made.version });
   leftBehind.push(`task ${made.id}`);
   say(`     task ${name}: ${made.id}`);
-  return (tasks[name] = { id: made.id, at, version: accepted.version, name });
+  return (tasks[name] = { id: made.id, at, version: accepted.version, name, title: made.title ?? `${RUN} ${name}` });
 }
 /**
  * The coder's change for a task: its token, a branch off the default branch with one commit of `files`, pushed, and a
@@ -528,10 +533,12 @@ async function main() {
   await check("M6-R02", async () => {
     ok(operator, "the test operator didn't sign in");
     refusedAs(await owner.dash("PUT", delegationPath, { granted: false }), 403, "not_allowed", "the owner, an admin of the organization, setting its release switch");
+    // Set before the request: a take whose answer is lost may still have landed, and clean-up reads before it undoes.
+    undo.delegationTaken = true;
     const taken = await operator.dash("PUT", delegationPath, { granted: false });
+    if (taken.status === 403) undo.delegationTaken = false;
     if (taken.status === 403) throw new Error(`the test operator was refused (${taken.code}): it isn't in staging's OPERATORS. m4-staging.mjs --operator-id prints its ID for the owner to add`);
     ok(taken.ok, `the operator taking release: HTTP ${taken.status} ${taken.code ?? ""}`);
-    undo.delegationTaken = true;
     eq(taken.body.granted, false, "the switch after the take");
     refusedAs(await owner.dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 }), 409, "release_not_delegated", "the owner switching release on");
     const config = await configOf();
@@ -544,8 +551,8 @@ async function main() {
 
   say("\n## who may configure and approve");
   await check("M6-R03", async () => {
-    const on = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 });
     undo.releaseOn = true;
+    const on = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 });
     eq([on.enabled, on.version, on.set_by], [true, 1, admin.id], "the configuration the admin set");
     refusedAs(await member.dash("GET", `/v1/workspaces/${room}/release-config`), 403, "not_allowed", "the member reading the configuration");
     refusedAs(await member.dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: 1 }), 403, "not_allowed", "the member setting the configuration");
@@ -577,7 +584,7 @@ async function main() {
     refusedAs(await askRelease(member, t1, { task_id: otherTask }), 404, "task_not_found", "another room's task");
     refusedAs(await askRelease(member, t1, { environment: "staging" }), 400, "invalid_argument", "another environment");
     for (const field of ["repository_id", "account_id", "namespace", "host", "label", "script_name"]) refusedAs(await askRelease(member, t1, { [field]: "e2e" }), 400, "invalid_argument", `a request naming ${field}`);
-    refusedAs(await admin.dash("POST", `${releasesPath()}/rel_${randomBytes(16).toString("hex")}/approve`, {}), 404, "not_found", "approving a release this room doesn't have");
+    refusedAs(await admin.dash("POST", `${releasesPath()}/rel_${randomBytes(16).toString("hex")}/approve`, {}), 404, "not_found", "approving a release ID this room doesn't have");
     eq((await admin.must("GET", `/v1/workspaces/${room}/release-approvals`)).releases, [], "the releases awaiting approval");
     const problems = statusProblems(await statusOf(t1), { taskId: t1.id, mergeSha: t1.mergeSha, release: "none" });
     ok(problems.length === 0, problems.join("; "));
@@ -585,6 +592,8 @@ async function main() {
 
   say("\n## the release");
   let first;
+  /** The release the host serves now. */
+  let served;
   await check("M6-R06", async () => {
     after("M6-R03");
     const once = key();
@@ -604,7 +613,7 @@ async function main() {
     const status = await statusOf(t1);
     eq(resultUrlProblem(status.release.result_url, host), null, "the result URL");
     eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
-    first = asked.body.id;
+    first = served = asked.body.id;
     return `release ${first} served after ${seconds} s at the app's default host, label ${appLabel}`;
   });
 
@@ -646,7 +655,8 @@ async function main() {
       const loaded = await page.goto(`https://${host}/`, { waitUntil: "load", timeout: 60_000 });
       ok(loaded?.status() === 200, `the page answered ${loaded?.status()}`);
       const inPage = await page.evaluate(async (api) => {
-        const out = {};
+        const out = { violations: [] };
+        document.addEventListener("securitypolicyviolation", (event) => out.violations.push({ directive: event.effectiveDirective, blocked: event.blockedURI }));
         try {
           out.read = document.cookie;
         } catch (error) {
@@ -654,29 +664,28 @@ async function main() {
         }
         try {
           document.cookie = "e2e_set=1; domain=podster.dev; path=/; secure";
-          document.cookie = "e2e_host=1; path=/; secure";
         } catch (error) {
           out.setThrew = error.name;
         }
         try {
-          out.after = document.cookie;
-        } catch (error) {
-          out.afterThrew = error.name;
-        }
-        try {
-          out.api = (await fetch(api, { credentials: "include" })).status;
+          await fetch(api, { credentials: "include" });
+          out.api = "answered";
         } catch (error) {
           out.apiThrew = error.name;
         }
+        // The violation event is queued after the refusal: give it a turn to arrive.
+        await new Promise((done) => setTimeout(done, 500));
         return out;
       }, `${STAGING}/api/v1/me`);
       return { inPage, jar: (await context.cookies()).map((c) => `${c.name}@${c.domain}`) };
     });
-    ok(!String(seen.inPage.read ?? "").includes(probe), "the page read the cookie set for podster.dev");
-    ok(!/e2e_/.test(String(seen.inPage.after ?? "")), "the page reads a cookie it set");
-    eq(seen.jar, ["e2e_probe@.podster.dev"], "the browser's cookies afterwards");
-    ok(seen.inPage.api === undefined, `the page reached the application's API (HTTP ${seen.inPage.api})`);
-    return `reading cookies: ${seen.inPage.readThrew ?? "empty"}; setting: ${seen.inPage.setThrew ?? "ignored"}; the API: ${seen.inPage.apiThrew}`;
+    // The sandbox gives the page an opaque origin (decision 216): the browser refuses cookies to it outright.
+    eq([seen.inPage.readThrew ?? null, seen.inPage.setThrew ?? null], ["SecurityError", "SecurityError"], "reading and setting document.cookie on the host");
+    eq(seen.jar, ["e2e_probe@.podster.dev"], "the browser's cookies afterwards: only the one the run set for podster.dev");
+    // The API is refused by the host's own policy, connect-src, before any request leaves: not by a network error.
+    eq([seen.inPage.api ?? null, seen.inPage.apiThrew ?? null], [null, "TypeError"], "the page's fetch of the application's API");
+    ok(seen.inPage.violations.some((v) => v.directive === "connect-src" && String(v.blocked).startsWith(STAGING)), `the fetch wasn't refused by connect-src (violations: ${JSON.stringify(seen.inPage.violations)})`);
+    return "document.cookie refused with SecurityError both ways; the API refused by connect-src";
   });
 
   say("\n## an agent's request, declined");
@@ -719,8 +728,13 @@ async function main() {
       const page = await context.newPage();
       const stageOf = async (task, headline) => {
         await page.goto(`${STAGING_APP}/w/${room}/tasks?task=${task.id}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-        await page.getByText(headline, { exact: true }).first().waitFor({ timeout: 30_000 });
-        return page.getByTestId("deployment-stage").first().innerText({ timeout: 10_000 });
+        // The task's own Sheet, a dialog named by the task's title, and its one deployment stage.
+        const sheet = page.getByRole("dialog", { name: task.title });
+        await sheet.waitFor({ timeout: 30_000 });
+        const stage = sheet.getByTestId("deployment-stage");
+        await stage.getByText(headline, { exact: true }).waitFor({ timeout: 30_000 });
+        eq(await stage.count(), 1, `deployment stages in ${task.id}'s Sheet`);
+        return stage.innerText({ timeout: 10_000 });
       };
       return { failed: await stageOf(t2, "Merged · Deployment failed"), live: await stageOf(t1, "Merged · Live") };
     });
@@ -738,10 +752,19 @@ async function main() {
     const back = await takeBack(held[0]);
     ok(back.ok, `taking the member's grant back: HTTP ${back.status} ${back.code ?? ""}`);
     const approved = await admin.dash("POST", `${releasesPath()}/${asked.body.id}/approve`, {});
-    ok(approved.ok && approved.body?.state === "failed" && typeof approved.body?.failure_code === "string", `the approval after the grant was taken back answered HTTP ${approved.status} ${approved.code ?? approved.body?.state ?? ""}, not the release failed`);
-    eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
+    ok(approved.ok, `the approval after the grant was taken back answered HTTP ${approved.status} ${approved.code ?? ""}`);
+    eq([approved.body.id, approved.body.state, approved.body.failure_code, approved.body.result_url], [asked.body.id, "failed", GRANT_LOST_CODE, null], "the release approved after its requester's grant was taken back");
+    // Nothing new is served, now or once the job has had time: the host keeps the release it served before.
+    for (let looks = 0; looks < 3; looks++) {
+      if (looks) await pause(POLL_MS);
+      eq(markerProblem(await marker(host), served, t1.mergeSha), null, "the host's marker");
+    }
+    const index = await hostAsk(`https://${host}/`);
+    eq([index.status, index.body], [200, SITE["site/index.html"]], "the site's index");
+    const problems = statusProblems(await statusOf(t1), { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: asked.body.id, state: "failed", served: false, failed: true } });
+    ok(problems.length === 0, problems.join("; "));
     await give(member, DEPLOY_GRANT.action);
-    return `release ${asked.body.id} failed ${approved.body.failure_code}; the member was given a new grant`;
+    return `release ${asked.body.id} failed ${approved.body.failure_code}; release ${served} still served; the member was given a new grant`;
   });
 
   say("\n## takedown");
@@ -750,9 +773,9 @@ async function main() {
     ok(operator, "the test operator didn't sign in");
     const report = await member.must("POST", "/v1/app-reports", { address: `https://${host}/`, reason: "other" }, { idempotencyKey: key() });
     ok(/^[A-Za-z0-9_]+$/.test(report.id ?? ""), "the report has no ID");
+    undo.suspended = appLabel;
     const suspended = await operator.dash("POST", `/v1/moderation/apps/${appLabel}/suspend`, { reason: "other" });
     ok(suspended.ok, `the operator's suspension: HTTP ${suspended.status} ${suspended.code ?? ""}`);
-    undo.suspended = appLabel;
     eq([suspended.body.label, suspended.body.suspended], [appLabel, true], "the suspension");
     const down = await hostDown("the host stopping after the suspension");
     refusedAs(await askRelease(member, t1), 409, "app_suspended", "a request while the app is suspended");
@@ -776,6 +799,7 @@ async function main() {
     ok(!at.problem, at.problem);
     [host, appLabel] = [config.default_host, at.label];
     eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
+    served = asked.body.id;
     return `release ${asked.body.id} served after ${seconds} s`;
   });
 
@@ -784,8 +808,8 @@ async function main() {
     after("M6-R06");
     const config = await configOf();
     const off = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.version });
-    undo.releaseOn = false;
     eq(off.enabled, false, "the configuration switched off");
+    undo.releaseOn = false;
     const down = await hostDown("the host stopping after release was switched off");
     const status = await statusOf(t1);
     eq([status.release?.exists, status.release?.served, status.release?.result_url], [true, false, null], "the first task's release after the unpublish");
@@ -807,18 +831,26 @@ async function main() {
 
 async function cleanUp() {
   const said = [];
+  // Each undo is safe to run whatever the step it undoes got to: a lift asked again changes nothing, and the switch and
+  // the room's configuration are read first and changed only if they still need it.
   if (undo.suspended && operator) {
     const lifted = await operator.dash("POST", `/v1/moderation/apps/${undo.suspended}/lift`, { reason: "other" }).catch(() => null);
-    said.push(lifted?.ok ? "the app's suspension was lifted" : `the app's suspension could NOT be lifted (${lifted ? `HTTP ${lifted.status} ${lifted.code ?? ""}` : "no answer"}): an operator lifts label ${undo.suspended}`);
+    if (lifted?.ok && lifted.body?.suspended === false) undo.suspended = null;
+    said.push(!undo.suspended ? "the app is not suspended" : `the app's suspension could NOT be lifted (${lifted ? `HTTP ${lifted.status} ${lifted.code ?? ""}` : "no answer"}): an operator lifts label ${undo.suspended}`);
   }
   if (undo.delegationTaken && operator) {
-    const back = await operator.dash("PUT", `/v1/orgs/${team}/release-delegation`, { granted: true }).catch(() => null);
-    said.push(back?.ok ? "the organization's release was given back" : `the organization's release could NOT be given back: an operator gives it back to ${team}`);
+    const path = `/v1/orgs/${team}/release-delegation`;
+    const read = await operator.dash("GET", path).catch(() => null);
+    const back = read?.ok && read.body?.granted === false ? await operator.dash("PUT", path, { granted: true }).catch(() => null) : read;
+    if (back?.ok && back.body?.granted === true) undo.delegationTaken = false;
+    said.push(!undo.delegationTaken ? "the organization holds release" : `the organization's release could NOT be given back: an operator gives it back to ${team}`);
   }
   if (undo.releaseOn && room) {
-    const config = await (admin ?? owner).dash("GET", `/v1/workspaces/${room}/release-config`).catch(() => null);
-    const off = config?.ok ? await (admin ?? owner).dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.body.version }).catch(() => null) : null;
-    said.push(off?.ok ? "release was switched off in the room, which unpublishes its app" : `release could NOT be switched off in room ${room}: its owner switches it off`);
+    const who = admin ?? owner;
+    const config = await who.dash("GET", `/v1/workspaces/${room}/release-config`).catch(() => null);
+    const off = config?.ok && config.body?.enabled ? await who.dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.body.version }).catch(() => null) : config;
+    if (off?.ok && off.body?.enabled === false) undo.releaseOn = false;
+    said.push(!undo.releaseOn ? "release is off in the room, so its app is unpublished" : `release could NOT be switched off in room ${room}: its owner switches it off`);
   }
   const { left } = await publisher.stop();
   if (left) said.push(`the room ${room} could NOT be made private again`);

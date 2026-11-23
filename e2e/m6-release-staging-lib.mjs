@@ -57,15 +57,15 @@ export const PLAN = [
   ["M6-R02", "M6-02, AC-10: an operator takes release from the organization; the owner's switch-on is then refused release_not_delegated and the configuration is unchanged; the owner, an organization admin, can't set the switch (not_allowed); the operator gives it back"],
   ["M6-R03", "M6-03, AC-11: the room's admin switches release on as a person; a member who will hold a deploy grant can't read or set the configuration or list approvals (not_allowed)"],
   ["M6-R04", "Expanded criterion 3, M6-05, AC-17: an agent that claimed a DevOps opening is refused deploy_release (grant_required), as is a person with no grant; a completed, merged task with no grant behind it deploys nothing"],
-  ["M6-R05", "M6-09, M6-21, AC-05: a request naming the task branch's head, another room's task, an unknown environment, or a repository, host, label or account is refused, with no release recorded; another room's release ID can't be approved"],
+  ["M6-R05", "M6-09, M6-21, AC-05: a request naming the task branch's head, another room's task, an unknown environment, or a repository, host, label or account is refused, with no release recorded; a well-formed release ID the room doesn't have can't be approved. Not shown: approving another room's real release, since the run's second room has no repository and so no release"],
   ["M6-R06", "M6-04, M6-06, M6-11: the member with the grant asks; the same idempotency key gives one release; it awaits approval and can't be approved by its requester, who isn't an admin; the admin approves; it is served, and the default host's marker names that release and the merged commit"],
   ["M6-R07", "M6-13: the host serves the site's files with the fixed headers and the sandbox, GET and HEAD only, and a path the site doesn't have is not found"],
   ["M6-R08", "M6-12, over HTTP: the host is on the content domain and not under podster.dev; no answer sets a cookie; a request carrying Podster's cookie names and an Authorization header gets byte for byte what one without does"],
-  ["M6-R09", "M6-12, in a scripted browser: a page on the host can't read a cookie set for podster.dev, can't set one there or for itself, and can't reach the application's API"],
+  ["M6-R09", "M6-12, in a scripted browser: the sandboxed page's document.cookie is refused with SecurityError for reading and setting, the browser holds no cookie but the one the run set for podster.dev, and the page's fetch of the application's API is refused by the host's connect-src"],
   ["M6-R10", "AC-17, M6-05: an agent given a deploy grant of its own asks with deploy_release and is recorded awaiting approval; the admin declines it; the host still serves the first release"],
   ["M6-R11", "M6-07, M6-08, AC-16, UI-02: a merged commit whose site holds _headers is released and fails with a reason code; the task stays completed and the merge succeeded; checks, merge and release are reported apart, each with its own time; the host still serves the first release"],
   ["M6-R12", "M6-25, UI-02, in a scripted browser: the failed task's Sheet says \"Merged · Deployment failed\" and never Live; the served task's says Live"],
-  ["M6-R13", "M6-10, AC-13: a release asked for, then its requester's deploy grant taken back, then approved, fails and serves nothing new; the host still serves the first release"],
+  ["M6-R13", "M6-10, AC-13: a release asked for, then its requester's deploy grant taken back, then approved, fails requester_lost_authority with no result URL; the host's marker still names the release served before, now and after a wait, and its status says failed, not served"],
   ["M6-R14", "M6-19, M6-27: a person reports the app by its address; the test operator suspends it by its label; the host answers not found within the wait; a request is refused app_suspended; lifting the suspension restores nothing"],
   ["M6-R15", "M6-19: after the lift, only a new request and a new approval serve the app again, under a new release"],
   ["M6-R16", "M6-16, M6-28: switching release off in the room unpublishes: the host answers not found within the wait, and the release records are kept"],
@@ -253,6 +253,12 @@ export function statusProblems(status, { taskId, mergeSha, release }) {
   } else if (r.failure_code !== null) problems.push("a release that didn't fail has a failure code");
   return problems;
 }
+
+/**
+ * The code a release fails with when its requester's deploy grant was taken back before the approval
+ * (`RecheckFailure::RequesterLostAuthority` in crates/core/src/release.rs; apps/api/test/release-approval.spec.ts).
+ */
+export const GRANT_LOST_CODE = "requester_lost_authority";
 
 /** The release states the job leaves for good. A release in any other is still on its way. */
 export const SETTLED = ["served", "replaced", "unpublished", "declined", "failed"];

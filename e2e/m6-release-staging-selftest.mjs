@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, deployGrantProblem, EXIT, fixedHeaderProblems, LABEL, markerBody, markerProblem, maskedPath, parseArgs, PLAN, REFUSED_SITE, resultUrlProblem, runOutcome, SIGN_UPS, SITE, STAGING,
+  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, deployGrantProblem, EXIT, fixedHeaderProblems, LABEL, markerBody, markerProblem, maskedPath, parseArgs, PLAN, REFUSED_SITE, resultUrlProblem, runOutcome, SIGN_UPS, SITE, STAGING,
   statusProblems, Tally, unknownLabel,
 } from "./m6-release-staging-lib.mjs";
 
@@ -120,6 +120,12 @@ const withDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, enum
   check(statusProblems({ ...status(served), merge: { state: "requested", observed_at: 5, sha: null } }, want({ id: rel, state: "served", served: true })).length > 0, "a merge not reported succeeded fails");
   check(statusProblems({ ...status(served), checks: null }, want({ id: rel, state: "served", served: true })).length > 0, "checks not reported on their own fail");
   check(statusProblems(status({ ...served, observed_at: null }), want({ id: rel, state: "served", served: true })).length > 0, "a release without its own time fails");
+}
+
+{
+  const core = readFileSync(join(here, "../crates/core/src/release.rs"), "utf8");
+  const spec = readFileSync(join(here, "../apps/api/test/release-approval.spec.ts"), "utf8");
+  check(core.includes(`RecheckFailure::RequesterLostAuthority => "${GRANT_LOST_CODE}"`) && /requester's grant was revoked.*"requester_lost_authority"/.test(spec), "AC-13's code is core's, and the API's approval test names it for a revoked grant");
 }
 
 // ---- the plan and the exit code ----

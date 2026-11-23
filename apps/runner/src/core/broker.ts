@@ -109,7 +109,7 @@ const isCap = (v: unknown): v is number => isCount(v) && v > 0;
 const REFUSED_FIXED_HEADERS = ["anthropic-beta", "openai-beta", "openai-organization", "openai-project", "authorization", "x-api-key"];
 
 function checkProfile(profile: ProviderProfile) {
-  if (Object.keys(profile.headers).some((name) => REFUSED_FIXED_HEADERS.includes(name.toLowerCase()))) throw new Error("the provider profile's fixed headers may not turn on a beta, name an organization or project, or carry an authorization");
+  if (Object.keys(profile.headers).some((name) => REFUSED_FIXED_HEADERS.includes(name.toLowerCase()))) throw new Error("the provider profile's fixed headers may not turn on a beta, name an organization or project, or carry credentials of its own");
   if (profile.dialect !== undefined && profile.dialect !== "anthropic_messages" && profile.dialect !== "openai_responses") throw new Error("the provider profile names a dialect Runner doesn't have");
   const labels = profile.host.split(".");
   if (profile.host.length > 253 || labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l))) throw new Error("the provider profile's host isn't a plain host name");

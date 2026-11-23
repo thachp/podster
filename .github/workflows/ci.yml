@@ -367,6 +367,9 @@ jobs:
         working-directory: e2e
       - run: node fake-ids-check.mjs
         working-directory: e2e
+      # The shared client's one resend: a reset on a reused connection before any answer, only for a request safe to repeat.
+      - run: node target-reset-selftest.mjs
+        working-directory: e2e
       # The staging run's tail reader, fed wrangler's real multi-line JSON shape.
       - run: node tail-stream-selftest.mjs
         working-directory: e2e

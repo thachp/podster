@@ -639,7 +639,7 @@ async function main() {
     const missing = await hostAsk(`https://${host}/e2e-${randomBytes(4).toString("hex")}.txt`);
     // The release's own Worker answers a path with no file: 404 with an empty body (not_found_handling none, ADR
     // 0010's spike A), passed on under the content Worker's fixed headers. Its own `not_found` is for a host with no app.
-    eq(missing.status, 404, "a path the site doesn't have");
+    eq([missing.status, missing.body], [404, ""], "a path the site doesn't have");
     const missingProblems = fixedHeaderProblems(missing.headers);
     ok(missingProblems.length === 0, `a path the site doesn't have: ${missingProblems.join("; ")}`);
   });
@@ -848,7 +848,12 @@ async function main() {
     eq(again.enabled, true, "the configuration switched on again");
     const status = await statusOf(t1);
     eq([status.release?.exists, status.release?.release_id, status.release?.state, status.release?.served, status.release?.result_url], [true, latest.id, latest.unpublished, false, null], "the first task's release once release is on again");
-    eq(contentNotFoundProblem(await hostAsk(`https://${host}/`)), null, "the host once release is on again");
+    // Three looks, spaced, so a republish in the background would show.
+    for (let look = 1; look <= 3; look++) {
+      if (look > 1) await sleep(POLL_MS);
+      eq(contentNotFoundProblem(await hostAsk(`https://${host}/`)), null, `the host once release is on again, look ${look} of 3`);
+    }
+    eq((await statusOf(t1)).release?.served, false, "the first task's release, still not served after the looks");
     const offAgain = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: again.version });
     eq(offAgain.enabled, false, "the configuration switched off again");
     undo.releaseOn = false;

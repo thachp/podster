@@ -298,7 +298,7 @@ jobs:
         working-directory: apps/runner
         env:
           RUNNER_LINUX_DOCKER: "1"
-      # And Runner on a real Git 2.25 (test/old-git.test.ts): setup, checkout, commit and push in `ubuntu:20.04`'s Git.
+      # And Runner on a real Git 2.25 (test/old-git.test.ts): setup, checkout, commit and push in Ubuntu 20.04's own Git (`buildpack-deps:focal-scm`, pinned by digest).
       # A run whose tests were all skipped would exit 0: this passes only when all sixteen ran and passed.
       - run: |
           node -e 'const r = require(process.argv[1]); const ok = r.numPassedTests === 16 && r.numFailedTests === 0 && r.numPendingTests === 0 && r.numTodoTests === 0; console.log(`linux docker proof - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/linux-docker.json"

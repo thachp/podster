@@ -220,8 +220,9 @@ pub(super) fn handle_owner_delete(
     answer(sql, label, provider_on)
 }
 
-/// Owes the deletion, with its audit row and its event, in the caller's transaction.
-fn owed(
+/// Owes the deletion, with its audit row and its event, in the caller's transaction. Also an unpublish's, which retires
+/// the label (`takedown::unpublish_app`), as `label_retired`.
+pub(super) fn owed(
     sql: &SqlStorage,
     label: &str,
     cause: DeleteCause,

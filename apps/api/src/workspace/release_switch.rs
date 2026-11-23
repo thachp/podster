@@ -155,11 +155,24 @@ pub(super) fn has_anything_up(sql: &SqlStorage) -> R<bool> {
     Ok(!up.is_empty())
 }
 
+/// Whether the room has a current app label: one a permanent cause retires even with nothing up (2026-11-23).
+pub(super) fn has_current_label(sql: &SqlStorage) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS current FROM app_label WHERE current = 1",
+        vec![],
+    )?
+    .is_empty())
+}
+
 /// The deployment's own setting read as exactly `false`, applied in the caller's transaction: if the room has anything up, it is
 /// unpublished as `UnpublishTrigger::ReleaseOffForDeployment` (ADR 0010), and permanently, as every unpublish is.
-/// Answers whether it unpublished.
+/// With nothing up, nothing is unpublished, but a current label is still retired and its store owed its deletion
+/// (`takedown::retire_current_label`; the review of PR #567, 2026-11-23): `false` is for good for an app an operator
+/// suspended, or one that never went live, too. Answers whether it unpublished.
 pub(super) fn apply_deployment_off(sql: &SqlStorage, now: i64) -> R<bool> {
     if !has_anything_up(sql)? {
+        takedown::retire_current_label(sql, now)?;
         return Ok(false);
     }
     takedown::unpublish_for(

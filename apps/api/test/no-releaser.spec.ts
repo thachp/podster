@@ -350,9 +350,16 @@ describe("ADR 0010's trigger, nobody who may release remains (M6 step 6, the int
 
   it("unpublishes for good at the window's end, by the alarm at exactly that time, and recovery afterwards restores nothing", async () => {
     const r = await room("org_nr_runs_out");
+    const label = r.host.split(".")[0];
+    // The store provider is off, so the deletion owed calls nothing and the room's alarm is the hold's.
+    await inRoom(r.room, (sql) => void sql.exec("CREATE TABLE test_app_store_provider_off (x INTEGER)"));
+    await inRoom(r.room, (sql) => void sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, updated_at) VALUES (?, 'd1', ?, 1, 1)", label, `podster-store-${"7c".repeat(16)}`));
+    /** The app's label and its store's deletion (2026-11-23): a hold keeps both, and the unpublish for good retires it. */
+    const labelState = () => all(r.room, "SELECT l.current, l.retired_at IS NOT NULL AS retired, s.delete_cause FROM app_label l JOIN app_store s ON s.label = l.label");
     expect(await depart(r, r.admin)).toBe(200);
     expect(await depart(r, r.owner)).toBe(200);
     const [row] = await hold(r);
+    expect(await labelState()).toEqual([{ current: 1, retired: 0, delete_cause: null }]);
     // A pass before the window ends sets the room's next wake at exactly its end. A public room's first
     // discovery-index check is set at random within six hours: it is put past the window, so the wake is the hold's.
     await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.put("public_index_verify_next", row.until + WEEK));
@@ -370,9 +377,11 @@ describe("ADR 0010's trigger, nobody who may release remains (M6 step 6, the int
       { id: PREV, state: "unpublished", failure_code: null },
       { id: REL, state: "failed", failure_code: "release_epoch_moved" },
     ].sort((a, b) => a.id.localeCompare(b.id)));
+    expect(await labelState()).toEqual([{ current: null, retired: 1, delete_cause: "label_retired" }]);
     // Recovery now names an owner, and nothing comes back.
     expect((await recover(r, r.member)).status).toBe(200);
     expect(await serving(r)).toEqual(DOWN);
+    expect(await labelState()).toEqual([{ current: null, retired: 1, delete_cause: "label_retired" }]);
     expect((await holdTrail(r)).audit.map((a: any) => a[1])).toEqual(["app.held"]);
   });
 

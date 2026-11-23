@@ -759,11 +759,12 @@ async function main() {
     await setUpRepository(failRoom, "fail");
     await give(coder, "push", failRoom);
     await give(admin, "merge", failRoom);
-    await give(member, DEPLOY_GRANT.action, failRoom);
     const before = await changeAndMerge(await newTask("site-fail-room", failRoom), SITE);
     await owner.must("PUT", `/v1/workspaces/${failRoom}/review-policy`, { require_person: true, policy_version: await owner.policyVersion(failRoom) });
     const published = await publisher.publish(owner, failRoom);
     ok(published.ok, `making the failing room public: HTTP ${published.status} ${published.code ?? ""}`);
+    // A deploy grant is given only in a public room (release_needs_public_room), as in the run's room after M6-R01.
+    await give(member, DEPLOY_GRANT.action, failRoom);
     undo.releaseOn.add(failRoom);
     const on = await admin.must("PUT", `/v1/workspaces/${failRoom}/release-config`, { enabled: true, expected_version: 0 });
     eq([on.enabled, on.set_by], [true, admin.id], "the failing room's configuration the admin set");

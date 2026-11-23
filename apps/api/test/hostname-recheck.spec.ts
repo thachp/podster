@@ -124,6 +124,9 @@ const endLongWay = async (r: Room, now: number) => { await dueAt(r, now); await 
 /** A room holding a committed claim on a fresh name, proved at `proved`, its challenge still published. */
 async function claimed(org: string) {
   const r = await room(org);
+  // The recheck's own: nothing is made at Cloudflare, as before the release path was complete (2026-11-23), so ending a
+  // claim takes no delete there. A test build closes the path for this room alone.
+  await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
   const name = newName();
   const request = (await switchedOn(() => api(r.owner, "PUT", path(r), { hostname: name }))).body.request;
   await alarmQuiet(stub(r.room));

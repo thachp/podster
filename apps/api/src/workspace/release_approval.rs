@@ -649,8 +649,7 @@ impl Workspace {
     /// Whether the labels' upkeep may run: only where release is switched on and the gate on the release path is
     /// open, as for every release command. Says nothing when it isn't: the alarm asks this on every pass.
     pub(super) async fn label_index_open(&self, sql: &SqlStorage) -> bool {
-        (super::release_commit::RELEASE_PATH_COMPLETE
-            || takedown::provider(&self.env, sql).is_none())
+        (self.release_path_complete() || takedown::provider(&self.env, sql).is_none())
             && crate::releases::switched_on(&self.env).await
     }
 

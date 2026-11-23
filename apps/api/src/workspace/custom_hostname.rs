@@ -192,7 +192,7 @@ impl Workspace {
     /// `RELEASES` say. Test builds only: a room a test gave the table `test_custom_hostname_create_open` has it open. A
     /// build without the `failpoints` feature never reads that table.
     fn custom_hostname_create_open(&self) -> bool {
-        if release_commit::RELEASE_PATH_COMPLETE {
+        if self.release_path_complete() {
             return true;
         }
         #[cfg(feature = "failpoints")]

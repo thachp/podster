@@ -207,7 +207,9 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
 
   it("is never created while creating is closed, with no provider, with release off, or for a claim not live at its object", async () => {
     const { r, name } = await claimed("org_ch_gates");
-    // Closed: no test build's opt-in, as every deployment is while the release path isn't complete.
+    // Closed: the release path incomplete, which a test build gives this room alone since the path is complete
+    // (2026-11-23), and no test build's opt-in.
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     await step(r);
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_custom_hostname_provider_off (x INTEGER)"));
     await createOpen(r);
@@ -227,11 +229,12 @@ describe("a committed claim's custom hostname at Cloudflare (M6 step 8b)", () =>
     await inClaim(name, (sql) => sql.exec("UPDATE claim SET state = 'live'"));
     await step(r);
     expect((await cloudflare(name)).calls).toEqual(["create"]);
-    // The gate is the release path's own constant, false, and the opt-in is read only under the test build's feature.
+    // The gate is the release path's own, read through the room's one method, and the opt-in is read only under the
+    // test build's feature.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
     const gate = sources["workspace/custom_hostname.rs"].split("fn custom_hostname_create_open")[1].split("\n    }\n")[0];
-    expect(gate).toMatch(/RELEASE_PATH_COMPLETE[\s\S]*#\[cfg\(feature = "failpoints"\)\][\s\S]*test_custom_hostname_create_open[\s\S]*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*\{\s*false\s*\}/);
+    expect(gate).toMatch(/self\.release_path_complete\(\)[\s\S]*#\[cfg\(feature = "failpoints"\)\][\s\S]*test_custom_hostname_create_open[\s\S]*#\[cfg\(not\(feature = "failpoints"\)\)\]\s*\{\s*false\s*\}/);
   });
 
   it("settles a create whose answer was lost by reading: found is kept, never created twice; not found is created again", async () => {
@@ -489,6 +492,8 @@ describe("the hostname's object, for the long end (M6 step 8b)", () => {
 describe("the gate on claims, open while the release path isn't complete (M6 step 8)", () => {
   it("opens nothing by itself: no ask where RELEASES is unset or a content provider is configured, no look while RELEASES is unset, and no create anywhere", async () => {
     const r = await room("org_ch_claims_open");
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const name = newName();
     const looks = async () => ((await (await fetch("https://resolver-fake.example.com/asked")).json()) as string[]).filter((line) => line.includes(name)).length;
     // RELEASES unset, as in every environment: the route can't be told from one nobody defined, and nothing is written.
@@ -535,9 +540,10 @@ describe("the gate on claims, open while the release path isn't complete (M6 ste
     expect(await all(r.room, "SELECT host FROM serve_state WHERE kind = 'custom'")).toEqual([]);
     expect(await requestRow(r)).toMatchObject({ state: "claimed" });
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
-    // The gate on claims is one constant, true, set in one place; the release path's stays false.
+    // The gate on claims is one constant, true, set in one place; the release path's is true too since 2026-11-23,
+    // closed here by the test build for this room alone.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     expect(sources["workspace/hostname.rs"]).toContain("pub(crate) const HOSTNAME_CLAIMS_COMPLETE: bool = true;");
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
   });
 });

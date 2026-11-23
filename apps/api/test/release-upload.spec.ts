@@ -704,12 +704,14 @@ describe("the upload's own boundaries", () => {
     // refuses every release command until the path is complete.
     const h = await uploading();
     await inRoom(h.room, (sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(h.room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const gated = await upload(h.room);
     await inRoom(h.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
     expect(gated.status).toBeGreaterThanOrEqual(400);
     expect([(await githubState()).calls, (await provider(h.script)).calls]).toEqual([[], []]);
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
     // The script's metadata: a static release's is the fixed assets object and two fixed fields; one with code adds only
     // `bindings` (core's, exactly none or the one store) and `main_module` (S3 of the store plan). No other
     // configuration, and nothing from a repository but a module's name.

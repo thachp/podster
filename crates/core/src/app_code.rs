@@ -31,6 +31,15 @@ pub const MANIFEST_PATH: &str = "podster-app.json";
 /// files are modules is core's to rule and doesn't say how; a directory of their own keeps a page's own scripts, which
 /// are static files, apart from the Worker's.
 pub const MODULES_DIRECTORY: &str = "worker";
+/// **The gate for apps with code** (stage 1), false. While it is false a release that carries code, or whose tree
+/// tries to (a manifest or anything under the modules directory, well-formed or not), fails by
+/// `release_code_not_available` before anything is sent and before any store is made ([`admit`]); a static release is
+/// uploaded as before. It is apart from the release path's own gate (`RELEASE_PATH_COMPLETE` in the API), so that one
+/// can open static sites alone. **Flipped only by the PR that shows what the M6 plan's gate on the release path owes
+/// "before code is turned on":** spike H's static marker served before an app's script can answer that path, a read
+/// of a real script's bindings, an app's `connect()` through the outbound Worker, and the script write's query with
+/// modules (the architect's ruling of 2026-11-23).
+pub const CODE_RELEASES_COMPLETE: bool = false;
 /// The manifest's size, in bytes. It holds two short fields. **Proposed.**
 pub const MAX_MANIFEST_BYTES: u64 = 1_024;
 /// Modules in one release. **Proposed.**
@@ -127,6 +136,9 @@ pub enum CodeProblem {
     ModulesTooLarge(u64),
     /// `release_config_file`: a `wrangler` file anywhere in the release.
     ConfigFile(String),
+    /// `release_code_not_available`: the release carries code, or tries to, while the gate for apps with code
+    /// ([`CODE_RELEASES_COMPLETE`]) is closed. Only static releases are uploaded until it is flipped ([`admit`]).
+    CodeNotAvailable,
 }
 
 impl CodeProblem {
@@ -150,6 +162,7 @@ impl CodeProblem {
             CodeProblem::TooManyModules(_) => "release_too_many_modules",
             CodeProblem::ModulesTooLarge(_) => "release_modules_too_large",
             CodeProblem::ConfigFile(_) => "release_config_file",
+            CodeProblem::CodeNotAvailable => "release_code_not_available",
         }
     }
 }
@@ -547,4 +560,20 @@ pub fn upload_form(plan: &ReleasePlan, manifest: Option<&[u8]>) -> Result<Upload
     check_code_release(&layout, bytes)
         .map(UploadForm::Code)
         .map_err(first)
+}
+
+/// **Whether the upload goes on, under the gate for apps with code.** `form` is [`upload_form`]'s answer; `code_open`
+/// is [`CODE_RELEASES_COMPLETE`] in every deployment (a test build alone may open it for a room a test names). Open,
+/// `form` is answered as it is. Closed, only [`UploadForm::Static`] goes on: every other answer, a whole code release
+/// or one that fails core's checks, fails by [`CodeProblem::CodeNotAvailable`], so a release never learns more of why
+/// its code would be refused while code isn't taken at all, and no store is asked for.
+pub fn admit(
+    form: Result<UploadForm, CodeProblem>,
+    code_open: bool,
+) -> Result<UploadForm, CodeProblem> {
+    match form {
+        Ok(UploadForm::Static) => Ok(UploadForm::Static),
+        _ if !code_open => Err(CodeProblem::CodeNotAvailable),
+        other => other,
+    }
 }

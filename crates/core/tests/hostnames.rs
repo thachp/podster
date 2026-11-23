@@ -796,3 +796,49 @@ fn a_report_keeps_only_the_host_of_its_address() {
     );
     assert_eq!(reported_host(&format!("{multi}é")), None);
 }
+
+#[test]
+fn a_content_domain_is_never_podsters_own() {
+    let own = [
+        "https://app-staging.podster.dev",
+        "https://gateway-staging.podster.dev/",
+    ];
+    for domain in [
+        "podster.dev",
+        "apps.podster.dev",
+        "PODSTER.DEV",
+        "a.b.podster.dev",
+    ] {
+        assert!(content_domain_is_podsters(domain, &own), "{domain}");
+    }
+    // The application's and the gateway's registrable domains, wherever they are.
+    let elsewhere = [
+        "https://app.example.com:8443/path",
+        "http://gateway.example.net",
+    ];
+    for domain in [
+        "example.com",
+        "apps.example.com",
+        "example.net",
+        "x.example.net",
+    ] {
+        assert!(content_domain_is_podsters(domain, &elsewhere), "{domain}");
+    }
+    // A domain of its own, and names that only look alike.
+    for domain in [
+        "apps-test.example",
+        "podster.site",
+        "notpodster.dev",
+        "podster.dev.example",
+        "example.org",
+    ] {
+        assert!(!content_domain_is_podsters(domain, &own), "{domain}");
+        assert!(!content_domain_is_podsters(domain, &elsewhere), "{domain}");
+    }
+    // An address that isn't a URL on a host is skipped, and Podster's own domain is still refused.
+    assert!(!content_domain_is_podsters(
+        "apps-test.example",
+        &["not a url", ""]
+    ));
+    assert!(content_domain_is_podsters("podster.dev", &[]));
+}

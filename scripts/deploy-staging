@@ -38,6 +38,9 @@ It refuses, before changing anything, unless:
     The release provider's settings and the release App's (CONTENT_*, CUSTOM_HOSTNAME_*, GITHUB_RELEASE_*)
     aren't refused: the API reads them as secrets, which the owner sets (docs/staging.md, "Setting up
     release (M6)"). The script prints which of them staging holds, by name, and deploys either way.
+    It can't read a secret's value, so it can't refuse a CONTENT_ACCOUNT_ID equal to its own
+    CLOUDFLARE_ACCOUNT_ID: it says so, and that check is the owner's. The API itself refuses a
+    CONTENT_DOMAIN that is podster.dev, under it, or APP_URL's or GATEWAY_URL's registrable domain.
     They are secrets, IDs too, because this script deploys without --keep-vars, so a variable set on
     the dashboard is gone after each deploy; and it won't keep them, since a dashboard RELEASES would
     then survive unseen by every check on wrangler.jsonc

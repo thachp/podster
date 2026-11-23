@@ -758,6 +758,7 @@ fresh
 echo '[{"name":"A2A_TOKEN_KEY","type":"secret_text"}]' > "$fix/secret-list"
 check "a secret the code reads as a secret, by name, deploys: exit 0" deploy 0
 check "  and says no release secret is set" said '^release \(M6\) secrets set: 0 of 12; not set: CONTENT_ACCOUNT_ID, '
+check "  and, with none set, no reminder of the account check" never_said "their values can't be read here"
 fresh
 
 # --- the release settings are secrets by design (audit item E3, 2026-11-23) ---
@@ -765,6 +766,7 @@ echo '[{"name":"CONTENT_SCRIPTS_TOKEN","type":"secret_text"},{"name":"CUSTOM_HOS
 check "release secrets read with crate::secret, or by the release App's names, deploy: exit 0" deploy 0
 check "  and are counted by name" said '^release \(M6\) secrets set: 3 of 12; not set: CONTENT_ACCOUNT_ID, CONTENT_DISPATCH_NAMESPACE, CONTENT_KV_NAMESPACE_ID, CONTENT_DOMAIN, CONTENT_ROUTING_TOKEN, CONTENT_STORE_TOKEN, CUSTOM_HOSTNAME_TOKEN, GITHUB_RELEASE_APP_ID, GITHUB_RELEASE_INSTALLATION_ID$'
 check "  and a plain setting beside them is still guarded" said 'no secret holds any of: .*PUBLIC_ROOMS'
+check "  and the account check is said to be the owner's, since no value can be read" said "^release \\(M6\\): their values can't be read here, so that CONTENT_ACCOUNT_ID isn't the podster.dev account"
 fresh
 echo '[{"name":"CONTENT_SCRIPTS_TOKEN","type":"secret_text"},{"name":"RELEASES","type":"secret_text"}]' > "$fix/secret-list"
 refused "a secret named RELEASES beside the release secrets" 'holds a secret named RELEASES, which the API reads as a plain setting'
@@ -773,6 +775,18 @@ git -C "$tmp/seed" add -A && commit "$tmp/seed" "a release name read as plain co
 quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
 echo '[]' > "$fix/secret-list"
 refused "a release name the source reads as plain configuration" 'RELEASE_SECRETS in scripts/setting-names.mjs names CONTENT_DOMAIN, which apps/api/src reads as plain configuration'
+# A name read as a secret in one place and plainly in another isn't dropped from the guard: it is refused (the security
+# review of #563, 2026-11-23).
+printf 'fn sneaky(env: &Env) -> Setting { crate::secret(env, "RELEASES") }\n' > "$tmp/seed/apps/api/src/sneaky.rs"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" "RELEASES read as a secret too" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+echo '[{"name":"RELEASES","type":"secret_text"}]' > "$fix/secret-list"
+refused "a name read both as a secret and as plain configuration" 'reads RELEASES both as a secret and as plain configuration'
+printf 'const KEY: &str = "PUBLIC_SUFFIX_RULES";\nfn sneaky(env: &Env) -> Option<String> { env.secret(KEY).ok().map(|s| s.to_string()) }\n' > "$tmp/seed/apps/api/src/sneaky.rs"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" "a const read as a secret too" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+refused "a const read both as a secret and as plain configuration" 'reads PUBLIC_SUFFIX_RULES both as a secret and as plain configuration'
+check "the real source reads no name both ways" bash -c 'node "$1" names "$2" > /dev/null' _ "$scripts/setting-names.mjs" "$scripts/../apps/api/src"
 
 printf 'wrangler-fails\n' > "$fix/secret-list"
 check "a secret list wrangler can't give is refused, exit 1" deploy 1

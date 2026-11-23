@@ -72,7 +72,29 @@ function rustFiles(dir) {
   });
 }
 
-/** The setting names in these sources, given as `{ path: text }`, sorted and without repeats. */
+// A plain read of a const by name: `env.var(NAME)`, `setting(env, NAME)` or `crate::setting(&self.env, NAME)`.
+const PLAIN_BY_NAME = /(?:\benv\s*\.\s*var|\bsetting)\s*\(\s*(?:&?[a-z_][a-z0-9_.]*\s*,\s*)?([A-Z][A-Z0-9_]*)\s*\)/g;
+
+/** The names read both ways: as a secret in one place and plainly, by a literal or a const, in another. Each is an
+ * error, since a name read both ways would be left out of the guarded names while a switch still reads it. */
+export function mixedReads(sources) {
+  const plain = new Set();
+  const secrets = new Set();
+  for (const text of Object.values(sources)) {
+    const consts = new Map();
+    for (const match of text.matchAll(CONST)) consts.set(match[1], match[2]);
+    for (const match of text.matchAll(LITERAL_READ)) plain.add(match[1]);
+    for (const match of text.matchAll(PLAIN_BY_NAME)) if (consts.has(match[1])) plain.add(consts.get(match[1]));
+    for (const match of text.matchAll(SECRET_LITERAL)) secrets.add(match[1]);
+    for (const match of text.matchAll(SECRET_BY_NAME)) if (consts.has(match[1])) secrets.add(consts.get(match[1]));
+    for (const match of text.matchAll(CRATE_SECRET_LITERAL)) secrets.add(match[1]);
+    for (const match of text.matchAll(CRATE_SECRET_BY_NAME)) if (consts.has(match[1])) secrets.add(consts.get(match[1]));
+  }
+  return [...plain].filter((name) => secrets.has(name)).sort();
+}
+
+/** The setting names in these sources, given as `{ path: text }`, sorted and without repeats. A name read as a secret
+ * is left out; one read both as a secret and plainly is [`mixedReads`]'s, and refused before this is trusted. */
 export function settingNames(sources) {
   const settings = new Set();
   const secrets = new Set();
@@ -103,6 +125,8 @@ export function settingNamesIn(dir) {
   } catch {
     return { problem: `${dir} can't be read, so which settings the API reads can't be told` };
   }
+  const mixed = mixedReads(sources);
+  if (mixed.length > 0) return { problem: `${dir} reads ${mixed.join(", ")} both as a secret and as plain configuration; read each name one way` };
   const all = settingNames(sources);
   const stale = FAILPOINTS_ONLY.filter((name) => !all.includes(name));
   if (stale.length > 0) return { problem: `FAILPOINTS_ONLY in scripts/setting-names.mjs names ${stale.join(", ")}, which ${dir} no longer reads as a setting` };
@@ -175,6 +199,7 @@ if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFile
       process.exit(1);
     }
     console.log(`release (M6) secrets set: ${release.set.length} of ${RELEASE_SECRETS.length}${release.missing.length ? `; not set: ${release.missing.join(", ")}` : ""}`);
+    if (release.set.length > 0) console.log("release (M6): their values can't be read here, so that CONTENT_ACCOUNT_ID isn't the podster.dev account and each token reaches only the second account or the content zone is the owner's check (docs/staging.md, \"Setting up release (M6)\")");
   } else {
     const problem = secretsProblem(found.names, readFileSync(0, "utf8"));
     if (problem) {

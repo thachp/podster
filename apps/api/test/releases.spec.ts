@@ -548,7 +548,7 @@ describe("the hostname-claim object (M6 step 2)", () => {
 });
 
 describe("the Worker's configuration for M6", () => {
-  it("binds the hostname-claim class in every environment, adds it in its own migration, and sets no release switch", () => {
+  it("binds the hostname-claim class in every environment, adds it in its own migration, and sets the release switch on staging alone, to exactly true", () => {
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
     const binding = { name: "HOSTNAME_CLAIM", class_name: "HostnameClaim" };
     expect(config.durable_objects.bindings).toContainEqual(binding);
@@ -558,8 +558,16 @@ describe("the Worker's configuration for M6", () => {
       { tag: "v2", new_sqlite_classes: ["Moderation"] },
       { tag: "v3", new_sqlite_classes: ["HostnameClaim"] },
     ]);
-    // Release is switched on nowhere, and nothing of Workers for Platforms, KV or a content domain is bound.
-    for (const vars of [config.vars, ...Object.values(config.env).map((environment: any) => environment.vars)]) expect(Object.keys(vars ?? {})).not.toContain("RELEASES");
+    // Release is switched on for staging alone, by the owner's yes of 2026-11-23, to exactly "true": any other value
+    // would be undecided, or "false", which unpublishes every app (docs/staging.md). The top level and every other
+    // environment set nothing. Nothing of Workers for Platforms, KV or a content domain is bound.
+    expect(config.env.staging.vars.RELEASES).toBe("true");
+    expect(Object.keys(config.vars ?? {})).not.toContain("RELEASES");
+    for (const [name, environment] of Object.entries(config.env) as [string, any][]) if (name !== "staging") expect(Object.keys(environment.vars ?? {}), name).not.toContain("RELEASES");
+    expect(BINDINGS.TEST_WRANGLER.match(/"RELEASES"\s*:/g)).toHaveLength(1);
+    // The reconciles run wherever RELEASES and a provider may both be: at the top level and on staging, each the same.
+    expect(config.triggers.crons).toEqual(["*/5 * * * *", "0 * * * *"]);
+    expect(config.env.staging.triggers.crons).toEqual(config.triggers.crons);
     for (const name of ["dispatch_namespaces", "kv_namespaces", "routes"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(`"${name}"`);
   });
 

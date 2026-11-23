@@ -1,5 +1,7 @@
-// M6's staging run, started at M6 build step 2 (docs/m6-plan.md, "Staging script"). Release is switched off on staging
-// (`RELEASES` is set nowhere), so today it shows two things only:
+// M6's staging run, started at M6 build step 2 (docs/m6-plan.md, "Staging script"). It was written for release switched
+// off on staging (`RELEASES` set nowhere), and shows two things only. **Since 2026-11-23 `apps/api/wrangler.jsonc` sets
+// `RELEASES` to `true` for staging,** so once that is deployed its checks that M6 can't be detected (M6-S01) fail there
+// by design. The run for release switched on is m6-release-staging.mjs. What this one shows:
 //
 // - M6 can't be detected there. Every M6 operation the contract lists, read from it at run time, answers each kind of
 //   caller with the API's own answer for a missing route, exactly as an invented neighbouring path does. An agent

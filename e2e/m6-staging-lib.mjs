@@ -2,8 +2,9 @@
 // run's exit code, which operations and fields the contract says are M6's, and how two answers are compared. Kept apart
 // so m6-staging-selftest.mjs can check them without a network, a secret or the e2e packages.
 //
-// M6 is switched off on staging (RELEASES is set nowhere). Today's checks show it can't be detected there and that the
-// room schema step M6 build step 2 added harmed nothing. The checks that need release switched on come later.
+// Written for M6 switched off on staging (RELEASES set nowhere). Its checks show it can't be detected there and that the
+// room schema step M6 build step 2 added harmed nothing. Since 2026-11-23 staging's configuration sets RELEASES to true,
+// so its off checks fail there once that is deployed; m6-release-staging.mjs is the run for release switched on.
 export { scrub, secretProblem, stagingOnly, STAGING, Tally } from "./m5-staging-lib.mjs";
 import { join } from "node:path";
 import { STAGING, stagingOnly } from "./m5-staging-lib.mjs";

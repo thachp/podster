@@ -28,7 +28,8 @@
 //!
 //! **What no spike has shown,** and a wrong assumption here leaves the room retrying, which shows: what any of the
 //! three answers on an error; whether the script's call needs wrangler's two query parameters, which are sent as
-//! wrangler sent them; how the provider sizes a bucket; and whether it checks a hash against the bytes.
+//! wrangler sent them; and whether it checks a hash against the bytes. *Spike G (2026-11-23) saw how it sizes a
+//! bucket: 100 files each for a 300-file release, one of them 11.6 MB, so a bucket can be larger than one request.*
 //!
 //! **The assets configuration is Podster's own, fixed, and written out** ([`ASSETS_CONFIG`]): how HTML paths are
 //! served and what a missing path answers, and nothing else. The platform's rules for headers and redirects arrive

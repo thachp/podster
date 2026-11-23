@@ -18,8 +18,9 @@
     // only. Nothing calls it and no route reaches it until custom domains are built (M6 step 8).
     { "name": "HOSTNAME_CLAIM", "class_name": "HostnameClaim" }
   ] },
-  // RELEASES switches release on (M6, ADR 0010). No environment sets it, here or anywhere: a test fails if one does.
-  // While it's unset every M6 route answers as one that doesn't exist. Setting it is the owner's yes.
+  // RELEASES switches release on (M6, ADR 0010). Only env.staging sets it, to exactly "true": a test fails if the top
+  // level or any other environment sets it, or staging sets anything else. While it's unset every M6 route answers as
+  // one that doesn't exist. Setting it anywhere is the owner's yes, and production needs its own.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace", "Principal"] }, { "tag": "v2", "new_sqlite_classes": ["Moderation"] }, { "tag": "v3", "new_sqlite_classes": ["HostnameClaim"] }],
   // The real database ID is set when staging is created. Only the listing read model lives here.
   "d1_databases": [{ "binding": "DB", "database_name": "podster-api", "database_id": "local-only", "migrations_dir": "migrations" }]
@@ -77,6 +78,11 @@
         "PUBLIC_ROOMS": "true",
         "MANAGED_REPOSITORIES": "true",
         "REPOSITORY_REQUESTERS": "operators,test-people",
+        // RELEASES switches release on for staging only. The owner, 2026-11-23: "i'm gonna say yes to Releases=true
+        // now". Exactly "true" is on; exactly "false" unpublishes every app for good; anything else, or unset, is
+        // undecided and takes nothing down (docs/staging.md, "Switching release off for the deployment"). Nothing is
+        // served until the owner also sets the content provider's secrets. Production needs its own yes.
+        "RELEASES": "true",
         "GITHUB_ORG_LOGIN": "podsterdev",
         "GITHUB_ORG_ID": "354820586",
         "GITHUB_PROVISION_APP_ID": "5695065",

@@ -88,7 +88,7 @@ This is what the sandbox is for.
 Asked directly, with no browser. The first run of the handler outside Node.
 
 - A page came back with the app's `Content-Type` and `ETag`, the Worker's fixed headers and the policy, and **neither the app's `Set-Cookie` nor its own extra header.**
-- **The local runtime added `Content-Encoding` and `Transfer-Encoding`** to the answer for a client that accepts compression. The handler sets neither. Whether Cloudflare's edge does the same with `no-transform` set is still spike G's to show.
+- **The local runtime added `Content-Encoding` and `Transfer-Encoding`** to the answer for a client that accepts compression. The handler sets neither. Whether Cloudflare's edge does the same with `no-transform` set is still spike G's to show. *(2026-11-23, spike G: it doesn't. Through the deployed content Worker no answer was compressed, whatever the visitor accepted. [Results](../spikes/m6-spike-g/RESULTS.md#compression-and-no-transform).)*
 - A `HEAD` got no body and no `Content-Length`.
 - An app's own not-found kept the app's 60 seconds and no `Clear-Site-Data`. A host with no entry got the Worker's not-found: `no-store` and `Clear-Site-Data: "cache"`.
 - A host that is no app's got a policy that names nothing: `default-src 'none'`.

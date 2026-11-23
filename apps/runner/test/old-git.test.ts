@@ -1,7 +1,7 @@
 // #520 and #525: Runner on a real Git 2.25, Ubuntu 20.04's, which WSL installs. CI's `runner` job runs it on GitHub's
 // Ubuntu runner through vitest.linux.config.ts, with RUNNER_LINUX_DOCKER=1; set RUNNER_OLD_GIT_DOCKER=1 to run it on a
-// Mac with Docker. Never in the default config. It starts the official `ubuntu:20.04` image, installs Git from Ubuntu's
-// own archive (the only network it uses), and runs Runner's real setup, `prepare` and `publish` with every host Git
+// Mac with Docker. Never in the default config. It starts the official `buildpack-deps:focal-scm` image (Ubuntu 20.04 with
+// its own Git, pinned by digest; it downloads nothing once pulled), and runs Runner's real setup, `prepare` and `publish` with every host Git
 // command run by that Git, as the owner's user, against a local bare repository standing in for GitHub. No GitHub, no
 // token, no provider. It proves:
 // - setup reads `git version 2.25.1`, accepts it, and leaves out `--no-write-fetch-head`, which 2.25 refuses;

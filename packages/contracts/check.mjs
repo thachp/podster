@@ -145,7 +145,14 @@ for (const [id, params] of [["listRepositoryGrants", "ws"], ["grantRepositoryAct
   else if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params}`);
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 }
-if (api.components.schemas.RepoGrant?.properties?.action?.enum?.join() !== "push,merge") problems.push("RepoGrant.action: must be exactly push,merge");
+// M6 step 6 added `deploy`, given by the same people on the same route, behind RELEASES. The request takes exactly what
+// the answer names.
+if (api.components.schemas.RepoGrant?.properties?.action?.enum?.join() !== "push,merge,deploy") problems.push("RepoGrant.action: must be exactly push,merge,deploy");
+{
+  const given = operations.get("grantRepositoryAction");
+  const asked = given && api.paths[given.path]?.post?.requestBody?.content?.["application/json"]?.schema?.properties?.action?.enum?.join();
+  if (asked !== "push,merge,deploy") problems.push("grantRepositoryAction: its action must be exactly push,merge,deploy");
+}
 for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", "RepoGrantList"]) {
   if (api.components.schemas[schema]?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
 }

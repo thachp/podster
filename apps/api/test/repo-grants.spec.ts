@@ -135,7 +135,8 @@ describe("giving a grant", () => {
         const refused = await give(id, who.id, action);
         expect([refused.status, refused.code], `${who.id} ${action}`).toEqual([403, "not_allowed"]);
       }
-      // A deploy grant has no route at all, so it's refused as malformed before anyone is looked at.
+      // While release is switched off, which it is here, `deploy` isn't an action, so it's refused as malformed before
+      // anyone is looked at. Switched on, it's refused `not_allowed` too: "giving a deploy grant (M6 step 6)" below.
       expect((await give(id, who.id, "deploy")).code).toBe("invalid_argument");
     }
     expect(await footprint(id)).toEqual(before);
@@ -239,8 +240,8 @@ describe("giving a grant", () => {
     const v = await version(id);
     for (const body of [
       { policy_version: v, principal_id: AGENT.id, action: "admin" },
-      // A `deploy` grant is what a release's requester must hold (M6). No route gives one: who may is step 6's to
-      // decide, and until then the only action a grant route takes is one of M5's two.
+      // A `deploy` grant is what a release's requester must hold (M6). It's an action only while release is switched
+      // on for the deployment, which it isn't here: "giving a deploy grant (M6 step 6)" below switches it on.
       { policy_version: v, principal_id: AGENT.id, action: "deploy" },
       { policy_version: v, principal_id: MEMBER.id, action: "deploy" },
       { policy_version: v, principal_id: AGENT.id, action: "Push" },
@@ -853,5 +854,154 @@ describe("an organization's admin with no place in the room (review A4, AC-11)",
     expect((await api(admin, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-was-admin" })).status).toBe(200);
     const after = await api({ ...admin, adminOrgs: [] }, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-was-admin" });
     expect([after.status, after.code]).toEqual([404, "workspace_not_found"]);
+  });
+});
+
+describe("giving a deploy grant (M6 step 6)", () => {
+  /** Release switched on for the test Worker, as no deployment is, while `run` runs. */
+  async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
+    await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+    try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+  }
+  /** A room as `room` makes it, made public by its own row: only a public room releases (decision 213). */
+  async function publicRoom() {
+    const id = await room();
+    await inRoom(id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    return id;
+  }
+  const actions = (id: string) => inRoom(id, (sql) => sql.exec("SELECT principal_id, action, delegated_by, revoked_at FROM provider_grant ORDER BY created_at, id").toArray() as any[]);
+
+  it("lets the room's owner or an admin, as people, give one to a person or an agent, audited and told to them", async () => {
+    const id = await publicRoom();
+    const given = await switchedOn(() => give(id, MEMBER.id, "deploy"));
+    expect(given.status, given.text).toBe(200);
+    expect(given.body).toEqual({ id: expect.stringMatching(/^pgr_[0-9a-f]{32}$/), principal_id: MEMBER.id, action: "deploy", delegated_by: OWNER.id, created_at: expect.any(Number), expires_at: null, revoked_at: null, state: "live" });
+    const byAdmin = await switchedOn(() => give(id, AGENT.id, "deploy", {}, ADMIN));
+    expect([byAdmin.status, byAdmin.body.action, byAdmin.body.delegated_by, byAdmin.body.state], byAdmin.text).toEqual([200, "deploy", ADMIN.id, "live"]);
+    expect((await grantRows(id)).map((g) => [g.principal_id, g.provider_repo_id, g.action, g.delegated_by])).toEqual([[MEMBER.id, REPO_ID, "deploy", OWNER.id], [AGENT.id, REPO_ID, "deploy", ADMIN.id]]);
+    expect((await audits(id, "repo_grant.given")).map((a) => a.new_json)).toEqual([{ principal: MEMBER.id, action: "deploy", expires_at: null }, { principal: AGENT.id, action: "deploy", expires_at: null }]);
+    expect(await events(id, "repo_grant.given")).toEqual([{ actor_id: OWNER.id, subject_id: MEMBER.id }, { actor_id: ADMIN.id, subject_id: AGENT.id }]);
+    // It's a grant of its own: it carries no push or merge, and they none of it.
+    expect((await switchedOn(() => give(id, MEMBER.id, "merge"))).status).toBe(200);
+    expect((await actions(id)).filter((g) => g.principal_id === MEMBER.id).map((g) => g.action)).toEqual(["deploy", "merge"]);
+    // Listed, to those who see grants, while release is on.
+    const listed = await switchedOn(() => api(OWNER, "GET", grants(id)));
+    expect(listed.body.grants.map((g: any) => [g.principal_id, g.action])).toEqual([[MEMBER.id, "deploy"], [AGENT.id, "deploy"], [MEMBER.id, "merge"]]);
+  });
+
+  it("is refused to everyone else in the room, an agent whatever its role, and an organization's admin (AC-10, AC-11)", async () => {
+    const id = await publicRoom();
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", OTHER_AGENT.id));
+    const before = await footprint(id);
+    for (const who of [MEMBER, GUEST, ORG_ADMIN, AGENT, OTHER_AGENT]) {
+      const refused = await switchedOn(() => give(id, MEMBER.id, "deploy", {}, who));
+      expect([refused.status, refused.code], who.id).toEqual([403, "not_allowed"]);
+    }
+    // Someone with no place here learns nothing of the room.
+    const outsider = await switchedOn(() => api(STRANGER, "POST", grants(id), { policy_version: before.version, principal_id: MEMBER.id, action: "deploy" }));
+    expect(outsider.status).toBe(404);
+    expect(await footprint(id)).toEqual(before);
+  });
+
+  it("goes only to a current participant who isn't there through a public claim or from another organization (decision 209)", async () => {
+    const id = await publicRoom();
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET org_id = 'org_rg_elsewhere' WHERE principal_id = ?", GUEST.id));
+    const before = await footprint(id);
+    const refusals = [
+      [PUBLIC_AGENT.id, 400, "grantee_public"],
+      [OUTSIDE_AGENT.id, 400, "grantee_not_participant"],
+      [STRANGER.id, 400, "grantee_not_participant"],
+      [GUEST.id, 403, "not_allowed"],
+    ] as const;
+    for (const [principal, status, code] of refusals) {
+      const refused = await switchedOn(() => give(id, principal, "deploy"));
+      expect([refused.status, refused.code], principal).toEqual([status, code]);
+    }
+    expect(await footprint(id)).toEqual(before);
+  });
+
+  it("isn't given in a private room, and who is asking is answered first (decisions 199 and 213)", async () => {
+    const id = await room();
+    const before = await footprint(id);
+    const refused = await switchedOn(() => give(id, MEMBER.id, "deploy"));
+    expect([refused.status, refused.code]).toEqual([409, "release_needs_public_room"]);
+    const member = await switchedOn(() => give(id, MEMBER.id, "deploy", {}, MEMBER));
+    expect([member.status, member.code]).toEqual([403, "not_allowed"]);
+    // M5's grants are unchanged there.
+    expect(await footprint(id)).toEqual(before);
+    expect((await switchedOn(() => give(id, MEMBER.id, "merge"))).status).toBe(200);
+  });
+
+  it("needs a linked repository, a current form and a live room, as every grant does", async () => {
+    const unlinked = await room({ link: null });
+    await inRoom(unlinked, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    const none = await switchedOn(() => give(unlinked, MEMBER.id, "deploy"));
+    expect([none.status, none.code]).toEqual([409, "repo_not_linked"]);
+    const id = await publicRoom();
+    const stale = await switchedOn(async () => api(OWNER, "POST", grants(id), { policy_version: (await version(id)) - 1, principal_id: MEMBER.id, action: "deploy" }));
+    expect([stale.status, stale.code]).toEqual([409, "version_conflict"]);
+    for (const action of ["Deploy", "deploy "]) {
+      const malformed = await switchedOn(() => give(id, MEMBER.id, action));
+      expect([malformed.status, malformed.code], action).toEqual([400, "invalid_argument"]);
+    }
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await switchedOn(() => give(id, MEMBER.id, "deploy"))).code).toBe("workspace_archived");
+    expect((await grantRows(id)).length).toBe(0);
+  });
+
+  it("while release is off, isn't an action, isn't listed, and one left from an on-period can still be taken back", async () => {
+    const id = await publicRoom();
+    const before = await footprint(id);
+    const off = await give(id, MEMBER.id, "deploy");
+    expect([off.status, off.code]).toEqual([400, "invalid_argument"]);
+    expect(await footprint(id)).toEqual(before);
+    const given = (await switchedOn(() => give(id, MEMBER.id, "deploy"))).body;
+    const push = (await give(id, AGENT.id, "push")).body;
+    expect((await api(OWNER, "GET", grants(id))).body.grants.map((g: any) => g.id)).toEqual([push.id]);
+    expect((await api(MEMBER, "GET", grants(id))).body.grants).toEqual([]);
+    const taken = await take(id, given.id);
+    expect([taken.status, taken.body.state, taken.body.action], taken.text).toEqual([200, "revoked", "deploy"]);
+  });
+
+  it("is taken back by the owner, an admin, the organization's admin or its holder, told to the holder, and fires nothing else", async () => {
+    const id = await publicRoom();
+    const holders = [MEMBER, AGENT, ADMIN] as const;
+    const given: any[] = [];
+    for (const who of holders) given.push((await switchedOn(() => give(id, who.id, "deploy"))).body);
+    given.push((await switchedOn(() => give(id, OTHER_AGENT.id, "deploy"))).body);
+    const version_before = await version(id);
+    await holdOutbox(id);
+    for (const [grant, by] of [[given[0], OWNER], [given[1], ADMIN], [given[2], ADMIN], [given[3], ORG_ADMIN]] as const) {
+      const taken = await switchedOn(() => take(id, grant.id, by));
+      expect([taken.status, taken.body.state], `${by.id} ${grant.principal_id}`).toEqual([200, "revoked"]);
+    }
+    expect((await audits(id, "repo_grant.revoked")).map((a) => [a.actor_id, a.prior_json])).toEqual([
+      [OWNER.id, { principal: MEMBER.id, action: "deploy", reason: "revoked" }],
+      [ADMIN.id, { principal: AGENT.id, action: "deploy", reason: "revoked" }],
+      [ADMIN.id, { principal: ADMIN.id, action: "deploy", reason: "revoked" }],
+      [ORG_ADMIN.id, { principal: OTHER_AGENT.id, action: "deploy", reason: "revoked" }],
+    ]);
+    // The holder is told, unless they took it back themselves.
+    expect(await toldOfRevocation(id)).toEqual([AGENT.id, OTHER_AGENT.id, MEMBER.id].sort());
+    // A deploy grant decides nothing in "nobody who may release now remains" (docs/m6-plan.md, step 6's fourth PR), so
+    // taking one back holds, unpublishes and ends nothing: a release asked for under it fails at its next recheck.
+    const fired = await inRoom(id, (sql) => sql.exec("SELECT action FROM audit_event WHERE action LIKE 'app.%' OR action LIKE 'release.%'").toArray());
+    expect(fired).toEqual([]);
+    expect(await version(id)).toBe(version_before + 4);
+    // Nobody else takes one back.
+    const fresh = (await switchedOn(() => give(id, MEMBER.id, "deploy"))).body;
+    for (const who of [GUEST, AGENT]) {
+      const refused = await switchedOn(() => take(id, fresh.id, who));
+      expect(refused.status, who.id).not.toBe(200);
+    }
+  });
+
+  it("ends with its holder's removal, as every grant does", async () => {
+    const id = await publicRoom();
+    const given = (await switchedOn(() => give(id, AGENT.id, "deploy"))).body;
+    const removed = await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${AGENT.id}`, { policy_version: await version(id) });
+    expect(removed.status, removed.text).toBe(200);
+    expect((await grantRows(id)).map((g) => [g.id, g.revoked_at !== null])).toEqual([[given.id, true]]);
+    expect((await audits(id, "repo_grant.revoked")).map((a) => [a.target_id, a.prior_json.reason])).toEqual([[given.id, "member_removed"]]);
   });
 });

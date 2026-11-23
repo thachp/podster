@@ -81,6 +81,7 @@ mod downloads;
 mod held;
 mod hostname;
 mod hostname_recheck;
+mod label_retire;
 mod merges;
 mod moderation;
 mod objects;
@@ -121,6 +122,7 @@ mod test_alarms;
 mod visibility;
 
 pub(crate) use hostname::HOSTNAME_REQUEST_PREFIX;
+pub(crate) use label_retire::INTERNAL_LABEL_RETIRE;
 pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
@@ -4306,6 +4308,9 @@ impl Workspace {
         }
         if req.path() == store_delete::INTERNAL_APP_DATA_DELETE {
             return self.app_data_delete(req).await;
+        }
+        if req.path() == label_retire::INTERNAL_LABEL_RETIRE {
+            return self.label_retire(req).await;
         }
         if req.path() == takedown::INTERNAL_HOSTNAME_NOTICE {
             return self.hostname_notice(req).await;

@@ -138,7 +138,8 @@ A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` 
 | `version` | Always `1`. |
 | `revision` | A whole number from 1 up. Raise it when you edit the file. |
 | `owner_org` | Your own organization's ID. Tasks from your own organization are always allowed. |
-| `adapter` | Always `"claude_agent_sdk"`. |
+| `adapter` | `"claude_agent_sdk"`, the default. `"openai_agents"` is experimental and off by default: see [The experimental OpenAI adapter](#the-experimental-openai-adapter). |
+| `experimental_openai` | Optional, `true` or `false`. Only `true` lets `adapter` be `"openai_agents"`; without it Runner refuses the file and won't start. |
 | `workspace_root` | An absolute folder where task folders are made. Plain path characters only, no `,` `:` `=`, not inside Runner's home and not holding it, and not on a Windows drive under WSL2 (`/mnt/c`). |
 | `caps` | Limits for one run. Each can be set lower than its ceiling, never above, and none can be left out. Money is in micro-USD: 1000000 is 1 USD, so `500000` is 0.50 USD. Time is in milliseconds. |
 | `caps.spend_micro_usd` | Spend for one run, 1 to 25000000 (25 USD). |
@@ -163,6 +164,27 @@ A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` 
 Every ID is lower case. Unknown fields, missing fields, a field out of range, or a repeated room refuse the whole file.
 
 **Where to find the IDs.** A workroom's `ws_…` ID is in its address in the web app: `/w/ws_…/…`. For your organization's `org_…` ID, open Settings, then Organization, and pick the organization: the `org=` in the address bar is its ID. If you can't find it, ask your Podster admin.
+
+### The experimental OpenAI adapter
+
+*Built 2026-11-22, off by default, and not verified for support.* Runner can run tasks through OpenAI's Agents SDK instead of the Claude Agent SDK. Use it with **test content only**: room content (the task's text, the files a tool reads and the tools' output) goes to OpenAI under OpenAI's standard data retention, sent with `store: false`. Whether real room content may go to OpenAI, and checking spend against OpenAI's own usage page, are still the owner's to decide.
+
+To opt in, set both of these in `policy.json`:
+
+```json
+  "adapter": "openai_agents",
+  "experimental_openai": true,
+```
+
+Then start `run --provider-key-file <path>` with a file holding an **OpenAI project API key** (`sk-proj-…`), written as below. With the opt-in, `run` prints a warning first. Runner refuses to start when:
+
+- `adapter` is `"openai_agents"` without `"experimental_openai": true`;
+- the key file holds another provider's key (an Anthropic key is never sent to OpenAI, nor an OpenAI key to Anthropic);
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL` or any other `OPENAI_…` variable is set in Runner's environment, except `OPENAI_AGENTS_DISABLE_TRACING`, `OPENAI_AGENTS_DONT_LOG_MODEL_DATA` and `OPENAI_AGENTS_DONT_LOG_TOOL_DATA`, or `ANTHROPIC_API_KEY` is. Unset them first (for example `env -u OPENAI_API_KEY npx podster@test run …`);
+- the installed `@openai/agents-core`, `@openai/agents-openai` or `openai` isn't the pinned version;
+- `caps.max_tokens` is below 4096. OpenAI counts the model's reasoning inside each reply's output bound, and a low bound can be spent entirely on reasoning with nothing returned, so Runner never sends a request with a smaller bound. When fewer than 4096 of the run's `output_tokens` are left, the run stops on its output cap.
+
+It asks only for `gpt-6-luna`, and uses the same run policy, task container, tools, egress proxy and caps as the Claude path. Tracing to OpenAI is switched off. One adapter runs per Runner: the whole Runner uses the one `policy.json` names.
 
 ### Writing the key file without the clipboard
 

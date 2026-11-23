@@ -1004,13 +1004,16 @@ describe("Runner's run interface source", () => {
     for (const file of files) {
       const code = (await readFile(new URL(file, root), "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
       expect([file, /keychain|\/usr\/bin\/security|secret-tool|SecretStore|RunnerStorage/i.test(code)]).toEqual([file, false]);
-      expect([file, /ANTHROPIC_API_KEY|x-api-key|authorization/i.test(code)]).toEqual([file, false]);
+      // Scoped exception (2026-11-22): the broker names these headers only in the list of fixed headers no profile may carry.
+      const held = file === "src/core/broker.ts" ? code.replace('const REFUSED_FIXED_HEADERS = ["anthropic-beta", "openai-beta", "openai-organization", "openai-project", "authorization", "x-api-key"];', "") : code;
+      expect([file, /ANTHROPIC_API_KEY|x-api-key|authorization/i.test(held)]).toEqual([file, false]);
     }
   });
 
   it("pins the Claude Agent SDK and its peers exactly, and only the Claude driver and its engine name it", async () => {
     const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8")) as { dependencies: Record<string, string> };
-    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/sdk": "1.32.2", zod: "4.6.7" });
+    // The experimental OpenAI adapter's three packages (2026-11-22), pinned as spike M7-OpenAI ran them; held in test/openai-adapter.test.ts (S-58).
+    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/sdk": "1.32.2", "@openai/agents-core": "0.22.0", "@openai/agents-openai": "0.22.0", openai: "7.62.0", zod: "4.6.7" });
     const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version: string }> };
     for (const [name, version] of Object.entries(pkg.dependencies)) expect([name, lock.packages[`node_modules/${name}`]?.version]).toEqual([name, version]);
     const src = new URL("src/", root);
@@ -1018,7 +1021,11 @@ describe("Runner's run interface source", () => {
       const text = await readFile(new URL(file, src), "utf8");
       const allowed = file === "node/claude-driver.ts" || file === "node/claude-engine.ts";
       expect([file, /@anthropic-ai|claude-agent-sdk/.test(text) && !allowed]).toEqual([file, false]);
-      expect([file, /openai/i.test(text)]).toEqual([file, false]);
+      // OpenAI only in the experimental adapter's own files (2026-11-22), and named by the policy, broker, transport, CLI and
+      // explanations that wire it in.
+      const openaiFiles = ["core/openai-profile.ts", "node/openai-driver.ts", "node/openai-engine.ts", "core/policy.ts", "core/broker.ts", "core/explain.ts", "core/run-interface.ts", "node/provider-transport.ts", "node/cli.ts"];
+      expect([file, /openai/i.test(text) && !openaiFiles.includes(file)]).toEqual([file, false]);
+      expect([file, /from "(?:@openai\/[^"]*|openai)"|import\(\s*"(?:@openai\/[^"]*|openai)"/.test(text) && file !== "node/openai-driver.ts"]).toEqual([file, false]);
     }
     for (const file of files.slice(0, 3)) expect([file, /\bfetch\s*\(/.test(await readFile(new URL(file, root), "utf8"))]).toEqual([file, false]);
   });

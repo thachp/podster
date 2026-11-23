@@ -26,7 +26,17 @@
  *
  * Pure: no clock, no network, no randomness. Step 9(b) feeds it from a loopback listener and forwards through a transport
  * that adds the owner's key, outside the task's container. Logs and refusals carry codes only.
+ *
+ * **Dialects** (RUNNER-OPENAI.md; 2026-11-22): a profile names the body format it speaks. `anthropic_messages`, the
+ * default, is everything above, unchanged. `openai_responses` (the experimental OpenAI adapter, off by default) swaps in
+ * the Responses body allowlist below, rewrites `max_output_tokens` instead of `max_tokens`, forces `store: false`,
+ * never sends a request whose bound is below `OPENAI_MIN_OUTPUT_BOUND` (the reasoning headroom rule), reads usage nested,
+ * and stops the run on a usage it doesn't expect (`usage_unexpected`). Spend, turns, the worst case and the caps are the
+ * same code for both.
  */
+
+export type Dialect = "anthropic_messages" | "openai_responses";
+export const dialectOf = (profile: ProviderProfile): Dialect => profile.dialect ?? "anthropic_messages";
 
 /** Micro-USD per million tokens, as integers. */
 export type Rates = { input: number; output: number; cache_write: number; cache_read: number };
@@ -39,6 +49,8 @@ export type Price = Rates & { long_context?: Rates & { above_input_tokens: numbe
 /** A provider, as an adapter's code fixes it. Never read from configuration, the task or Podster. */
 export type ProviderProfile = {
   provider: string;
+  /** The body format the broker checks and the transport reads: `anthropic_messages` when left out. */
+  dialect?: Dialect;
   /** The upstream's host name, without scheme, port, user or path. */
   host: string;
   /** The one path requests may name, and the one they're sent to. */
@@ -69,8 +81,8 @@ export type BrokerRefusal =
   | "spend_cap"
   | "run_stopped";
 
-/** Refusals that end the run. */
-export type HardStop = "turns_exhausted" | "output_tokens_exhausted" | "spend_cap";
+/** Refusals that end the run, and `usage_unexpected`: a settled usage the dialect says Runner never asked for. */
+export type HardStop = "turns_exhausted" | "output_tokens_exhausted" | "spend_cap" | "usage_unexpected";
 const HARD: ReadonlySet<BrokerRefusal> = new Set<BrokerRefusal>(["turns_exhausted", "output_tokens_exhausted", "spend_cap"]);
 
 /**
@@ -93,8 +105,12 @@ const MODEL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isCap = (v: unknown): v is number => isCount(v) && v > 0;
 
+/** Fixed headers no profile may carry: a beta, an OpenAI organization or project, or any authorization of its own. */
+const REFUSED_FIXED_HEADERS = ["anthropic-beta", "openai-beta", "openai-organization", "openai-project", "authorization", "x-api-key"];
+
 function checkProfile(profile: ProviderProfile) {
-  if (Object.keys(profile.headers).some((name) => name.toLowerCase() === "anthropic-beta")) throw new Error("the provider profile's fixed headers may not turn on a beta");
+  if (Object.keys(profile.headers).some((name) => REFUSED_FIXED_HEADERS.includes(name.toLowerCase()))) throw new Error("the provider profile's fixed headers may not turn on a beta, name an organization or project, or carry credentials of its own");
+  if (profile.dialect !== undefined && profile.dialect !== "anthropic_messages" && profile.dialect !== "openai_responses") throw new Error("the provider profile names a dialect Runner doesn't have");
   const labels = profile.host.split(".");
   if (profile.host.length > 253 || labels.length < 2 || !labels.every((l) => HOST_LABEL.test(l))) throw new Error("the provider profile's host isn't a plain host name");
   if (!PATH.test(profile.path) || profile.path.split("/").some((s) => s === "." || s === "..")) throw new Error("the provider profile's path isn't a plain path");
@@ -359,7 +375,193 @@ function bodyRefusal(b: Obj): string | null {
   return null;
 }
 
+// ---- The OpenAI Responses dialect (RUNNER-OPENAI.md, "The broker profile"; built 2026-11-22, off by default) ----
+//
+// - Only a known body: top-level keys from `RESPONSES_ALLOWED_KEYS`; every key in `RESPONSES_REFUSED_KEYS` refused by
+//   name, and any other key too. Tools only `type: "function"`; every hosted tool refused by its type. Input items only
+//   user and assistant text messages, function calls, text function outputs and reasoning items: no system or developer
+//   role, no image, file or audio, no item reference. `truncation` only `disabled`; `include` only encrypted reasoning.
+// - Forced keys: `admit` writes `store: false` and its own `max_output_tokens` after parsing.
+// - Usage is read nested (spike M7-OpenAI, 2026-11-21, on all 23 requests that returned usage): cached and cache-write
+//   tokens are parts of `input_tokens`, and reasoning tokens part of `output_tokens`. A usage missing a field, or whose
+//   parts are larger than their whole, can't be read, so the request counts its worst case. A 12-hour cache write above
+//   zero is `unexpected`: the request counts its worst case and the run stops (`usage_unexpected`).
+
+/**
+ * The reasoning headroom floor (2026-11-22): an OpenAI request's output bound is never below this, since
+ * `max_output_tokens` bounds reasoning and visible output together and spike M7-OpenAI's 256-token bound was spent
+ * entirely on reasoning. Equal to `OPENAI_MIN_MAX_TOKENS` in `policy.ts`, which refuses a lower cap at load (a test holds
+ * the two equal; neither pure module imports the other).
+ */
+export const OPENAI_MIN_OUTPUT_BOUND = 4_096;
+
+const isStr = (v: unknown): v is string => typeof v === "string";
+const extraKey = (o: Obj, keys: readonly string[]) => Object.keys(o).find((k) => !keys.includes(k));
+
+/** Top-level keys the broker takes (`openai` 7.62.0's `ResponseCreateParamsBase`, read 2026-11-21). */
+export const RESPONSES_ALLOWED_KEYS: readonly string[] = Object.freeze(["model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls", "max_output_tokens", "store", "stream", "include", "reasoning", "text", "temperature", "top_p", "truncation"]);
+
+/** Keys refused by name: work, state or spend outside Runner's tools and its worst case. */
+export const RESPONSES_REFUSED_KEYS: readonly string[] = Object.freeze([
+  "background", "background_options", "conversation", "previous_response_id", "prompt", "context_management",
+  "prompt_cache_options", "prompt_cache_retention", "prompt_cache_key", "service_tier", "max_tool_calls", "metadata",
+  "safety_identifier", "user", "moderation", "access_programs", "image", "top_logprobs", "stream_options",
+]);
+
+/** Hosted tool types, refused by type. Only `function` passes; an unlisted type is refused too. */
+export const HOSTED_TOOL_TYPES: readonly string[] = Object.freeze([
+  "web_search", "web_search_preview", "web_search_2025_08_26", "web_search_preview_2025_03_11", "file_search",
+  "code_interpreter", "computer", "computer_use_preview", "computer_use", "mcp", "shell", "local_shell", "apply_patch",
+  "image_generation", "programmatic_tool_calling", "tool_search", "custom", "namespace",
+]);
+
+/** Reasoning efforts reviewed for the worst case: all reasoning counts inside `max_output_tokens`. */
+const REASONING_EFFORTS = ["minimal", "low", "medium"];
+const REASONING_SUMMARIES = ["none", "auto"];
+const VERBOSITIES = ["low", "medium", "high"];
+
+const ITEM_KEYS: Readonly<Record<string, readonly string[]>> = {
+  message: ["type", "id", "role", "status", "content"],
+  function_call: ["type", "id", "call_id", "name", "arguments", "status"],
+  function_call_output: ["type", "id", "call_id", "output", "status"],
+  reasoning: ["type", "id", "summary", "encrypted_content", "content", "status"],
+};
+const TEXT_PART_KEYS = ["type", "text", "annotations", "logprobs"];
+const RESPONSES_TOOL_KEYS = ["type", "name", "description", "parameters", "strict"];
+
+/** A message's content: a string, or text parts of the given types only. */
+function textPartsRefusal(content: unknown, types: readonly string[], at: string): string | null {
+  if (isStr(content)) return null;
+  if (!Array.isArray(content)) return `${at}_content`;
+  for (const part of content) {
+    if (!isObj(part) || !isStr(part.type) || !types.includes(part.type)) return `${at}_part:${nameCode(isObj(part) ? part.type : undefined)}`;
+    const extra = extraKey(part, TEXT_PART_KEYS);
+    if (extra !== undefined) return `${at}_part_key:${nameCode(extra)}`;
+    if (!isStr(part.text)) return `${at}_part_shape`;
+    if (part.annotations !== undefined && !(Array.isArray(part.annotations) && part.annotations.length === 0)) return `${at}_part:annotations`;
+  }
+  return null;
+}
+
+function inputRefusal(input: unknown, tools: ReadonlySet<string>): string | null {
+  if (isStr(input)) return null;
+  if (!Array.isArray(input)) return "input";
+  for (const item of input) {
+    if (!isObj(item)) return "input_item";
+    const type = item.type ?? (item.role !== undefined ? "message" : undefined);
+    if (typeof type !== "string" || !Object.hasOwn(ITEM_KEYS, type)) return `input_type:${nameCode(type)}`;
+    const extra = extraKey(item, ITEM_KEYS[type]);
+    if (extra !== undefined) return `input_key:${type}.${nameCode(extra)}`;
+    if (type === "message") {
+      if (item.role !== "user" && item.role !== "assistant") return `input_role:${nameCode(item.role)}`;
+      const refused = textPartsRefusal(item.content, item.role === "user" ? ["input_text"] : ["output_text"], "input_message");
+      if (refused !== null) return refused;
+    } else if (type === "function_call") {
+      if (!isStr(item.name) || !tools.has(item.name)) return "input_function_call:name";
+      if (!isStr(item.arguments) || !isStr(item.call_id)) return "input_function_call:shape";
+    } else if (type === "function_call_output") {
+      if (!isStr(item.call_id)) return "input_function_call_output:shape";
+      if (!isStr(item.output)) {
+        const refused = textPartsRefusal(item.output, ["input_text"], "input_function_call_output");
+        if (refused !== null) return refused;
+      }
+    } else {
+      if (item.encrypted_content !== undefined && item.encrypted_content !== null && !isStr(item.encrypted_content)) return "input_reasoning:encrypted_content";
+      if (item.content !== undefined && !(Array.isArray(item.content) && item.content.length === 0)) return "input_reasoning:content";
+      if (item.summary !== undefined && !(Array.isArray(item.summary) && item.summary.every((s) => isObj(s) && s.type === "summary_text" && isStr(s.text) && extraKey(s, ["type", "text"]) === undefined))) return "input_reasoning:summary";
+    }
+  }
+  return null;
+}
+
+/** The tools' names, or the first part refused. */
+function toolsRefusal(tools: unknown): { names: Set<string> } | { refused: string } {
+  if (!Array.isArray(tools)) return { refused: "tools" };
+  const names = new Set<string>();
+  for (const t of tools) {
+    if (!isObj(t)) return { refused: "tools" };
+    if (t.type !== "function") return { refused: `tool_type:${nameCode(t.type)}` };
+    const extra = extraKey(t, RESPONSES_TOOL_KEYS);
+    if (extra !== undefined) return { refused: `tool_key:${nameCode(extra)}` };
+    if (!isStr(t.name) || !/^[A-Za-z0-9_-]{1,64}$/.test(t.name) || !isObj(t.parameters) || (t.description !== undefined && t.description !== null && !isStr(t.description)) || (t.strict !== undefined && t.strict !== null && typeof t.strict !== "boolean")) return { refused: "tool_shape" };
+    names.add(t.name);
+  }
+  return { names };
+}
+
+/** The request body, by the allowlist: the first part refused, as a code, or null when the body is allowed. */
+export function responsesBodyRefusal(b: Obj): string | null {
+  for (const key of Object.keys(b)) {
+    if (RESPONSES_REFUSED_KEYS.includes(key)) return `refused_key:${key}`;
+    if (!RESPONSES_ALLOWED_KEYS.includes(key)) return `top_key:${nameCode(key)}`;
+  }
+  if (b.instructions !== undefined && b.instructions !== null && !isStr(b.instructions)) return "instructions";
+  const tools = toolsRefusal(b.tools ?? []);
+  if ("refused" in tools) return tools.refused;
+  if (b.tool_choice !== undefined && b.tool_choice !== null) {
+    const c = b.tool_choice;
+    const named = isObj(c) && c.type === "function" && isStr(c.name) && tools.names.has(c.name) && extraKey(c, ["type", "name"]) === undefined;
+    if (!named && c !== "auto" && c !== "required" && c !== "none") return "tool_choice";
+  }
+  const input = inputRefusal(b.input, tools.names);
+  if (input !== null) return input;
+  for (const k of ["parallel_tool_calls", "stream", "store"]) if (b[k] !== undefined && b[k] !== null && typeof b[k] !== "boolean") return k;
+  if (b.include !== undefined && b.include !== null && !(Array.isArray(b.include) && b.include.every((x) => x === "reasoning.encrypted_content"))) return "include";
+  if (b.reasoning !== undefined && b.reasoning !== null) {
+    const r = b.reasoning;
+    if (!isObj(r)) return "reasoning";
+    const extra = extraKey(r, ["effort", "summary"]);
+    if (extra !== undefined) return `reasoning_key:${nameCode(extra)}`;
+    if (r.effort !== undefined && r.effort !== null && !(isStr(r.effort) && REASONING_EFFORTS.includes(r.effort))) return "reasoning:effort";
+    if (r.summary !== undefined && r.summary !== null && !(isStr(r.summary) && REASONING_SUMMARIES.includes(r.summary))) return "reasoning:summary";
+  }
+  if (b.text !== undefined && b.text !== null) {
+    const t = b.text;
+    if (!isObj(t)) return "text";
+    const extra = extraKey(t, ["format", "verbosity"]);
+    if (extra !== undefined) return `text_key:${nameCode(extra)}`;
+    if (t.verbosity !== undefined && t.verbosity !== null && !(isStr(t.verbosity) && VERBOSITIES.includes(t.verbosity))) return "text:verbosity";
+    if (t.format !== undefined && t.format !== null) {
+      const f = t.format;
+      if (!isObj(f)) return "text:format";
+      if (f.type === "text") {
+        if (extraKey(f, ["type"]) !== undefined) return "text:format";
+      } else if (f.type === "json_schema") {
+        if (extraKey(f, ["type", "name", "schema", "strict", "description"]) !== undefined || !isStr(f.name) || !isObj(f.schema)) return "text:format";
+      } else return `text_format:${nameCode(f.type)}`;
+    }
+  }
+  for (const k of ["temperature", "top_p"]) if (b[k] !== undefined && b[k] !== null && !(typeof b[k] === "number" && Number.isFinite(b[k]))) return k;
+  if (b.truncation !== undefined && b.truncation !== null && b.truncation !== "disabled") return "truncation";
+  if (b.max_output_tokens !== undefined && b.max_output_tokens !== null && !(isCount(b.max_output_tokens) && b.max_output_tokens > 0)) return "max_output_tokens";
+  return null;
+}
+
+/** A Responses usage, read nested: `{ usage }` in the broker's own fields, `unexpected` for a 12-hour cache write, or null. */
+export function readResponsesUsage(v: unknown): { usage: Usage } | { unexpected: true } | null {
+  if (!isObj(v)) return null;
+  const inDetails = v.input_tokens_details;
+  const outDetails = v.output_tokens_details;
+  if (!isObj(inDetails) || !isObj(outDetails)) return null;
+  const writeDetails = inDetails.cache_write_tokens_details;
+  if (isObj(writeDetails) && writeDetails.ttl_12h_tokens !== undefined && writeDetails.ttl_12h_tokens !== null) {
+    if (!isCount(writeDetails.ttl_12h_tokens)) return null;
+    if (writeDetails.ttl_12h_tokens > 0) return { unexpected: true };
+  }
+  const input = v.input_tokens;
+  const output = v.output_tokens;
+  const cached = inDetails.cached_tokens;
+  const written = inDetails.cache_write_tokens;
+  const reasoning = outDetails.reasoning_tokens;
+  if (!isCount(input) || !isCount(output) || !isCount(cached) || !isCount(written) || !isCount(reasoning)) return null;
+  // Nested: the parts can't be larger than their whole. If they are, the reading is wrong, so it counts the worst case.
+  if (cached + written > input || reasoning > output) return null;
+  return { usage: { input_tokens: input - cached - written, cache_read_input_tokens: cached, cache_creation_input_tokens: written, output_tokens: output } };
+}
+
 type InFlight = { worst: number; max_tokens: number; price: Price };
+/** Each dialect's output-bound key. */
+const BOUND_KEY: Record<Dialect, string> = { anthropic_messages: "max_tokens", openai_responses: "max_output_tokens" };
 
 /** One run's broker: its caps, its allowed models, and its running total. */
 export class RunBroker {
@@ -367,6 +569,8 @@ export class RunBroker {
   private readonly caps: BrokerCaps;
   private readonly models: ReadonlySet<string>;
   private readonly url: string;
+  private readonly dialect: Dialect;
+  private unexpected = false;
   private spent = 0;
   private outputUsed = 0;
   private turns = 0;
@@ -378,6 +582,8 @@ export class RunBroker {
     this.url = upstreamUrl(profile);
     if (!isCap(caps.spend_micro_usd) || !isCap(caps.turns) || !isCap(caps.output_tokens) || !isCap(caps.max_tokens)) throw new Error("a run's caps must each be set, as a positive whole number");
     for (const model of models) if (!Object.hasOwn(profile.prices, model)) throw new Error("a run's model has no price in the provider profile, so Runner won't allow it");
+    this.dialect = dialectOf(profile);
+    if (this.dialect === "openai_responses" && caps.max_tokens < OPENAI_MIN_OUTPUT_BOUND) throw new Error("an OpenAI run's max_tokens cap is below the reasoning headroom floor");
     this.profile = profile;
     this.caps = { ...caps };
     this.models = new Set(models);
@@ -414,7 +620,8 @@ export class RunBroker {
     if (typeof model !== "string") return refuse("body_invalid");
     if (!Object.hasOwn(this.profile.prices, model)) return refuse("model_unpriced");
     if (!this.models.has(model)) return refuse("model_not_allowed");
-    const refusedPart = bodyRefusal(fields);
+    const openai = this.dialect === "openai_responses";
+    const refusedPart = openai ? responsesBodyRefusal(fields) : bodyRefusal(fields);
     if (refusedPart !== null) return { ok: false, reason: "body_not_allowed", hard_stop: false, detail: refusedPart };
 
     if (this.turns >= this.caps.turns) return refuse("turns_exhausted");
@@ -425,11 +632,15 @@ export class RunBroker {
       heldSpend += f.worst;
     }
     const outputLeft = this.caps.output_tokens - this.outputUsed - heldOutput;
-    const asked = fields.max_tokens;
+    const boundKey = BOUND_KEY[this.dialect];
+    const asked = fields[boundKey];
+    // The reasoning headroom rule: an OpenAI request may not ask for less than the floor, since reasoning counts inside it.
+    if (openai && isCap(asked) && asked < OPENAI_MIN_OUTPUT_BOUND) return { ok: false, reason: "body_not_allowed", hard_stop: false, detail: "max_output_tokens:below_floor" };
     const bound = Math.min(this.caps.max_tokens, outputLeft, isCap(asked) ? asked : Number.POSITIVE_INFINITY);
-    if (bound <= 0) return refuse("output_tokens_exhausted");
+    if (bound <= 0 || (openai && bound < OPENAI_MIN_OUTPUT_BOUND)) return refuse("output_tokens_exhausted");
 
-    const rewritten = new TextEncoder().encode(JSON.stringify({ ...fields, max_tokens: bound }));
+    // Parsed and written again, so a duplicate key can't carry another value past the rewrite; `store` forced off for OpenAI.
+    const rewritten = new TextEncoder().encode(JSON.stringify(openai ? { ...fields, [boundKey]: bound, store: false } : { ...fields, max_tokens: bound }));
     const worst = worstCaseOf(this.profile.prices[model], rewritten.byteLength, bound);
     if (this.spent + heldSpend + worst > this.caps.spend_micro_usd) return refuse("spend_cap");
 
@@ -447,7 +658,14 @@ export class RunBroker {
     const held = this.inFlight.get(request_id);
     if (!held) return { cap_reached: this.reached() };
     this.inFlight.delete(request_id);
-    const read = usageOf(usage);
+    let read: Usage | null;
+    if (this.dialect === "openai_responses") {
+      const nested = readResponsesUsage(usage);
+      if (nested !== null && "unexpected" in nested) this.unexpected = true;
+      read = nested !== null && "usage" in nested ? nested.usage : null;
+    } else {
+      read = usageOf(usage);
+    }
     if (read) {
       this.spent += costOf(held.price, read);
       this.outputUsed += read.output_tokens;
@@ -468,6 +686,7 @@ export class RunBroker {
   }
 
   private reached(): HardStop | null {
+    if (this.unexpected) return "usage_unexpected";
     if (this.spent >= this.caps.spend_micro_usd) return "spend_cap";
     if (this.outputUsed >= this.caps.output_tokens) return "output_tokens_exhausted";
     return null;

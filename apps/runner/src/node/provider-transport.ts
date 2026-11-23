@@ -16,8 +16,15 @@
  *   or one too large to hold returns no usage, so the broker counts the request's whole worst case.
  *
  * The answer's body goes back to Claude Code as it came. The key is never logged, returned or put in an error.
+ *
+ * **The OpenAI Responses dialect** (2026-11-22; the experimental adapter, off by default): the key goes as
+ * `authorization: Bearer <key>` instead of `x-api-key`; a key shaped like another provider's is refused when the
+ * transport is made, both ways (`keyProviderRefusal`); and usage is the non-streamed answer's `usage` when its `status` is
+ * `completed`, or a stream's `response.completed` event's, only once it arrives. An `incomplete` or `failed` answer, an
+ * `error`, `response.failed` or `response.incomplete` event, a cut stream or an answer that isn't 2xx returns no usage,
+ * so the broker counts the whole worst case.
  */
-import { upstreamUrl, type Forward, type ProviderProfile } from "../core/broker.js";
+import { dialectOf, upstreamUrl, type Forward, type ProviderProfile } from "../core/broker.js";
 import type { ProviderAnswer, ProviderTransport } from "../core/run-interface.js";
 
 /** The most an answer may hold. A larger one is cut, and counts its worst case. */
@@ -74,6 +81,53 @@ export function streamUsage(text: string): unknown {
   return stopped ? usage : null;
 }
 
+/**
+ * The usage a streamed Responses answer reports: the `response.completed` event's, only when it is the stream's first
+ * terminal event. Null if the stream never completed, carried an error, failed, was incomplete, or a line can't be read.
+ */
+export function responsesStreamUsage(text: string): unknown {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (data === "" || data === "[DONE]") continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      return null;
+    }
+    if (!isObj(event)) return null;
+    if (event.type === "error" || event.type === "response.failed" || event.type === "response.incomplete") return null;
+    if (event.type === "response.completed") return isObj(event.response) && event.response.status === "completed" ? (event.response.usage ?? null) : null;
+  }
+  return null;
+}
+
+/** A whole Responses answer's usage: only a 2xx answer whose response completed. */
+export function responsesAnswerUsage(status: number, contentType: string, text: string): unknown {
+  if (status < 200 || status > 299) return null;
+  if (contentType.includes("text/event-stream")) return responsesStreamUsage(text);
+  try {
+    const body = JSON.parse(text) as unknown;
+    return isObj(body) && body.object === "response" && body.status === "completed" ? (body.usage ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why a key can't be sent to this profile's provider, as a fixed code, or null. Shape only, never the key in the code:
+ * an OpenAI profile takes only a project key (`sk-proj-`), and no profile takes another provider's (`sk-ant-` is
+ * Anthropic's). The Claude profile refuses only a key shaped as one of OpenAI's (project, service-account or admin;
+ * an unprefixed legacy `sk-` key can't be told apart by shape), so nothing else about it changes.
+ */
+export function keyProviderRefusal(profile: ProviderProfile, key: string): "key_provider" | null {
+  if (dialectOf(profile) === "openai_responses") return key.startsWith("sk-proj-") ? null : "key_provider";
+  return OPENAI_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)) ? "key_provider" : null;
+}
+
+const OPENAI_KEY_PREFIXES = ["sk-proj-", "sk-svcacct-", "sk-admin-"];
+
 /** A whole answer's usage. */
 export function answerUsage(status: number, contentType: string, text: string): unknown {
   if (status < 200 || status > 299) return null;
@@ -104,9 +158,11 @@ export class ProviderKeyTransport implements ProviderTransport {
   private readonly url: string;
   private readonly profile: ProviderProfile;
   private readonly fetch: typeof globalThis.fetch;
+  private readonly openai: boolean;
 
   constructor(profile: ProviderProfile, key: string, opts: { fetch?: typeof globalThis.fetch; env?: NodeJS.ProcessEnv; execArgv?: readonly string[] } = {}) {
     if (!KEY.test(key)) throw new Error("The provider key isn't one Runner can use.");
+    if (keyProviderRefusal(profile, key) !== null) throw new Error("The provider key file holds a key for another provider than the run policy's adapter uses, so Runner won't send it.");
     const refused = transportEnvRefusal(opts.env ?? process.env, opts.execArgv ?? process.execArgv);
     if (refused === "env_proxy") throw new Error("Runner won't send the provider key through a proxy taken from the environment. Unset NODE_USE_ENV_PROXY and --use-env-proxy.");
     if (refused !== null) throw new Error("Runner won't send the provider key with TLS trust taken from the environment. Unset NODE_TLS_REJECT_UNAUTHORIZED=0, NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, --use-openssl-ca and --use-system-ca.");
@@ -114,6 +170,7 @@ export class ProviderKeyTransport implements ProviderTransport {
     this.url = upstreamUrl(profile);
     this.key = key;
     this.fetch = opts.fetch ?? globalThis.fetch;
+    this.openai = dialectOf(profile) === "openai_responses";
   }
 
   async send(forward: Forward, signal: AbortSignal): Promise<ProviderAnswer> {
@@ -125,7 +182,7 @@ export class ProviderKeyTransport implements ProviderTransport {
     try {
       response = await this.fetch(this.url, {
         method: "POST",
-        headers: { ...this.profile.headers, "x-api-key": this.key },
+        headers: { ...this.profile.headers, ...(this.openai ? { authorization: `Bearer ${this.key}` } : { "x-api-key": this.key }) },
         body: forward.body as Uint8Array<ArrayBuffer>,
         redirect: "error",
         signal,
@@ -162,7 +219,7 @@ export class ProviderKeyTransport implements ProviderTransport {
       body.set(c, at);
       at += c.byteLength;
     }
-    const usage = cut ? null : answerUsage(response.status, response.headers.get("content-type") ?? "", new TextDecoder().decode(body));
+    const usage = cut ? null : (this.openai ? responsesAnswerUsage : answerUsage)(response.status, response.headers.get("content-type") ?? "", new TextDecoder().decode(body));
     return { status: response.status, body, usage };
   }
 }

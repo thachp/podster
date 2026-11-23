@@ -280,7 +280,7 @@ jobs:
       # The package as users get it: packed by scripts/pack.mjs (production tree bundled, no shrinkwrap), then installed the
       # way `npx podster@test` does, from a registry on 127.0.0.1 that passes other packages through to npm's, scripts off.
       # It fails if any Claude Code binary lands (Runner runs Claude Code only in its container), or any dev tool, if the
-      # install passes 60 MB, or if the installed SDK, given Runner's options, starts anything but the container's binary.
+      # install passes 100 MB, or if the installed SDK, given Runner's options, starts anything but the container's binary.
       - run: node scripts/pack.mjs --out "$RUNNER_TEMP/pack"
         working-directory: apps/runner
       - run: node scripts/install-check.mjs "$RUNNER_TEMP/pack/podster-$(node -p "require('./package.json').version").tgz"

@@ -221,6 +221,8 @@ const LISTENER_FILE = "node/broker-listener.ts";
 /** Step 14's scoped exception: the inbound nudge's loopback listener. */
 const NUDGE_LISTENER_FILE = "node/nudge-listener.ts";
 const PROFILE_FILE = "core/claude-profile.ts";
+/** The experimental OpenAI adapter's profile (2026-11-22): the only other file that may name a versioned path. */
+const OPENAI_PROFILE_FILE = "core/openai-profile.ts";
 /** The egress proxy's program: run only inside its own container per run, never in Runner's process. */
 const EGRESS_PROXY_FILE = "node/egress-proxy.ts";
 
@@ -240,7 +242,8 @@ describe("Runner's own source", () => {
       expect([file, /api\.internal|x-podster-assertion/.test(text)]).toEqual([file, false]);
       // Scoped exception (2), step 9(b): `/v1/` only as the exact literal "/v1/messages", only in the Claude driver's
       // profile file. Everything else is held to the old rule.
-      const v1 = file === PROFILE_FILE ? text.replaceAll('"/v1/messages"', "") : text;
+      // The same for the experimental OpenAI adapter's profile (2026-11-22): only "/v1/responses", only in its file.
+      const v1 = file === PROFILE_FILE ? text.replaceAll('"/v1/messages"', "") : file === OPENAI_PROFILE_FILE ? text.replaceAll('"/v1/responses"', "") : text;
       expect([file, /\/v1\//.test(v1)]).toEqual([file, false]);
       // Scoped exception (1), step 9(b): only the broker listener may use node:http and `.listen(` (with node:http's
       // createServer); node:net, node:dgram and node:https stay banned there too.
@@ -331,6 +334,16 @@ describe("Runner's own source", () => {
     expect(CLAUDE_PROFILE.host).toBe("api.anthropic.com");
     expect(CLAUDE_PROFILE.path).toBe("/v1/messages");
     expect(Object.keys(CLAUDE_PROFILE.headers).map((h) => h.toLowerCase())).not.toContain("anthropic-beta");
+  });
+
+  it("pins the OpenAI profile file's one versioned path to api.openai.com, with no beta, organization or project header (2026-11-22)", async () => {
+    const text = await readFile(new URL(`apps/runner/src/${OPENAI_PROFILE_FILE}`, repo), "utf8");
+    expect(text.match(/\/v1\/[^"]*/g)).toEqual(["/v1/responses"]);
+    expect(text).toMatch(/host: "api\.openai\.com",/);
+    const { OPENAI_PROFILE } = await import("../src/core/openai-profile.js");
+    expect(OPENAI_PROFILE.host).toBe("api.openai.com");
+    expect(OPENAI_PROFILE.path).toBe("/v1/responses");
+    expect(Object.keys(OPENAI_PROFILE.headers).map((h) => h.toLowerCase())).toEqual(["content-type"]);
   });
 
   it("takes the home's lock for pair, run, setup and forget, before anything else they do (decision 227)", async () => {

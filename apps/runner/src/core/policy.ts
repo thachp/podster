@@ -58,8 +58,24 @@
  */
 
 export const POLICY_VERSION = 1;
-export const ADAPTERS = ["claude_agent_sdk"] as const;
+export const ADAPTERS = ["claude_agent_sdk", "openai_agents"] as const;
 export type Adapter = (typeof ADAPTERS)[number];
+/**
+ * The OpenAI Agents SDK adapter is off by default (the architect's ruling of 2026-11-22, RUNNER-OPENAI.md question 6):
+ * `adapter: "openai_agents"` is taken only with this top-level field set to `true` beside it. Without it the whole
+ * configuration is refused, and `run` refuses to start. Built, not verified for support: room content goes to OpenAI
+ * under OpenAI's standard retention, so test content only.
+ */
+export const OPENAI_OPT_IN = "experimental_openai";
+/**
+ * The OpenAI adapter's floor on `caps.max_tokens` (the reasoning headroom rule, 2026-11-22). OpenAI's
+ * `max_output_tokens` bounds reasoning and visible output together, and spike M7-OpenAI's `bound` scenario
+ * (2026-11-21) spent a bound of 256 entirely on reasoning and returned nothing. So an OpenAI run's per-request bound is
+ * never below this: a configuration with a lower `caps.max_tokens` is refused at load, and the broker refuses a request
+ * whose bound would fall below it (`output_tokens_exhausted`) rather than send one that can only reason. 4,096 is the
+ * bound every one of the spike's completed runs used, at the driver's fixed `low` reasoning effort.
+ */
+export const OPENAI_MIN_MAX_TOKENS = 4_096;
 
 /** Runner's own tools, run in the task's container (spike B ruling 1). Shell only when the owner lists it. */
 export const TOOLS = ["read", "search", "write", "edit", "shell"] as const;
@@ -256,7 +272,23 @@ export function policyProblem(at: string): string {
   if (chain) return `entry ${chain[3]} of the room ${chain[2]}'s rooms[].toolchains repeats a toolchain already listed (${TOOLCHAIN_DUPLICATE})`;
   const shell = at.match(/^rooms\[\]\.toolchains:toolchain_needs_shell:([A-Za-z0-9_-]{1,128})$/);
   if (shell) return `the room ${shell[1]} lists rooms[].toolchains without "shell" in rooms[].tools, and only the shell can run a toolchain (${TOOLCHAIN_NEEDS_SHELL})`;
+  if (at === OPENAI_OPT_IN) return `adapter "openai_agents" is experimental and off by default: it needs "${OPENAI_OPT_IN}": true beside it in the policy file, and ${OPENAI_OPT_IN} must be true or false`;
+  if (at === "caps.max_tokens:openai_floor") return `caps.max_tokens is below ${OPENAI_MIN_MAX_TOKENS}, the least the "openai_agents" adapter takes, since OpenAI counts reasoning inside each request's output bound`;
   return `${at} is missing or out of range`;
+}
+
+/** What `run` builds its engine for, read from the policy file's text at start; refused with fixed words. */
+export type StartAdapter = { ok: true; adapter: Adapter } | { ok: false; message: string };
+/**
+ * The adapter `run` builds at start, from the policy file as read (null: none could be read). Only the top-level
+ * `adapter` and the OpenAI opt-in are read here; the whole file is checked again at every evaluation. A file that is
+ * missing, unreadable or names no OpenAI adapter keeps the Claude engine exactly as before.
+ */
+export function adapterAtStart(raw: unknown): StartAdapter {
+  const v = copy(raw);
+  if (!isObj(v) || own(v, "adapter") !== "openai_agents") return { ok: true, adapter: "claude_agent_sdk" };
+  if (own(v, OPENAI_OPT_IN) !== true) return { ok: false, message: `Runner won't start: policy.json names adapter "openai_agents", which is experimental and off by default. To try it with test content only, add "${OPENAI_OPT_IN}": true beside it. Nothing was started.` };
+  return { ok: true, adapter: "openai_agents" };
 }
 const fail = (at: string): { ok: false; at: string } => ({ ok: false, at });
 
@@ -463,7 +495,7 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
     if (runnerHome !== undefined && !isRoot(runnerHome)) return fail("runner_home");
     if (typeof runnerHome === "string" && onWindowsDrive(runnerHome)) return fail("runner_home_windows_drive");
     const raw = copy(input);
-    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"], ["max_active_tasks"])) return fail("config");
+    if (!isObj(raw) || !keysAre(raw, ["version", "revision", "owner_org", "adapter", "workspace_root", "caps", "day_caps", "rooms"], ["max_active_tasks", OPENAI_OPT_IN])) return fail("config");
     const maxActive = Object.hasOwn(raw, "max_active_tasks") ? raw.max_active_tasks : 1;
     if (!inRange(maxActive, 1, MAX_ACTIVE_TASKS_CEILING)) return fail("max_active_tasks");
     if (raw.version !== POLICY_VERSION) return fail("version");
@@ -473,12 +505,16 @@ export function parsePolicyConfig(input: unknown, context: { runner_home?: unkno
     if (!isId(ownerOrg)) return fail("owner_org");
     const adapter = raw.adapter;
     if (typeof adapter !== "string" || !(ADAPTERS as readonly string[]).includes(adapter)) return fail("adapter");
+    const optIn = Object.hasOwn(raw, OPENAI_OPT_IN) ? raw[OPENAI_OPT_IN] : false;
+    if (typeof optIn !== "boolean") return fail(OPENAI_OPT_IN);
+    if (adapter === "openai_agents" && optIn !== true) return fail(OPENAI_OPT_IN);
     const root = raw.workspace_root;
     if (!isRoot(root)) return fail("workspace_root");
     if (onWindowsDrive(root)) return fail("workspace_root_windows_drive");
     if (typeof runnerHome === "string" && overlaps(root, runnerHome)) return fail("workspace_root");
     const caps = parseCaps(raw.caps);
     if (!caps.ok) return caps;
+    if (adapter === "openai_agents" && caps.value.max_tokens < OPENAI_MIN_MAX_TOKENS) return fail("caps.max_tokens:openai_floor");
     const day = raw.day_caps;
     if (!isObj(day) || !keysAre(day, ["spend_micro_usd"])) return fail("day_caps");
     const daySpend = day.spend_micro_usd;

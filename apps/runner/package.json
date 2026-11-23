@@ -43,6 +43,9 @@
     "@anthropic-ai/sdk": "1.10.0",
     "@auth/agent": "0.6.2",
     "@modelcontextprotocol/sdk": "1.32.2",
+    "@openai/agents-core": "0.22.0",
+    "@openai/agents-openai": "0.22.0",
+    "openai": "7.62.0",
     "zod": "4.6.7"
   },
   "bundleDependencies": [
@@ -50,6 +53,9 @@
     "@anthropic-ai/sdk",
     "@auth/agent",
     "@modelcontextprotocol/sdk",
+    "@openai/agents-core",
+    "@openai/agents-openai",
+    "openai",
     "zod"
   ],
   "devDependencies": {

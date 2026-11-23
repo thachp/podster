@@ -21,8 +21,12 @@ import { fileURLToPath } from "node:url";
 import { childEnv, devOnlyNames, folderBytes, installedPackages, installProblems, mb, resolutionProblems, tarballProblems } from "./install-shape.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-/** The production tree is about 43 MB, with no Claude Code binary (each is about 350 MB). */
-const DEFAULT_BUDGET_MB = 60;
+/**
+ * The production tree was about 43 MB, with no Claude Code binary (each is about 350 MB). The experimental OpenAI adapter's
+ * three pinned packages (2026-11-22) brought it to 82.2 MB, `openai` alone 24.2 MB, so the budget went from 60 to 100 MB:
+ * still far below one Claude Code binary, which is what it is here to catch.
+ */
+const DEFAULT_BUDGET_MB = 100;
 const UPSTREAM = "https://registry.npmjs.org";
 
 function usage(message) {

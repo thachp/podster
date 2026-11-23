@@ -624,7 +624,12 @@ describe("off by default (the architect's ruling of 2026-11-22)", () => {
     const importers: string[] = [];
     for (const file of await readdir(root, { recursive: true })) {
       if (!file.endsWith(".ts")) continue;
-      if (/from "[^"]*openai-driver\.js"|import\(\s*"[^"]*openai-driver\.js"/.test(await readFile(new URL(file, root), "utf8"))) importers.push(file.replaceAll("\\", "/"));
+      const code = await readFile(new URL(file, root), "utf8");
+      const name = file.replaceAll("\\", "/");
+      if (/(from|import)\s*\(?\s*"[^"]*openai-driver\.js"/.test(code)) importers.push(name);
+      // Only cli.ts reaches the engine, and only by its dynamic import; only the driver names an OpenAI or MCP package.
+      if (name !== "node/cli.ts" && /(from|import)\s*\(?\s*"[^"]*openai-engine\.js"/.test(code)) importers.push(`engine:${name}`);
+      if (name !== "node/openai-driver.ts" && /(from|import)\s*\(?\s*"(@openai\/|openai"|@modelcontextprotocol\/)/.test(code)) importers.push(`package:${name}`);
     }
     expect(importers).toEqual(["node/openai-engine.ts"]);
   });

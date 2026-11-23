@@ -50,14 +50,20 @@ if (args.length !== 1) usage("install-check.mjs needs one .tgz.");
 const tarball = resolve(args[0]);
 const bytes = readFileSync(tarball);
 
+// Every child is killed after 5 minutes, so a hung start fails the check instead of waiting for CI's job limit.
+const RUN_TIMEOUT_MS = 5 * 60 * 1000;
 const run = (cmd, argv, opts) =>
   new Promise((done, fail) => {
     const child = spawn(cmd, argv, { ...opts, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    const timer = setTimeout(() => {
+      process.stderr.write(`install check: ${cmd} timed out after ${RUN_TIMEOUT_MS / 1000} s\n`);
+      child.kill("SIGKILL");
+    }, RUN_TIMEOUT_MS);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => process.stderr.write(d));
-    child.on("error", fail);
-    child.on("close", (status) => done({ status, out }));
+    child.on("error", (e) => (clearTimeout(timer), fail(e)));
+    child.on("close", (status) => (clearTimeout(timer), done({ status, out })));
   });
 
 // The package's own manifest and whether it ships a shrinkwrap, from the .tgz itself.

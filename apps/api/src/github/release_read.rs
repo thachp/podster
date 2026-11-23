@@ -7,8 +7,9 @@
 //! The room's upload command drives it (`workspace/release_upload.rs`), and a test-only path runs it alone (`probe`).
 //!
 //! - **Its own App.** A fourth GitHub App, read-only, with Contents read and Metadata read, named in the Worker's
-//!   configuration as `GITHUB_RELEASE_APP_ID`, `GITHUB_RELEASE_INSTALLATION_ID` and `GITHUB_RELEASE_APP_KEY`. **None
-//!   of the three is set in any deployment, and the App doesn't exist:** each is the owner's. Unconfigured, a read is
+//!   configuration as `GITHUB_RELEASE_APP_ID`, `GITHUB_RELEASE_INSTALLATION_ID` and `GITHUB_RELEASE_APP_KEY`, all three
+//!   Worker secrets read through [`lookup`] (docs/staging.md, "Setting up release (M6)"). **None of the three is set
+//!   in any deployment, and the App doesn't exist:** each is the owner's. Unconfigured, a read is
 //!   refused as `release_read_not_configured` before anything is asked of anyone. Its ID, installation and key must
 //!   differ from the other three Apps', or it is treated as unconfigured.
 //! - **One token, for one repository, for the two permissions,** and revoked when the read is over, on every way out:

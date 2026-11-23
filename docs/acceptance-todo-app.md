@@ -75,7 +75,7 @@ From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's o
 - `deploy_release` in the contract and capabilities (step 6, alone in its turn). *The release fields of `get_task_release_status` (step 7) are built, by #407.*
 - Step 10's screens: release in room settings, *Needs approval*, what an approver is told, and the operators' page for apps' reports.
 - The reconcile's cron entry, and an explicit `RELEASES` value, in staging's configuration (by PR; turning it on is the owner's, below). Then the PR that flips `RELEASE_PATH_COMPLETE`.
-- The rerun of spike C's checks on `podster.site`, and spike G's timings (the takedown time the test asserts).
+- The rerun of spike C's checks on `podster.site`, and spike G's timings (the takedown time the test asserts). *(Spike G ran on 2026-11-23.)*
 - An observer script for [section 3](#3-what-counts-as-passing), in the shape of `e2e/m6-staging.mjs`, and a way to start the three agents without a person typing.
 - **[code]** The manifest and modules in core. The serve entry's code marker (a contract change). The content Worker's write methods, preflight, `no-store` and limits. The outbound Worker's code. The write counter. The upload of a script and its binding. The store's schema step, the two data-deletion commands and the store reconcile. **Spike H**, which shows the marker is served before an app's script, a blocker for trusting the marker on code-bearing releases. Most of these wait for the store spike.
 - Not needed for this test: a custom hostname's marker, custom domains, and room or organization deletion.
@@ -101,7 +101,7 @@ From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's o
 - **A committed bundle is approved on trust** (decision 220, answer 3). The reviewer can't check the bundle against its source. We'd learn whether review of built files is workable for agents.
 - **The sandbox may break the framework's output** (inline scripts, routing). Agents learning that from the brief, or not, tells us whether a room's inputs carry constraints well.
 - **Public room, public API.** Anyone with the address can change the list (decision 220, answer 2). The test room must be short-lived, and unpublished at the end.
-- **Timing.** The takedown time waits for spike G. A KV change can take a minute or more to show, so asserting a tighter time would be flaky.
+- **Timing.** The takedown time waits for spike G. A KV change can take a minute or more to show, so asserting a tighter time would be flaky. *(2026-11-23: spike G saw a removal at the host within 0.25 s from one location. The test asserts the stated two minutes, not that figure. [Results](../spikes/m6-spike-g/RESULTS.md).)*
 - **Second-account timing.** Nothing serves before 2026-11-22. A static dry run doesn't avoid that wait.
 - **Load.** Three agent sessions plus browser checks are heavy. Run them alone, not beside other local suites.
 - **What we'd learn overall:** whether real agents, with nothing but Podster's capabilities, carry work from a brief to a served app, and whether every authority boundary held. Agents never approve, roles grant nothing by themselves, a merge releases nothing, and takedown reaches the app.

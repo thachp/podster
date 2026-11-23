@@ -10,7 +10,7 @@
 //!   fetches nothing for any other ([`plan`]: core's `custom_switched`).
 //! - **The switch:** the host is open, the app isn't held, and the applier has recorded exactly the script it wants
 //!   written at exactly its version, not refused there. When the room first sees a switch, it keeps the time: the
-//!   marker's wait, ADR 0010's provisional 30 seconds, runs from it.
+//!   marker's wait, ADR 0010's 30 seconds, runs from it.
 //! - **The fetch,** in the alarm after the applier, under a lease of its own: one `GET` of the marker's path on the
 //!   custom host, as for the default host (`content_provider::fetch_marker`), and nothing while the content domain is
 //!   stopped.

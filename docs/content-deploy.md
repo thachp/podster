@@ -31,7 +31,7 @@ Each is the owner's, on the second account. The script's read-only checks find m
 | **The serve entries' KV namespace** | Yes |
 | **The wildcard DNS record** for `*.` the content domain, proxied, and the redirect from HTTP to HTTPS | Only after a deploy, by the probes |
 | **The deploy token,** below | Partly: see what it can't read |
-| **Spike G** (`spikes/m6-spike-g`), **after this deploy and before `RELEASES` or the provider settings.** *Changed 2026-11-22 by the architect's ruling; it said "run first".* The content Worker deploys first: it serves nothing until a serve entry exists, and `RELEASES` stays off on the API. Spike G then runs against it on the second account, since what it measures is the deployed content Worker reading serve entries | No |
+| **Spike G** (`spikes/m6-spike-g`), **after this deploy and before `RELEASES` or the provider settings.** *Changed 2026-11-22 by the architect's ruling; it said "run first".* The content Worker deploys first: it serves nothing until a serve entry exists, and `RELEASES` stays off on the API. Spike G then runs against it on the second account, since what it measures is the deployed content Worker reading serve entries *(Ran on 2026-11-23: [results](../spikes/m6-spike-g/RESULTS.md).)* | No |
 
 None of these comes with a deploy: the six provider settings on the API, the two cron entries, and `RELEASES`. Each is a separate yes. Spike G's results come before any of them.
 
@@ -164,7 +164,7 @@ Then the script probes one random host on the content domain, signed out:
 - the domain-wide stop's effect;
 - how long a takedown takes.
 
-These are spike G's and the first release's to show.
+These are spike G's and the first release's to show. *(2026-11-23: spike G showed a dispatch to a real script, the stop's effect and a takedown's time at one location ([results](../spikes/m6-spike-g/RESULTS.md)). An app released through the job is still the first release's to show.)*
 
 ## An open question for the owner: deploy with the stop set?
 

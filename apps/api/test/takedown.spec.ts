@@ -2144,6 +2144,12 @@ describe("the two reconciles", () => {
     const noProvider = { ...env, CONTENT_DOMAIN: undefined };
     await scheduled(ENTRIES_CRON, noProvider);
     await scheduled(SCRIPTS_CRON, noProvider);
+    // A content domain that is Podster's own is no provider either (the security review of #563): podster.dev, a name
+    // under it, or the registrable domain of the application's or the gateway's address.
+    for (const own of [{ CONTENT_DOMAIN: "podster.dev" }, { CONTENT_DOMAIN: "apps.podster.dev" }, { APP_URL: "https://app.apps-test.example" }, { GATEWAY_URL: "https://gw.apps-test.example" }]) {
+      await scheduled(ENTRIES_CRON, { ...env, ...own });
+      await scheduled(SCRIPTS_CRON, { ...env, ...own });
+    }
     expect(await calls()).toBe(before);
     expect((await held()).calls).toEqual([]);
     // A schedule nothing answers to calls nothing either.

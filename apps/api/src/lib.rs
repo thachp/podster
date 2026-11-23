@@ -142,6 +142,21 @@ pub(crate) fn setting(env: &Env, name: &str) -> Setting {
     }
 }
 
+/// A Worker secret under `name`, set by the owner with `wrangler secret put` (docs/staging.md), read as
+/// [`setting`] reads a binding: only `undefined` is absent, and anything bound that isn't a string is unreadable. The
+/// text itself is read with `env.secret`, as every other secret is. Cloudflare hands a Worker a secret and a plain-text
+/// variable alike, as a string, so what makes a setting a secret is that the code reads it here and nowhere with
+/// [`setting`] or `env.var`: `scripts/setting-names.mjs` then lets a secret of its name through `scripts/deploy-staging`,
+/// and a secret, unlike a dashboard variable, survives each deploy.
+pub(crate) fn secret(env: &Env, name: &str) -> Setting {
+    match setting(env, name) {
+        Setting::Text(_) => env.secret(name).map_or(Setting::Unreadable, |found| {
+            Setting::Text(found.to_string())
+        }),
+        other => other,
+    }
+}
+
 fn room_limit_applies(org: &str) -> bool {
     !cfg!(feature = "failpoints") || org.starts_with("org_limit_")
 }

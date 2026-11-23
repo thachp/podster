@@ -60,8 +60,8 @@ export const PLAN = [
   ["M6-R07", "M6-13: the host serves the site's files with the fixed headers and the sandbox, GET and HEAD only, and a path the site doesn't have is not found"],
   ["M6-R08", "M6-12, over HTTP: the host is on the content domain and not under podster.dev; no answer sets a cookie; a request carrying Podster's cookie names and an Authorization header gets byte for byte what one without does"],
   ["M6-R09", "M6-12, in a scripted browser: the sandboxed page's document.cookie is refused with SecurityError for reading and setting, the browser holds no cookie but the one the run set for podster.dev, and the page's fetch of the application's API is refused by the host's connect-src"],
-  ["M6-R10", "AC-17, M6-05: an agent given a deploy grant of its own asks with deploy_release and is recorded awaiting approval; the admin declines it; the host still serves the first release"],
-  ["M6-R11", "M6-07, M6-08, AC-16, UI-02: a merged commit whose site holds _headers is released and fails with a reason code; the task stays completed and the merge succeeded; checks, merge and release are reported apart, each with its own time; the host still serves the first release"],
+  ["M6-R10", "AC-17, M6-05: an agent given a deploy grant of its own asks with deploy_release and is recorded awaiting approval; the admin declines it; the host still serves the first release, and the task's status names the declined attempt while its commit stays served"],
+  ["M6-R11", "M6-07, M6-08, AC-16, UI-02, in a room of its own, since a room has 2 uploads an hour: a release is served there; then a merged commit whose site holds _headers is released and fails with a reason code; the task stays completed and the merge succeeded; checks, merge and release are reported apart, each with its own time; that room's host still serves the release before"],
   ["M6-R12", "M6-25, UI-02, in a scripted browser: the failed task's Sheet says \"Merged · Deployment failed\" and never Live; the served task's says Live"],
   ["M6-R13", "M6-10, AC-13: a release asked for, then its requester's deploy grant taken back, then approved, fails requester_lost_authority with no result URL; the host's marker still names the release served before, now and after a wait, and the task's status names it failed while the commit stays served by the release before"],
   ["M6-R14", "M6-19, M6-27: a person reports the app by its address; the test operator suspends it by its label; the host answers not found within the wait; a request is refused app_suspended; lifting the suspension restores nothing"],
@@ -113,10 +113,11 @@ scope for now: their checks always say SKIP and are listed apart.
   configuration, and a request isn't refused release_not_available, which staging answers while a provider is
   configured and the release path isn't complete.
 
-  It takes 4 test sign-ups (3 new test people and the fixed test operator), makes one public repository in
-  podsterdev, merges two tasks there, and releases a tiny static site from it. It cleans up: release off in the room,
-  the app unpublished, the room private, grants taken back, agents disconnected, sessions signed out. It can't delete
-  the repository: it prints its name for the owner to archive or delete.
+  It takes 4 test sign-ups (3 new test people and the fixed test operator), makes two public repositories in
+  podsterdev, one for the run's room and one for M6-R11's failing room (a room has 2 uploads an hour), merges three
+  tasks, and releases a tiny static site from each room. It cleans up: release off in both rooms, the apps
+  unpublished, the rooms private, grants taken back, agents disconnected, sessions signed out. It can't delete the
+  repositories: it prints their names for the owner to archive or delete.
 
   Exit 0 only when every in-scope check passed and none said SKIP; 1 otherwise; 2 for a refused configuration or a
   failed preflight, with no sign-up taken; 3 when release isn't on with a provider, with at most the owner's sign-up.`;

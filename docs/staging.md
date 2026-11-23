@@ -622,7 +622,7 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 ## M6's release-on staging run
 
-*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there, and it can't run yet for a second reason: **no route gives a `deploy` grant.** The grant route takes `push` and `merge` only, and the [M6 plan](m6-plan.md) lists "who may give a `deploy` grant, and the route that gives one" as owed to step 6. The script assumes that route with the action `deploy` and refuses, exit 3, with nothing sent, while `packages/contracts/openapi.yaml` doesn't list it. Whoever builds the route updates the script if it takes another shape.
+*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there. It gives the `deploy` grant through the repository grant route, which takes the action `deploy` since PR #566. It still reads `packages/contracts/openapi.yaml` first and refuses, exit 3, with nothing sent, if a checkout's grant route doesn't list `deploy`.
 
 It releases a tiny static site through the real flow: a managed repository in `podsterdev`, the coding agent's pull request, the room's admin's review and merge, a member's request and the admin's approval. Then it checks each part of [the gate](m6-plan.md#the-gate) a script can show from outside, M6-R01 to M6-R17:
 
@@ -650,13 +650,13 @@ It releases a tiny static site through the real flow: a managed repository in `p
 - **Clean-up, on every way out but a hard kill:** a suspension lifted, the organization's release given back, release off in the room, the room private, grants taken back, the agent disconnected, sessions signed out. The repository stays, for the owner to archive or delete on GitHub, and so do the people, the organization, the two rooms and their tasks.
 - **Exit:** 0 only when every in-scope check passed and none said `SKIP`; 1 otherwise, naming what wasn't shown; 2 for a refused configuration or a failed preflight, no sign-up taken; 3 when release isn't on with a provider.
 
-The dry run reads the contract, prints the sign-ups and every check, and sends nothing. On today's contract it exits 3, naming the missing deploy grant:
+The dry run reads the contract, prints the sign-ups and every check, and sends nothing. It exits 0 once the configuration is complete; the next gate, release on with a provider, needs staging, so only the run itself reaches it:
 
 ```bash
 cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev --dry-run
 ```
 
-The run, once release is on with a provider and the deploy grant's route exists:
+The run, once release is on with a provider:
 
 ```bash
 cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev

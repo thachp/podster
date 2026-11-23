@@ -37,7 +37,13 @@
 // holds the deploy grant, and staging's fixed test operator, who must be in the API's OPERATORS (m4-staging.mjs
 // --operator-id prints its ID). One agent, made under the owner, takes none. A sign-up is never sent twice.
 //
-// GitHub: one public repository in podsterdev, made by Podster for the room. The coding agent pushes with its
+// Uploads: the release job takes at most 2 upload attempts a room in a rolling hour
+// (MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR), and a release refused for its tree, like M6-R11's, spends one. So M6-R11 and
+// M6-R12 run in a room of their own, the failing room, with its own repository, grants and admin approval: a release
+// served there, then the failing one. The run's room spends M6-R06's and M6-R15's. Each room spends at most 2.
+//
+// GitHub: two public repositories in podsterdev, made by Podster, one for the run's room and one for the failing room.
+// The coding agent pushes with its
 // short-lived token through `git`, a child process with child-env.mjs's environment, a home of its own and the token
 // under one name in its environment, never on a command line or in a file; and opens each pull request with that token.
 // The browser for M6-R09 and M6-R12 is Playwright's Chromium, launched with child-env.mjs's environment.
@@ -49,11 +55,11 @@
 // a refused configuration or a failed preflight, with no sign-up taken; 3 when release isn't on with a provider, with at
 // most the owner's sign-up taken.
 //
-// Clean-up, on every way out, Ctrl-C included: release switched off in the room (which unpublishes), a suspension the
-// run left lifted, an organization's release given back, the room made private, every grant taken back, the agent
-// disconnected, every session signed out. Left behind, as every staging run's are: the test people, the organization,
-// the two rooms and their tasks, and the repository, which this script can't delete: it prints its name for the owner
-// to archive or delete on GitHub.
+// Clean-up, on every way out, Ctrl-C included: release switched off in both rooms that had it (which unpublishes), a
+// suspension the run left lifted, an organization's release given back, every room made private, every grant taken
+// back, the agent disconnected, every session signed out. Left behind, as every staging run's are: the test people, the
+// organization, the three rooms and their tasks, and the two repositories, which this script can't delete: it prints
+// their names for the owner to archive or delete on GitHub.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -326,46 +332,71 @@ let owner, admin, member, operator, coder;
 /** The organization the owner made for the run, which the room is in and the two other people join. */
 let team;
 let room, otherRoom, otherTask;
-let repo;
+/** M6-R11's room, with a repository of its own: a room has 2 uploads an hour, and the run's room spends its own. */
+let failRoom;
+/** Each room's repository, by room. */
+const repos = new Map();
 /** The app's default host and label, once it has one. */
 let host, appLabel;
 const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, sleep });
-/** What clean-up must undo, set as each is done and cleared once undone. */
-const undo = { releaseOn: false, suspended: null, delegationTaken: false };
-/** Grants the run gave, by ID, that clean-up takes back unless seen ended. */
+/** What clean-up must undo, set as each is done and cleared once undone. `releaseOn` holds the rooms release may be on in. */
+const undo = { releaseOn: new Set(), suspended: null, delegationTaken: false };
+/** Grants the run gave, by ID, with the room each is in, that clean-up takes back unless seen ended. */
 const grants = new Map();
 const tasks = {};
 
-const releasesPath = () => `/v1/workspaces/${room}/releases`;
-const statusOf = async (task) => owner.must("GET", `/v1/workspaces/${room}/tasks/${task.id}/release-status`);
-const taskRead = async (task) => owner.must("GET", `/v1/workspaces/${room}/tasks/${task.id}`);
-const configOf = async () => owner.must("GET", `/v1/workspaces/${room}/release-config`);
-/** A member's request for a release of `task`'s merged commit. */
-const askRelease = (who, task, body = {}, options = undefined) => who.dash("POST", releasesPath(), { task_id: task.id, commit_sha: task.mergeSha, ...body }, options);
+const releasesPath = (at = room) => `/v1/workspaces/${at}/releases`;
+const statusOf = async (task) => owner.must("GET", `/v1/workspaces/${task.room}/tasks/${task.id}/release-status`);
+const taskRead = async (task) => owner.must("GET", `/v1/workspaces/${task.room}/tasks/${task.id}`);
+const configOf = async (at = room) => owner.must("GET", `/v1/workspaces/${at}/release-config`);
+/** A member's request for a release of `task`'s merged commit, in the task's room. */
+const askRelease = (who, task, body = {}, options = undefined) => who.dash("POST", releasesPath(task.room), { task_id: task.id, commit_sha: task.mergeSha, ...body }, options);
 
-/** A grant the run gives, noted for clean-up before anything is asserted about it. */
-async function give(principal, action) {
-  const answer = await owner.dash("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: principal.id, action });
-  if (answer.body?.id) grants.set(answer.body.id, `${action} grant to ${principal.id}`);
+/** A grant the run gives in room `at`, noted for clean-up before anything is asserted about it. */
+async function give(principal, action, at = room) {
+  const answer = await owner.dash("POST", `/v1/workspaces/${at}/repository/grants`, { policy_version: await owner.policyVersion(at), principal_id: principal.id, action });
+  if (answer.body?.id) grants.set(answer.body.id, { what: `${action} grant to ${principal.id}`, room: at });
   if (action === DEPLOY_GRANT.action && answer.status === 400 && answer.code === "invalid_argument") throw new NotOn("staging's grant route refuses the action deploy: no route gives a deploy grant there, so nothing can be released");
   ok(answer.ok, `giving a ${action} grant to ${principal.id}: HTTP ${answer.status} ${answer.code ?? ""}`);
   eq([answer.body.principal_id, answer.body.action, answer.body.state], [principal.id, action, "live"], `the ${action} grant`);
   return answer.body;
 }
 async function takeBack(id) {
-  const back = await owner.dash("DELETE", `/v1/workspaces/${room}/repository/grants/${id}`, { policy_version: await owner.policyVersion(room) });
+  const { room: at } = grants.get(id);
+  const back = await owner.dash("DELETE", `/v1/workspaces/${at}/repository/grants/${id}`, { policy_version: await owner.policyVersion(at) });
   if ((back.ok && back.body?.revoked_at) || (back.status === 404 && back.code === "grant_not_found")) grants.delete(id);
   return back;
 }
 
-/** A task for the coder, accepted, reviewed by the admin. */
-async function newTask(name) {
-  const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `${RUN} ${name}`, instructions: "Change the site.", acceptance_criteria: "A pull request.", assignee: coder.id, reviewer: admin.id }, { idempotencyKey: key() });
-  const at = { workspace_id: room, task_id: made.id };
-  const accepted = await coder.must("accept_task", { ...at, version: made.version });
+/** Adds a person of the run's organization to room `at`, in `role`. */
+async function addPerson(who, role, at) {
+  await owner.must("POST", `/v1/workspaces/${at}/members`, { principal_id: who.id, kind: "person", org_id: team, role, policy_version: await owner.policyVersion(at) });
+}
+
+/** Asks Podster for room `at`'s public repository in podsterdev, and waits for it. Answers it, noted by room. */
+async function setUpRepository(at, tag) {
+  const name = `e2e-m6-${tag}-${new Date().toISOString().slice(0, 16).replace(/\D/g, "")}-${randomBytes(2).toString("hex")}`;
+  const asked = await owner.dash("POST", `/v1/workspaces/${at}/repository`, { name, visibility: "public" });
+  leftBehind.push(`possibly the repository ${STAGING_ORG}/${name} on GitHub`);
+  // Noted before it is ready, so clean-up names it even if its setup fails.
+  repos.set(at, { full: `${STAGING_ORG}/${name}` });
+  ok(asked.ok && asked.body?.request?.state === "pending", `asking for the repository: HTTP ${asked.status} ${asked.code ?? ""}`);
+  const { value: read, seconds } = await within(options.setupWait, "the repository's setup", () => owner.must("GET", `/v1/workspaces/${at}/repository`), (r) => r.request?.state !== "pending");
+  eq([read.request.state, read.repository?.status, read.repository?.full_name], ["ready", "ready", `${STAGING_ORG}/${name}`], "the room's repository");
+  const repo = { id: read.repository.provider_repo_id, full: read.repository.full_name, defaultBranch: read.repository.default_branch, cloneUrl: `https://github.com/${read.repository.full_name}.git` };
+  repos.set(at, repo);
+  say(`     repository ${repo.id}, ${repo.full}, ready after ${seconds} s`);
+  return repo;
+}
+
+/** A task for the coder in room `at`, accepted, reviewed by the admin. Its name is its branch's, so unique in the run. */
+async function newTask(name, at = room) {
+  const made = await owner.must("POST", `/v1/workspaces/${at}/tasks`, { title: `${RUN} ${name}`, instructions: "Change the site.", acceptance_criteria: "A pull request.", assignee: coder.id, reviewer: admin.id }, { idempotencyKey: key() });
+  const ids = { workspace_id: at, task_id: made.id };
+  const accepted = await coder.must("accept_task", { ...ids, version: made.version });
   leftBehind.push(`task ${made.id}`);
   say(`     task ${name}: ${made.id}`);
-  return (tasks[name] = { id: made.id, at, version: accepted.version, name, title: made.title ?? `${RUN} ${name}` });
+  return (tasks[name] = { id: made.id, room: at, at: ids, version: accepted.version, name, title: made.title ?? `${RUN} ${name}` });
 }
 /**
  * The coder's change for a task: its token, a branch off the default branch with one commit of `files`, pushed, and a
@@ -376,6 +407,7 @@ async function changeAndMerge(task, files) {
   const access = await coder.must("get_repo_access", task.at, false);
   ok(typeof access?.token === "string" && access.token.length >= 20, "the coder was given no token");
   const token = secret(access.token);
+  const repo = repos.get(task.room);
   const dir = join(work, task.name);
   const branch = `e2e/${task.name}`;
   await mustGit(["clone", "-q", repo.cloneUrl, dir], {}, "git clone");
@@ -391,8 +423,8 @@ async function changeAndMerge(task, files) {
   const opened = await github(`/repos/${repo.full}/pulls`, { token, method: "POST", body: { title: `e2e: ${task.name}`, head: branch, base: repo.defaultBranch } });
   eq([opened.status, opened.body?.head?.sha], [201, head], "opening the pull request");
   await coder.must("submit_task", { ...task.at, version: task.version, note: "Ready for review.", commit_sha: head, pr_number: opened.body.number });
-  await admin.must("POST", `/v1/workspaces/${room}/tasks/${task.id}/verify`, { submission_no: 1, commit_sha: head });
-  const asked = await admin.must("POST", `/v1/workspaces/${room}/tasks/${task.id}/merge`, { submission_no: 1, commit_sha: head });
+  await admin.must("POST", `/v1/workspaces/${task.room}/tasks/${task.id}/verify`, { submission_no: 1, commit_sha: head });
+  const asked = await admin.must("POST", `/v1/workspaces/${task.room}/tasks/${task.id}/merge`, { submission_no: 1, commit_sha: head });
   eq(asked.merge_state, "requested", "the merge as asked for");
   const { value: change, seconds } = await within(options.mergeWait, "the merge", async () => (await taskRead(task)).change, (c) => ["succeeded", "failed", "outcome_unknown"].includes(c?.merge_state));
   eq([change.merge_state, change.merge_reason ?? null], ["succeeded", null], "the merge");
@@ -409,7 +441,7 @@ async function settled(task, releaseId) {
 }
 /** Approves a release as the admin, and waits for it to be served. Answers the status and the seconds it took. */
 async function approveAndServe(task, releaseId) {
-  const approved = await admin.must("POST", `${releasesPath()}/${releaseId}/approve`, {});
+  const approved = await admin.must("POST", `${releasesPath(task.room)}/${releaseId}/approve`, {});
   eq([approved.id, approved.approved_by], [releaseId, admin.id], "the approval");
   ok(approved.state !== "failed", `the approval ended the release failed, ${approved.failure_code}`);
   let outcome;
@@ -418,7 +450,7 @@ async function approveAndServe(task, releaseId) {
   } catch (error) {
     const last = (await statusOf(task).catch(() => null))?.release;
     const stuck = ["queued", "uploading", "uncertain", "awaiting_confirmation"].includes(last?.state);
-    throw new Error(`${cause(error)}; it was last ${last?.state ?? "unread"}${stuck ? ". A release that stays queued or uploading is what staging does with no content provider configured" : ""}`);
+    throw new Error(`${cause(error)}; it was last ${last?.state ?? "unread"}${stuck ? ". A release stays queued or uploading when no content provider is configured, or when its room has spent its 2 uploads in the hour" : ""}`);
   }
   const problems = statusProblems(outcome.status, { taskId: task.id, mergeSha: task.mergeSha, release: { id: releaseId, state: "served", served: true } });
   ok(problems.length === 0, problems.join("; "));
@@ -481,7 +513,7 @@ async function main() {
     const invited = await owner.must("POST", `/orgs/${team}/invitations`, { role: "member" });
     await who.must("POST", "/org-invitations/accept", { token: secret(invited.token) });
     who.org = who.actingOrg = team;
-    await owner.must("POST", `/v1/workspaces/${room}/members`, { principal_id: who.id, kind: "person", org_id: team, role, policy_version: await owner.policyVersion(room) });
+    await addPerson(who, role, room);
   };
   admin = await person("the room's admin");
   await joinRoom(admin, "admin");
@@ -495,14 +527,7 @@ async function main() {
   otherTask = (await owner.must("POST", `/v1/workspaces/${otherRoom}/tasks`, { title: `${RUN} elsewhere`, instructions: "Nothing." }, { idempotencyKey: key() })).id;
   say(`     admin ${admin.id}; member ${member.id}; coder ${coder.id}; another room ${otherRoom} with task ${otherTask}`);
 
-  const name = `e2e-m6-${new Date().toISOString().slice(0, 16).replace(/\D/g, "")}-${randomBytes(2).toString("hex")}`;
-  const asked = await owner.dash("POST", `/v1/workspaces/${room}/repository`, { name, visibility: "public" });
-  leftBehind.push(`possibly the repository ${STAGING_ORG}/${name} on GitHub`);
-  ok(asked.ok && asked.body?.request?.state === "pending", `asking for the repository: HTTP ${asked.status} ${asked.code ?? ""}`);
-  const { value: read, seconds } = await within(options.setupWait, "the repository's setup", () => owner.must("GET", `/v1/workspaces/${room}/repository`), (r) => r.request?.state !== "pending");
-  eq([read.request.state, read.repository?.status, read.repository?.full_name], ["ready", "ready", `${STAGING_ORG}/${name}`], "the room's repository");
-  repo = { id: read.repository.provider_repo_id, full: read.repository.full_name, defaultBranch: read.repository.default_branch, cloneUrl: `https://github.com/${read.repository.full_name}.git` };
-  say(`     repository ${repo.id}, ${repo.full}, ready after ${seconds} s`);
+  await setUpRepository(room, "room");
   await give(coder, "push");
   await give(admin, "merge");
   const t1 = await changeAndMerge(await newTask("site"), SITE);
@@ -553,7 +578,7 @@ async function main() {
 
   say("\n## who may configure and approve");
   await check("M6-R03", async () => {
-    undo.releaseOn = true;
+    undo.releaseOn.add(room);
     const on = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 });
     eq([on.enabled, on.version, on.set_by], [true, 1, admin.id], "the configuration the admin set");
     refusedAs(await member.dash("GET", `/v1/workspaces/${room}/release-config`), 403, "not_allowed", "the member reading the configuration");
@@ -710,34 +735,72 @@ async function main() {
     eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
     declinedId = asked.id;
     latest = { id: declinedId, unpublished: "declined" };
+    // The status reports the latest attempt for the commit, declined, and `served` for the commit: still true, since
+    // the first release of that commit is what the host serves (openapi.yaml's TaskRelease).
+    const status = await statusOf(t1);
+    const problems = statusProblems(status, { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: declinedId, state: "declined", served: true } });
+    ok(problems.length === 0, `the first task: ${problems.join("; ")}`);
+    eq(resultUrlProblem(status.release.result_url, host), null, "the first task's result URL");
     return `release ${asked.id} asked for by ${coder.id}, declined`;
   });
 
-  say("\n## a release that fails, beside a merge that succeeded");
+  say("\n## a release that fails, beside a merge that succeeded, in a room of its own");
+  // A room has 2 uploads an hour, and a release refused for its tree spends one: the run's room keeps its own for
+  // M6-R06 and M6-R15. This room gets its own repository, grants and admin approval, a release served, then the failing one.
   let t2;
   await check("M6-R11", async () => {
-    after("M6-R06");
-    t2 = await changeAndMerge(await newTask("refused"), REFUSED_SITE);
+    after("M6-R03");
+    failRoom = await owner.createRoom(`${RUN} failing release`);
+    leftBehind.push(`room ${failRoom}`);
+    await addPerson(admin, "admin", failRoom);
+    await addPerson(member, "member", failRoom);
+    await owner.addAgent(failRoom, coder);
+    say(`     the failing room ${failRoom}`);
+    await setUpRepository(failRoom, "fail");
+    await give(coder, "push", failRoom);
+    await give(admin, "merge", failRoom);
+    const before = await changeAndMerge(await newTask("site-fail-room", failRoom), SITE);
+    await owner.must("PUT", `/v1/workspaces/${failRoom}/review-policy`, { require_person: true, policy_version: await owner.policyVersion(failRoom) });
+    const published = await publisher.publish(owner, failRoom);
+    ok(published.ok, `making the failing room public: HTTP ${published.status} ${published.code ?? ""}`);
+    // A deploy grant is given only in a public room (release_needs_public_room), as in the run's room after M6-R01.
+    await give(member, DEPLOY_GRANT.action, failRoom);
+    undo.releaseOn.add(failRoom);
+    const on = await admin.must("PUT", `/v1/workspaces/${failRoom}/release-config`, { enabled: true, expected_version: 0 });
+    eq([on.enabled, on.set_by], [true, admin.id], "the failing room's configuration the admin set");
+    // Its first upload: a release served, so the failing one has something to leave in place.
+    const good = await askRelease(member, before);
+    ok(good.ok, `the member's request in the failing room: HTTP ${good.status} ${good.code ?? ""}`);
+    await approveAndServe(before, good.body.id);
+    const failHost = (await configOf(failRoom)).default_host;
+    const at = defaultHostProblem(failHost);
+    ok(!at.problem, `the failing room's host: ${at.problem}`);
+    ok(failHost !== host, "the failing room's host is the run's room's");
+    eq(markerProblem(await marker(failHost), good.body.id, before.mergeSha), null, "the failing room's marker before");
+
+    // Its second upload: the commit whose site holds _headers.
+    t2 = await changeAndMerge(await newTask("refused", failRoom), REFUSED_SITE);
     const asked = await askRelease(member, t2);
     ok(asked.ok, `the member's request: HTTP ${asked.status} ${asked.code ?? ""}`);
-    await admin.must("POST", `${releasesPath()}/${asked.body.id}/approve`, {});
+    await admin.must("POST", `${releasesPath(failRoom)}/${asked.body.id}/approve`, {});
     const { status, seconds } = await settled(t2, asked.body.id);
     const problems = statusProblems(status, { taskId: t2.id, mergeSha: t2.mergeSha, release: { id: asked.body.id, state: "failed", served: false, failed: true } });
     ok(problems.length === 0, problems.join("; "));
     eq((await taskRead(t2)).task.status, "completed", "the task's status");
-    // The status reports the latest attempt for the commit (R10's, declined), and `served` for the commit: still true,
-    // since the first release of that commit is what the host serves (openapi.yaml's TaskRelease).
-    after("M6-R10");
-    const earlierStatus = await statusOf(t1);
-    const earlier = statusProblems(earlierStatus, { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: declinedId, state: "declined", served: true } });
-    ok(earlier.length === 0, `the first task: ${earlier.join("; ")}`);
-    eq(resultUrlProblem(earlierStatus.release.result_url, host), null, "the first task's result URL");
-    eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
-    return `release ${asked.body.id} failed ${status.release.failure_code} after ${seconds} s; merge succeeded at ${status.merge.observed_at}, release at ${status.release.observed_at}, checks ${status.checks.state ?? "unread"}`;
+    // The release before is still the room's latest for its commit, and still served.
+    const earlierStatus = await statusOf(before);
+    const earlier = statusProblems(earlierStatus, { taskId: before.id, mergeSha: before.mergeSha, release: { id: good.body.id, state: "served", served: true } });
+    ok(earlier.length === 0, `the task served before: ${earlier.join("; ")}`);
+    eq(resultUrlProblem(earlierStatus.release.result_url, failHost), null, "the result URL of the task served before");
+    eq(markerProblem(await marker(failHost), good.body.id, before.mergeSha), null, "the failing room's marker after");
+    const index = await hostAsk(`https://${failHost}/`);
+    eq([index.status, index.body], [200, SITE["site/index.html"]], "the failing room's index");
+    return `room ${failRoom}: release ${good.body.id} served, then release ${asked.body.id} failed ${status.release.failure_code} after ${seconds} s; merge succeeded at ${status.merge.observed_at}, release at ${status.release.observed_at}, checks ${status.checks.state ?? "unread"}`;
   });
 
   await check("M6-R12", async () => {
-    after("M6-R11");
+    // The failed task is the failing room's; the served one is the run's room's, whose latest attempt R10 declined.
+    after("M6-R11", "M6-R10");
     const shown = await withBrowser(async (browser) => {
       const context = await browser.newContext();
       const appHost = new URL(STAGING_APP).hostname;
@@ -745,7 +808,7 @@ async function main() {
       await context.addCookies([...cookies, { name: "podster-org", value: team, domain: appHost, path: "/", secure: true, sameSite: "Lax" }]);
       const page = await context.newPage();
       const stageOf = async (task, headline) => {
-        await page.goto(`${STAGING_APP}/w/${room}/tasks?task=${task.id}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await page.goto(`${STAGING_APP}/w/${task.room}/tasks?task=${task.id}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
         // The task's own Sheet, a dialog named by the task's title, and its one deployment stage.
         const sheet = page.getByRole("dialog", { name: task.title });
         await sheet.waitFor({ timeout: 30_000 });
@@ -765,7 +828,7 @@ async function main() {
     after("M6-R06");
     const asked = await askRelease(member, t1);
     ok(asked.ok, `the member's request: HTTP ${asked.status} ${asked.code ?? ""}`);
-    const held = [...grants].find(([, what]) => what === `${DEPLOY_GRANT.action} grant to ${member.id}`);
+    const held = [...grants].find(([, g]) => g.room === room && g.what === `${DEPLOY_GRANT.action} grant to ${member.id}`);
     ok(held, "the member's deploy grant isn't on the run's list");
     const back = await takeBack(held[0]);
     ok(back.ok, `taking the member's grant back: HTTP ${back.status} ${back.code ?? ""}`);
@@ -838,13 +901,13 @@ async function main() {
     const config = await configOf();
     const off = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.version });
     eq(off.enabled, false, "the configuration switched off");
-    undo.releaseOn = false;
+    undo.releaseOn.delete(room);
     const down = await hostDown("the host stopping after release was switched off");
     // While the room's release is off, the status says only that no release exists (openapi.yaml's TaskRelease;
     // M6 plan, step 7). The records are kept: switched on again, the status names the latest attempt, ended.
     eq((await statusOf(t1)).release, { exists: false }, "the first task's release while release is off");
     const again = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: off.version });
-    undo.releaseOn = true;
+    undo.releaseOn.add(room);
     eq(again.enabled, true, "the configuration switched on again");
     const status = await statusOf(t1);
     eq([status.release?.exists, status.release?.release_id, status.release?.state, status.release?.served, status.release?.result_url], [true, latest.id, latest.unpublished, false, null], "the first task's release once release is on again");
@@ -856,7 +919,7 @@ async function main() {
     eq((await statusOf(t1)).release?.served, false, "the first task's release, still not served after the looks");
     const offAgain = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: again.version });
     eq(offAgain.enabled, false, "the configuration switched off again");
-    undo.releaseOn = false;
+    undo.releaseOn.delete(room);
     return `the host answered not found ${down} s after release was switched off; release ${status.release.release_id} is kept, ${status.release.state}`;
   });
 
@@ -888,16 +951,16 @@ async function cleanUp() {
     if (back?.ok && back.body?.granted === true) undo.delegationTaken = false;
     said.push(!undo.delegationTaken ? "the organization holds release" : `the organization's release could NOT be given back: an operator gives it back to ${team}`);
   }
-  if (undo.releaseOn && room) {
+  for (const at of [...undo.releaseOn]) {
     const who = admin ?? owner;
-    const config = await who.dash("GET", `/v1/workspaces/${room}/release-config`).catch(() => null);
-    const off = config?.ok && config.body?.enabled ? await who.dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.body.version }).catch(() => null) : config;
-    if (off?.ok && off.body?.enabled === false) undo.releaseOn = false;
-    said.push(!undo.releaseOn ? "release is off in the room, so its app is unpublished" : `release could NOT be switched off in room ${room}: its owner switches it off`);
+    const config = await who.dash("GET", `/v1/workspaces/${at}/release-config`).catch(() => null);
+    const off = config?.ok && config.body?.enabled ? await who.dash("PUT", `/v1/workspaces/${at}/release-config`, { enabled: false, expected_version: config.body.version }).catch(() => null) : config;
+    if (off?.ok && off.body?.enabled === false) undo.releaseOn.delete(at);
+    said.push(!undo.releaseOn.has(at) ? `release is off in room ${at}, so its app is unpublished` : `release could NOT be switched off in room ${at}: its owner switches it off`);
   }
   const { left } = await publisher.stop();
-  if (left) said.push(`the room ${room} could NOT be made private again`);
-  for (const [id, what] of [...grants]) {
+  if (left) said.push(`${[...publisher.published.keys()].map((at) => `room ${at}`).join(" and ")} could NOT be made private again`);
+  for (const [id, { what }] of [...grants]) {
     const back = await takeBack(id).catch(() => null);
     if (grants.has(id)) said.push(`the ${what} (${id}) could NOT be taken back (${back ? `HTTP ${back.status} ${back.code ?? ""}` : "no answer"})`);
   }
@@ -956,7 +1019,7 @@ try {
 }
 say("\n## clean-up");
 for (const line of cleanupLines) say(`  - ${line}`);
-if (repo) say(`  - the repository ${repo.full} stays on GitHub: the owner archives or deletes it`);
+for (const { full } of repos.values()) say(`  - the repository ${full} stays on GitHub: the owner archives or deletes it`);
 if (notOn) {
   say(`\nRelease isn't on with a provider on staging: ${notOn}. Sign-ups taken: ${signUpsAsked}.`);
   say(`Left behind on staging: ${leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);

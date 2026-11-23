@@ -466,6 +466,32 @@ describe("the app's address", () => {
       const due = await inRoom(r.room, (s) => s.exec("SELECT s.host, s.script_name FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE a.applied_version IS NULL OR a.applied_version != s.version ORDER BY s.host = ?", old).toArray());
       expect(due).toContainEqual({ host: old, script_name: null });
     });
+
+    it("takes back the host it retired when the content domain is changed and changed back, inserting nothing twice", async () => {
+      const r = await room();
+      const here = `${r.label}.${FAKE.domain}`;
+      const there = `${r.label}.changed.example`;
+      /** The queued release ended, as the job would end it, and another asked for under the same label. */
+      const another = async (): Promise<Room> => {
+        await inRoom(r.room, (s) => void s.exec("UPDATE release SET state = 'failed', failure_code = 'release_upload_expired', finished_at = 1 WHERE state = 'queued'"));
+        const asked = await switchedOn(() => api(r.requester, "POST", `/v1/workspaces/${r.room}/releases`, { task_id: TASK, commit_sha: SHA }));
+        expect(asked.status, asked.text).toBe(200);
+        return { ...r, release: asked.body.id };
+      };
+      const hosts = () => all(r.room, "SELECT s.host, s.script_name, s.version, r.host IS NOT NULL AS retired FROM serve_state s LEFT JOIN serve_retired r ON r.host = s.host ORDER BY s.host");
+      expect((await approve(r)).body.state).toBe("queued");
+      expect(await hosts()).toEqual([{ host: here, script_name: null, version: 1, retired: 0 }]);
+      // The content domain changed: the next approval names the address on it, and the earlier one is retired.
+      await inRoom(r.room, (s) => { s.exec("CREATE TABLE test_content_domain (domain TEXT)"); s.exec("INSERT INTO test_content_domain (domain) VALUES ('changed.example')"); });
+      expect((await approve(await another())).body.state).toBe("queued");
+      expect(await hosts()).toEqual([{ host: there, script_name: null, version: 1, retired: 0 }, { host: here, script_name: null, version: 1, retired: 1 }].sort((a, b) => (a.host < b.host ? -1 : 1)));
+      // And changed back: the host on it is the room's already, retired, so it is taken back as it is, never inserted.
+      await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_domain"));
+      const back = await approve(await another());
+      expect([back.status, back.body?.state], back.text).toEqual([200, "queued"]);
+      expect(await hosts()).toEqual([{ host: there, script_name: null, version: 1, retired: 1 }, { host: here, script_name: null, version: 1, retired: 0 }].sort((a, b) => (a.host < b.host ? -1 : 1)));
+      expect(await all(r.room, "SELECT COUNT(*) AS n FROM serve_retired")).toEqual([{ n: 1 }]);
+    });
   });
 });
 
@@ -534,6 +560,123 @@ describe("the labels' upkeep", () => {
     expect(await count()).toBe(start + 1);
     expect(await all(approved.room, "SELECT approved_at, indexed_at FROM app_label_approval")).toEqual([{ approved_at: T, indexed_at: T }]);
     expect(await BINDINGS.DB.prepare("SELECT approved_at FROM app_label_index WHERE label = ?").bind(asked.label).first()).toEqual({ approved_at: null });
+  });
+});
+
+describe("an operator retiring a label another room's lookup row holds (6f's open item 3)", () => {
+  const OPERATOR: Who = { id: "per_operator_one", org: "org_ra_ops" };
+  const SOMEONE_ELSE = "ws_ra_someone_else";
+  const retire = (label: string, body: unknown, who: Who = OPERATOR) => switchedOn(() => api(who, "POST", `/v1/moderation/apps/${label}/retire`, body));
+  /** A room whose label's lookup row another room holds, refused at approval, as operators were told. */
+  async function taken() {
+    const r = await room();
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(r.label, SOMEONE_ELSE).run();
+    expect(refused(await approve(r))).toEqual([409, "release_label_taken"]);
+    return r;
+  }
+  const labelRow = (r: Room) => all(r.room, "SELECT label, current, retired_at FROM app_label WHERE label = ?", r.label);
+  const operatorLog = (label: string) => inModeration((sql) => sql.exec("SELECT operator, subject_kind, action, reason, outcome FROM operator_action WHERE subject = ? ORDER BY seq", label).toArray());
+
+  it("tells operators which room can't release under the label, by its ID", async () => {
+    const r = await taken();
+    expect(await inModeration((sql) => sql.exec("SELECT subject, detail FROM takedown_finding WHERE code = 'app_label_taken' AND subject = ?", r.label).toArray())).toEqual([{ subject: r.label, detail: r.room }]);
+  });
+
+  it("retires it, ends what awaited approval under it, and the room's next request draws a new label", async () => {
+    const r = await taken();
+    await inRoom(r.room, (s) => void s.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'agent', ?, 'admin', ?, 1)", AGENT.id, AGENT.org, r.owner.id));
+    const answer = await retire(r.label, { reason: "other", room: r.room });
+    expect([answer.status, answer.body], answer.text).toEqual([200, { label: r.label, retired: true, retired_at: T }]);
+    expect(await labelRow(r)).toEqual([{ label: r.label, current: null, retired_at: T }]);
+    expect(await releaseRow(r)).toMatchObject({ state: "failed", failure_code: "release_label_retired", finished_at: T, approved_by: null });
+    // Podster's act in the room, the reason with it, never the operator's ID; the operator is in the operators' log.
+    expect(await all(r.room, "SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action = 'app.label_retired'")).toEqual([
+      { actor_id: "podster", action: "app.label_retired", target_id: "app", prior_json: '{"current":true}', new_json: '{"current":false,"reason":"other"}' },
+    ]);
+    expect(JSON.stringify(await all(r.room, "SELECT * FROM audit_event"))).not.toContain(OPERATOR.id);
+    // Told to the room's managers by Podster, as a suspension is, with nothing of the label.
+    const [told] = await all(r.room, "SELECT id, actor_id FROM event WHERE type = 'app.label_retired'");
+    expect(told.actor_id).toBe("podster");
+    expect((await all(r.room, "SELECT recipient_principal_id AS who FROM outbox WHERE event_id = ? ORDER BY who", told.id)).map((o: any) => o.who)).toContain(r.owner.id);
+    expect(JSON.stringify(await all(r.room, "SELECT * FROM event WHERE type = 'app.label_retired'"))).not.toContain(r.label);
+    expect(await operatorLog(r.label)).toEqual([{ operator: OPERATOR.id, subject_kind: "app", action: "retire_label", reason: "other", outcome: "done" }]);
+    // Nothing was unpublished: no epoch moved, and nothing serves or was queued for deletion.
+    expect(await all(r.room, "SELECT release_epoch FROM release_config")).toEqual([{ release_epoch: 2 }]);
+    expect(await all(r.room, "SELECT (SELECT COUNT(*) FROM unpublish) AS unpublished, (SELECT COUNT(*) FROM serve_state) AS hosts, (SELECT COUNT(*) FROM script_delete) AS deletes")).toEqual([{ unpublished: 0, hosts: 0, deletes: 0 }]);
+    // Asking again changes nothing, and answers the same.
+    const before = await everything(r);
+    const again = await retire(r.label, { reason: "other", room: r.room });
+    expect([again.status, again.body]).toEqual([200, { label: r.label, retired: true, retired_at: T }]);
+    expect(await everything(r)).toBe(before);
+    // The room asks again: a new label, never the retired one, and its approval holds.
+    const asked = await switchedOn(() => api(r.requester, "POST", `/v1/workspaces/${r.room}/releases`, { task_id: TASK, commit_sha: SHA }));
+    expect(asked.status, asked.text).toBe(200);
+    const [{ label }] = await all(r.room, "SELECT label FROM release WHERE id = ?", asked.body.id);
+    expect(label).not.toBe(r.label);
+    expect((await approve({ ...r, release: asked.body.id, label })).body.state).toBe("queued");
+    expect(await indexRow(label)).toMatchObject({ workspace_id: r.room });
+    expect(await indexRow(r.label)).toMatchObject({ workspace_id: SOMEONE_ELSE });
+  });
+
+  it("refuses, changing nothing, a label the room may still release under or one an approval held for", async () => {
+    // D1's row is this room's, or there is none: approvals would hold.
+    const free = await room();
+    let before = await everything(free);
+    expect(refused(await retire(free.label, { reason: "other", room: free.room }))).toEqual([409, "app_label_not_taken"]);
+    expect(await everything(free)).toBe(before);
+    expect((await approve(free)).body.state).toBe("queued");
+    // An approval held for it, and only then did the row come to name another room.
+    await BINDINGS.DB.prepare("UPDATE app_label_index SET workspace_id = ? WHERE label = ?").bind(SOMEONE_ELSE, free.label).run();
+    before = await everything(free);
+    expect(refused(await retire(free.label, { reason: "other", room: free.room }))).toEqual([409, "app_label_not_taken"]);
+    expect(await everything(free)).toBe(before);
+    // The same with only one of the room's own marks: the label recorded as its own in the lookup table, so its
+    // approvals hold, an approval recorded, or a release past awaiting approval.
+    for (const [why, mark] of [
+      ["recorded as the room's own in the lookup table", () => "UPDATE app_label SET indexed_at = 1"],
+      ["an approval recorded", (r: Room) => `INSERT INTO app_label_approval (label, approved_at) VALUES ('${r.label}', 1)`],
+      ["a release past awaiting approval", () => "UPDATE release SET state = 'queued'"],
+      ["a release an approval held for, failed since", () => "UPDATE release SET state = 'failed', failure_code = 'release_upload_expired', finished_at = 1, approved_by = 'per_x', approved_at = 1"],
+    ] as const) {
+      const r = await taken();
+      await inRoom(r.room, (s) => void s.exec(mark(r)));
+      before = await everything(r);
+      expect(refused(await retire(r.label, { reason: "other", room: r.room })), why).toEqual([409, "app_label_not_taken"]);
+      expect(await everything(r), why).toBe(before);
+    }
+  });
+
+  it("acts only on the room named, for a label that is its own, for an operator, with exactly a reason and a room", async () => {
+    const r = await taken();
+    const other = await room();
+    const before = await everything(r);
+    const cases: [string, string, unknown, Who, [number, string]][] = [
+      ["another room's label", other.label, { reason: "other", room: r.room }, OPERATOR, [404, "not_found"]],
+      ["the label, named in another room", r.label, { reason: "other", room: other.room }, OPERATOR, [404, "not_found"]],
+      ["a room that doesn't exist", r.label, { reason: "other", room: `ws_${"0".repeat(32)}` }, OPERATOR, [404, "not_found"]],
+      ["the room's owner, not an operator", r.label, { reason: "other", room: r.room }, r.owner, [403, "not_allowed"]],
+      ["no room", r.label, { reason: "other" }, OPERATOR, [400, "invalid_argument"]],
+      ["a room that isn't a room's ID", r.label, { reason: "other", room: "ws_RA" }, OPERATOR, [400, "invalid_argument"]],
+      ["no reason", r.label, { room: r.room }, OPERATOR, [400, "invalid_argument"]],
+      ["another field", r.label, { reason: "other", room: r.room, label: other.label }, OPERATOR, [400, "invalid_argument"]],
+      ["a label of the wrong form", "NOT-A-LABEL", { reason: "other", room: r.room }, OPERATOR, [404, "not_found"]],
+    ];
+    for (const [why, label, body, who, want] of cases) expect(refused(await retire(label, body, who)), why).toEqual(want);
+    expect(await everything(r)).toBe(before);
+    expect(await labelRow(other)).toEqual([{ label: other.label, current: 1, retired_at: null }]);
+  });
+
+  it("answers release_not_available, writing nothing, while the release path is incomplete and a provider is configured; and is no route while release is off", async () => {
+    const r = await taken();
+    await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
+    const before = await everything(r);
+    try {
+      expect(refused(await retire(r.label, { reason: "other", room: r.room }))).toEqual([409, "release_not_available"]);
+    } finally { await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
+    expect(await everything(r)).toBe(before);
+    const off = await api(OPERATOR, "POST", `/v1/moderation/apps/${r.label}/retire`, { reason: "other", room: r.room });
+    expect(refused(off)).toEqual([404, "not_found"]);
+    expect(await everything(r)).toBe(before);
   });
 });
 

@@ -157,7 +157,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 const AGENT_RELEASE = { capability: "deploy_release", operation: "requestRelease" };
 const releaseOperations = {
   getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
-  deleteAppData: "ws,label", deleteAppDataAsOperator: "label",
+  deleteAppData: "ws,label", deleteAppDataAsOperator: "label", retireAppLabel: "label",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
   getReleaseDelegation: "org", setReleaseDelegation: "org",
 };
@@ -178,13 +178,14 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 6 built a person's request for a release, which the room itself answers.
     // Step 6's 6f built approving and declining one, and 6h asking to roll back, which the room itself answers.
     // S4 of the store plan built deleting an app's data, the owner's (which the room itself answers) and an operator's.
-    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "deleteAppData", "deleteAppDataAsOperator"].includes(id);
+    // Step 6's 6f built an operator's retirement of a room's label another room's lookup row holds, behind the gate.
+    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "deleteAppData", "deleteAppDataAsOperator", "retireAppLabel"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: while the release path isn't complete, a deployment with release
     // and a content provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a
     // release, and approving one, until the release path is complete (`RELEASE_PATH_COMPLETE`). Declining only takes
     // away and passes no gate, so its summary may not name `release_not_available` at all.
-    const gates = { requestAppHostname: "**While the release path isn't complete,**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**", rollbackRelease: "**Until the release path is complete**" };
+    const gates = { requestAppHostname: "**While the release path isn't complete,**", requestRelease: "**Until the release path is complete**", approveRelease: "**Until the release path is complete**", rollbackRelease: "**Until the release path is complete**", retireAppLabel: "**Until the release path is complete**" };
     const gated = id in gates;
     if (gated && !found.op.summary?.includes(gates[id])) problems.push(`${id}: its summary must say when its gate answers \`release_not_available\``);
     if (built ? found.op.summary?.includes("Not built") || (!gated && found.op.summary?.includes("`release_not_available`")) : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);

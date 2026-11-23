@@ -115,6 +115,8 @@ person_only:
   - suspendApp
   - liftAppSuspension
   - deleteAppDataAsOperator
+  # M6 step 6, 6f's open item 3: an operator retires a room's label another room's lookup row holds.
+  - retireAppLabel
   - suspendAppHost
   - liftAppHostSuspension
   - stopContentDomain

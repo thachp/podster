@@ -91,6 +91,8 @@ const M6: Record<string, "person" | "operator"> = {
   getReleaseConfig: "person", setReleaseConfig: "person", listReleaseApprovals: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
   stopContentDomain: "operator", resumeContentDomain: "operator", listTakedownFindings: "operator",
+  // Step 6's 6f: an operator retires a room's label another room's lookup row holds.
+  retireAppLabel: "operator",
   // Decision 218's release switch: an operator or the organization's admin reads it, and only an operator sets it.
   getReleaseDelegation: "person", setReleaseDelegation: "operator",
 };
@@ -175,6 +177,8 @@ describe("M6's routes, none of them built", () => {
           listReleaseApprovals: [404, "workspace_not_found"],
           // Step 6's 6f built approving and declining a release, which the room answers the same way.
           approveRelease: [404, "workspace_not_found"], declineRelease: [404, "workspace_not_found"],
+          // Step 6's 6f built an operator's retirement of a label, which needs the room named: this body names none.
+          retireAppLabel: [400, "invalid_argument"],
         };
         const ownerWant: Record<string, [number, string | undefined]> = {
           ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"],

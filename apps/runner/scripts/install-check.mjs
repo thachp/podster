@@ -9,7 +9,8 @@
 // off and an empty npm config, then fails if any Claude Code binary is there (Runner runs Claude Code only in its own
 // container, and tells the SDK so), or any dev-only package, or the install passes the budget, or the installed SDK,
 // given Runner's own options, starts anything but the container's binary, or npm asked the registry for any package but
-// Runner's (with no shrinkwrap, everything must come from the bundle). It publishes nothing and sends no credential.
+// Runner's (with no shrinkwrap, everything must come from the bundle), or the installed CLI's `--help` or any of Runner's
+// modules that load a bundled SDK fails to start. It publishes nothing and sends no credential.
 // It isn't packed.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -24,7 +25,8 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 /**
  * The production tree was about 43 MB, with no Claude Code binary (each is about 350 MB). The experimental OpenAI adapter's
  * three pinned packages (2026-11-22) brought it to 82.2 MB, `openai` alone 24.2 MB, so the budget went from 60 to 100 MB:
- * still far below one Claude Code binary, which is what it is here to catch.
+ * still far below one Claude Code binary, which is what it is here to catch. Bundling `@modelcontextprotocol/client`, which
+ * agents-core imports at load though npm lists it as optional (0.0.1-test.18 couldn't start without it), made it 90.9 MB.
  */
 const DEFAULT_BUDGET_MB = 100;
 const UPSTREAM = "https://registry.npmjs.org";
@@ -48,14 +50,20 @@ if (args.length !== 1) usage("install-check.mjs needs one .tgz.");
 const tarball = resolve(args[0]);
 const bytes = readFileSync(tarball);
 
+// Every child is killed after 5 minutes, so a hung start fails the check instead of waiting for CI's job limit.
+const RUN_TIMEOUT_MS = 5 * 60 * 1000;
 const run = (cmd, argv, opts) =>
   new Promise((done, fail) => {
     const child = spawn(cmd, argv, { ...opts, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    const timer = setTimeout(() => {
+      process.stderr.write(`install check: ${cmd} timed out after ${RUN_TIMEOUT_MS / 1000} s\n`);
+      child.kill("SIGKILL");
+    }, RUN_TIMEOUT_MS);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => process.stderr.write(d));
-    child.on("error", fail);
-    child.on("close", (status) => done({ status, out }));
+    child.on("error", (e) => (clearTimeout(timer), fail(e)));
+    child.on("close", (status) => (clearTimeout(timer), done({ status, out })));
   });
 
 // The package's own manifest and whether it ships a shrinkwrap, from the .tgz itself.
@@ -191,12 +199,18 @@ try {
   process.stdout.write(`the installed SDK started: ${JSON.stringify(commands)}\n`);
   if (!Array.isArray(commands) || commands.length !== 1 || commands[0] !== "/opt/claude/claude") problems.push("the installed SDK, given Runner's options, didn't start exactly /opt/claude/claude");
 
-  // And Runner's modules that load the bundled SDK, MCP SDK and zod import from the installed package. Importing them
-  // runs no command.
-  for (const module of ["build/node/claude-engine.js", "build/node/claude-driver.js"]) {
+  // And Runner's modules that load the bundled SDKs import from the installed package: the Claude ones, and the
+  // experimental OpenAI adapter's, which the CLI loads only when the policy picks it. Importing them runs no command.
+  for (const module of ["build/node/claude-engine.js", "build/node/claude-driver.js", "build/node/openai-engine.js", "build/node/openai-driver.js"]) {
     const loaded = await run(process.execPath, ["--input-type=module", "-e", "await import(process.argv[1]);", join(installedRoot, module)], { cwd: project, env: childEnv() });
     if (loaded.status !== 0) problems.push(`the installed ${module} doesn't load`);
   }
+
+  // And the installed CLI itself starts, as `npx podster@test --help` would: it loads every module the CLI imports at
+  // start, and touches no network, key, home folder or Docker (help prints and returns before any of them).
+  const cli = await run(process.execPath, [join(installedRoot, manifest.bin.podster), "--help"], { cwd: project, env: childEnv() });
+  process.stdout.write(`the installed CLI's --help exited ${cli.status}\n`);
+  if (cli.status !== 0 || !cli.out.includes("Podster Runner")) problems.push(`the installed CLI didn't start (\`--help\` exited ${cli.status})`);
 
   if (problems.length > 0) {
     for (const problem of problems) process.stderr.write(`install check: ${problem}\n`);

@@ -518,16 +518,31 @@ describe("S-58, supply chain", () => {
     }
   });
 
+  it("bundles @modelcontextprotocol/client, pinned exactly, because agents-core imports it at load though npm calls it optional", async () => {
+    // Packing omits optional dependencies (scripts/pack.mjs), so without this 0.0.1-test.18's OpenAI path couldn't load.
+    // Runner gives the OpenAI agent no MCP server; the package is only there for agents-core to import.
+    const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8")) as { dependencies: Record<string, string>; bundleDependencies: string[] };
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version?: string; integrity?: string; optional?: boolean; optionalDependencies?: Record<string, string> }> };
+    expect(Object.keys(lock.packages["node_modules/@openai/agents-core"]?.optionalDependencies ?? {})).toEqual(["@modelcontextprotocol/client"]);
+    expect(pkg.dependencies["@modelcontextprotocol/client"]).toBe("2.4.0");
+    expect(pkg.bundleDependencies).toContain("@modelcontextprotocol/client");
+    for (const name of ["@modelcontextprotocol/client", "@modelcontextprotocol/core"]) {
+      const entry = lock.packages[`node_modules/${name}`];
+      expect([name, entry?.version, entry?.optional ?? false, /^sha512-/.test(entry?.integrity ?? "")]).toEqual([name, "2.4.0", false, true]);
+    }
+  });
+
   it("has no umbrella or realtime package in the lockfile, and no install-time script in any OpenAI package or its dependencies", async () => {
-    const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { hasInstallScript?: boolean; dependencies?: Record<string, string> }> };
+    const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { hasInstallScript?: boolean; dependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }> };
     const names = Object.keys(lock.packages);
     expect(names.filter((n) => /node_modules\/@openai\/(agents|agents-realtime)$/.test(n))).toEqual([]);
-    // The OpenAI packages and everything they depend on, transitively.
+    // The OpenAI packages and everything they depend on, transitively, optional dependencies included.
     const seen = new Set<string>();
     const walk = (name: string) => {
       if (seen.has(name)) return;
       seen.add(name);
-      for (const dep of Object.keys(lock.packages[`node_modules/${name}`]?.dependencies ?? {})) walk(dep);
+      const entry = lock.packages[`node_modules/${name}`];
+      for (const dep of Object.keys({ ...entry?.dependencies, ...entry?.optionalDependencies })) walk(dep);
     };
     for (const name of Object.keys(PINNED_OPENAI_PACKAGES)) walk(name);
     for (const name of seen) {
@@ -596,7 +611,27 @@ describe("off by default (the architect's ruling of 2026-11-22)", () => {
 
   it("builds the OpenAI engine in run only through the start check, printing the warning first", async () => {
     const cli = await readFile(new URL("../src/node/cli.ts", import.meta.url), "utf8");
-    expect(cli).toMatch(/const choice = adapterAtStart\([^\n]*\);\n\s*if \(!choice\.ok\) throw new Error\(choice\.message\);\n\s*if \(choice\.adapter === "openai_agents"\) \{\n\s*say\(OPENAI_WARNING\);\n\s*engine = await openaiEngine\(/);
+    expect(cli).toMatch(/const choice = adapterAtStart\([^\n]*\);\n\s*if \(!choice\.ok\) throw new Error\(choice\.message\);\n\s*if \(choice\.adapter === "openai_agents"\) \{\n\s*say\(OPENAI_WARNING\);\n\s*\/\/[^\n]*\n\s*const \{ openaiEngine \} = await import\("\.\/openai-engine\.js"\);\n\s*engine = await openaiEngine\(/);
+  });
+
+  it("loads the OpenAI engine only there, by a dynamic import, so the Claude path and every other command load no OpenAI package", async () => {
+    const cli = await readFile(new URL("../src/node/cli.ts", import.meta.url), "utf8");
+    expect(cli).not.toMatch(/^import[^;]*from "\.\/openai-(engine|driver)\.js";/m);
+    expect(cli.match(/openai-(engine|driver)\.js/g)).toEqual(["openai-engine.js"]);
+    // And only the engine imports the driver, the one module that imports OpenAI packages.
+    const root = new URL("../src/", import.meta.url);
+    const { readdir } = await import("node:fs/promises");
+    const importers: string[] = [];
+    for (const file of await readdir(root, { recursive: true })) {
+      if (!file.endsWith(".ts")) continue;
+      const code = await readFile(new URL(file, root), "utf8");
+      const name = file.replaceAll("\\", "/");
+      if (/(from|import)\s*\(?\s*"[^"]*openai-driver\.js"/.test(code)) importers.push(name);
+      // Only cli.ts reaches the engine, and only by its dynamic import; only the driver names an OpenAI or MCP package.
+      if (name !== "node/cli.ts" && /(from|import)\s*\(?\s*"[^"]*openai-engine\.js"/.test(code)) importers.push(`engine:${name}`);
+      if (name !== "node/openai-driver.ts" && /(from|import)\s*\(?\s*"(@openai\/|openai"|@modelcontextprotocol\/)/.test(code)) importers.push(`package:${name}`);
+    }
+    expect(importers).toEqual(["node/openai-engine.ts"]);
   });
 });
 

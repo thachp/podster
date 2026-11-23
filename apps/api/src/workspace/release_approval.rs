@@ -43,7 +43,12 @@
 //! its own rows, and a row is never taken from another room. The serve row is written in the approval's own
 //! transaction, only once every check holds, and it names no script, so it serves nothing until a release is committed
 //! live. **An earlier default host is kept,** marked retired (`serve_retired`), never deleted: the applier goes on
-//! answering for it, so a write to it that lands late is still put right.
+//! answering for it, so a write to it that lands late is still put right. **A retired host is taken back, not inserted
+//! again,** when the address names it once more, as after the content domain is changed and changed back
+//! (2026-11-23, owed from the re-review of #411).
+//!
+//! **A label another room's lookup row holds** stays refused until an operator retires it (`label_retire`); operators
+//! are told by the finding `app_label_taken`, with this room's ID in its `detail`.
 //!
 //! **Decline** passes no gate, since it only takes away: `podster_policy::release::authorize_decline` allows it
 //! wherever the room is still there. It needs the same standing, then a release awaiting approval, and it writes
@@ -227,6 +232,21 @@ fn domain_for(sql: &SqlStorage, domain: Option<&str>) -> Option<String> {
     {
         return None;
     }
+    // Test builds only: a room a test gives `test_content_domain` names its address on that domain instead, as a
+    // deployment whose content domain was changed.
+    #[cfg(feature = "failpoints")]
+    if let Some(changed) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_content_domain'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| rows(sql, "SELECT domain FROM test_content_domain", vec![]).ok())
+    .and_then(|found| found.first().and_then(|row| text(&row["domain"])))
+    {
+        return Some(changed);
+    }
     let _ = sql;
     domain.map(str::to_owned)
 }
@@ -291,7 +311,28 @@ fn address(
           WHERE s.kind = 'default' AND s.host NOT IN (SELECT host FROM serve_retired)",
         vec![],
     )?;
-    let insert = || {
+    // The host on the domain now. **A host the room retired is taken back, never inserted again** (owed from the
+    // re-review of #411): a content domain changed and then changed back names an address the room already has, kept
+    // retired, and its rows are reused as they are. It serves nothing: it was retired only once it was down, and nothing
+    // gives a retired host a script.
+    let insert = || -> R<()> {
+        let kept = rows(
+            sql,
+            "SELECT s.kind, s.script_name FROM serve_retired r JOIN serve_state s ON s.host = r.host WHERE r.host = ?",
+            vec![host.as_str().into()],
+        )?;
+        if let Some(row) = kept.first() {
+            if row["kind"].as_str() != Some("default") || !row["script_name"].is_null() {
+                return Err(ApiError::internal(
+                    "a retired host isn't a default host serving nothing",
+                ));
+            }
+            return exec(
+                sql,
+                "DELETE FROM serve_retired WHERE host = ?",
+                vec![host.as_str().into()],
+            );
+        }
         exec(
             sql,
             "INSERT INTO serve_state (host, kind, version, updated_at) VALUES (?, 'default', 1, ?)",
@@ -573,10 +614,12 @@ impl Workspace {
         })
     }
 
-    /// Operators are told, by the label, that its lookup row names another room. If the telling fails, the next
-    /// approval or alarm tells again.
+    /// Operators are told, by the label, that its lookup row names another room, with this room's ID in `detail`: the
+    /// lookup table can't route an operator here, and retiring the label (`retireAppLabel`) needs to name this room.
+    /// If the telling fails, the next approval or alarm tells again.
     async fn tell_label_taken(&self, label: &str) {
-        let finding = json!({ "code": LABEL_TAKEN_FINDING, "subject": label });
+        let room = objects::room_id(&self.state.storage().sql()).unwrap_or_default();
+        let finding = json!({ "code": LABEL_TAKEN_FINDING, "subject": label, "detail": room });
         let told = crate::moderation::call(
             &self.env,
             crate::reconcile::FINDING_PATH,

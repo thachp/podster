@@ -122,6 +122,28 @@ pub fn normalize(input: &str) -> Result<String, HostnameRefusal> {
     Ok(ascii)
 }
 
+/// Whether a content domain is Podster's own (the security review of PR #563, 2026-11-23): `podster.dev` or a name
+/// under it, or the registrable domain of one of `own_addresses`, the application's and the gateway's addresses as the
+/// Worker's configuration gives them, or a name under that. A content domain serves agents' apps, so one that is
+/// Podster's would serve them beside Podster's own pages and cookies. With no Public Suffix List here, a registrable
+/// domain is read as the host's last two labels, which errs strict: under a two-label suffix such as `co.uk` it
+/// refuses more than it must, never less. An address that isn't an `http` or `https` URL on a host is skipped.
+pub fn content_domain_is_podsters(domain: &str, own_addresses: &[&str]) -> bool {
+    let domain = domain.to_ascii_lowercase();
+    let mut roots = vec![PODSTER_DOMAIN.to_string()];
+    for address in own_addresses {
+        let Some(host) = reported_host(address) else {
+            continue;
+        };
+        let mut last_two: Vec<&str> = host.rsplit('.').take(2).collect();
+        last_two.reverse();
+        roots.push(last_two.join("."));
+    }
+    roots
+        .iter()
+        .any(|root| domain == *root || domain.ends_with(&format!(".{root}")))
+}
+
 /// The longest address a report may give, in characters (Unicode scalar values), as the contract's `maxLength` counts
 /// them: an address with multi-byte characters may be longer in bytes.
 pub const MAX_REPORTED_ADDRESS_LEN: usize = 2048;

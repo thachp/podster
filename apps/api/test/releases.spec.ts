@@ -91,6 +91,8 @@ const M6: Record<string, "person" | "operator"> = {
   getReleaseConfig: "person", setReleaseConfig: "person", listReleaseApprovals: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
   stopContentDomain: "operator", resumeContentDomain: "operator", listTakedownFindings: "operator",
+  // Step 6's 6f: an operator retires a room's label another room's lookup row holds.
+  retireAppLabel: "operator",
   // Decision 218's release switch: an operator or the organization's admin reads it, and only an operator sets it.
   getReleaseDelegation: "person", setReleaseDelegation: "operator",
 };
@@ -175,6 +177,8 @@ describe("M6's routes, none of them built", () => {
           listReleaseApprovals: [404, "workspace_not_found"],
           // Step 6's 6f built approving and declining a release, which the room answers the same way.
           approveRelease: [404, "workspace_not_found"], declineRelease: [404, "workspace_not_found"],
+          // Step 6's 6f built an operator's retirement of a label, which needs the room named: this body names none.
+          retireAppLabel: [400, "invalid_argument"],
         };
         const ownerWant: Record<string, [number, string | undefined]> = {
           ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"],
@@ -555,5 +559,20 @@ describe("the Worker's configuration for M6", () => {
     // Release is switched on nowhere, and nothing of Workers for Platforms, KV or a content domain is bound.
     for (const vars of [config.vars, ...Object.values(config.env).map((environment: any) => environment.vars)]) expect(Object.keys(vars ?? {})).not.toContain("RELEASES");
     for (const name of ["dispatch_namespaces", "kv_namespaces", "routes"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(`"${name}"`);
+  });
+
+  it("holds none of release's twelve secrets as a variable, in any environment", () => {
+    // They are Worker secrets the owner sets (docs/staging.md, "Setting up release (M6)"); the owner's Cloudflare IDs
+    // never go in git, and a variable here would be what the API reads.
+    const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    const secrets = [
+      "CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_KV_NAMESPACE_ID", "CONTENT_DOMAIN", "CONTENT_SCRIPTS_TOKEN", "CONTENT_ROUTING_TOKEN",
+      "CONTENT_STORE_TOKEN", "CUSTOM_HOSTNAME_ZONE_ID", "CUSTOM_HOSTNAME_TOKEN", "GITHUB_RELEASE_APP_ID", "GITHUB_RELEASE_INSTALLATION_ID", "GITHUB_RELEASE_APP_KEY",
+    ];
+    const environments = [["top level", config], ...Object.entries(config.env ?? {})] as [string, any][];
+    expect(environments.map(([name]) => name)).toContain("staging");
+    for (const [name, environment] of environments) {
+      for (const secret of secrets) expect(Object.keys(environment.vars ?? {}), `${name}: ${secret}`).not.toContain(secret);
+    }
   });
 });

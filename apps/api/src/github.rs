@@ -100,12 +100,22 @@ fn number(env: &Env, name: &str) -> Option<i64> {
         .filter(|n| *n > 0)
 }
 
-/// A variable's or secret's value by name, or `None`.
+/// A setting's value by name, or `None`, read by one mechanism for each name ([`is_secret`]): a secret with
+/// `env.secret`, anything else as a plain variable with `env.var`.
 pub fn lookup(env: &Env, name: &str) -> Option<String> {
-    env.var(name)
-        .ok()
-        .map(|v| v.to_string())
-        .or_else(|| secret(env, name))
+    if is_secret(name) {
+        secret(env, name)
+    } else {
+        env.var(name).ok().map(|v| v.to_string())
+    }
+}
+
+/// Whether a setting of the Apps' is a Worker secret the owner sets with `wrangler secret put` (docs/staging.md): each
+/// App's private key, and all three of the release App's settings, `GITHUB_RELEASE_*`. Its IDs are secrets too, because
+/// that App isn't committed in `wrangler.jsonc` as the other three are, and a variable set on the dashboard is gone
+/// after the next deploy. Every other name is a variable from `wrangler.jsonc`.
+fn is_secret(name: &str) -> bool {
+    name.ends_with("_APP_KEY") || name.starts_with("GITHUB_RELEASE_")
 }
 
 /// A secret's value, or `None`.

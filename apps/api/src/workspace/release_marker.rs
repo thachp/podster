@@ -35,8 +35,8 @@
 //!   release back) records nothing served. Its answer and log show the set-back it found, with its code.
 //! - **A flight's end wakes** every release waiting `release_in_flight`.
 //!
-//! **Not shown, and not decided here:** whether 30 seconds is long enough at the real host. ADR 0010 calls it
-//! provisional until spike G, and a false failure only sets back.
+//! **Not shown, and not decided here:** whether 30 seconds is long enough at every location. Spike G (2026-11-23) saw a
+//! switch at the host within 0.37 s from one location, and core keeps 30 seconds; a false failure only sets back.
 //!
 //! Logs carry the room's and the release's IDs and codes. The host is never logged.
 use super::release_commit::{end_stale, fail, queue_script, record as record_change, write_state};

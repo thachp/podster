@@ -28,7 +28,7 @@
 //! A client never names a zone, an ID or a hostname here: the zone comes from configuration, the hostname from the
 //! room's own state and an ID from Cloudflare's own answer, each checked against its form before it goes into a path.
 //! Logs carry nothing from this module: no hostname, no ID, no zone and no token.
-use crate::{setting, Setting};
+use crate::{secret, Setting};
 use futures_util::future::{select, Either};
 use podster_core::hostname_requests::{provider_id_form, provider_status_form, ProviderRead};
 use serde_json::{json, Value};
@@ -47,7 +47,8 @@ const PAGE: usize = 50;
 /// answer, and the room tells operators.
 pub(crate) const MAX_PAGES: usize = 20;
 
-/// The settings a provider for custom hostnames needs. Neither is set in any environment.
+/// The settings a provider for custom hostnames needs, each a Worker secret the owner sets (docs/staging.md, "Setting
+/// up release (M6)"). Neither is set in any environment's configuration.
 const ZONE: &str = "CUSTOM_HOSTNAME_ZONE_ID";
 const TOKEN: &str = "CUSTOM_HOSTNAME_TOKEN";
 
@@ -98,9 +99,10 @@ fn plain_host(host: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
 }
 
-fn text_setting(env: &Env, name: &str, well_formed: fn(&str) -> bool) -> Option<String> {
-    match setting(env, name) {
-        Setting::Text(value) if well_formed(&value) => Some(value),
+/// A secret's text when it is bound as text and well-formed, or `None`.
+fn well_formed(found: Setting, form: fn(&str) -> bool) -> Option<String> {
+    match found {
+        Setting::Text(value) if form(&value) => Some(value),
         _ => None,
     }
 }
@@ -166,8 +168,8 @@ impl HostnameProvider {
     /// well-formed; one missing or malformed means no provider at all.
     pub(crate) fn from_env(env: &Env) -> Option<HostnameProvider> {
         Some(HostnameProvider {
-            zone: text_setting(env, ZONE, hex32)?,
-            token: text_setting(env, TOKEN, token)?,
+            zone: well_formed(secret(env, ZONE), hex32)?,
+            token: well_formed(secret(env, TOKEN), token)?,
         })
     }
 

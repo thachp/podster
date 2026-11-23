@@ -6,15 +6,15 @@
 // namespace's own fields; an existing one comes back as an object there; deleting one that is there answers 200; and
 // deleting it again answers 404 with code 10007.
 //
-// **Serve entries are an assumption, not a record.** No spike has run the KV REST calls. This stand-in answers the
-// way `src/content_provider.rs` expects: a write and a delete answer 200 with `"success": true`, a read answers 200
-// with the value, and a read of a missing key answers 404 with code 10009. Spike G must confirm those before a
-// provider is configured.
+// **Serve entries answer as spike G recorded them on 2026-11-23.** This stand-in answers the way
+// `src/content_provider.rs` expects: a write and a delete answer 200 with `"success": true`, a read answers 200 with
+// the value, and a read of a missing key answers 404 with code 10009, as the real KV REST calls did.
 //
 // **The two lists are for the reconciles** (third PR). The scripts' list answers as spike A saw it: one array, each
-// script an object with `id`, and a `has_assets` that is wrong on purpose, as it was. **The keys' list is an
-// assumption,** from Cloudflare's documented KV list: `result` an array of `{ name }`, and `result_info.cursor` for
-// the next page, empty at the end. A test can make the scripts' list claim there is more than it holds.
+// script an object with `id`, and a `has_assets` that is wrong on purpose, as it was. **The keys' list** is
+// Cloudflare's documented KV list, as spike G saw it on 2026-11-23: `result` an array of `{ name }`, and
+// `result_info.cursor` for the next page, empty at the end. A test can make the scripts' list claim there is more
+// than it holds.
 //
 // **A script's bindings** (rule 3(b), S5 of the store plan) answer at `…/scripts/<name>/bindings`, with the scripts
 // token only, as the store spike read them: `result` an array of bindings, `[]` for a script nothing was seeded for,

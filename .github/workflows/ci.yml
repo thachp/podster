@@ -397,6 +397,10 @@ jobs:
       # M6's staging run, without a network: the one host, the M6 operations it reads from the contract, how it compares answers.
       - run: node m6-staging-selftest.mjs
         working-directory: e2e
+      # M6's release-on staging run, without a network: its refusals before anything is sent, its plan and exit code, and
+      # how it judges a content host's answers and a task's release status.
+      - run: node m6-release-staging-selftest.mjs
+        working-directory: e2e
       # The scripts agents merge, deploy and probe with: every refusal, with stand-ins for gh, wrangler and curl. The content
       # Worker's deploy (M6 step 4(b)): every refusal makes no changing call, the token is in no argument or output, and
       # --deploy needs a terminal. It deploys nothing. These three are the slowest, so they run side by side; each has its

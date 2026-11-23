@@ -8,8 +8,8 @@
 //! - **Switched** ([`custom_switched`]): the host is open, wants a script whose release is served on the default host,
 //!   and the applier has recorded exactly that script written at exactly that version, not refused there, while the app
 //!   isn't held. Until then nothing is fetched.
-//! - **The fetch** ([`custom_plan`]): from the switch, at most [`MARKER_WAIT_MS`] (ADR 0010's provisional 30 seconds),
-//!   as for the default host; then set back.
+//! - **The fetch** ([`custom_plan`]): from the switch, at most [`MARKER_WAIT_MS`] (ADR 0010's 30 seconds, kept after
+//!   spike G), as for the default host; then set back.
 //! - **What came of it** ([`custom_record`]): **only that host's own marker records the release served on it.** A host
 //!   that moved while the fetch was out, closed when its claim ended among them, records nothing, seen or not: after a
 //!   deletion the edge can still answer for a name (spike D, item 12), so a marker is never taken as proof of anything

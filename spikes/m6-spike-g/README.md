@@ -1,6 +1,6 @@
 # M6 spike G: a hostname's proof and a takedown's speed
 
-**Status, 2026-11-22: written, not run.** Nothing here has been sent to Cloudflare. It answers [spike G](../../docs/m6-plan.md#the-spikes) once the owner runs it, and nothing builds on this folder.
+**Status, 2026-11-23: ran.** The architect ran `run`, `cursor` and `cleanup` on 2026-11-23 against the second account and `podster.site`, with tokens the owner made. All three exited 0 and nothing was left. See [RESULTS.md](RESULTS.md). *(2026-11-22: written, not run.)* It answers [spike G](../../docs/m6-plan.md#the-spikes), and nothing builds on this folder.
 
 **When it runs (the architect's ruling of 2026-11-22).** The content Worker deploys first, through `scripts/deploy-content` ([its guide](../../docs/content-deploy.md)). It serves nothing until a serve entry exists, and `RELEASES` stays off on the API. Spike G then runs against it on **the second account**, on `podster.site`, before `RELEASES` or the API's six provider settings are turned on. So the spike's serve entries are the only ones in the namespace while it runs.
 
@@ -107,7 +107,7 @@ The clean-up's own calls are outside these, and bounded by what the listings hol
 
 ## Results
 
-Every step is appended to `results/results.jsonl`, redacted. As with earlier spikes, the file is committed after a run, once it has been checked for tokens, the account and namespace IDs, the namespace's name and the workers.dev subdomain. One JSON object a line, with the run's ID and command. `takedown` lines hold, for each host and phase, the provider's answer, the host's timeline (`first_ms`, `stable_ms`, `flips_after_first`, the states read and the Cloudflare locations seen) and the read-back series. The figure to set the marker's wait from is the largest `stable_ms` of the `write` and `switch` phases; the takedown time is the `remove` phase's.
+Every step is appended to `results/results.jsonl`, redacted. *(2026-11-23: the run's lines are committed as `results/run.jsonl`, `results/cursor.jsonl` and `results/cleanup.jsonl`, one file a command.)* As with earlier spikes, the file is committed after a run, once it has been checked for tokens, the account and namespace IDs, the namespace's name and the workers.dev subdomain. One JSON object a line, with the run's ID and command. `takedown` lines hold, for each host and phase, the provider's answer, the host's timeline (`first_ms`, `stable_ms`, `flips_after_first`, the states read and the Cloudflare locations seen) and the read-back series. The figure to set the marker's wait from is the largest `stable_ms` of the `write` and `switch` phases; the takedown time is the `remove` phase's.
 
 ## Sources
 

@@ -1,0 +1,4 @@
+{"run":"240435","command":"cleanup","at":"2026-11-23T12:55:39.075Z","step":"start","bounds":{"ms":300000,"api":400,"edge":0,"probe":0},"stop_part":"if the gate allows","dns":true}
+{"run":"240435","command":"cleanup","at":"2026-11-23T12:55:39.272Z","step":"cleanup-stop","read":{"status":404,"success":false,"errors":[{"code":10009,"message":"get: 'key not found'"}],"ms":194},"reads":[404],"deleted":false,"note":"absent"}
+{"run":"240435","command":"cleanup","at":"2026-11-23T12:55:46.332Z","step":"cleanup","left":{"kv_spike_keys":0,"stop_key":"absent","spike_scripts":0,"scripts_list_info":{"count":0,"cursor":""},"named_scripts_still_readable":0,"probe_workers":0,"txt_records":0},"clean":true,"calls":11}
+{"run":"240435","command":"cleanup","at":"2026-11-23T12:55:46.333Z","step":"end","used":{"api":0,"edge":0,"probe":0},"ms":7259}

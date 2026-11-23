@@ -293,6 +293,7 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Secret | `GITHUB_PROVISION_APP_KEY` | The private key of `podster-staging-provision`. The owner's to set, as of 2026-11-11 |
 | Secret | `GITHUB_AGENT_APP_KEY` | The private key of `podster-staging-agent`. The owner's to set, as of 2026-11-11 |
 | Secret | `GITHUB_MERGE_APP_KEY` | The private key of `podster-staging-merge`. The owner's to set, as of 2026-11-11 |
+| Secret | `CONTENT_*`, `CUSTOM_HOSTNAME_*`, `GITHUB_RELEASE_*` | Release's twelve settings, [Setting up release (M6)](#setting-up-release-m6). The owner's to set; none set, as of 2026-11-23 |
 | Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
 | Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
 | Var | `PUBLIC_ROOMS` | `true`: public rooms are on for staging |
@@ -402,6 +403,99 @@ cd apps/api && npx wrangler secret delete REPO_TOKEN_KEY_PREVIOUS --env staging
 A sealed token that opens with neither key is recorded as `repo_token.unrevocable`, by its row's ID only, and dropped. The agent gets a new token at its next call. The old one can't be revoked and lives out its hour. If `REPO_TOKEN_KEY_PREVIOUS` is set but isn't 64 hex characters, nothing is dropped: those rows wait, the log says `key_invalid`, and they're revoked once it's fixed.
 
 **Switching managed repositories off** doesn't wake the rooms. Each room revokes its tokens at its next alarm, within the hour. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes after setting `MANAGED_REPOSITORIES` to anything but `true`, or the tokens still out can't be revoked.
+
+## Setting up release (M6)
+
+*Written 2026-11-23, for audit item E3.* The API reads twelve settings for release: the content provider's six, the app store's token, the custom hostname provider's two, and the release App's three. **Each is a Worker secret on the API Worker, which the owner sets** with `wrangler secret put`, one at a time, as [Setting a secret: one form only](#setting-a-secret-one-form-only) says. None is in `apps/api/wrangler.jsonc`, and none is set on staging as of 2026-11-23.
+
+**Why secrets, the IDs too.** The tokens and the App's key are credentials. The IDs, names and the domain aren't secret, but the owner's Cloudflare IDs never go in git, and a variable set on the dashboard doesn't last: `scripts/deploy-staging` deploys without `--keep-vars`, so each deploy replaces the dashboard's variables with the file's. It won't keep them, because a `RELEASES` set by hand would then survive every deploy unseen by the checks on `wrangler.jsonc`. A secret survives deploys, so every one of the twelve is a secret, and the API reads each only as a secret: `crate::secret` for the provider settings, and `github::lookup`, which reads an App's key and all three of the release App's settings with `env.secret` and nothing else.
+
+**What `scripts/deploy-staging` does with them.** It still refuses a secret named as a setting the API reads as plain configuration, such as `RELEASES`, `HOSTNAME_RESOLVER_URL`, `PUBLIC_SUFFIX_RULES`, `PUBLIC_ROOMS` or `MANAGED_REPOSITORIES`: a secret of one of those names would switch a feature on whatever `wrangler.jsonc` says. These twelve it doesn't refuse. It prints which of them staging holds, by name, as `release (M6) secrets set: N of 12`, and deploys whether or not they are set. When any is set, it also prints a reminder that it can't see their values, so the account check below is the owner's.
+
+**When.** The architect's ruling of 2026-11-22 puts [spike G](m6-plan.md) on the second account after the content Worker's first deploy and **before `RELEASES` or the provider settings**, so set none of the first nine until spike G has run. **Nothing here sets `RELEASES`.** Switching release on is a separate yes of the owner's; [below](#switching-release-off-for-the-deployment) is what its values mean. Once all six content provider settings are set and well-formed, the provider is configured, and the two scheduled reconciles run whatever `RELEASES` says: they list the namespace's scripts and the serve entries, ask the rooms, and tell operators what they find. Neither writes or removes a serve entry, and neither deletes a script. With any setting missing or malformed, that part has no provider at all, never half of one.
+
+**The owner's check of the account, before setting any of them.** Nothing can check this for you. The API doesn't know Podster's own account ID, so it can't compare against it. `scripts/deploy-staging` can read the secrets' names but not their values, so it can't compare `CONTENT_ACCOUNT_ID` with its own `CLOUDFLARE_ACCOUNT_ID` either. A token's verify call shows only that the token is active, not which accounts it reaches. So, by hand:
+
+- `CONTENT_ACCOUNT_ID` is the second account's ID, **not** the account that holds `podster.dev`, which is in `~/.podster/cloudflare-account-id.staging`.
+- Each of the four tokens was made with **Account Resources** or **Zone Resources** set to the second account or the content zone alone. The token's summary page, before **Create Token**, lists them.
+- `CUSTOM_HOSTNAME_ZONE_ID` is the content zone's, not `podster.dev`'s.
+
+**What the API refuses by itself.** A `CONTENT_DOMAIN` that is `podster.dev`, any name under it, or the registrable domain of `APP_URL` or `GATEWAY_URL` (read as the host's last two labels), or a name under one of those, gives no content provider at all. The API then logs `code=content_domain_is_podsters` once for each isolate.
+
+**Where each comes from.** The second Cloudflare account is the one that holds the content domain, the dispatch namespace, the content Worker and its KV namespace, and nothing of Podster's own ([ADR 0010](adr/0010-release-and-the-content-domain.md), decision 217). Every token below is made on that account, under **My Profile → API Tokens → Create Token → Custom token**, with only the permission named and only that account or zone as its resource. The four ID-like settings are the same values `scripts/deploy-content` reads from the owner's configuration file.
+
+| Secret | What it is | Where the owner gets it |
+| --- | --- | --- |
+| `CONTENT_ACCOUNT_ID` | The second account's ID, 32 lowercase hex characters | The second account's dashboard, or `account_id` in `scripts/deploy-content`'s configuration file |
+| `CONTENT_DISPATCH_NAMESPACE` | The dispatch namespace's name, which holds one script for each release | `dispatch_namespace` in that configuration file |
+| `CONTENT_KV_NAMESPACE_ID` | The KV namespace's ID, which holds the serve entries, 32 lowercase hex characters | `kv_namespace_id` in that configuration file |
+| `CONTENT_DOMAIN` | The content domain, lowercase, such as the one in [the M6 plan](m6-plan.md) | `content_domain` in that configuration file |
+| `CONTENT_SCRIPTS_TOKEN` | Uploads, reads, lists and deletes scripts in the namespace | A token on the second account with **Account → Workers Scripts → Edit**. It is the only permission found that can publish and unpublish, and it is account-wide: it could also replace the content Worker itself ([the M6 plan](m6-plan.md), ADR 0010's credentials) |
+| `CONTENT_ROUTING_TOKEN` | Writes, reads, lists and deletes the serve entries | A token on the second account with **Account → Workers KV Storage → Edit**. Which permission the KV calls need is still owed to spike G; this is the one the store spike saw reach a KV namespace |
+| `CONTENT_STORE_TOKEN` | Makes, reads, lists and deletes rooms' app stores, D1 databases | A token on the second account with **Account → D1 → Edit** alone, as ruled on 2026-11-17. It must differ from the scripts and routing tokens, or the API has no store provider. Whether D1 Edit alone does all four calls is owed to the second account's repeat of the store spike |
+| `CUSTOM_HOSTNAME_ZONE_ID` | The zone that serves custom hostnames, 32 lowercase hex characters. It must be Podster's alone: nothing else may create custom hostnames there | The zone's overview page, under **API**, on the account that holds the content zone |
+| `CUSTOM_HOSTNAME_TOKEN` | Creates, reads by name and deletes custom hostnames on that zone, the three calls ADR 0010's "Custom domains" and `apps/api/src/custom_hostnames.rs` make, and nothing else | A token with **Zone → SSL and Certificates → Edit**, with **Zone Resources** set to that one zone alone, and no other permission: no DNS, Zone Settings or Workers Routes. Edit is needed, not only Read, because Cloudflare's documentation, read on 2026-11-23, requires `SSL and Certificates Write` to create a custom hostname (`POST /zones/{zone}/custom_hostnames`, as in [WAF for SaaS](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/security/waf-for-saas/)), and Read or Write to list one. Spike D's token (2026-11-18) did the same calls and was refused the zone's routes, DNS and SSL setting, but spike D didn't record its permission's name, so the name is the documentation's, not seen in a run |
+| `GITHUB_RELEASE_APP_ID` | The release App's ID | The fourth GitHub App, read-only, in `podsterdev`, with repository permissions **Contents: Read** and **Metadata: Read** and nothing else ([the M6 plan](m6-plan.md), ADR 0010). Its settings page shows the ID. It must be a different App from the other three, or release reads are refused `release_read_not_configured` |
+| `GITHUB_RELEASE_INSTALLATION_ID` | That App's installation on `podsterdev` | The installation's settings page, the number at the end of its address |
+| `GITHUB_RELEASE_APP_KEY` | That App's private key | **Generate a private key** on the App's settings page, as the PEM GitHub gives. In the built-in browser, generate it with a real click |
+
+The commands, each from the repository's root, one secret at a time. Each asks for its value; paste it and press Enter. Never pass a value as an argument, and never add `--name`.
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_ACCOUNT_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_DISPATCH_NAMESPACE --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_KV_NAMESPACE_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_DOMAIN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_SCRIPTS_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_ROUTING_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_STORE_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CUSTOM_HOSTNAME_ZONE_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CUSTOM_HOSTNAME_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_APP_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_INSTALLATION_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_APP_KEY --env staging
+```
+
+To see which are set, by name only:
+
+```bash
+cd apps/api && npx wrangler secret list --env staging
+```
+
+A secret takes effect without a deploy. Taking one away is `npx wrangler secret delete NAME --env staging` from `apps/api`; read [Switching release off for the deployment](#switching-release-off-for-the-deployment) before removing a provider setting from a deployment that has served an app.
 
 ## Switching release off for the deployment
 
@@ -525,6 +619,50 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 - **The job's own refusal of a moved head.** The script waits until Podster has seen the new head, then wants `merge_task` refused with `commit_changed`. A request that lands before Podster notices, and fails in the job, is M5-S7viii locally.
 - **Approval refused after the branch advances** (the rest of M5-08), **a failed check** (M5-12), **another repository** and workflow files (the rest of M5-06), **how long a token works after the agent is removed** (the rest of M5-07), and **the Workers' logs** (M5-13).
 - **Production.** There is none.
+
+## M6's release-on staging run
+
+*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there, and it can't run yet for a second reason: **no route gives a `deploy` grant.** The grant route takes `push` and `merge` only, and the [M6 plan](m6-plan.md) lists "who may give a `deploy` grant, and the route that gives one" as owed to step 6. The script assumes that route with the action `deploy` and refuses, exit 3, with nothing sent, while `packages/contracts/openapi.yaml` doesn't list it. Whoever builds the route updates the script if it takes another shape.
+
+It releases a tiny static site through the real flow: a managed repository in `podsterdev`, the coding agent's pull request, the room's admin's review and merge, a member's request and the admin's approval. Then it checks each part of [the gate](m6-plan.md#the-gate) a script can show from outside, M6-R01 to M6-R17:
+
+- release switched off publishes nothing, private or public (M6-01, M6-23);
+- an operator taking release from the organization refuses the owner's switch-on (AC-10, M6-02);
+- who may configure and approve (AC-11, M6-03), and claiming a DevOps opening grants no deploy right (expanded criterion 3, AC-17);
+- refused requests: another commit, another room's task, another environment, a named repository, host or label (AC-05, M6-09, M6-21);
+- the release served at the default host, its marker naming the release and the merged commit, and one release for a repeated idempotency key (M6-04, M6-06, M6-11);
+- the host's answers: the fixed headers and the sandbox, GET and HEAD only, no cookie set, nothing more for a request carrying Podster's cookie names or an `Authorization` header, and, in a browser, no reading or setting of `podster.dev`'s cookies and no reach to the API (M6-12, M6-13);
+- an agent's request with its own grant, declined (AC-17);
+- a merged commit whose site holds `_headers` fails with a reason code while the merge stays succeeded, reported apart, and the task Sheet says "Merged · Deployment failed" (M6-07, M6-08, M6-25, UI-02, AC-16);
+- a grant taken back between request and approval fails the release (AC-13, M6-10);
+- a report by address, the operator's suspension, the host down within the wait, and a lift that restores nothing until a new release (M6-19, M6-27);
+- switching release off unpublishes and keeps the records (M6-16), and the room made private again (M6-23).
+
+**Out of scope for now:** custom domains (M6-14, M6-15, M6-26) and apps with code (M6-13 as revised for Workers). Those four checks always say `SKIP`, are printed apart, and don't stop exit 0.
+
+**Not covered:** a failed check with no merge (M6-08's first combination: the run's repository has no CI), rollback (M6-17), the caps (M6-18), archiving (M6-20), the Workers' logs (M6-22), export (M6-24), the domain-wide stop (M6-27's second half), and a provider's own refusal of an upload (AC-16's provider half, shown only by the API's tests).
+
+- **Before anything is sent** it reads the contract for the deploy grant. **Before any sign-up,** signed out: the agent configuration, a signed-out 401, `deploy_release` in capabilities discovery (listed only while the API says `RELEASES` is exactly `true`), and the content Worker's own not found for an unknown host on `podster.site`. Any of those missing is exit 3, or 2 for a preflight that fails outright.
+- **After the owner's sign-up only,** before any other sign-up, the repository or a public room: the room must answer its release configuration, and a request mustn't be refused `release_not_available`, which staging answers while a provider is configured and `RELEASE_PATH_COMPLETE` is false. Either is exit 3 with that one sign-up taken.
+- **No read shows whether a content provider is configured.** Nothing signed out does, and nothing a test person or an operator can read without changing state: the release configuration, capabilities discovery, the operators' findings and the content Worker's answers are the same either way. So the run can't refuse on it before starting. With no provider a release stays queued, M6-R06 fails saying so, and clean-up runs. Check the six `CONTENT_*` settings with the owner before a run.
+- **People:** 4 takes of the test sign-up: the owner, the room's admin, a member, and staging's fixed test operator, which must be in the API's `OPERATORS` ([M4's run](#m4s-staging-run) has `--operator-id`). Without it M6-R02 and M6-R14 fail. One agent, under the owner, takes none.
+- **GitHub:** one public repository, `e2e-m6-<time>-<4 hex>`, with two pull requests. `git` runs as M5's run runs it. The browser is Playwright's Chromium (`node install-browser.mjs` once), with `e2e/child-env.mjs`'s environment.
+- **Clean-up, on every way out but a hard kill:** a suspension lifted, the organization's release given back, release off in the room, the room private, grants taken back, the agent disconnected, sessions signed out. The repository stays, for the owner to archive or delete on GitHub, and so do the people, the organization, the two rooms and their tasks.
+- **Exit:** 0 only when every in-scope check passed and none said `SKIP`; 1 otherwise, naming what wasn't shown; 2 for a refused configuration or a failed preflight, no sign-up taken; 3 when release isn't on with a provider.
+
+The dry run reads the contract, prints the sign-ups and every check, and sends nothing. On today's contract it exits 3, naming the missing deploy grant:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev --dry-run
+```
+
+The run, once release is on with a provider and the deploy grant's route exists:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev
+```
+
+`node m6-release-staging-selftest.mjs` checks its pure parts, its dry run, and each refusal against a stand-in that answers on this machine, and CI runs it. Nothing has shown the run past the owner's first sign-up.
 
 ## Explore's cursor key
 

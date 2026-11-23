@@ -619,3 +619,62 @@ fn a_code_release_that_fails_cores_checks_fails_by_its_first_problems_code_and_i
         Err("release_manifest_unreadable")
     );
 }
+
+#[test]
+#[allow(clippy::assertions_on_constants)]
+fn the_gate_for_apps_with_code_is_closed_and_one_constant() {
+    // Flipped only by the PR that shows stage 1's "before code is turned on" items (the M6 plan's gate).
+    assert!(!CODE_RELEASES_COMPLETE);
+    assert_eq!(
+        CodeProblem::CodeNotAvailable.code(),
+        "release_code_not_available"
+    );
+}
+
+#[test]
+fn closed_only_a_static_release_goes_on_and_every_other_fails_code_not_available() {
+    let static_files = vec![f("index.html", 10), f("app.js", 10), f("wrangler.toml", 10)];
+    // A static tree goes on, open or closed, whatever manifest bytes are given.
+    for open in [false, true] {
+        for bytes in [None, Some(GOOD)] {
+            assert_eq!(
+                admit(upload_form(&plan(static_files.clone()), bytes), open),
+                Ok(UploadForm::Static)
+            );
+        }
+    }
+    // Closed: a whole code release, with or without its store, fails by the gate's code and never as static files.
+    for bytes in [GOOD, br#"{"main":"index.js","store":false}"#] {
+        assert_eq!(
+            admit(upload_form(&plan(app(vec![])), Some(bytes)), false).map_err(|p| p.code()),
+            Err("release_code_not_available")
+        );
+    }
+    // Closed: a tree that only tries to carry code fails by the gate's code too, not by core's checks.
+    for (files, bytes) in [
+        (vec![f("worker/index.js", 1)], Some(GOOD)),
+        (vec![f("index.html", 1), f(MANIFEST_PATH, 10)], None),
+        (app(vec![f("worker/a.ts", 1)]), Some(GOOD)),
+        (vec![f("index.html", 1), f("Worker/x.js", 1)], None),
+        (app(vec![]), Some(&b"not json"[..])),
+        (app(vec![]), None),
+    ] {
+        assert_eq!(
+            admit(upload_form(&plan(files.clone()), bytes), false).map_err(|p| p.code()),
+            Err("release_code_not_available"),
+            "{files:?}"
+        );
+    }
+}
+
+#[test]
+fn open_the_gate_answers_the_upload_form_unchanged() {
+    let whole = upload_form(&plan(app(vec![])), Some(GOOD));
+    assert!(matches!(whole, Ok(UploadForm::Code(_))));
+    assert_eq!(admit(whole.clone(), true), whole);
+    let refused = upload_form(&plan(app(vec![f("worker/a.ts", 1)])), Some(GOOD));
+    assert_eq!(
+        admit(refused, true).map_err(|p| p.code()),
+        Err("release_module_kind")
+    );
+}

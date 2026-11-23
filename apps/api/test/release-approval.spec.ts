@@ -502,11 +502,12 @@ describe("the labels' upkeep", () => {
     await alarmPass(stub(r.room));
     expect(await indexRow(r.label)).toBeNull();
     expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
-    // Release on, and a provider configured, with the release path incomplete: nothing either.
-    await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
+    // Release on, and a provider configured, with the release path incomplete (a test build's closing, since the path
+    // is complete): nothing either.
+    await inRoom(r.room, (s) => { s.exec("DROP TABLE test_content_provider_off"); s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"); });
     try {
       await switchedOn(() => alarmPass(stub(r.room)));
-    } finally { await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
+    } finally { await inRoom(r.room, (s) => { s.exec("CREATE TABLE test_content_provider_off (x INTEGER)"); s.exec("DROP TABLE test_release_path_incomplete"); }); }
     expect(await indexRow(r.label)).toBeNull();
     expect(await all(r.room, "SELECT indexed_at FROM app_label")).toEqual([{ indexed_at: null }]);
     // The control: on, with the gate open, the label is written, by the release commands' clock.
@@ -669,6 +670,8 @@ describe("an operator retiring a label another room's lookup row holds (6f's ope
   it("answers release_not_available, writing nothing, while the release path is incomplete and a provider is configured; and is no route while release is off", async () => {
     const r = await taken();
     await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const before = await everything(r);
     try {
       expect(refused(await retire(r.label, { reason: "other", room: r.room }))).toEqual([409, "release_not_available"]);
@@ -717,6 +720,8 @@ describe("declining a release", () => {
 describe("the gate on the release path", () => {
   it("refuses approval where release is on and a provider is configured, before anything is read or written; declining passes", async () => {
     const r = await room();
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const before = await everything(r);
     // This room's provider is configured, as the test Worker's is, and release is switched on for the command.
     await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
@@ -728,9 +733,9 @@ describe("the gate on the release path", () => {
       // Declining only takes away: no gate.
       expect((await decline(r)).body.state).toBe("declined");
     } finally { await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
-    // The constant is still false, and the gate comes before any read.
+    // The constant is true since 2026-11-23, and the gate comes before any read.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
     const source = sources["workspace/release_approval.rs"];
     const reads = source.slice(source.indexOf("async fn approval_reads"));
     expect(reads.indexOf("self.release_path_open().await?")).toBeGreaterThan(-1);

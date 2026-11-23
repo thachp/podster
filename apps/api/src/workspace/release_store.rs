@@ -10,9 +10,10 @@
 //! - **Recorded before it is sent.** The name and `create_sent_at` are written in the room's own transaction, the same
 //!   one that runs the whole recheck again on fresh outside reads, before the create goes out. So a create whose answer
 //!   is lost always leaves the name it can be found by.
-//! - **The create's gate** is the release path's constant, `release_commit::RELEASE_PATH_COMPLETE`, alone, as a custom
-//!   hostname's create is (8b): closed everywhere while it is false, whatever is configured. Only a test build opens
-//!   it, for a room a test gives `test_app_store_create_open`. Lists are never gated: they only settle.
+//! - **The create's gate** is the release path's constant, `release_commit::RELEASE_PATH_COMPLETE`, as a custom
+//!   hostname's create is (8b), and since 2026-11-23 the gate for apps with code too
+//!   (`podster_core::app_code::CODE_RELEASES_COMPLETE`): closed everywhere while either is false, whatever is
+//!   configured. Only a test build opens it, for a room a test gives `test_app_store_create_open`. Lists are never gated: they only settle.
 //! - **A lost answer is settled by a whole list read by the name.** Found: its ID is recorded made. Not found on two
 //!   whole lists at least ten minutes apart, the first ten minutes after the create: the create is no longer
 //!   outstanding, and the next release step that asks for the store creates it again, under the same name. A list that
@@ -388,12 +389,14 @@ pub(super) fn store_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Valu
 }
 
 impl Workspace {
-    /// **The gate on making a store,** the release path's constant (`release_commit::RELEASE_PATH_COMPLETE`), alone:
-    /// closed everywhere while it is false, whatever the providers and `RELEASES` say. Test builds only: a room a test
+    /// **The gate on making a store,** the release path's constant (`release_commit::RELEASE_PATH_COMPLETE`) and, since
+    /// 2026-11-23, the gate for apps with code (`podster_core::app_code::CODE_RELEASES_COMPLETE`), both: closed
+    /// everywhere while either is false, whatever the providers and `RELEASES` say. Only a release that carries code
+    /// asks for a store, and the upload refuses one while code is closed, so this second gate only stands behind that. Test builds only: a room a test
     /// gave the table `test_app_store_create_open` has it open. A build without the `failpoints` feature never reads
     /// that table.
     fn store_create_open(&self) -> bool {
-        if release_commit::RELEASE_PATH_COMPLETE {
+        if self.release_path_complete() && podster_core::app_code::CODE_RELEASES_COMPLETE {
             return true;
         }
         #[cfg(feature = "failpoints")]

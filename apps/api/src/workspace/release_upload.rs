@@ -11,6 +11,11 @@
 //! the transaction of step 5, which also records the script's kind before it is written (`write_check`). A static
 //! release is uploaded exactly as before.
 //!
+//! *Since 2026-11-23:* **the gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`, false) is
+//! apart from the release path's. While it is closed, a release that carries code, or whose tree tries to, fails
+//! `release_code_not_available` at the same point, before its store or anything else is asked for, so the release
+//! path can open for static sites alone (`code_releases_open`).
+//!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
 //!
@@ -66,7 +71,7 @@ use crate::github::release_read::{
     hash_of, reserve, Attempt, ReadFailure, ReadFile, ReadPlan, ReleaseApp, ReleaseReader,
 };
 use podster_core::app_code::{
-    upload_form, CodeProblem, UploadForm, MANIFEST_PATH, MAX_MANIFEST_BYTES,
+    admit, upload_form, CodeProblem, UploadForm, MANIFEST_PATH, MAX_MANIFEST_BYTES,
 };
 use podster_core::app_requests::HostKind;
 use podster_core::app_store::Binding;
@@ -469,6 +474,30 @@ impl Workspace {
         takedown::provider(&self.env, &sql)
     }
 
+    /// **The gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`), alone: closed everywhere while
+    /// it is false, whatever the providers, `RELEASES` and the release path's own gate say, so a release that carries
+    /// code fails `release_code_not_available` before any store is made or anything is sent. Test builds only: a room a
+    /// test gave the table `test_code_release_open` has it open. A build without the `failpoints` feature never reads
+    /// that table.
+    fn code_releases_open(&self) -> bool {
+        if podster_core::app_code::CODE_RELEASES_COMPLETE {
+            return true;
+        }
+        #[cfg(feature = "failpoints")]
+        {
+            rows(
+                &self.state.storage().sql(),
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_code_release_open'",
+                vec![],
+            )
+            .is_ok_and(|found| !found.is_empty())
+        }
+        #[cfg(not(feature = "failpoints"))]
+        {
+            false
+        }
+    }
+
     /// Test builds only: a test changes the room after the files are sent and before the room is asked again, by
     /// leaving statements for the room to run here, in `test_release_upload_before_check (statement)`.
     #[cfg(feature = "failpoints")]
@@ -680,9 +709,11 @@ impl Workspace {
                     .await
                     {
                         Err(stop) => Err(stop),
-                        // What is uploaded, from the tree and the manifest: a release that carries code and fails
-                        // core's checks fails by the problem's code, and nothing is sent.
-                        Ok(first) => match first.form() {
+                        // What is uploaded, from the tree and the manifest: while the gate for apps with code is
+                        // closed, a release that carries code, or tries to, fails `release_code_not_available`; with
+                        // it open, one that fails core's checks fails by the problem's code. Either way nothing is
+                        // sent and no store is made.
+                        Ok(first) => match admit(first.form(), self.code_releases_open()) {
                             Err(problem) => Err(Stop::Code(problem.code())),
                             // The app's store, for a release that asks for one, before anything is sent to the
                             // provider.

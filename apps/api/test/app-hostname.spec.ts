@@ -638,6 +638,8 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
 
   it("refuses asking, and switching release on, where a provider is configured while the release path isn't complete", async () => {
     const r = await room("org_ah_path");
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
     await withProvider(r, () => switchedOn(async () => {
       const on = await api(r.owner, "PUT", `/v1/workspaces/${r.room}/release-config`, { enabled: true, expected_version: 3 });

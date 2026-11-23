@@ -48,7 +48,6 @@ import { chooseKeyStore } from "./key-store.js";
 import { acquireLock, LockRefused } from "./lock.js";
 import { clearStop, requestStop, watchStop } from "./local-stop.js";
 import { claudeEngine, type ClaudeEngine } from "./claude-engine.js";
-import { openaiEngine } from "./openai-engine.js";
 import { adapterAtStart } from "../core/policy.js";
 import { OPENAI_WARNING } from "../core/openai-profile.js";
 import { readFile } from "node:fs/promises";
@@ -263,6 +262,8 @@ async function locked(command: string, args: string[], home: string, state: File
       if (!choice.ok) throw new Error(choice.message);
       if (choice.adapter === "openai_agents") {
         say(OPENAI_WARNING);
+        // Loaded only here: the Claude path, and every other command, never loads an OpenAI package.
+        const { openaiEngine } = await import("./openai-engine.js");
         engine = await openaiEngine({ home, key_file: resolve(keyFile), log, notify: say });
       } else {
         engine = await claudeEngine({ home, key_file: resolve(keyFile), log, notify: say });

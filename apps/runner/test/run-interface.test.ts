@@ -1012,8 +1012,8 @@ describe("Runner's run interface source", () => {
 
   it("pins the Claude Agent SDK and its peers exactly, and only the Claude driver and its engine name it", async () => {
     const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8")) as { dependencies: Record<string, string> };
-    // The experimental OpenAI adapter's three packages (2026-11-22), pinned as spike M7-OpenAI ran them; held in test/openai-adapter.test.ts (S-58).
-    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/sdk": "1.32.2", "@openai/agents-core": "0.22.0", "@openai/agents-openai": "0.22.0", openai: "7.62.0", zod: "4.6.7" });
+    // The experimental OpenAI adapter's three packages (2026-11-22), pinned as spike M7-OpenAI ran them, and the MCP client agents-core imports at load; held in test/openai-adapter.test.ts (S-58).
+    expect(pkg.dependencies).toEqual({ "@anthropic-ai/claude-agent-sdk": "0.3.327", "@anthropic-ai/sdk": "1.10.0", "@auth/agent": "0.6.2", "@modelcontextprotocol/client": "2.4.0", "@modelcontextprotocol/sdk": "1.32.2", "@openai/agents-core": "0.22.0", "@openai/agents-openai": "0.22.0", openai: "7.62.0", zod: "4.6.7" });
     const lock = JSON.parse(await readFile(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version: string }> };
     for (const [name, version] of Object.entries(pkg.dependencies)) expect([name, lock.packages[`node_modules/${name}`]?.version]).toEqual([name, version]);
     const src = new URL("src/", root);

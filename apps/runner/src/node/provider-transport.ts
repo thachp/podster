@@ -118,12 +118,15 @@ export function responsesAnswerUsage(status: number, contentType: string, text: 
 /**
  * Why a key can't be sent to this profile's provider, as a fixed code, or null. Shape only, never the key in the code:
  * an OpenAI profile takes only a project key (`sk-proj-`), and no profile takes another provider's (`sk-ant-` is
- * Anthropic's). The Claude profile refuses only a key shaped as OpenAI's, so nothing else about it changes.
+ * Anthropic's). The Claude profile refuses only a key shaped as one of OpenAI's (project, service-account or admin;
+ * an unprefixed legacy `sk-` key can't be told apart by shape), so nothing else about it changes.
  */
 export function keyProviderRefusal(profile: ProviderProfile, key: string): "key_provider" | null {
   if (dialectOf(profile) === "openai_responses") return key.startsWith("sk-proj-") ? null : "key_provider";
-  return key.startsWith("sk-proj-") ? "key_provider" : null;
+  return OPENAI_KEY_PREFIXES.some((prefix) => key.startsWith(prefix)) ? "key_provider" : null;
 }
+
+const OPENAI_KEY_PREFIXES = ["sk-proj-", "sk-svcacct-", "sk-admin-"];
 
 /** A whole answer's usage. */
 export function answerUsage(status: number, contentType: string, text: string): unknown {

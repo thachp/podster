@@ -298,6 +298,8 @@ describe("S-54, the key", () => {
     expect(keyProviderRefusal(OPENAI_PROFILE, KEY)).toBeNull();
     expect(keyProviderRefusal(CLAUDE_PROFILE, KEY)).toBe("key_provider");
     expect(keyProviderRefusal(CLAUDE_PROFILE, anthropic)).toBeNull();
+    for (const shape of ["sk-svcacct-", "sk-admin-"]) expect(keyProviderRefusal(CLAUDE_PROFILE, `${shape}${"Ab3_".repeat(20)}`)).toBe("key_provider");
+    expect(keyProviderRefusal(CLAUDE_PROFILE, "sk-test-0123456789-the-owners-provider-key")).toBeNull();
     for (const [profile, key] of [[OPENAI_PROFILE, anthropic], [CLAUDE_PROFILE, KEY]] as const) {
       let message = "";
       try {

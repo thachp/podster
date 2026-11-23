@@ -293,6 +293,7 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Secret | `GITHUB_PROVISION_APP_KEY` | The private key of `podster-staging-provision`. The owner's to set, as of 2026-11-11 |
 | Secret | `GITHUB_AGENT_APP_KEY` | The private key of `podster-staging-agent`. The owner's to set, as of 2026-11-11 |
 | Secret | `GITHUB_MERGE_APP_KEY` | The private key of `podster-staging-merge`. The owner's to set, as of 2026-11-11 |
+| Secret | `CONTENT_*`, `CUSTOM_HOSTNAME_*`, `GITHUB_RELEASE_*` | Release's twelve settings, [Setting up release (M6)](#setting-up-release-m6). The owner's to set; none set, as of 2026-11-23 |
 | Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
 | Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
 | Var | `PUBLIC_ROOMS` | `true`: public rooms are on for staging |
@@ -402,6 +403,99 @@ cd apps/api && npx wrangler secret delete REPO_TOKEN_KEY_PREVIOUS --env staging
 A sealed token that opens with neither key is recorded as `repo_token.unrevocable`, by its row's ID only, and dropped. The agent gets a new token at its next call. The old one can't be revoked and lives out its hour. If `REPO_TOKEN_KEY_PREVIOUS` is set but isn't 64 hex characters, nothing is dropped: those rows wait, the log says `key_invalid`, and they're revoked once it's fixed.
 
 **Switching managed repositories off** doesn't wake the rooms. Each room revokes its tokens at its next alarm, within the hour. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes after setting `MANAGED_REPOSITORIES` to anything but `true`, or the tokens still out can't be revoked.
+
+## Setting up release (M6)
+
+*Written 2026-11-23, for audit item E3.* The API reads twelve settings for release: the content provider's six, the app store's token, the custom hostname provider's two, and the release App's three. **Each is a Worker secret on the API Worker, which the owner sets** with `wrangler secret put`, one at a time, as [Setting a secret: one form only](#setting-a-secret-one-form-only) says. None is in `apps/api/wrangler.jsonc`, and none is set on staging as of 2026-11-23.
+
+**Why secrets, the IDs too.** The tokens and the App's key are credentials. The IDs, names and the domain aren't secret, but the owner's Cloudflare IDs never go in git, and a variable set on the dashboard doesn't last: `scripts/deploy-staging` deploys without `--keep-vars`, so each deploy replaces the dashboard's variables with the file's. It won't keep them, because a `RELEASES` set by hand would then survive every deploy unseen by the checks on `wrangler.jsonc`. A secret survives deploys, so every one of the twelve is a secret, and the API reads each only as a secret: `crate::secret` for the provider settings, and `github::lookup`, which reads an App's key and all three of the release App's settings with `env.secret` and nothing else.
+
+**What `scripts/deploy-staging` does with them.** It still refuses a secret named as a setting the API reads as plain configuration, such as `RELEASES`, `HOSTNAME_RESOLVER_URL`, `PUBLIC_SUFFIX_RULES`, `PUBLIC_ROOMS` or `MANAGED_REPOSITORIES`: a secret of one of those names would switch a feature on whatever `wrangler.jsonc` says. These twelve it doesn't refuse. It prints which of them staging holds, by name, as `release (M6) secrets set: N of 12`, and deploys whether or not they are set. When any is set, it also prints a reminder that it can't see their values, so the account check below is the owner's.
+
+**When.** The architect's ruling of 2026-11-22 puts [spike G](m6-plan.md) on the second account after the content Worker's first deploy and **before `RELEASES` or the provider settings**, so set none of the first nine until spike G has run. **Nothing here sets `RELEASES`.** Switching release on is a separate yes of the owner's; [below](#switching-release-off-for-the-deployment) is what its values mean. Once all six content provider settings are set and well-formed, the provider is configured, and the two scheduled reconciles run whatever `RELEASES` says: they list the namespace's scripts and the serve entries, ask the rooms, and tell operators what they find. Neither writes or removes a serve entry, and neither deletes a script. With any setting missing or malformed, that part has no provider at all, never half of one.
+
+**The owner's check of the account, before setting any of them.** Nothing can check this for you. The API doesn't know Podster's own account ID, so it can't compare against it. `scripts/deploy-staging` can read the secrets' names but not their values, so it can't compare `CONTENT_ACCOUNT_ID` with its own `CLOUDFLARE_ACCOUNT_ID` either. A token's verify call shows only that the token is active, not which accounts it reaches. So, by hand:
+
+- `CONTENT_ACCOUNT_ID` is the second account's ID, **not** the account that holds `podster.dev`, which is in `~/.podster/cloudflare-account-id.staging`.
+- Each of the four tokens was made with **Account Resources** or **Zone Resources** set to the second account or the content zone alone. The token's summary page, before **Create Token**, lists them.
+- `CUSTOM_HOSTNAME_ZONE_ID` is the content zone's, not `podster.dev`'s.
+
+**What the API refuses by itself.** A `CONTENT_DOMAIN` that is `podster.dev`, any name under it, or the registrable domain of `APP_URL` or `GATEWAY_URL` (read as the host's last two labels), or a name under one of those, gives no content provider at all. The API then logs `code=content_domain_is_podsters` once for each isolate.
+
+**Where each comes from.** The second Cloudflare account is the one that holds the content domain, the dispatch namespace, the content Worker and its KV namespace, and nothing of Podster's own ([ADR 0010](adr/0010-release-and-the-content-domain.md), decision 217). Every token below is made on that account, under **My Profile → API Tokens → Create Token → Custom token**, with only the permission named and only that account or zone as its resource. The four ID-like settings are the same values `scripts/deploy-content` reads from the owner's configuration file.
+
+| Secret | What it is | Where the owner gets it |
+| --- | --- | --- |
+| `CONTENT_ACCOUNT_ID` | The second account's ID, 32 lowercase hex characters | The second account's dashboard, or `account_id` in `scripts/deploy-content`'s configuration file |
+| `CONTENT_DISPATCH_NAMESPACE` | The dispatch namespace's name, which holds one script for each release | `dispatch_namespace` in that configuration file |
+| `CONTENT_KV_NAMESPACE_ID` | The KV namespace's ID, which holds the serve entries, 32 lowercase hex characters | `kv_namespace_id` in that configuration file |
+| `CONTENT_DOMAIN` | The content domain, lowercase, such as the one in [the M6 plan](m6-plan.md) | `content_domain` in that configuration file |
+| `CONTENT_SCRIPTS_TOKEN` | Uploads, reads, lists and deletes scripts in the namespace | A token on the second account with **Account → Workers Scripts → Edit**. It is the only permission found that can publish and unpublish, and it is account-wide: it could also replace the content Worker itself ([the M6 plan](m6-plan.md), ADR 0010's credentials) |
+| `CONTENT_ROUTING_TOKEN` | Writes, reads, lists and deletes the serve entries | A token on the second account with **Account → Workers KV Storage → Edit**. Which permission the KV calls need is still owed to spike G; this is the one the store spike saw reach a KV namespace |
+| `CONTENT_STORE_TOKEN` | Makes, reads, lists and deletes rooms' app stores, D1 databases | A token on the second account with **Account → D1 → Edit** alone, as ruled on 2026-11-17. It must differ from the scripts and routing tokens, or the API has no store provider. Whether D1 Edit alone does all four calls is owed to the second account's repeat of the store spike |
+| `CUSTOM_HOSTNAME_ZONE_ID` | The zone that serves custom hostnames, 32 lowercase hex characters. It must be Podster's alone: nothing else may create custom hostnames there | The zone's overview page, under **API**, on the account that holds the content zone |
+| `CUSTOM_HOSTNAME_TOKEN` | Creates, reads by name and deletes custom hostnames on that zone, the three calls ADR 0010's "Custom domains" and `apps/api/src/custom_hostnames.rs` make, and nothing else | A token with **Zone → SSL and Certificates → Edit**, with **Zone Resources** set to that one zone alone, and no other permission: no DNS, Zone Settings or Workers Routes. Edit is needed, not only Read, because Cloudflare's documentation, read on 2026-11-23, requires `SSL and Certificates Write` to create a custom hostname (`POST /zones/{zone}/custom_hostnames`, as in [WAF for SaaS](https://developers.cloudflare.com/cloudflare-for-platforms/cloudflare-for-saas/security/waf-for-saas/)), and Read or Write to list one. Spike D's token (2026-11-18) did the same calls and was refused the zone's routes, DNS and SSL setting, but spike D didn't record its permission's name, so the name is the documentation's, not seen in a run |
+| `GITHUB_RELEASE_APP_ID` | The release App's ID | The fourth GitHub App, read-only, in `podsterdev`, with repository permissions **Contents: Read** and **Metadata: Read** and nothing else ([the M6 plan](m6-plan.md), ADR 0010). Its settings page shows the ID. It must be a different App from the other three, or release reads are refused `release_read_not_configured` |
+| `GITHUB_RELEASE_INSTALLATION_ID` | That App's installation on `podsterdev` | The installation's settings page, the number at the end of its address |
+| `GITHUB_RELEASE_APP_KEY` | That App's private key | **Generate a private key** on the App's settings page, as the PEM GitHub gives. In the built-in browser, generate it with a real click |
+
+The commands, each from the repository's root, one secret at a time. Each asks for its value; paste it and press Enter. Never pass a value as an argument, and never add `--name`.
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_ACCOUNT_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_DISPATCH_NAMESPACE --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_KV_NAMESPACE_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_DOMAIN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_SCRIPTS_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_ROUTING_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CONTENT_STORE_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CUSTOM_HOSTNAME_ZONE_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put CUSTOM_HOSTNAME_TOKEN --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_APP_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_INSTALLATION_ID --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put GITHUB_RELEASE_APP_KEY --env staging
+```
+
+To see which are set, by name only:
+
+```bash
+cd apps/api && npx wrangler secret list --env staging
+```
+
+A secret takes effect without a deploy. Taking one away is `npx wrangler secret delete NAME --env staging` from `apps/api`; read [Switching release off for the deployment](#switching-release-off-for-the-deployment) before removing a provider setting from a deployment that has served an app.
 
 ## Switching release off for the deployment
 

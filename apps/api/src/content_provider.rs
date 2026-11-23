@@ -26,8 +26,9 @@
 //!
 //! A client never names an account, a namespace, a script or a host here: all come from configuration or from the
 //! room's own state, and each name is checked against its form before it goes into a path. Logs carry nothing from
-//! this module: no host, no script, no ID of the account or the namespaces, and no token.
-use crate::{setting, Setting};
+//! this module: no host, no script, no ID of the account or the namespaces, and no token. Its one log line is a code:
+//! a content domain refused as Podster's own ([`content_domain`]).
+use crate::{secret, Setting};
 use futures_util::future::{select, Either};
 use podster_core::app_requests::HostKind;
 use podster_core::release::{is_label, script_owner, ScriptAnswer, ScriptOwner};
@@ -50,7 +51,8 @@ const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// one is the KV read's for a key that isn't there, which no spike has seen: see the module's note.
 const KV_KEY_NOT_FOUND: i64 = 10009;
 
-/// The settings a provider needs. None is set in any environment.
+/// The settings a provider needs, each a Worker secret the owner sets (docs/staging.md, "Setting up release (M6)").
+/// None is set in any environment's configuration.
 const ACCOUNT: &str = "CONTENT_ACCOUNT_ID";
 const NAMESPACE: &str = "CONTENT_DISPATCH_NAMESPACE";
 const KV_NAMESPACE: &str = "CONTENT_KV_NAMESPACE_ID";
@@ -137,11 +139,36 @@ pub(crate) enum StopKey {
 
 /// The content domain this deployment is configured with, if it is: read alone, since telling an app's default host
 /// from a custom hostname needs only this and neither token.
+///
+/// **A content domain that is Podster's own is no content domain** (the security review of PR #563, 2026-11-23):
+/// `podster.dev` or a name under it, or the registrable domain of `APP_URL` or `GATEWAY_URL`, by
+/// `podster_core::hostnames::content_domain_is_podsters`. Then there is no provider at all, which fails closed, and
+/// the isolate logs one line with a code and nothing else.
 pub(crate) fn content_domain(env: &Env) -> Option<String> {
-    let domain = text_setting(env, DOMAIN, plain_host)?;
-    (podster_core::hostnames::normalize(&domain).ok().as_deref() == Some(domain.as_str()))
-        .then_some(domain)
+    let domain = well_formed(secret(env, DOMAIN), plain_host)?;
+    if podster_core::hostnames::normalize(&domain).ok().as_deref() != Some(domain.as_str()) {
+        return None;
+    }
+    let own: Vec<String> = ["APP_URL", "GATEWAY_URL"]
+        .into_iter()
+        .filter_map(|name| match crate::setting(env, name) {
+            Setting::Text(address) => Some(address),
+            Setting::Absent | Setting::Unreadable => None,
+        })
+        .collect();
+    let own: Vec<&str> = own.iter().map(String::as_str).collect();
+    if podster_core::hostnames::content_domain_is_podsters(&domain, &own) {
+        if !DOMAIN_REFUSAL_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            console_error!("content_provider: no provider: code=content_domain_is_podsters");
+        }
+        return None;
+    }
+    Some(domain)
 }
+
+/// Whether this isolate has logged the content domain's refusal, so it is logged once and not on every read.
+static DOMAIN_REFUSAL_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The label of the app whose default host this is on `domain`: `<label>.<domain>`, exactly one label deep.
 pub(crate) fn default_host_label_on<'a>(domain: &str, host: &'a str) -> Option<&'a str> {
@@ -220,9 +247,10 @@ fn plain_host(host: &str) -> bool {
         && !host.contains("..")
 }
 
-fn text_setting(env: &Env, name: &str, well_formed: fn(&str) -> bool) -> Option<String> {
-    match setting(env, name) {
-        Setting::Text(value) if well_formed(&value) => Some(value),
+/// A secret's text when it is bound as text and well-formed, or `None`.
+fn well_formed(found: Setting, form: fn(&str) -> bool) -> Option<String> {
+    match found {
+        Setting::Text(value) if form(&value) => Some(value),
         _ => None,
     }
 }
@@ -363,12 +391,12 @@ impl Provider {
     pub(crate) fn from_env(env: &Env) -> Option<Provider> {
         let domain = content_domain(env)?;
         Some(Provider {
-            account: text_setting(env, ACCOUNT, hex32)?,
-            namespace: text_setting(env, NAMESPACE, namespace_name)?,
-            kv_namespace: text_setting(env, KV_NAMESPACE, hex32)?,
+            account: well_formed(secret(env, ACCOUNT), hex32)?,
+            namespace: well_formed(secret(env, NAMESPACE), namespace_name)?,
+            kv_namespace: well_formed(secret(env, KV_NAMESPACE), hex32)?,
             domain,
-            scripts_token: text_setting(env, SCRIPTS_TOKEN, token)?,
-            routing_token: text_setting(env, ROUTING_TOKEN, token)?,
+            scripts_token: well_formed(secret(env, SCRIPTS_TOKEN), token)?,
+            routing_token: well_formed(secret(env, ROUTING_TOKEN), token)?,
         })
     }
 

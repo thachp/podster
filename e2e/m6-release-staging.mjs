@@ -510,6 +510,8 @@ async function main() {
   say("\n## release switched off publishes nothing");
   await check("M6-R01", async () => {
     refusedAs(await askRelease(member, t1), 409, "release_needs_public_room", "a request in the private room");
+    // A public room always has person review on (decision 159), so publishing is refused person_review_required without it.
+    await owner.must("PUT", `/v1/workspaces/${room}/review-policy`, { require_person: true, policy_version: await owner.policyVersion(room) });
     const published = await publisher.publish(owner, room);
     ok(published.ok, `making the room public: HTTP ${published.status} ${published.code ?? ""}`);
     refusedAs(await askRelease(member, t1), 409, "release_off", "a request in the public room, with release off in the room");
@@ -594,6 +596,10 @@ async function main() {
   let first;
   /** The release the host serves now. */
   let served;
+  // R10's declined release of the first task's commit: from then on, the latest attempt for that commit.
+  let declinedId;
+  // The latest attempt for the first task's commit, and the state it should be in once the app is unpublished.
+  let latest;
   await check("M6-R06", async () => {
     after("M6-R03");
     const once = key();
@@ -614,6 +620,7 @@ async function main() {
     eq(resultUrlProblem(status.release.result_url, host), null, "the result URL");
     eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
     first = served = asked.body.id;
+    latest = { id: first, unpublished: "unpublished" };
     return `release ${first} served after ${seconds} s at the app's default host, label ${appLabel}`;
   });
 
@@ -630,7 +637,11 @@ async function main() {
     eq((await hostAsk(`https://${host}/`, { method: "HEAD" })).status, 200, "HEAD of the index");
     for (const method of ["POST", "PUT", "DELETE"]) eq((await hostAsk(`https://${host}/`, { method })).status, 405, `${method} of the index`);
     const missing = await hostAsk(`https://${host}/e2e-${randomBytes(4).toString("hex")}.txt`);
-    eq(contentNotFoundProblem(missing), null, "a path the site doesn't have");
+    // The release's own Worker answers a path with no file: 404 with an empty body (not_found_handling none, ADR
+    // 0010's spike A), passed on under the content Worker's fixed headers. Its own `not_found` is for a host with no app.
+    eq([missing.status, missing.body], [404, ""], "a path the site doesn't have");
+    const missingProblems = fixedHeaderProblems(missing.headers);
+    ok(missingProblems.length === 0, `a path the site doesn't have: ${missingProblems.join("; ")}`);
   });
 
   await check("M6-R08", async () => {
@@ -697,6 +708,8 @@ async function main() {
     const declined = await admin.must("POST", `${releasesPath()}/${asked.id}/decline`, {});
     eq([declined.state, declined.declined_by], ["declined", admin.id], "the declined release");
     eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
+    declinedId = asked.id;
+    latest = { id: declinedId, unpublished: "declined" };
     return `release ${asked.id} asked for by ${coder.id}, declined`;
   });
 
@@ -712,8 +725,13 @@ async function main() {
     const problems = statusProblems(status, { taskId: t2.id, mergeSha: t2.mergeSha, release: { id: asked.body.id, state: "failed", served: false, failed: true } });
     ok(problems.length === 0, problems.join("; "));
     eq((await taskRead(t2)).task.status, "completed", "the task's status");
-    const earlier = statusProblems(await statusOf(t1), { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: first, state: "served", served: true } });
+    // The status reports the latest attempt for the commit (R10's, declined), and `served` for the commit: still true,
+    // since the first release of that commit is what the host serves (openapi.yaml's TaskRelease).
+    after("M6-R10");
+    const earlierStatus = await statusOf(t1);
+    const earlier = statusProblems(earlierStatus, { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: declinedId, state: "declined", served: true } });
     ok(earlier.length === 0, `the first task: ${earlier.join("; ")}`);
+    eq(resultUrlProblem(earlierStatus.release.result_url, host), null, "the first task's result URL");
     eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
     return `release ${asked.body.id} failed ${status.release.failure_code} after ${seconds} s; merge succeeded at ${status.merge.observed_at}, release at ${status.release.observed_at}, checks ${status.checks.state ?? "unread"}`;
   });
@@ -753,6 +771,7 @@ async function main() {
     ok(back.ok, `taking the member's grant back: HTTP ${back.status} ${back.code ?? ""}`);
     const approved = await admin.dash("POST", `${releasesPath()}/${asked.body.id}/approve`, {});
     ok(approved.ok, `the approval after the grant was taken back answered HTTP ${approved.status} ${approved.code ?? ""}`);
+    if (approved.body.state === "failed") latest = { id: asked.body.id, unpublished: "failed" };
     eq([approved.body.id, approved.body.state, approved.body.failure_code, approved.body.result_url], [asked.body.id, "failed", GRANT_LOST_CODE, null], "the release approved after its requester's grant was taken back");
     // Nothing new is served, now or once the job has had time: the host keeps the release it served before.
     for (let looks = 0; looks < 3; looks++) {
@@ -761,8 +780,12 @@ async function main() {
     }
     const index = await hostAsk(`https://${host}/`);
     eq([index.status, index.body], [200, SITE["site/index.html"]], "the site's index");
-    const problems = statusProblems(await statusOf(t1), { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: asked.body.id, state: "failed", served: false, failed: true } });
+    // The failed attempt is the latest for the commit, and the commit is still served, by the release served before:
+    // `served` is the commit's, never this attempt's (openapi.yaml's TaskRelease), and the marker above names that one.
+    const status = await statusOf(t1);
+    const problems = statusProblems(status, { taskId: t1.id, mergeSha: t1.mergeSha, release: { id: asked.body.id, state: "failed", served: true, failed: true } });
     ok(problems.length === 0, problems.join("; "));
+    eq(resultUrlProblem(status.release.result_url, host), null, "the result URL of the commit still served");
     await give(member, DEPLOY_GRANT.action);
     return `release ${asked.body.id} failed ${approved.body.failure_code}; release ${served} still served; the member was given a new grant`;
   });
@@ -784,7 +807,10 @@ async function main() {
     undo.suspended = null;
     for (let looks = 0; looks < 3; looks++) {
       await pause(POLL_MS);
-      eq(contentNotFoundProblem(await hostAsk(`https://${host}/`)), null, "the host after the lift");
+      const answer = await hostAsk(`https://${host}/`);
+      // The answer's own code, when it is one of the content Worker's: so a failure says which answer it was.
+      const code = /^[a-z_]{1,40}$/.test(String(answer.body).trim()) ? String(answer.body).trim() : "another body";
+      eq(contentNotFoundProblem(answer), null, `the host after the lift (${answer.status} ${code})`);
     }
     return `report ${report.id}; the host answered not found ${down} s after the suspension, and still did after the lift`;
   });
@@ -793,6 +819,8 @@ async function main() {
     after("M6-R14");
     const asked = await askRelease(member, t1);
     ok(asked.ok, `the member's new request: HTTP ${asked.status} ${asked.code ?? ""}`);
+    // Still on its way when the app is unpublished, a release ends failed and is never served (M6-28).
+    latest = { id: asked.body.id, unpublished: "failed" };
     const { seconds } = await approveAndServe(t1, asked.body.id);
     const config = await configOf();
     const at = defaultHostProblem(config.default_host);
@@ -800,6 +828,7 @@ async function main() {
     [host, appLabel] = [config.default_host, at.label];
     eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
     served = asked.body.id;
+    latest = { id: served, unpublished: "unpublished" };
     return `release ${asked.body.id} served after ${seconds} s`;
   });
 
@@ -811,10 +840,24 @@ async function main() {
     eq(off.enabled, false, "the configuration switched off");
     undo.releaseOn = false;
     const down = await hostDown("the host stopping after release was switched off");
+    // While the room's release is off, the status says only that no release exists (openapi.yaml's TaskRelease;
+    // M6 plan, step 7). The records are kept: switched on again, the status names the latest attempt, ended.
+    eq((await statusOf(t1)).release, { exists: false }, "the first task's release while release is off");
+    const again = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: off.version });
+    undo.releaseOn = true;
+    eq(again.enabled, true, "the configuration switched on again");
     const status = await statusOf(t1);
-    eq([status.release?.exists, status.release?.served, status.release?.result_url], [true, false, null], "the first task's release after the unpublish");
-    eq(status.release.state, "unpublished", "the state of the release that was served");
-    return `the host answered not found ${down} s after release was switched off; release ${status.release.release_id} is kept, unpublished`;
+    eq([status.release?.exists, status.release?.release_id, status.release?.state, status.release?.served, status.release?.result_url], [true, latest.id, latest.unpublished, false, null], "the first task's release once release is on again");
+    // Three looks, spaced, so a republish in the background would show.
+    for (let look = 1; look <= 3; look++) {
+      if (look > 1) await sleep(POLL_MS);
+      eq(contentNotFoundProblem(await hostAsk(`https://${host}/`)), null, `the host once release is on again, look ${look} of 3`);
+    }
+    eq((await statusOf(t1)).release?.served, false, "the first task's release, still not served after the looks");
+    const offAgain = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: again.version });
+    eq(offAgain.enabled, false, "the configuration switched off again");
+    undo.releaseOn = false;
+    return `the host answered not found ${down} s after release was switched off; release ${status.release.release_id} is kept, ${status.release.state}`;
   });
 
   say("\n## the room made private again");

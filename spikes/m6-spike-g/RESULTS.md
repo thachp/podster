@@ -129,6 +129,17 @@ Every spike release carried a root `_headers` and a root `_redirects` as ordinar
 - **The script's write** answered `200` with the script named (0.3 to 0.9 s). **A read straight after it** answered `200` with the script present every time (8 of 8, 0.1 to 1.1 s).
 - The upload session's token carried a `cfwau_` prefix.
 
+## The architect's rulings, 2026-11-23
+
+Made on #565, after the run:
+
+- **`MARKER_WAIT_MS` stays 30 s.** The measured switch was under 0.4 s. A cached old entry's 30 s lifetime is why the wait isn't lower. It is to be revisited after the first real staging releases. `REOPEN_FIRST_MS` is unchanged.
+- **M6-27's stated takedown time is two minutes,** accepted. It stays Proposed until the M6 gate.
+- **The resolver is `https://cloudflare-dns.com/dns-query`,** accepted.
+- **A root `_headers` and `_redirects` are still refused by name,** although both were shown to be ordinary files.
+- **Apps are served uncompressed,** accepted for static sites. This is a known cost in bandwidth and load time.
+- **Memory was measured in JavaScript, not Wasm.** The release job's batches stay under the 25 MB that fit. They already are: `UPLOAD_REQUEST_BYTES` is 8 MiB and `FETCH_BATCH_BYTES` 10 MiB, in `crates/core/src/release.rs`.
+
 ## What it couldn't answer
 
 - **One location.** Every read of the content domain was served at `SEA`. How long a change takes at other locations, where KV documents up to 60 s or more, is still unknown.

@@ -164,7 +164,7 @@ Then the script probes one random host on the content domain, signed out:
 - the domain-wide stop's effect;
 - how long a takedown takes.
 
-These are spike G's and the first release's to show.
+These are spike G's and the first release's to show. *(2026-11-23: spike G showed a dispatch to a real script, the stop's effect and a takedown's time at one location ([results](../spikes/m6-spike-g/RESULTS.md)). An app released through the job is still the first release's to show.)*
 
 ## An open question for the owner: deploy with the stop set?
 

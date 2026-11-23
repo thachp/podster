@@ -433,7 +433,12 @@ pub(super) fn unpublish_app(
 /// - **a reversible hold:** nobody left to release, while its window is open; a repository's unpublish held at the
 ///   deployment's ceiling. Neither unpublishes; the unpublish that may follow retires the label;
 /// - **the stop for the whole content domain,** which unpublishes nothing.
-fn retire_current_label(sql: &SqlStorage, now: i64) -> R<()> {
+///
+/// **A permanent cause with nothing up still retires the label** (the review of PR #567, 2026-11-23): an app an
+/// operator suspended, or one whose only release failed before it went live, has nothing to unpublish but still has a
+/// current label. The deployment's switch read as `false` and a repository's link off ready (once the ceiling grants
+/// it) call this directly then, with no unpublish recorded.
+pub(super) fn retire_current_label(sql: &SqlStorage, now: i64) -> R<()> {
     for row in rows(sql, "SELECT label FROM app_label WHERE current = 1", vec![])? {
         let Some(label) = text(&row["label"]) else {
             continue;

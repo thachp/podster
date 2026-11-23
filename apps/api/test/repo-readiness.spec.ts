@@ -599,11 +599,18 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
   });
 
-  it("records no unpublish for a room with a configuration and nothing up, as the deployment's switch records none", async () => {
-    // Owed only with something up (core's `repo_unpublish_owed`): a release that hasn't ended under the room's epoch
-    // counts, so nothing in flight can go live after the link went off ready, and the recheck refuses new ones.
+  it("records no unpublish for a room with a configuration and nothing up, as the deployment's switch records none, but retires its current label", async () => {
+    // Owed with something up (core's `repo_unpublish_owed`): a release that hasn't ended under the room's epoch
+    // counts, so nothing in flight can go live after the link went off ready, and the recheck refuses new ones. Here the
+    // room's only release failed before it ever went live: nothing is unpublished, but the cause is for good, so its
+    // current label is retired and its store owed a deletion, under the same ceiling (the review of PR #567, 2026-11-23).
     const r = await room();
-    await withApp(r.id, { up: false });
+    const app = await withApp(r.id, { up: false });
+    await inRoom(r.id, (sql) => void sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, failure_code, finished_at, updated_at)
+         VALUES (?, ?, 'failed', ?, 1, 2, 'tsk_rr_release', ?, 1, ?, 1, 'upload_failed', 1, 1)`, `rel_${"5f".repeat(16)}`, "ab".repeat(20), app.label, OWNER.id, OWNER.id));
+    const labelState = () => inRoom(r.id, (sql) => sql.exec("SELECT l.current, l.retired_at IS NOT NULL AS retired, s.delete_cause FROM app_label l LEFT JOIN app_store s ON s.label = l.label").toArray());
+    expect(await labelState()).toEqual([{ current: 1, retired: 0, delete_cause: null }]);
     await ready({ rulesets: "no_update" });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
     expect(await inRoom(r.id, (sql) => ({
@@ -611,6 +618,9 @@ describe("an operator's recheck of a ready link (item 12)", () => {
       epoch: sql.exec("SELECT release_epoch FROM release_config").one().release_epoch,
       event: sql.exec("SELECT reason FROM event WHERE type = 'app.unpublished'").toArray(),
     }))).toEqual({ unpublish: [], epoch: 2, event: [] });
+    expect(await labelState()).toEqual([{ current: null, retired: 1, delete_cause: "label_retired" }]);
+    // Nothing more is owed: the room's walk no longer wants an unpublish for its link.
+    expect(await woken(r.id)).toBe(false);
   });
 
   it("restores a repository made before these settings were set, once they're switched off by hand on GitHub", async () => {

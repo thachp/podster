@@ -62,7 +62,9 @@ pub(super) fn link_status(sql: &SqlStorage) -> R<Option<(LinkStatus, Option<Stri
 }
 
 /// The reason the room's app is owed an unpublish for its link, or `None` when it isn't: core's
-/// `repo_unpublish_owed`, on the link's status and whether anything is up. Durable state alone decides it.
+/// `repo_unpublish_owed`, on the link's status and whether anything is up **or a label is current**, since a current
+/// label with nothing up is retired for good too, under the same ceiling (the review of PR #567, 2026-11-23). Durable
+/// state alone decides it.
 pub(super) fn owed(sql: &SqlStorage) -> R<Option<String>> {
     let Some((status, reason)) = link_status(sql)? else {
         return Ok(None);
@@ -70,10 +72,11 @@ pub(super) fn owed(sql: &SqlStorage) -> R<Option<String>> {
     if status == LinkStatus::Ready {
         return Ok(None);
     }
-    Ok(
-        repo_unpublish_owed(status, release_switch::has_anything_up(sql)?)
-            .then(|| reason.unwrap_or_else(|| status.name().to_owned())),
+    Ok(repo_unpublish_owed(
+        status,
+        release_switch::has_anything_up(sql)? || release_switch::has_current_label(sql)?,
     )
+    .then(|| reason.unwrap_or_else(|| status.name().to_owned())))
 }
 
 /// When the room's alarm should next come for this: while an unpublish is owed, at once or when the kept retry time
@@ -266,6 +269,10 @@ impl Workspace {
         let store = sql.clone();
         let unpublished = transaction_sync(&self.state, move || {
             if let Some(reason) = owed(&store)? {
+                // Nothing up, only a current label: it is retired, its store owed, and nothing is unpublished.
+                if !release_switch::has_anything_up(&store)? {
+                    return takedown::retire_current_label(&store, now_ms());
+                }
                 takedown::unpublish_for(
                     &store,
                     UnpublishTrigger::RepositoryNotReady,

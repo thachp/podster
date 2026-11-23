@@ -233,6 +233,23 @@ describe("what retires no label", () => {
     expect(await all(r.room, "SELECT suspended_at IS NOT NULL AS suspended FROM app_label WHERE label = ?", r.label)).toEqual([{ suspended: 1 }]);
   });
 
+  it("an app an operator suspended, then `RELEASES` set to `false`: nothing is up, but the label is retired for good, and the next request draws a new one", async () => {
+    const r = await room();
+    const suspension = (suspended: boolean) => stub(r.room).fetch("https://do/internal/app-suspension", { method: "POST", body: JSON.stringify({ label: r.label, suspended, reason: "abuse" }) });
+    expect((await suspension(true)).status).toBe(200);
+    await expectKept(r, "suspended");
+    expect((await withSetting("false", () => internal(r, "takedown-check", { kind: "wake" }))).status).toBe(200);
+    // Nothing was up, so nothing more is unpublished; the label is retired and its store owed all the same.
+    expect(await all(r.room, "SELECT cause FROM unpublish")).toEqual([{ cause: "app_suspended" }]);
+    await expectRetired(r, "switched off");
+    // Read `false` again: nothing more.
+    await withSetting("false", () => internal(r, "takedown-check", { kind: "wake" }));
+    await expectRetired(r, "read again");
+    // The suspension lifted and release on again: the next request draws a new label, never the old one.
+    expect((await suspension(false)).status).toBe(200);
+    await expectNewLabel(r, "lifted and on again");
+  });
+
   it("a room with no release configuration has nothing to unpublish, and its label stays", async () => {
     const r = await room();
     await inRoom(r.room, (sql) => {

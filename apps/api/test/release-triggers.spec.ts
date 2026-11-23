@@ -475,4 +475,11 @@ describe("the deployment's own setting, `RELEASES`, read by the room (M6 step 6)
       expect(await trail(r), JSON.stringify(opts)).toEqual({ events: [], audit: [] });
     }
   });
+
+  it("still retires the current label of a room with nothing up when the setting is `false`, and unpublishes nothing (2026-11-23)", async () => {
+    const r = await room("org_rt_deployment_label_only", { up: false });
+    await withSetting("false", () => ask(r));
+    expect(await unpublishes(r)).toEqual([]);
+    expect(await all(r.room, "SELECT label, current, retired_at IS NOT NULL AS retired FROM app_label")).toEqual([{ label: r.label, current: null, retired: 1 }]);
+  });
 });

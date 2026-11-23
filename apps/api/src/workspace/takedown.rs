@@ -232,6 +232,8 @@ pub(super) fn unpublish_for(
     if !unpublish_app(sql, trigger, None, now)? {
         return Ok(false);
     }
+    // Every trigger here is for good, so the label goes with the app ([`retire_current_label`]).
+    retire_current_label(sql, now)?;
     // Test builds only: a test adds details of its own, a `reason` among them, to show the trigger's reason wins.
     #[cfg(feature = "failpoints")]
     let details = test_details(sql, details)?;
@@ -414,6 +416,52 @@ pub(super) fn unpublish_app(
         )?;
     }
     Ok(true)
+}
+
+/// **Every unpublish for good retires the room's current label** (the architect's ruling of 2026-11-23, on the security
+/// review of PR #564; ADR 0010, "Unpublishing", and its rule that a label is never used again). Every trigger that goes
+/// through [`unpublish_for`] is one: whatever undoes its cause restores nothing. In the unpublish's own transaction the
+/// label stops being current (`retired_at` now), and its store, if it has one, is owed its deletion as `label_retired`,
+/// audited and told as Podster's act (S4 of the store plan). So the room's next request draws a new label and host, an
+/// old shared link never meets a later release, and the store and its data go. The retired label stays in the room's
+/// table, so it is never drawn again. A room with no current label retires nothing.
+///
+/// **What retires nothing:**
+/// - **an operator's suspension of the app** ([`set`], `app_suspended`), which keeps the label and its store, so a false
+///   suspension can be lifted with the app's data intact (the architect's ruling of 2026-11-16, on review of rule 3(b));
+///   an operator deletes the data by its own command;
+/// - **a reversible hold:** nobody left to release, while its window is open; a repository's unpublish held at the
+///   deployment's ceiling. Neither unpublishes; the unpublish that may follow retires the label;
+/// - **the stop for the whole content domain,** which unpublishes nothing.
+fn retire_current_label(sql: &SqlStorage, now: i64) -> R<()> {
+    for row in rows(sql, "SELECT label FROM app_label WHERE current = 1", vec![])? {
+        let Some(label) = text(&row["label"]) else {
+            continue;
+        };
+        exec(
+            sql,
+            "UPDATE app_label SET current = NULL, retired_at = ? WHERE label = ? AND current = 1",
+            vec![now.into(), label.as_str().into()],
+        )?;
+        super::store_delete::owed(
+            sql,
+            &label,
+            podster_core::app_store::DeleteCause::LabelRetired,
+            moderation::PODSTER,
+            moderation::PODSTER_KIND,
+            now,
+        )?;
+    }
+    if !rows(
+        sql,
+        "SELECT 1 AS current FROM app_label WHERE current = 1",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Err(ApiError::internal("an unpublish left a label current"));
+    }
+    Ok(())
 }
 
 /// `{ label, suspended, reason }`: an operator suspends the room's app, or lifts that. The room acts only if the

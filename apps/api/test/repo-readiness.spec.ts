@@ -158,6 +158,10 @@ async function withApp(id: string, opts: { up?: boolean } = {}) {
   await inRoom(id, (sql) => {
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
+    // The label's store, so the unpublish for good is seen to owe its deletion (2026-11-23). The store provider is off,
+    // so the deletion job stays owed and calls nothing, and the room's alarm is as it was.
+    sql.exec("CREATE TABLE test_app_store_provider_off (x INTEGER)");
+    sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, updated_at) VALUES (?, 'd1', ?, 1, 1)", label, `podster-store-${crypto.randomUUID().replace(/-/g, "")}`);
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
     if (opts.up === false) return;
@@ -180,6 +184,8 @@ const appState = (id: string) => inRoom(id, (sql) => ({
   queued: sql.exec("SELECT script_name FROM script_delete").toArray().map((q: any) => q.script_name),
   event: sql.exec("SELECT actor_id, reason FROM event WHERE type = 'app.unpublished'").toArray(),
   audit: sql.exec("SELECT actor_id, new_json FROM audit_event WHERE action = 'app.unpublished'").toArray().map((a: any) => [a.actor_id, JSON.parse(a.new_json)]),
+  // The app's label, and its store's deletion: an unpublish for good retires the label and owes it; a hold keeps both.
+  label: sql.exec("SELECT l.current, l.retired_at IS NOT NULL AS retired, s.delete_cause FROM app_label l LEFT JOIN app_store s ON s.label = l.label").toArray(),
 }));
 /** Room state after a degrade with code `cause` took the app down, the queued release ended in the same request or pass. */
 const appDown = (app: App, cause: string) => ({
@@ -189,6 +195,7 @@ const appDown = (app: App, cause: string) => ({
   queued: [app.script],
   event: [{ actor_id: "podster", reason: "repo_not_ready" }],
   audit: [["podster", { reason: "repo_not_ready", cause }]],
+  label: [{ current: null, retired: 1, delete_cause: "label_retired" }],
 });
 const appUp = (app: App) => ({
   serving: app.script,
@@ -197,6 +204,7 @@ const appUp = (app: App) => ({
   queued: [],
   event: [],
   audit: [],
+  label: [{ current: 1, retired: 0, delete_cause: null }],
 });
 
 beforeAll(async () => {

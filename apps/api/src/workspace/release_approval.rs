@@ -616,9 +616,20 @@ impl Workspace {
 
     /// Operators are told, by the label, that its lookup row names another room, with this room's ID in `detail`: the
     /// lookup table can't route an operator here, and retiring the label (`retireAppLabel`) needs to name this room.
-    /// If the telling fails, the next approval or alarm tells again.
+    /// If the telling fails, the next approval or alarm tells again. **A room ID that can't be read is never sent as an
+    /// empty one:** the finding is still raised, with no `detail`, and the failure is logged by its code, so an operator
+    /// who can't route to the room sees why.
     async fn tell_label_taken(&self, label: &str) {
-        let room = objects::room_id(&self.state.storage().sql()).unwrap_or_default();
+        let room = match objects::room_id(&self.state.storage().sql()) {
+            Ok(room) => Some(room),
+            Err(error) => {
+                console_error!(
+                    "release: a label taken couldn't name its room: code={}",
+                    error.code().unwrap_or("internal_error")
+                );
+                None
+            }
+        };
         let finding = json!({ "code": LABEL_TAKEN_FINDING, "subject": label, "detail": room });
         let told = crate::moderation::call(
             &self.env,

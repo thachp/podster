@@ -588,7 +588,7 @@ pub enum DeleteCause {
     OperatorTakedown,
     /// The room's owner deleted the app's data, once nothing served it.
     OwnerDeleted,
-    /// The app's label was retired. **Nothing retires a label yet;** the cause is here so the set is whole.
+    /// The app's label was retired, by an unpublish for good, in its own transaction (2026-11-23).
     LabelRetired,
     /// The room was deleted. **Nothing deletes a room's app yet;** the cause is here so the set is whole.
     RoomDeleted,

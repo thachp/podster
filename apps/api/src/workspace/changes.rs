@@ -1439,13 +1439,8 @@ fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bo
     let held = rows(sql, "SELECT cause FROM release_hold", vec![])?
         .first()
         .is_some_and(|row| !row["cause"].is_null());
-    let app_suspended = rows(
-        sql,
-        "SELECT suspended_at FROM app_label WHERE current = 1",
-        vec![],
-    )?
-    .first()
-    .is_some_and(|row| !row["suspended_at"].is_null());
+    // On any label the room ever had: a suspension unpublishes, which retires the label it was on (2026-11-23).
+    let app_suspended = super::takedown::app_suspended(sql)?;
     let held_attempts: Vec<AttemptHeld> = attempts
         .iter()
         .map(|row| AttemptHeld {

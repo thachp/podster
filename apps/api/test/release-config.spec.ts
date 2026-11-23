@@ -213,7 +213,8 @@ describe("the room's release configuration (M6 step 6)", () => {
       expect((await put(r, { enabled: false, expected_version: 3 })).status).toBe(200);
       const on = await put(r, { enabled: true, expected_version: 4 });
       expect(on.status).toBe(200);
-      expect(on.body).toMatchObject(config(r, true, 5));
+      // Switching off retired the label (2026-11-23), so there is no default host until the next request draws one.
+      expect(on.body).toMatchObject({ ...config(r, true, 5), default_host: null });
     });
     expect(await serving(r)).toEqual(DOWN);
     expect(await unpublishes(r)).toHaveLength(1);

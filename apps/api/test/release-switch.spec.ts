@@ -96,6 +96,10 @@ async function room(org: string, opts: { state?: string } = {}): Promise<Room> {
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES (?, 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", TASK, owner.id, admin.id);
     sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, merge_state, merge_sha, merge_called_at, merge_finished_at, reviewer_id, created_at, updated_at) VALUES (?, ?, 7, 1, 'succeeded', ?, 1, 1, ?, 1, 1)", TASK, REPO_ID, SHA, admin.id);
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
+    // The label's store, so the unpublish for good is seen to owe its deletion (2026-11-23). The store provider is off,
+    // so the deletion job stays owed and calls nothing, and the room's alarm is as it was.
+    sql.exec("CREATE TABLE test_app_store_provider_off (x INTEGER)");
+    sql.exec("INSERT INTO app_store (label, kind, store_name, recorded_at, updated_at) VALUES (?, 'd1', ?, 1, 1)", label, `podster-store-${crypto.randomUUID().replace(/-/g, "")}`);
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 3, 2, ?, 1, 1)", owner.id);
     const release = (rel: string, relState: string, withScript: boolean) => sql.exec(
       `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
@@ -171,6 +175,9 @@ async function expectDown(r: Room, generation: number, what: string) {
   expect(events, what).toEqual([{ type: "app.unpublished", actor_id: "podster", reason: "release_not_delegated" }]);
   expect(audit.map((a: any) => [a.actor_id, a.action, a.target_id, a.prior_json, JSON.parse(a.new_json)]), what)
     .toEqual([["podster", "app.unpublished", "app", null, { reason: "release_not_delegated", cause: "release_switch", generation }]]);
+  // The label went with the app, for good, and its store is owed a deletion (2026-11-23).
+  expect(await all(r.room, "SELECT l.label, l.current, l.retired_at IS NOT NULL AS retired, s.delete_cause FROM app_label l LEFT JOIN app_store s ON s.label = l.label"), what)
+    .toEqual([{ label: r.label, current: null, retired: 1, delete_cause: "label_retired" }]);
 }
 const UP = (r: Room) => ({ script_name: r.prev, release_id: PREV });
 

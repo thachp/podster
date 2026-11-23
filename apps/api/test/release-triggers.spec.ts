@@ -152,6 +152,8 @@ async function expectDown(r: Room, reason: string, what: string) {
   ].sort((a, b) => a.id.localeCompare(b.id)));
   expect(await unpublishes(r), what).toEqual([{ cause: reason, label: null, release_epoch: 3 }]);
   expect((await all(r.room, "SELECT script_name, unpublish_epoch FROM script_delete")).map((q: any) => [q.script_name, q.unpublish_epoch]), what).toEqual([[r.prev, 3]]);
+  // The label went with the app, for good (2026-11-23): retired, and none is current until the next request draws one.
+  expect(await all(r.room, "SELECT label, current, retired_at IS NOT NULL AS retired FROM app_label"), what).toEqual([{ label: r.label, current: null, retired: 1 }]);
   expect(await trail(r), what).toEqual({
     events: [{ type: "app.unpublished", actor_id: "podster", reason }],
     audit: [["podster", "app.unpublished", "app", null, { reason }]],
@@ -159,14 +161,18 @@ async function expectDown(r: Room, reason: string, what: string) {
 }
 
 /**
- * After the cause is undone: nothing comes back, and a new release, asked for under the epoch the trigger moved to, is
- * decided by the whole recheck, not refused for an epoch it started under.
+ * After the cause is undone: nothing comes back, and a new release, asked for under the epoch the trigger moved to and
+ * under a new label, since the trigger retired the old one, is decided by the whole recheck, not refused for an epoch
+ * it started under.
  */
 async function expectNothingBack(r: Room, reason: string, what: string) {
   await expectDown(r, reason, what);
-  await inRoom(r.room, (sql) => void sql.exec(
-    `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, updated_at)
-       SELECT ?, commit_sha, 'queued', label, config_version, 3, task_id, requested_by, 2, approved_by, 2, 2 FROM release WHERE id = ?`, NEXT, REL));
+  await inRoom(r.room, (sql) => {
+    sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 2)", `${r.label}n`);
+    sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, updated_at)
+         SELECT ?, commit_sha, 'queued', ?, config_version, 3, task_id, requested_by, 2, approved_by, 2, 2 FROM release WHERE id = ?`, NEXT, `${r.label}n`, REL);
+  });
   expect((await recheck(r, NEXT)).body, what).toEqual({ release_id: NEXT, state: "queued", rechecked: true, reason: null });
   expect(await serving(r), what).toEqual(DOWN);
 }

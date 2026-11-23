@@ -526,6 +526,50 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 - **Approval refused after the branch advances** (the rest of M5-08), **a failed check** (M5-12), **another repository** and workflow files (the rest of M5-06), **how long a token works after the agent is removed** (the rest of M5-07), and **the Workers' logs** (M5-13).
 - **Production.** There is none.
 
+## M6's release-on staging run
+
+*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there, and it can't run yet for a second reason: **no route gives a `deploy` grant.** The grant route takes `push` and `merge` only, and the [M6 plan](m6-plan.md) lists "who may give a `deploy` grant, and the route that gives one" as owed to step 6. The script assumes that route with the action `deploy` and refuses, exit 3, with nothing sent, while `packages/contracts/openapi.yaml` doesn't list it. Whoever builds the route updates the script if it takes another shape.
+
+It releases a tiny static site through the real flow: a managed repository in `podsterdev`, the coding agent's pull request, the room's admin's review and merge, a member's request and the admin's approval. Then it checks each part of [the gate](m6-plan.md#the-gate) a script can show from outside, M6-R01 to M6-R17:
+
+- release switched off publishes nothing, private or public (M6-01, M6-23);
+- an operator taking release from the organization refuses the owner's switch-on (AC-10, M6-02);
+- who may configure and approve (AC-11, M6-03), and claiming a DevOps opening grants no deploy right (expanded criterion 3, AC-17);
+- refused requests: another commit, another room's task, another environment, a named repository, host or label (AC-05, M6-09, M6-21);
+- the release served at the default host, its marker naming the release and the merged commit, and one release for a repeated idempotency key (M6-04, M6-06, M6-11);
+- the host's answers: the fixed headers and the sandbox, GET and HEAD only, no cookie set, nothing more for a request carrying Podster's cookie names or an `Authorization` header, and, in a browser, no reading or setting of `podster.dev`'s cookies and no reach to the API (M6-12, M6-13);
+- an agent's request with its own grant, declined (AC-17);
+- a merged commit whose site holds `_headers` fails with a reason code while the merge stays succeeded, reported apart, and the task Sheet says "Merged · Deployment failed" (M6-07, M6-08, M6-25, UI-02, AC-16);
+- a grant taken back between request and approval fails the release (AC-13, M6-10);
+- a report by address, the operator's suspension, the host down within the wait, and a lift that restores nothing until a new release (M6-19, M6-27);
+- switching release off unpublishes and keeps the records (M6-16), and the room made private again (M6-23).
+
+**Out of scope for now:** custom domains (M6-14, M6-15, M6-26) and apps with code (M6-13 as revised for Workers). Those four checks always say `SKIP`, are printed apart, and don't stop exit 0.
+
+**Not covered:** a failed check with no merge (M6-08's first combination: the run's repository has no CI), rollback (M6-17), the caps (M6-18), archiving (M6-20), the Workers' logs (M6-22), export (M6-24), the domain-wide stop (M6-27's second half), and a provider's own refusal of an upload (AC-16's provider half, shown only by the API's tests).
+
+- **Before anything is sent** it reads the contract for the deploy grant. **Before any sign-up,** signed out: the agent configuration, a signed-out 401, `deploy_release` in capabilities discovery (listed only while the API says `RELEASES` is exactly `true`), and the content Worker's own not found for an unknown host on `podster.site`. Any of those missing is exit 3, or 2 for a preflight that fails outright.
+- **After the owner's sign-up only,** before any other sign-up, the repository or a public room: the room must answer its release configuration, and a request mustn't be refused `release_not_available`, which staging answers while a provider is configured and `RELEASE_PATH_COMPLETE` is false. Either is exit 3 with that one sign-up taken.
+- **No read shows whether a content provider is configured.** Nothing signed out does, and nothing a test person or an operator can read without changing state: the release configuration, capabilities discovery, the operators' findings and the content Worker's answers are the same either way. So the run can't refuse on it before starting. With no provider a release stays queued, M6-R06 fails saying so, and clean-up runs. Check the six `CONTENT_*` settings with the owner before a run.
+- **People:** 4 takes of the test sign-up: the owner, the room's admin, a member, and staging's fixed test operator, which must be in the API's `OPERATORS` ([M4's run](#m4s-staging-run) has `--operator-id`). Without it M6-R02 and M6-R14 fail. One agent, under the owner, takes none.
+- **GitHub:** one public repository, `e2e-m6-<time>-<4 hex>`, with two pull requests. `git` runs as M5's run runs it. The browser is Playwright's Chromium (`node install-browser.mjs` once), with `e2e/child-env.mjs`'s environment.
+- **Clean-up, on every way out but a hard kill:** a suspension lifted, the organization's release given back, release off in the room, the room private, grants taken back, the agent disconnected, sessions signed out. The repository stays, for the owner to archive or delete on GitHub, and so do the people, the organization, the two rooms and their tasks.
+- **Exit:** 0 only when every in-scope check passed and none said `SKIP`; 1 otherwise, naming what wasn't shown; 2 for a refused configuration or a failed preflight, no sign-up taken; 3 when release isn't on with a provider.
+
+The dry run reads the contract, prints the sign-ups and every check, and sends nothing. On today's contract it exits 3, naming the missing deploy grant:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev --dry-run
+```
+
+The run, once release is on with a provider and the deploy grant's route exists:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev
+```
+
+`node m6-release-staging-selftest.mjs` checks its pure parts, its dry run, and each refusal against a stand-in that answers on this machine, and CI runs it. Nothing has shown the run past the owner's first sign-up.
+
 ## Explore's cursor key
 
 `EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. It has been set on staging since 2026-11-09. Changing it later only ends cursors already handed out.

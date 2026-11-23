@@ -502,10 +502,11 @@ describe("what the driver is behind", () => {
         expect((await pass(r.room)).outcome, value).toBe("idle");
       } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run(); }
     }
-    // Switched on, with a provider configured for the room: the release path's gate is closed.
-    await inRoom(r.room, (sql) => { sql.exec("DELETE FROM release_job"); sql.exec("DROP TABLE test_content_provider_off"); });
+    // Switched on, with a provider configured for the room and the release path's gate closed (a test build's closing,
+    // since the path is complete).
+    await inRoom(r.room, (sql) => { sql.exec("DELETE FROM release_job"); sql.exec("DROP TABLE test_content_provider_off"); sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"); });
     const gated = await drivenPass(r.room);
-    await inRoom(r.room, (sql) => void sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    await inRoom(r.room, (sql) => { sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"); sql.exec("DROP TABLE test_release_path_incomplete"); });
     expect(gated.outcome).toBe("idle");
     expect([(await githubState()).minted, (await release(r.room)).state, (await job(r.room)).attempts]).toEqual([[], "queued", 0]);
     // The control: switched on, with the gate open, the same room is driven.
@@ -549,7 +550,7 @@ describe("what the driver is behind", () => {
     expect(driver).toContain('Some(json!({ "owner_key": owner, "reads": MAX_ATTEMPT_READS }))');
     expect(sources["workspace/release_upload.rs"]).toContain("let owner = release_driver::read_owner(&sql)?;");
     expect(sources["workspace/release_upload.rs"].match(/owner_key/g)).toBeNull();
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
   });
 });
 

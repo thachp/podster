@@ -118,7 +118,7 @@ type Room = { room: string; label: string; script: string };
  * release commands' clock at `T`. Its applier and delete job have no content provider; its upload has. `open` gives it
  * the test-only opening of the gate on making a store.
  */
-async function uploading(opts: { open?: boolean; driver?: boolean } = {}): Promise<Room> {
+async function uploading(opts: { open?: boolean; driver?: boolean; code?: boolean } = {}): Promise<Room> {
   const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Store" })).body.id;
   made.push(room);
   await manualAlarms(stub(room));
@@ -150,6 +150,8 @@ async function uploading(opts: { open?: boolean; driver?: boolean } = {}): Promi
     sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
     sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
     if (opts.open !== false) sql.exec("CREATE TABLE test_app_store_create_open (x INTEGER)");
+    // The gate for apps with code, opened as the store's is: every release here but the gate's own test may carry code.
+    if (opts.code !== false) sql.exec("CREATE TABLE test_code_release_open (x INTEGER)");
     if (opts.driver) {
       sql.exec("CREATE TABLE test_release_driver (from_alarm INTEGER)");
       sql.exec("INSERT INTO test_release_driver (from_alarm) VALUES (0)");
@@ -458,11 +460,11 @@ export function appStoreMakeCases() {
       expect(writers).toEqual(["workspace/release_store.rs"]);
     });
 
-    it("is gated by the release path's constant alone, and logs only IDs and codes", () => {
+    it("is gated by the release path's constant and the gate for apps with code, both, and logs only IDs and codes", () => {
       const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
       const source = sources["workspace/release_store.rs"];
       const gate = source.slice(source.indexOf("fn store_create_open"), source.indexOf("fn store_provider"));
-      expect(gate).toContain("if release_commit::RELEASE_PATH_COMPLETE {\n            return true;\n        }");
+      expect(gate).toContain("if self.release_path_complete() && podster_core::app_code::CODE_RELEASES_COMPLETE {\n            return true;\n        }");
       expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\]\n\s+\{\n\s+rows\(\n[^]*test_app_store_create_open/);
       expect(gate).toMatch(/#\[cfg\(not\(feature = "failpoints"\)\)\]\n\s+\{\n\s+false\n\s+\}/);
       // The create is sent in one place, after the record's transaction.
@@ -648,6 +650,46 @@ export function appCodeUploadCases() {
       expect(live.state).toBe("failed");
       expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "store_delete_owed" });
       expect(await inRoom(r.room, (sql) => sql.exec("SELECT script_name FROM serve_state").one().script_name)).toBeNull();
+    });
+
+    it("fails every release that carries code, or tries to, by release_code_not_available while the gate for apps with code is closed, and uploads a static one", async () => {
+      const page = { "index.html": "<p>x</p>\n" };
+      for (const files of [
+        app(true),
+        app(false),
+        { ...codeApp(true), "worker/extra.ts": "export {};\n" },
+        { ...page, "worker/index.js": "export default {};\n" },
+        { ...page, "podster-app.json": "not json" },
+      ]) {
+        await github("/reset", {});
+        await github("/seed", repository(files as Record<string, string>));
+        const r = await uploading({ code: false });
+        const answer = await upload(r.room);
+        expect([answer.status, answer.body.state, answer.body.uploaded], JSON.stringify(files)).toEqual([200, "failed", false]);
+        expect(await failure(r.room)).toEqual({ state: "failed", failure_code: "release_code_not_available" });
+        // Nothing was sent to the provider, and no store was recorded or asked for, though the store's gate is open.
+        expect(await uploadCalls(r.script)).toEqual([]);
+        expect(await record(r.room)).toEqual([]);
+      }
+      expect((await storeState()).calls).toEqual([]);
+      // The control: a static release in a room with the gate closed uploads as before.
+      await github("/reset", {});
+      await github("/seed", repository(STATIC));
+      const r = await uploading({ code: false });
+      expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
+    });
+
+    it("keeps the gate for apps with code in core, closed, and read in one place, with only a test build opening it", () => {
+      const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+      const source = sources["workspace/release_upload.rs"];
+      const gate = source.slice(source.indexOf("fn code_releases_open"), source.indexOf("fn test_before_check"));
+      expect(gate).toContain("if podster_core::app_code::CODE_RELEASES_COMPLETE {\n            return true;\n        }");
+      expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\]\n\s+\{\n\s+rows\(\n[^]*test_code_release_open/);
+      expect(gate).toMatch(/#\[cfg\(not\(feature = "failpoints"\)\)\]\n\s+\{\n\s+false\n\s+\}/);
+      // The upload asks the gate on the form, before its store and before anything is sent.
+      expect(source).toContain("admit(first.form(), self.code_releases_open())");
+      expect(source.indexOf("admit(first.form()")).toBeLessThan(source.indexOf(".store_before_upload("));
+      expect(Object.values(sources).join("\n")).not.toMatch(/CODE_RELEASES_COMPLETE: bool/);
     });
 
     it("fails a code release that fails core's checks by the problem's code, and never uploads it as static files", async () => {

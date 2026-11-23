@@ -399,6 +399,8 @@ describe("what may be asked for (podster_core::release_request)", () => {
 describe("the gate on the release path", () => {
   it("refuses the request where release is switched on and a provider is configured, before anything is read or written", async () => {
     const r = await room();
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const before = await everything(r);
     // This room's provider is configured, as the test Worker's is, and release is switched on for the command.
     await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
@@ -406,9 +408,9 @@ describe("the gate on the release path", () => {
       expect(refused(await switchedOn(() => ask(r)))).toEqual([409, "release_not_available"]);
     } finally { await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
     expect(await everything(r)).toBe(before);
-    // The constant is still false, and set in one place.
+    // The constant is true since 2026-11-23, and set in one place.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
+    expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = true;");
     // The request passes the gate before it reads anything outside the room.
     const source = sources["workspace/release_request.rs"];
     const reads = source.slice(source.indexOf("async fn release_request_reads"));

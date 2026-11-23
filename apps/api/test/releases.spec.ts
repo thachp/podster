@@ -146,6 +146,8 @@ describe("M6's routes, none of them built", () => {
 
   it("switched on, refuse an agent and a non-operator, and otherwise say release isn't available", async () => {
     const room = await makeRoom();
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, so each route's gate shows.
+    await inRoom(room, (sql) => sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     // The stop is set and lifted below. Its key at the provider is this object's to write: with no provider for it
     // here, nothing reaches the stand-in that the takedown tests share.
     await runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_content_provider_off (x INTEGER)"));

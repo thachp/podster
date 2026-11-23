@@ -83,11 +83,13 @@ pub(crate) const INTERNAL_RELEASE_COMMIT_LIVE: &str = "/internal/release-commit-
 /// staged on a script that may hold nothing, or part of a release.
 pub(super) const NOT_UPLOADED: &str = "release_not_uploaded";
 
-/// **Whether the release path is complete.** False until the PR that completes it flips this, and that is the only
-/// place it is set. While false, a deployment with release switched on and a provider configured refuses every
-/// release command (`Workspace::release_path_open`). What must be true before it is flipped is in `docs/m6-plan.md`,
-/// under "The gate on the release path".
-pub(crate) const RELEASE_PATH_COMPLETE: bool = false;
+/// **Whether the release path is complete.** Set here and nowhere else. While false, a deployment with release
+/// switched on and a provider configured refuses every release command (`Workspace::release_path_open`). What had to
+/// be true before it was flipped is in `docs/m6-plan.md`, under "The gate on the release path". **Flipped on
+/// 2026-11-23, for static sites only:** a release that carries code is refused `release_code_not_available` by its
+/// own gate, `podster_core::app_code::CODE_RELEASES_COMPLETE`, still false, and no store is made while that is false.
+/// Flipping this serves nothing by itself: `RELEASES` and a provider are each the owner's to set.
+pub(crate) const RELEASE_PATH_COMPLETE: bool = true;
 
 /// How old a commit's outside reads may be when its confirm runs. Older, and the confirm decides nothing: the reads
 /// are an answer about too long ago, and the command asks again.
@@ -1146,6 +1148,24 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
 }
 
 impl Workspace {
+    /// The release path's gate as this room reads it: [`RELEASE_PATH_COMPLETE`], in every deployment. Every gate on the
+    /// path reads it through here. Test builds only: a room a test gave the table `test_release_path_incomplete` reads
+    /// it closed, so the refusals it stands for stay tested now that it is open. A build without the `failpoints`
+    /// feature never reads that table.
+    pub(super) fn release_path_complete(&self) -> bool {
+        #[cfg(feature = "failpoints")]
+        if rows(
+            &self.state.storage().sql(),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_path_incomplete'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
+        {
+            return false;
+        }
+        RELEASE_PATH_COMPLETE
+    }
+
     /// `{ release_id }`: starts one release's upload (M6 step 5). The release's own state is
     /// read first, with no outside read for one that isn't the job's; then every outside fact; then the room's
     /// transaction. Nothing goes live on this, so one round of reads before the transaction is all it makes.

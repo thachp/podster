@@ -919,7 +919,7 @@ impl Workspace {
     /// route that isn't built, and says so in one log line by its code. With either missing nothing can be served,
     /// which is every deployment today, and the commands answer.
     pub(super) async fn release_path_open(&self) -> R<()> {
-        if release_commit::RELEASE_PATH_COMPLETE {
+        if self.release_path_complete() {
             return Ok(());
         }
         let sql = self.state.storage().sql();

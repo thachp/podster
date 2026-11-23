@@ -274,6 +274,8 @@ describe("asking to roll back (M6 step 6, 6h)", () => {
 
   it("is refused by the gate on the release path before anything is read or written, and isn't there while release is off", async () => {
     const r = await room();
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(r.room, (s) => void s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const before = await everything(r);
     await inRoom(r.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
     try {

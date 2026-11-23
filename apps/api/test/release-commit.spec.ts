@@ -701,6 +701,8 @@ describe("a release that can't go on", () => {
 describe("the gate on the release path", () => {
   it("refuses every release command where release is switched on and a provider is configured, and writes nothing", async () => {
     const h = await healthy({ state: "uploading" });
+    // The path is complete since 2026-11-23; a test build closes it for this room alone, to show what it refused.
+    await inRoom(h.room, (s) => void s.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)"));
     const all = await everything(h.room);
     // This room's provider is configured, as the test Worker's is, and release is switched on for the command.
     await inRoom(h.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
@@ -711,10 +713,15 @@ describe("the gate on the release path", () => {
       expect([off.status, ((await off.json()) as any).state]).toEqual([200, "served"]);
     } finally { await inRoom(h.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
     expect(await everything(h.room)).toBe(all);
-    // One constant, false, set in one place.
+    // One constant, true since 2026-11-23, set in one place, and read through one method, whose closing is the test
+    // build's alone.
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
-    expect(sources["workspace/release_commit.rs"]).toMatch(/pub\(crate\) const RELEASE_PATH_COMPLETE: bool = false;/);
+    expect(sources["workspace/release_commit.rs"]).toMatch(/pub\(crate\) const RELEASE_PATH_COMPLETE: bool = true;/);
     expect(Object.values(sources).join("\n").match(/RELEASE_PATH_COMPLETE: bool/g)).toHaveLength(1);
+    const reads = Object.entries(sources).flatMap(([path, source]) => source.split("\n").filter((line) => /RELEASE_PATH_COMPLETE/.test(line) && !/^\s*\/\//.test(line)).map(() => path));
+    expect(reads).toEqual(["workspace/release_commit.rs", "workspace/release_commit.rs"]);
+    const method = sources["workspace/release_commit.rs"].split("pub(super) fn release_path_complete")[1].split("\n    }\n")[0];
+    expect(method).toMatch(/#\[cfg\(feature = "failpoints"\)\]\s*if rows\([\s\S]*'test_release_path_incomplete'[\s\S]*\{\s*return false;\s*\}\s*RELEASE_PATH_COMPLETE\s*$/);
   });
 });
 

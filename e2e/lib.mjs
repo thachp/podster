@@ -5,6 +5,7 @@ import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { randomUUID } from "node:crypto";
+import { subscribe } from "node:diagnostics_channel";
 
 // Longer than the gateway's own 25-second limit on the API, so its answer arrives first.
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -62,6 +63,65 @@ export function rejected(result, label, statuses = [400, 401, 403, 404]) {
   if (!statuses.includes(result.status)) throw new Error(`${label}: expected HTTP ${statuses.join(" or ")}, got ${result.status}`);
 }
 
+// Cloudflare's edge, now and then, drops an open keep-alive connection without a FIN: the next request written to it is
+// answered with a reset, before any byte of a response. It isn't an idle timeout (an idle connection stayed open over
+// 120 s, and Node closes its own after 4 s), and it hit sockets idle 0.1 s to 3.9 s, so a shorter keep-alive can't avoid
+// it. Node's fetch says which socket a request went on only through these channels, so they mark each request sent on a
+// socket that had carried one before, and each error that ended such a request before its response's headers arrived.
+const socketUses = new WeakMap();
+const sentOn = new WeakMap();
+const endedBeforeAnswer = new WeakSet();
+subscribe("undici:client:sendHeaders", ({ request, socket }) => {
+  const uses = socketUses.get(socket) ?? 0;
+  socketUses.set(socket, uses + 1);
+  sentOn.set(request, { reused: uses > 0, answered: false });
+});
+subscribe("undici:request:headers", ({ request }) => {
+  const sent = sentOn.get(request);
+  if (sent) sent.answered = true;
+});
+subscribe("undici:request:error", ({ request, error }) => {
+  const sent = sentOn.get(request);
+  if (sent?.reused && !sent.answered && error && typeof error === "object") endedBeforeAnswer.add(error);
+});
+
+/** A reset on a reused connection before any answer: the one failure `Target` sends again, and only once. */
+export function resetBeforeAnswer(error) {
+  const cause = error?.cause;
+  return cause?.code === "ECONNRESET" && endedBeforeAnswer.has(cause);
+}
+
+// MCP tools that only read (ARCHITECTURE.md: queries have no side effects), except read_inbox, which can ack, and
+// get_repo_access, a command that issues a repository token.
+const MCP_READS = /^(get|list)_[a-z_]+$/;
+const MCP_NOT_READS = new Set(["read_inbox", "get_repo_access"]);
+
+/**
+ * Whether sending this request a second time can't do a second thing. GET and HEAD, but an acking inbox read; a dashboard command to a room, which
+ * the room's Durable Object answers once per idempotency key; and an MCP message that is a read or carries an idempotency
+ * key. Anything else, sign-ups, consent, token exchange, MCP's initialize and every other POST, is never sent again.
+ */
+export function safeToRepeat(url, init = {}) {
+  const method = (init.method ?? url?.method ?? "GET").toUpperCase();
+  const { pathname, searchParams } = new URL(url?.url ?? String(url));
+  // An inbox read with `ack=true` moves the cursor, the one GET that does something.
+  if (method === "GET" || method === "HEAD") return searchParams.get("ack") !== "true";
+  if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) return false;
+  // Every room command but an agent's repository token takes and keeps a key (apps/api/src/workspace.rs).
+  if (/^\/api\/v1\/workspaces\/[^/]+\/./.test(pathname)) return !/\/repo-access$/.test(pathname) && new Headers(init.headers).has("idempotency-key");
+  if (method !== "POST" || !/\/mcp$/.test(pathname) || typeof init.body !== "string") return false;
+  let message;
+  try {
+    message = JSON.parse(init.body);
+  } catch {
+    return false;
+  }
+  if (message?.method === "tools/list" || message?.method === "ping") return true;
+  if (message?.method !== "tools/call") return false;
+  const { name, arguments: args } = message.params ?? {};
+  return typeof args?.idempotency_key === "string" || (MCP_READS.test(name ?? "") && !MCP_NOT_READS.has(name));
+}
+
 export class Target {
   /** `onRequest`, if given, hears of each request sent, retries included: its URL, method, start, status or error, and milliseconds. */
   constructor(base, { pollMs, onRequest }) {
@@ -86,10 +146,24 @@ export class Target {
     }
   }
 
-  /** A limit that's reached waits it out, as a real client would. No run should need this for long. */
+  /**
+   * A limit that's reached waits it out, as a real client would. No run should need this for long. A reset on a reused
+   * connection before any answer is sent once more, only when `safeToRepeat`, and said in the output by method and path.
+   */
   async fetch(url, { retry = true, ...init } = {}) {
+    let resent = false;
     for (let attempt = 0; ; attempt++) {
-      const response = await this.#timed(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      let response;
+      try {
+        response = await this.#timed(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      } catch (error) {
+        if (resent || !resetBeforeAnswer(error) || !safeToRepeat(url, init)) throw error;
+        resent = true;
+        attempt--;
+        const { pathname } = new URL(url?.url ?? String(url));
+        console.log(`     (connection reset before any answer, on a reused connection: sending ${(init.method ?? url?.method ?? "GET").toUpperCase()} ${pathname} once more)`);
+        continue;
+      }
       // `retry: false` returns a refusal as it is, for a caller that can't wait out the limit.
       if (response.status !== 429 || attempt >= 2 || !retry) return response;
       const wait = Math.min(Number(response.headers.get("retry-after")) || 60, 70);

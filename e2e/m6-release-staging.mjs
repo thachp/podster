@@ -510,6 +510,8 @@ async function main() {
   say("\n## release switched off publishes nothing");
   await check("M6-R01", async () => {
     refusedAs(await askRelease(member, t1), 409, "release_needs_public_room", "a request in the private room");
+    // A public room always has person review on (decision 159), so publishing is refused person_review_required without it.
+    await owner.must("PUT", `/v1/workspaces/${room}/review-policy`, { require_person: true, policy_version: await owner.policyVersion(room) });
     const published = await publisher.publish(owner, room);
     ok(published.ok, `making the room public: HTTP ${published.status} ${published.code ?? ""}`);
     refusedAs(await askRelease(member, t1), 409, "release_off", "a request in the public room, with release off in the room");

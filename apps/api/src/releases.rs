@@ -53,7 +53,7 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
         ["v1", "workspaces", _, "app-hostname"] if get || put || delete => Some(Audience::Person),
         ["v1", "workspaces", _, "apps", _, "delete-data"] if post => Some(Audience::Person),
         ["v1", "app-reports"] if post => Some(Audience::Person),
-        ["v1", "moderation", "apps", _, "suspend" | "lift" | "delete-data"] if post => {
+        ["v1", "moderation", "apps", _, "suspend" | "lift" | "delete-data" | "retire"] if post => {
             Some(Audience::Operator)
         }
         ["v1", "moderation", "app-hosts", _, "suspend" | "lift"] if post => {
@@ -239,6 +239,62 @@ async fn app_data_delete(
     .await
 }
 
+/// An operator retires a room's current label that another room's lookup row holds (M6 step 6, 6f's open item 3),
+/// `{ reason, room }`. The lookup table names the other room, so the operator names this one, by the ID the finding
+/// `app_label_taken` carries in its `detail`; the room acts only if the label is its own, current, never approved, and
+/// D1's row names another room (`workspace::label_retire`). Recorded in the operators' log as the action
+/// `retire_label`, intent first and outcome after.
+async fn label_retire(
+    env: &Env,
+    caller: &Caller,
+    label: &str,
+    body: Option<&str>,
+) -> R<std::result::Result<Value, Response>> {
+    let fields: serde_json::Map<String, Value> = body
+        .and_then(|body| serde_json::from_str(body).ok())
+        .ok_or_else(ApiError::invalid_argument)?;
+    if fields.keys().any(|k| k != "reason" && k != "room") {
+        return Err(ApiError::invalid_argument());
+    }
+    let reason = fields
+        .get("reason")
+        .and_then(Value::as_str)
+        .and_then(podster_policy::moderation::Reason::from_name)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let room = fields
+        .get("room")
+        .and_then(Value::as_str)
+        .filter(|room| room_id_form(room))
+        .ok_or_else(ApiError::invalid_argument)?;
+    if !is_label(label) {
+        return Err(ApiError::not_found());
+    }
+    let request = json!({ "label": label, "reason": reason.name() });
+    moderation::room_action_named(
+        env,
+        &caller.id,
+        room,
+        crate::workspace::INTERNAL_LABEL_RETIRE,
+        request,
+        "app",
+        label,
+        "retire_label",
+        reason,
+    )
+    .await
+}
+
+/// Whether a room's ID has the form the API gives one: `ws_` and lower-case letters, digits and `_`, at most 128.
+fn room_id_form(room: &str) -> bool {
+    room.len() <= 128
+        && room.strip_prefix("ws_").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
 /// An operator suspends a custom hostname, or lifts that (M6 step 4(a)). The operator was checked before this. The
 /// name comes normalized, so two spellings are one name. Anything on the content domain that isn't an app's
 /// default host, and anything on Podster's own domain, is nobody's hostname: `not_found`. The suspension is the
@@ -340,6 +396,10 @@ pub(crate) async fn answer(
         // An operator deletes an app's data (S4 of the store plan), which suspends it first.
         ["v1", "moderation", "apps", label, "delete-data"] => {
             app_data_delete(env, caller, label, body).await?
+        }
+        // An operator retires a room's label another room's lookup row holds (6f's open item 3).
+        ["v1", "moderation", "apps", label, "retire"] => {
+            label_retire(env, caller, label, body).await?
         }
         ["v1", "moderation", "apps", label, verb] => {
             app_suspension(env, caller, label, *verb == "suspend", body).await?

@@ -1,7 +1,7 @@
 // #520 and #525: Runner on a real Git 2.25, Ubuntu 20.04's, which WSL installs. CI's `runner` job runs it on GitHub's
 // Ubuntu runner through vitest.linux.config.ts, with RUNNER_LINUX_DOCKER=1; set RUNNER_OLD_GIT_DOCKER=1 to run it on a
-// Mac with Docker. Never in the default config. It starts the official `ubuntu:20.04` image, installs Git from Ubuntu's
-// own archive (the only network it uses), and runs Runner's real setup, `prepare` and `publish` with every host Git
+// Mac with Docker. Never in the default config. It starts the official `buildpack-deps:focal-scm` image (Ubuntu 20.04 with
+// its own Git, pinned by digest; it downloads nothing once pulled), and runs Runner's real setup, `prepare` and `publish` with every host Git
 // command run by that Git, as the owner's user, against a local bare repository standing in for GitHub. No GitHub, no
 // token, no provider. It proves:
 // - setup reads `git version 2.25.1`, accepts it, and leaves out `--no-write-fetch-head`, which 2.25 refuses;
@@ -23,7 +23,9 @@ import { hostRepositoryPath } from "../src/node/repo-path.js";
 const ON = process.env.RUNNER_OLD_GIT_DOCKER === "1" || (process.platform === "linux" && process.env.RUNNER_LINUX_DOCKER === "1");
 const docker = findDocker();
 const hostGit = findGit();
-const IMAGE = "ubuntu:20.04";
+// Ubuntu 20.04 with its own Git 2.25.1 already installed, pinned by digest, so setup never waits on an apt mirror
+// (main's CI hung 10 minutes in apt-get on 2026-11-23).
+const IMAGE = "buildpack-deps:focal-scm@sha256:fa56fe73b4475655b2f39d6376b6a6664d24b5c43227f709d4a923609f3286a1";
 const NAME = `podster-old-git-${process.pid}`;
 const NOW = 1_800_000_000_000;
 const SCOPE = { full_name: "podsterdev/todo-app", provider_repo_id: 9001 };
@@ -43,7 +45,7 @@ describe.skipIf(!ON || docker === null || hostGit === null)("Runner on Git 2.25 
     // The real path, so the folder is mounted where Runner names it (a Mac's /var is a link to /private/var).
     root = await realpath(await mkdtemp(join(tmpdir(), "runner-oldgit-")));
     run(["run", "-d", "--rm", "--name", NAME, "--network", "bridge", "-v", `${root}:${root}`, IMAGE, "sleep", "3600"]);
-    run(["exec", "-e", "DEBIAN_FRONTEND=noninteractive", NAME, "sh", "-c", "apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends git >/dev/null"]);
+    expect(run(["exec", NAME, "git", "--version"]).trim()).toBe("git version 2.25.1");
     // A local bare repository standing in for GitHub, made with the host's Git.
     const seed = join(root, "seed");
     await mkdir(seed);

@@ -41,6 +41,7 @@ const cases = [
   ["an MCP tool call without one", "/mcp", { method: "POST", headers: json, body: mcp("tools/call", { name: "create_task", arguments: {} }) }, false],
   ["an MCP read", "/mcp", { method: "POST", headers: json, body: mcp("tools/call", { name: "list_tasks", arguments: {} }) }, true],
   ["MCP's read_inbox, which can ack", "/mcp", { method: "POST", headers: json, body: mcp("tools/call", { name: "read_inbox", arguments: {} }) }, false],
+  ["MCP's get_repo_access, which issues a token", "/mcp", { method: "POST", headers: json, body: mcp("tools/call", { name: "get_repo_access", arguments: {} }) }, false],
   ["MCP's initialize", "/mcp", { method: "POST", headers: json, body: mcp("initialize", {}) }, false],
   ["MCP's tools/list", "/mcp", { method: "POST", headers: json, body: mcp("tools/list") }, true],
 ];

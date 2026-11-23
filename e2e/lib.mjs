@@ -91,8 +91,10 @@ export function resetBeforeAnswer(error) {
   return cause?.code === "ECONNRESET" && endedBeforeAnswer.has(cause);
 }
 
-// MCP tools that only read (ARCHITECTURE.md: queries have no side effects), except read_inbox, which can ack.
+// MCP tools that only read (ARCHITECTURE.md: queries have no side effects), except read_inbox, which can ack, and
+// get_repo_access, a command that issues a repository token.
 const MCP_READS = /^(get|list)_[a-z_]+$/;
+const MCP_NOT_READS = new Set(["read_inbox", "get_repo_access"]);
 
 /**
  * Whether sending this request a second time can't do a second thing. GET and HEAD, but an acking inbox read; a dashboard command to a room, which
@@ -117,7 +119,7 @@ export function safeToRepeat(url, init = {}) {
   if (message?.method === "tools/list" || message?.method === "ping") return true;
   if (message?.method !== "tools/call") return false;
   const { name, arguments: args } = message.params ?? {};
-  return typeof args?.idempotency_key === "string" || (MCP_READS.test(name ?? "") && name !== "read_inbox");
+  return typeof args?.idempotency_key === "string" || (MCP_READS.test(name ?? "") && !MCP_NOT_READS.has(name));
 }
 
 export class Target {

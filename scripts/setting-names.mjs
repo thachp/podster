@@ -1,16 +1,20 @@
 // The names of the settings the API reads as plain configuration, found in its own source, and the rule that none of
 // them is a secret on a deployed Worker. scripts/deploy-staging refuses on that rule before it changes anything.
 //
-// Why (the deep review of PR #450, 2026-11-18): the API reads `RELEASES`, `HOSTNAME_RESOLVER_URL`,
-// `PUBLIC_SUFFIX_RULES`, `CUSTOM_HOSTNAME_*` and `CONTENT_*` through `env.var` and `crate::setting`, which read any
-// string binding. A Worker secret of one of those names would switch a feature on, survive every deploy, and never be
-// seen by the checks that read apps/api/wrangler.jsonc.
+// Why (the deep review of PR #450, 2026-11-18): the API reads switches such as `RELEASES`, `HOSTNAME_RESOLVER_URL`,
+// `PUBLIC_SUFFIX_RULES`, `PUBLIC_ROOMS` and `MANAGED_REPOSITORIES` through `env.var` and `crate::setting`, which read
+// any string binding. A Worker secret of one of those names would switch a feature on, survive every deploy, and never
+// be seen by the checks that read apps/api/wrangler.jsonc. That refusal stays.
+//
+// The release provider's credentials and IDs are the other way round (audit item E3, 2026-11-23): the API reads them
+// with `crate::secret`, so they are secrets by design, which the owner sets with `wrangler secret put` and which survive
+// deploys. They are left out of the names, and `release` reports which of them staging holds (RELEASE_SECRETS, below).
 //
 // The names aren't listed by hand. A setting's name is either the value of a `const NAME: &str = "NAME";` in a file
 // under apps/api/src that reads settings (calls `setting(` or `env.var(`), which is how the release path's modules name
 // their settings and the form the API's own tests read them by, or a string literal read directly, as
-// `env.var("NAME")` or `setting(env, "NAME")`. A name the source also reads with `env.secret(` is a secret by design
-// and is left out, and so is a name in FAILPOINTS_ONLY, below. Today that gives the release path's settings and PUBLIC_ROOMS,
+// `env.var("NAME")` or `setting(env, "NAME")`. A name the source also reads with `env.secret(` or `crate::secret(`, by a
+// literal or a const, is a secret by design and is left out, and so is a name in FAILPOINTS_ONLY, below. Today that gives the release path's settings and PUBLIC_ROOMS,
 // MANAGED_REPOSITORIES and REPOSITORY_REQUESTERS, which staging sets in wrangler.jsonc and are the same kind of switch.
 //
 //   node scripts/setting-names.mjs names apps/api/src
@@ -19,6 +23,10 @@
 //     reads `wrangler secret list --format json` on stdin. Exit 0 and prints nothing when no secret has one of the
 //     names; exit 1 and prints why when one does, or when the list can't be read. Secret names are printed, never values,
 //     and `secret list` gives no values.
+//   node scripts/setting-names.mjs release apps/api/src < secret-list.json
+//     reads the same list and prints which of RELEASE_SECRETS it holds and which it doesn't, by name. Exit 0 whatever
+//     is missing, since staging runs without release; exit 1 when the list can't be read, or a name in RELEASE_SECRETS
+//     is one the source reads as plain configuration, so the list can't drift into a switch.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,6 +43,26 @@ export const FAILPOINTS_ONLY = [
 ];
 const SECRET_LITERAL = /\benv\s*\.\s*secret\s*\(\s*"([A-Z][A-Z0-9_]*)"\s*\)/g;
 const SECRET_BY_NAME = /\benv\s*\.\s*secret\s*\(\s*([A-Z][A-Z0-9_]*)\s*\)/g;
+// `secret(env, "NAME")`, `crate::secret(&self.env, NAME)` and the like: the API's own secret reader, in apps/api/src/lib.rs.
+const CRATE_SECRET_LITERAL = /(?<![.\w])(?:crate\s*::\s*)?secret\s*\(\s*&?[a-z_][a-z0-9_.]*\s*,\s*"([A-Z][A-Z0-9_]*)"\s*\)/g;
+const CRATE_SECRET_BY_NAME = /(?<![.\w])(?:crate\s*::\s*)?secret\s*\(\s*&?[a-z_][a-z0-9_.]*\s*,\s*([A-Z][A-Z0-9_]*)\s*\)/g;
+
+// The release provider's settings and the release App's (docs/staging.md, "Setting up release (M6)"), each a Worker
+// secret the owner sets on the API Worker. RELEASES isn't one: it is a switch, set separately, and never a secret.
+export const RELEASE_SECRETS = [
+  "CONTENT_ACCOUNT_ID",
+  "CONTENT_DISPATCH_NAMESPACE",
+  "CONTENT_KV_NAMESPACE_ID",
+  "CONTENT_DOMAIN",
+  "CONTENT_SCRIPTS_TOKEN",
+  "CONTENT_ROUTING_TOKEN",
+  "CONTENT_STORE_TOKEN",
+  "CUSTOM_HOSTNAME_ZONE_ID",
+  "CUSTOM_HOSTNAME_TOKEN",
+  "GITHUB_RELEASE_APP_ID",
+  "GITHUB_RELEASE_INSTALLATION_ID",
+  "GITHUB_RELEASE_APP_KEY",
+];
 
 function rustFiles(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -53,6 +81,8 @@ export function settingNames(sources) {
     for (const match of text.matchAll(CONST)) consts.set(match[1], match[2]);
     for (const match of text.matchAll(SECRET_LITERAL)) secrets.add(match[1]);
     for (const match of text.matchAll(SECRET_BY_NAME)) if (consts.has(match[1])) secrets.add(consts.get(match[1]));
+    for (const match of text.matchAll(CRATE_SECRET_LITERAL)) secrets.add(match[1]);
+    for (const match of text.matchAll(CRATE_SECRET_BY_NAME)) if (consts.has(match[1])) secrets.add(consts.get(match[1]));
     for (const match of text.matchAll(LITERAL_READ)) settings.add(match[1]);
     if (!READS_SETTING.test(text)) continue;
     for (const value of consts.values()) settings.add(value);
@@ -115,10 +145,20 @@ export function secretsProblem(settings, listOutput) {
     "Deleting it is the owner's to do; nothing on staging changed";
 }
 
+/** Which of RELEASE_SECRETS the list holds and which it doesn't, or a problem: the list can't be read, or a name in
+ * RELEASE_SECRETS is one the source reads as plain configuration. */
+export function releaseSecrets(settings, listOutput) {
+  const switches = RELEASE_SECRETS.filter((name) => settings.includes(name));
+  if (switches.length > 0) return { problem: `RELEASE_SECRETS in scripts/setting-names.mjs names ${switches.join(", ")}, which apps/api/src reads as plain configuration` };
+  const names = secretNames(listOutput);
+  if (names === null) return { problem: "the API Worker's secret list can't be read, so which release secrets it holds can't be told" };
+  return { set: RELEASE_SECRETS.filter((name) => names.includes(name)), missing: RELEASE_SECRETS.filter((name) => !names.includes(name)) };
+}
+
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {
   const [mode, dir] = process.argv.slice(2);
-  if ((mode !== "names" && mode !== "check") || !dir) {
-    console.log("Usage: node scripts/setting-names.mjs names|check <apps/api/src>");
+  if (!["names", "check", "release"].includes(mode) || !dir) {
+    console.log("Usage: node scripts/setting-names.mjs names|check|release <apps/api/src>");
     process.exit(2);
   }
   const found = settingNamesIn(dir);
@@ -128,6 +168,13 @@ if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFile
   }
   if (mode === "names") {
     console.log(found.names.join("\n"));
+  } else if (mode === "release") {
+    const release = releaseSecrets(found.names, readFileSync(0, "utf8"));
+    if (release.problem) {
+      console.log(release.problem);
+      process.exit(1);
+    }
+    console.log(`release (M6) secrets set: ${release.set.length} of ${RELEASE_SECRETS.length}${release.missing.length ? `; not set: ${release.missing.join(", ")}` : ""}`);
   } else {
     const problem = secretsProblem(found.names, readFileSync(0, "utf8"));
     if (problem) {

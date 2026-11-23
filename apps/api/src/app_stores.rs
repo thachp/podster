@@ -34,7 +34,7 @@
 //! own record, and an ID from Cloudflare's own answer, each checked against its form before it goes into a path or a
 //! body. Logs carry nothing from this module: no name, no ID, no account and no token.
 
-use crate::{setting, Setting};
+use crate::{secret, Setting};
 use futures_util::future::{select, Either};
 use podster_core::app_store::{
     create_answer, d1_id_form, is_store_name, read, CreateAnswer, Described, Envelope, ListPage,
@@ -50,7 +50,8 @@ const CALL_TIMEOUT_MS: u64 = 5_000;
 /// No answer read here is longer. A page of the list holds at most [`LIST_PAGE`] short entries.
 const MAX_ANSWER_BYTES: usize = 256 * 1024;
 
-/// The settings a store provider needs. The account is the content provider's; the token is this module's alone.
+/// The settings a store provider needs, each a Worker secret the owner sets (docs/staging.md, "Setting up release
+/// (M6)"). The account is the content provider's; the token is this module's alone.
 const ACCOUNT: &str = "CONTENT_ACCOUNT_ID";
 const TOKEN: &str = "CONTENT_STORE_TOKEN";
 /// The content provider's two tokens, read only to refuse a store token equal to either.
@@ -79,9 +80,10 @@ fn token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
 
-fn text_setting(env: &Env, name: &str, well_formed: fn(&str) -> bool) -> Option<String> {
-    match setting(env, name) {
-        Setting::Text(value) if well_formed(&value) => Some(value),
+/// A secret's text when it is bound as text and well-formed, or `None`.
+fn well_formed(found: Setting, form: fn(&str) -> bool) -> Option<String> {
+    match found {
+        Setting::Text(value) if form(&value) => Some(value),
         _ => None,
     }
 }
@@ -159,7 +161,11 @@ impl StoreProvider {
     /// The store provider this deployment is configured with, or `None`. Both settings must be bound as text and
     /// well-formed, and the token must be neither of the content provider's tokens, nor either of them unreadable.
     pub(crate) fn from_env(env: &Env) -> Option<StoreProvider> {
-        StoreProvider::from_settings(env, ACCOUNT, TOKEN, OTHER_TOKENS)
+        StoreProvider::from_reads(
+            secret(env, ACCOUNT),
+            secret(env, TOKEN),
+            OTHER_TOKENS.map(|other| secret(env, other)),
+        )
     }
 
     /// The store provider the `Moderation` object's store reconcile reads with (S5 of the store plan, its second PR):
@@ -169,29 +175,39 @@ impl StoreProvider {
     /// release job's tests keep under the content account in another spec file running beside them.
     pub(crate) fn for_reconcile(env: &Env) -> Option<StoreProvider> {
         #[cfg(feature = "failpoints")]
-        if let Setting::Text(_) = setting(env, "TEST_STORE_RECONCILE_ACCOUNT") {
-            return StoreProvider::from_settings(
-                env,
-                "TEST_STORE_RECONCILE_ACCOUNT",
-                TOKEN,
-                OTHER_TOKENS,
+        if let found @ Setting::Text(_) = crate::setting(env, "TEST_STORE_RECONCILE_ACCOUNT") {
+            return StoreProvider::from_reads(
+                found,
+                secret(env, TOKEN),
+                OTHER_TOKENS.map(|other| secret(env, other)),
             );
         }
         StoreProvider::from_env(env)
     }
 
-    /// The same, read from the settings of these names. Only [`StoreProvider::from_env`] and the test-only route call
-    /// it; the route names other settings to show each refusal.
+    /// Test builds only: the same, read from the secrets of these names. The test-only route names other bindings to
+    /// show each refusal.
+    #[cfg(feature = "failpoints")]
     fn from_settings(
         env: &Env,
         account: &str,
         token_name: &str,
         others: [&str; 2],
     ) -> Option<StoreProvider> {
-        let account = text_setting(env, account, hex32)?;
-        let token = text_setting(env, token_name, token)?;
+        StoreProvider::from_reads(
+            secret(env, account),
+            secret(env, token_name),
+            others.map(|other| secret(env, other)),
+        )
+    }
+
+    /// The provider from what was read: the account and the token well-formed, and the token neither of the content
+    /// provider's tokens, nor either of them unreadable.
+    fn from_reads(account: Setting, token: Setting, others: [Setting; 2]) -> Option<StoreProvider> {
+        let account = well_formed(account, hex32)?;
+        let token = well_formed(token, self::token)?;
         for other in others {
-            match setting(env, other) {
+            match other {
                 Setting::Absent => {}
                 Setting::Text(value) if value != token => {}
                 Setting::Text(_) | Setting::Unreadable => return None,

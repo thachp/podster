@@ -30,11 +30,17 @@ It refuses, before changing anything, unless:
   - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
     run is looked into, not deployed
   - the API Worker on staging holds no secret named as a setting the API reads as plain configuration,
-    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_SUFFIX_RULES, CUSTOM_HOSTNAME_* or CONTENT_*. The API
-    reads those through env.var and crate::setting, which take a secret too, so one would switch a
-    feature on and survive every deploy. The names come from apps/api/src (scripts/setting-names.mjs),
+    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_SUFFIX_RULES, PUBLIC_ROOMS or MANAGED_REPOSITORIES.
+    The API reads those through env.var and crate::setting, which take a secret too, so one would switch
+    a feature on and survive every deploy. The names come from apps/api/src (scripts/setting-names.mjs),
     and the secrets from a read-only list of staging's API Worker secrets after npm ci, which gives
-    names only. A list that can't be read is refused too
+    names only. A list that can't be read is refused too.
+    The release provider's settings and the release App's (CONTENT_*, CUSTOM_HOSTNAME_*, GITHUB_RELEASE_*)
+    aren't refused: the API reads them as secrets, which the owner sets (docs/staging.md, "Setting up
+    release (M6)"). The script prints which of them staging holds, by name, and deploys either way.
+    They are secrets, IDs too, because this script deploys without --keep-vars, so a variable set on
+    the dashboard is gone after each deploy; and it won't keep them, since a dashboard RELEASES would
+    then survive unseen by every check on wrangler.jsonc
   - no D1 migration is pending on podster-api-staging or podster-gateway-staging, or
     --apply-migrations names exactly the pending set, by file name, such as
     --apply-migrations 0007_repo_room_index.sql. It then applies them first and lists again.
@@ -199,6 +205,7 @@ done
 # --- no secret may hold a setting's name ---
 # The API reads its settings with env.var and crate::setting, which take any string binding, a secret included, and a
 # secret survives deploys unseen by the checks on wrangler.jsonc. The names are the code's own (scripts/setting-names.mjs).
+# What the API reads with crate::secret, the release settings among them, is a secret by design and isn't refused.
 # `secret list` is read-only and gives names, never values; its output isn't printed.
 step "checking the API Worker's secret names"
 settings=$(node scripts/setting-names.mjs names apps/api/src 2>&1) \
@@ -213,8 +220,10 @@ if ! (cd apps/api && npx wrangler secret list --format json --env staging) > "$s
 fi
 rm -f "$secrets_err"
 clash=$(node scripts/setting-names.mjs check apps/api/src < "$secrets_out" 2>&1) || { rm -f "$secrets_out"; refuse "${clash:-scripts/setting-names.mjs could not check the secret list}"; }
+release=$(node scripts/setting-names.mjs release apps/api/src < "$secrets_out" 2>&1) || { rm -f "$secrets_out"; refuse "${release:-scripts/setting-names.mjs could not read the release secrets}"; }
 rm -f "$secrets_out"
 echo "no secret holds any of: $(echo $settings)"
+echo "$release"
 
 # --- migrations ---
 # pending APP DATABASE: prints the file names wrangler lists as not yet applied, one per line.

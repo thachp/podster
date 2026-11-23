@@ -188,6 +188,8 @@ fresh() {
   printf 'fn reads_checks(env: &Env) -> bool { env.var("GITHUB_AGENT_APP_READS_CHECKS").is_ok() }\n' > "$tmp/seed/apps/api/src/workspace/changes.rs"
   printf 'fn for_reconcile(env: &Env) {\n    #[cfg(feature = "failpoints")]\n    if let Setting::Text(_) = setting(env, "TEST_STORE_RECONCILE_ACCOUNT") {}\n}\n' > "$tmp/seed/apps/api/src/app_stores.rs"
   printf 'const KEY: &str = "A2A_TOKEN_KEY";\nfn key(env: &Env) -> Option<String> { env.secret(KEY).ok().map(|s| s.to_string()) }\n' > "$tmp/seed/apps/api/src/sealed.rs"
+  # And one that reads release settings with the API's own secret reader, beside a plain setting in the same file.
+  printf 'const TOKEN: &str = "CONTENT_SCRIPTS_TOKEN";\nconst ZONE: &str = "CUSTOM_HOSTNAME_ZONE_ID";\nfn read(env: &Env) { well_formed(secret(env, TOKEN)); crate::secret(&self.env, ZONE); crate::setting(env, "PUBLIC_ROOMS"); }\n' > "$tmp/seed/apps/api/src/content_provider.rs"
   mkdir -p "$tmp/seed/scripts/lib" && cp "$scripts/lib/rust-toolchain.sh" "$tmp/seed/scripts/lib/"
   # The API's configuration as staging has it: the switch on, and the list of who may ask beside it.
   api_config '"MANAGED_REPOSITORIES": "true", "REPOSITORY_REQUESTERS": "operators,test-people"' > "$tmp/seed/apps/api/wrangler.jsonc"
@@ -269,7 +271,7 @@ check "  the probes run after the deploys, one line each" test "$(grep -c '^PASS
 check "  no secret or variable is set" test "$(grep -c -i -E 'secret|--var|versions' "$fix/calls")" -eq "$(grep -c -E '^npx wrangler secret list --format json --env staging \[in api\] ' "$fix/calls")"
 check "  the API Worker's secret names were listed once, read-only" test "$(grep -c 'secret list' "$fix/calls")" -eq 1
 check "  before anything was applied or deployed" before 'secret list' 'wrangler deploy --env staging \[in api\]'
-check "  and it says which names it checked, from the code" said '^no secret holds any of: GITHUB_AGENT_APP_READS_CHECKS PUBLIC_SUFFIX_RULES RELEASES$'
+check "  and it says which names it checked, from the code" said '^no secret holds any of: GITHUB_AGENT_APP_READS_CHECKS PUBLIC_ROOMS PUBLIC_SUFFIX_RULES RELEASES$'
 check "  main's CI was asked about, for the commit being deployed" called "^gh run list --workflow ci.yml --branch main --event push --commit $(git -C "$work" rev-parse HEAD) "
 check "  before anything else ran" test "$(order '^gh run list')" -eq 1
 fresh
@@ -755,7 +757,23 @@ check "with no secrets at all it deploys: exit 0" deploy 0
 fresh
 echo '[{"name":"A2A_TOKEN_KEY","type":"secret_text"}]' > "$fix/secret-list"
 check "a secret the code reads as a secret, by name, deploys: exit 0" deploy 0
+check "  and says no release secret is set" said '^release \(M6\) secrets set: 0 of 12; not set: CONTENT_ACCOUNT_ID, '
 fresh
+
+# --- the release settings are secrets by design (audit item E3, 2026-11-23) ---
+echo '[{"name":"CONTENT_SCRIPTS_TOKEN","type":"secret_text"},{"name":"CUSTOM_HOSTNAME_ZONE_ID","type":"secret_text"},{"name":"GITHUB_RELEASE_APP_KEY","type":"secret_text"}]' > "$fix/secret-list"
+check "release secrets read with crate::secret, or by the release App's names, deploy: exit 0" deploy 0
+check "  and are counted by name" said '^release \(M6\) secrets set: 3 of 12; not set: CONTENT_ACCOUNT_ID, CONTENT_DISPATCH_NAMESPACE, CONTENT_KV_NAMESPACE_ID, CONTENT_DOMAIN, CONTENT_ROUTING_TOKEN, CONTENT_STORE_TOKEN, CUSTOM_HOSTNAME_TOKEN, GITHUB_RELEASE_APP_ID, GITHUB_RELEASE_INSTALLATION_ID$'
+check "  and a plain setting beside them is still guarded" said 'no secret holds any of: .*PUBLIC_ROOMS'
+fresh
+echo '[{"name":"CONTENT_SCRIPTS_TOKEN","type":"secret_text"},{"name":"RELEASES","type":"secret_text"}]' > "$fix/secret-list"
+refused "a secret named RELEASES beside the release secrets" 'holds a secret named RELEASES, which the API reads as a plain setting'
+printf 'const DOMAIN: &str = "CONTENT_DOMAIN";\nfn domain(env: &Env) -> Setting { crate::setting(env, DOMAIN) }\n' > "$tmp/seed/apps/api/src/releases_domain.rs"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" "a release name read as plain configuration" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+echo '[]' > "$fix/secret-list"
+refused "a release name the source reads as plain configuration" 'RELEASE_SECRETS in scripts/setting-names.mjs names CONTENT_DOMAIN, which apps/api/src reads as plain configuration'
+
 printf 'wrangler-fails\n' > "$fix/secret-list"
 check "a secret list wrangler can't give is refused, exit 1" deploy 1
 check "  and says why" said "REFUSE  could not list the API Worker's secrets on staging"
@@ -782,13 +800,18 @@ refused "a test-only name the source no longer reads" 'FAILPOINTS_ONLY in script
 check "the secret check never prints a value: the script prints only what setting-names.mjs says, never the list" \
   test "$(grep -c -E 'cat "\$secrets_out"|echo "\$secrets_out"' "$scripts/deploy-staging")" -eq 0
 
-# The names from the API's real source: the release path's, and none the code reads as a secret or staging sets as one.
+# The names from the API's real source: the switches, and none the code reads as a secret or staging sets as one.
 real=$(node "$scripts/setting-names.mjs" names "$scripts/../apps/api/src")
-for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_SUFFIX_RULES CUSTOM_HOSTNAME_ZONE_ID CUSTOM_HOSTNAME_TOKEN \
-  CONTENT_ACCOUNT_ID CONTENT_DISPATCH_NAMESPACE CONTENT_KV_NAMESPACE_ID CONTENT_DOMAIN CONTENT_SCRIPTS_TOKEN \
-  CONTENT_ROUTING_TOKEN CONTENT_STORE_TOKEN GITHUB_AGENT_APP_READS_CHECKS GATEWAY_URL APP_URL GITHUB_ORG_LOGIN; do
+for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_SUFFIX_RULES PUBLIC_ROOMS MANAGED_REPOSITORIES REPOSITORY_REQUESTERS \
+  GITHUB_AGENT_APP_READS_CHECKS GATEWAY_URL APP_URL GITHUB_ORG_LOGIN; do
   check "the real source gives $name" grep -q -x "$name" <<< "$real"
 done
+# The release settings are secrets in the real source (audit item E3, 2026-11-23), each with its owner's command in
+# docs/staging.md.
+# The module's path goes in the environment, not as an argument, which would run its command line instead.
+release_names=$(SETTING_NAMES="$scripts/setting-names.mjs" node --input-type=module -e 'const { RELEASE_SECRETS } = await import(process.env.SETTING_NAMES); console.log(RELEASE_SECRETS.join("\n"))')
+check "there are twelve release secrets" test "$(grep -c . <<< "$release_names")" -eq 12
+check "the real source's release secrets are consistent" bash -c 'node "$1" release "$2" <<< "[]"' _ "$scripts/setting-names.mjs" "$scripts/../apps/api/src"
 # Every secret docs/staging.md has the owner put on the API Worker stays out of the list, or the guard would refuse
 # every deploy.
 documented=$(sed -n -E 's/^cd apps\/api && npx wrangler secret put ([A-Z0-9_]+) --env staging$/\1/p; s/^npx wrangler secret put (ASSERTION_KEYS) --env staging$/\1/p' "$scripts/../docs/staging.md" | sort -u)
@@ -799,6 +822,10 @@ staging_now='[{"name":"A2A_TOKEN_KEY"},{"name":"ASSERTION_KEYS"},{"name":"EXPLOR
 check "the real source refuses none of staging's secrets as of 2026-11-18" bash -c 'node "$1" check "$2" <<< "$3"' _ "$scripts/setting-names.mjs" "$scripts/../apps/api/src" "$staging_now"
 for name in $documented; do
   check "  the real source doesn't give $name, a documented secret" bash -c '! grep -q -x "$1" <<< "$2"' _ "$name" "$real"
+done
+for name in $release_names; do
+  check "  $name isn't a plain setting in the real source" bash -c '! grep -q -x "$1" <<< "$2"' _ "$name" "$real"
+  check "  $name has its command in docs/staging.md" grep -q -x "$name" <<< "$documented"
 done
 
 # --- usage, and what the script can't do at all ---

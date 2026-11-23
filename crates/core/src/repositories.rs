@@ -103,6 +103,9 @@ pub enum GrantAction {
     Push,
     /// Asking for the merge of an approved submission's commit. Approval alone never carries it.
     Merge,
+    /// Asking for a release of the room's app (M6, ADR 0010, decision 200). Approval of a task and a merge grant never
+    /// carry it (AC-17). `podster_policy::release` decides who may give one and whether one counts.
+    Deploy,
 }
 
 impl GrantAction {
@@ -110,11 +113,12 @@ impl GrantAction {
         match self {
             GrantAction::Push => "push",
             GrantAction::Merge => "merge",
+            GrantAction::Deploy => "deploy",
         }
     }
 
     pub fn from_name(name: &str) -> Option<GrantAction> {
-        [GrantAction::Push, GrantAction::Merge]
+        [GrantAction::Push, GrantAction::Merge, GrantAction::Deploy]
             .into_iter()
             .find(|a| a.name() == name)
     }

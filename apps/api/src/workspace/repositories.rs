@@ -15,6 +15,7 @@ use podster_core::repo_grants::{
     grants_ended_by_removal, Grant, GrantPlan, GrantRefusal, GrantUse, RevokePlan,
 };
 use podster_core::repositories::GrantAction;
+use podster_policy::release::authorize_deploy_grant;
 use podster_policy::repositories::{
     authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
     may_receive_grant, sees_grant, setup_view, RepoDenial,
@@ -818,7 +819,17 @@ fn end_grant(
 /// `POST repository/grants`: `{ policy_version, principal_id, action, expires_at? }`. A person who is the room's owner or
 /// a room admin, whose authority holds, gives a participant one action on the room's repository. Granting the same again changes
 /// nothing; a new expiry, an expired row or an earlier owner's row is revoked and replaced in this transaction.
-pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+///
+/// `deploy` (M6 step 6) is an action only while release is switched on for the deployment (`releases_on`). Otherwise
+/// it is refused as an action that doesn't exist, `invalid_argument`, exactly as before M6. It is given only in a
+/// public room (`podster_policy::release::authorize_deploy_grant`).
+pub(super) fn handle_grant(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    releases_on: bool,
+    now: i64,
+) -> R<Value> {
     // `resolve_caller` gives a role only while it stands, so the caller's role carries that check.
     authorize_grant(caller).map_err(denied)?;
     require_policy_version(sql, body)?;
@@ -836,7 +847,13 @@ pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now:
     let action = body["action"]
         .as_str()
         .and_then(GrantAction::from_name)
+        .filter(|action| releases_on || *action != GrantAction::Deploy)
         .ok_or_else(ApiError::invalid_argument)?;
+    if action == GrantAction::Deploy {
+        // `resolve_caller` gives a role only while it stands, as above.
+        authorize_deploy_grant(caller, true, room_is_public(sql)?)
+            .map_err(super::release_config::denial)?;
+    }
     // An expiry is optional. When given, it's after now and at most a year ahead; `decide_grant` checks the first again.
     let expires_at = match &body["expires_at"] {
         Value::Null => None,
@@ -939,6 +956,13 @@ pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now:
     Ok(granted.json(holder, now))
 }
 
+/// Whether the room is public now, from its own row.
+fn room_is_public(sql: &SqlStorage) -> R<bool> {
+    Ok(rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|room| room["visibility"].as_str() == Some("public")))
+}
+
 /// Whether a stored answer to a grant may be replayed: only to someone who may still give one.
 pub(super) fn may_still_grant(caller: &Caller) -> R<()> {
     authorize_grant(caller).map_err(denied)
@@ -1017,7 +1041,10 @@ fn revocable(
 /// `GET repository/grants`: the grants that aren't revoked, for a person. A human owner or admin sees every one, and
 /// anyone else their own (`sees_grant`). An agent gets `not_allowed`: it learns of its grant through a token, once step 6
 /// builds that. It's a read of current rows, and `state` authorizes nothing.
-pub(super) fn read_grants(sql: &SqlStorage, who: &Participant) -> R<Value> {
+///
+/// While release is switched off for the deployment (`releases_on` false), a `deploy` grant left from an earlier
+/// on-period isn't listed, as the action isn't there; it can still be taken back by its ID.
+pub(super) fn read_grants(sql: &SqlStorage, who: &Participant, releases_on: bool) -> R<Value> {
     let caller = &who.caller;
     if caller.kind != PrincipalKind::Person {
         return Err(ApiError::not_allowed());
@@ -1027,6 +1054,7 @@ pub(super) fn read_grants(sql: &SqlStorage, who: &Participant) -> R<Value> {
     for grant in grant_rows(sql, "revoked_at IS NULL", vec![])?
         .iter()
         .filter(|g| sees_grant(caller, &g.principal))
+        .filter(|g| releases_on || g.action != GrantAction::Deploy)
     {
         grants.push(grant.json(recorded_holder(sql, &grant.delegated_by)?.as_deref(), now));
     }

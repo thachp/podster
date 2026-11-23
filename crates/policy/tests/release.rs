@@ -1013,3 +1013,39 @@ fn a_persons_request_needs_what_asking_needs_and_their_own_standing() {
         );
     }
 }
+
+#[test]
+fn only_the_rooms_owner_and_admins_as_people_give_a_deploy_grant_and_only_in_a_public_room() {
+    for kind in [Person, Agent] {
+        for role in Role::ALL {
+            for holds in [true, false] {
+                for public in [true, false] {
+                    let c = caller("x", kind, role);
+                    let expected = if role == Role::None {
+                        Err(ReleaseDenial::NotParticipant)
+                    } else if !(kind == Person
+                        && matches!(role, Role::Owner | Role::Admin)
+                        && holds)
+                    {
+                        // An agent, a member, a guest, and an owner or admin whose authority lapsed (AC-10, AC-11).
+                        Err(ReleaseDenial::NotAllowed)
+                    } else if !public {
+                        // Who is asking comes first, so nobody else learns the room's visibility from this.
+                        Err(ReleaseDenial::NeedsPublicRoom)
+                    } else {
+                        Ok(())
+                    };
+                    assert_eq!(
+                        authorize_deploy_grant(&c, holds, public),
+                        expected,
+                        "{kind:?} {role:?} {holds} {public}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        ReleaseDenial::NeedsPublicRoom.code(),
+        "release_needs_public_room"
+    );
+}

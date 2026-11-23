@@ -1,0 +1,8 @@
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:44:48.692Z","step":"start","bounds":{"ms":780000,"api":120,"edge":0,"probe":0},"stop_part":"if the gate allows","dns":false}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:44:56.134Z","step":"cursor-use","age_ms":0,"status":200,"success":true,"errors":[],"ms":194,"keys":10,"same_page":true,"next_cursor":true}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:45:56.245Z","step":"cursor-use","age_ms":60004,"status":200,"success":true,"errors":[],"ms":300,"keys":10,"same_page":true,"next_cursor":true}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:50:26.262Z","step":"cursor-use","age_ms":330003,"status":200,"success":true,"errors":[],"ms":319,"keys":10,"same_page":true,"next_cursor":true}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:55:26.194Z","step":"cursor-use","age_ms":630003,"status":200,"success":true,"errors":[],"ms":251,"keys":10,"same_page":true,"next_cursor":true}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:55:26.410Z","step":"cleanup-stop","read":{"status":404,"success":false,"errors":[{"code":10009,"message":"get: 'key not found'"}],"ms":215},"reads":[404],"deleted":false,"note":"absent"}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:55:39.018Z","step":"cleanup","left":{"kv_spike_keys":0,"stop_key":"absent","scripts":"not checked: no scripts token","txt_records":"not checked"},"clean":true,"calls":29}
+{"run":"7a0680","command":"cursor","at":"2026-11-23T12:55:39.019Z","step":"end","used":{"api":30,"edge":0,"probe":0},"ms":650327}

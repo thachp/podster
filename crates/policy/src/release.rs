@@ -5,6 +5,7 @@
 //! | --- | --- |
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
 //! | Map a custom hostname, or remove one (M6 step 8) | The same people; asking only where release may happen at all, release switched on in the room among them; removing always ([`authorize_custom_hostname`]) |
+//! | Give a `deploy` grant, or take one back (M6 step 6) | Giving: a person who is the room's owner or a room admin, with that authority holding, in a public room ([`authorize_deploy_grant`]), to a current participant who isn't there through a public claim (decision 209) and isn't a person from another organization (`podster_policy::repositories::may_receive_grant`). An agent never gives one, and may hold one. Taking back: whoever may take back any grant on the room's repository (`podster_policy::repositories::authorize_revoke`) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
 //! | Ask for a release (`requestRelease`, M6 step 6; an agent through `deploy_release`, 6g) | The same, the requester's controlling person still in their organization: a person themselves, an agent the person who linked its credential, whose link must be the one recorded at the request ([`authorize_release_request`], [`controller_unchanged`]). A rollback is a person's alone ([`may_ask_for_release`]) |
 //! | Approve a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed, and so is approving a release one's own agent asked for (the owner's decision of 2026-11-16) |
@@ -599,6 +600,26 @@ pub fn may_ask_for_deploy(caller: &Caller, controller_known: bool) -> Result<(),
         return Err(ReleaseDenial::AgentDisconnected);
     }
     Ok(())
+}
+
+/// Who may give a `deploy` grant (M6 step 6), and where: a person who is the room's owner or a room admin, with that
+/// authority holding (decisions 200 and 215, AC-10, AC-11), in a public room (decisions 199 and 213: only a public room
+/// releases, so a grant elsewhere would be a row nothing could use). An agent never, whatever role is stored for it.
+/// Who may hold one is `podster_policy::repositories::may_receive_grant`, as for a repository grant: never someone in
+/// the room only through a public claim (decision 209). Nothing else about release is asked here: a grant authorizes
+/// nothing by itself, and [`check_deploy_grant`] runs at the request, the approval and every pass of the job.
+pub fn authorize_deploy_grant(
+    caller: &Caller,
+    authority_holds: bool,
+    room_public: bool,
+) -> Result<(), ReleaseDenial> {
+    if caller.role == Role::None {
+        return Err(ReleaseDenial::NotParticipant);
+    }
+    if !holds_release_authority(caller.kind, caller.role, authority_holds) {
+        return Err(ReleaseDenial::NotAllowed);
+    }
+    require_public_room(room_public)
 }
 
 /// Who may ask for a rollback (`rollbackRelease`, 6h), by the room's rows alone, asked before anything is read outside

@@ -560,4 +560,19 @@ describe("the Worker's configuration for M6", () => {
     for (const vars of [config.vars, ...Object.values(config.env).map((environment: any) => environment.vars)]) expect(Object.keys(vars ?? {})).not.toContain("RELEASES");
     for (const name of ["dispatch_namespaces", "kv_namespaces", "routes"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(`"${name}"`);
   });
+
+  it("holds none of release's twelve secrets as a variable, in any environment", () => {
+    // They are Worker secrets the owner sets (docs/staging.md, "Setting up release (M6)"); the owner's Cloudflare IDs
+    // never go in git, and a variable here would be what the API reads.
+    const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    const secrets = [
+      "CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_KV_NAMESPACE_ID", "CONTENT_DOMAIN", "CONTENT_SCRIPTS_TOKEN", "CONTENT_ROUTING_TOKEN",
+      "CONTENT_STORE_TOKEN", "CUSTOM_HOSTNAME_ZONE_ID", "CUSTOM_HOSTNAME_TOKEN", "GITHUB_RELEASE_APP_ID", "GITHUB_RELEASE_INSTALLATION_ID", "GITHUB_RELEASE_APP_KEY",
+    ];
+    const environments = [["top level", config], ...Object.entries(config.env ?? {})] as [string, any][];
+    expect(environments.map(([name]) => name)).toContain("staging");
+    for (const [name, environment] of environments) {
+      for (const secret of secrets) expect(Object.keys(environment.vars ?? {}), `${name}: ${secret}`).not.toContain(secret);
+    }
+  });
 });

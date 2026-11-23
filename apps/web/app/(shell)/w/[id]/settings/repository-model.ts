@@ -22,7 +22,7 @@ export type RoomRepository = {
 export const REQUESTS_CLOSED = "Creating a repository isn't available to your account on this Podster deployment yet, so one can't be created or set up again from here.";
 
 /** Display only. The API checks every grant again, from current authority, at each use; `state` can lag. */
-export type RepoGrant = { id: string; principal_id: string; action: "push" | "merge"; delegated_by: string; created_at: number; expires_at: number | null; revoked_at: number | null; state: "live" | "expired" | "stale" | "revoked" };
+export type RepoGrant = { id: string; principal_id: string; action: "push" | "merge" | "deploy"; delegated_by: string; created_at: number; expires_at: number | null; revoked_at: number | null; state: "live" | "expired" | "stale" | "revoked" };
 
 /**
  * What a repository read says about the feature. Managed repositories are behind a server-side switch, and while it's off
@@ -188,7 +188,9 @@ export function explainGrantRefusal(code: string, status = 400) {
   }
 }
 
-export const ACTION_LABELS: Record<RepoGrant["action"], string> = { push: "Push", merge: "Merge" };
+// `deploy` (M6 step 6) is listed only while release is switched on. The form here doesn't offer it: it is given through
+// the API, and this only names one that is listed.
+export const ACTION_LABELS: Record<RepoGrant["action"], string> = { push: "Push", merge: "Merge", deploy: "Deploy" };
 
 /** Display only, labelled as such where it's shown. */
 export const GRANT_STATE_LABELS: Record<RepoGrant["state"], string> = { live: "Live", expired: "Expired", stale: "Its giver no longer holds the delegation", revoked: "Taken back" };

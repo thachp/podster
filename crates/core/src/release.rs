@@ -20,7 +20,10 @@ pub const MAX_RELEASE_READS_PER_HOUR: u32 = 3_000;
 pub const READ_WINDOW_MS: i64 = 60 * 60 * 1000;
 /// How many files are fetched from GitHub at once.
 pub const FETCH_CONCURRENCY: usize = 10;
-/// How long the job waits for its marker to come back through the host. Provisional until spike G.
+/// How long the job waits for its marker to come back through the host. Spike G (2026-11-23) saw a serve entry's
+/// switch at the host within 0.37 s, from one location, with the location's cached copy of the old entry expired. A
+/// location still holding the old entry can serve it for up to the content Worker's 30-second `cacheTtl`, which wasn't
+/// measured, and other locations weren't seen. So 30 seconds is kept, and a false failure only sets back.
 pub const MARKER_WAIT_MS: i64 = 30_000;
 /// How long a release still uploading keeps its script from the hourly reconcile. Past it the release is failed and its
 /// script deleted.
@@ -1708,7 +1711,9 @@ pub fn fetch_batches(sizes: &[u64]) -> Vec<usize> {
 
 /// The most bytes of files Podster sends the provider in one request, whatever the provider asked for in one bucket.
 /// As base64 that is about 11 MB, held twice while it is sent. One file is at most 5 MB, so one always fits; a
-/// release of 25 MB never goes as one body. **Proposed.**
+/// release of 25 MB never goes as one body. **Proposed.** Spike G (2026-11-23), in a JavaScript Worker: a 25 MB
+/// release built as one body and held three ways fit, and 50 MB didn't (`503`); the provider made one bucket of a
+/// full-size release 11.6 MB, so splitting a bucket is needed, and took one file a request.
 pub const UPLOAD_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How the files of one bucket are sent, as the lengths of consecutive requests: each at most

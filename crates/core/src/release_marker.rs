@@ -5,8 +5,8 @@
 //!   written for exactly the version and the script the commit wrote, and the host still wants them. Until then
 //!   nothing is fetched: a marker fetched before the switch would be the release before's.
 //! - **What to do now** ([`marker_plan`]): wait for the switch, at most [`MARKER_SWITCH_WAIT_MS`] from going live;
-//!   fetch the marker, while within [`MARKER_WAIT_MS`] (ADR 0010's provisional 30 seconds) of the switch; or set the
-//!   release back once either bound has run out.
+//!   fetch the marker, while within [`MARKER_WAIT_MS`] (ADR 0010's 30 seconds, kept after spike G) of the switch; or
+//!   set the release back once either bound has run out.
 //! - **Whose marker came back** ([`marker_seen`]): exactly this release's body, as the job uploaded it, answered `200`.
 //!   Anything else, an older release's marker, an error, no answer, is not this release's, and never confirms it.
 //! - **What came of a fetch** ([`marker_outcome`]): served, asked again after [`MARKER_POLL_MS`], or set back.

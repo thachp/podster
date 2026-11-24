@@ -237,7 +237,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .scrim.enter { animation: fadein .18s ease-out; }
 @keyframes fadein { from { opacity: 0; } }
 @keyframes slide { from { transform: translateX(24px); opacity: 0; } }
-.modal { position: fixed; z-index: 31; left: 50%; top: 12vh; transform: translateX(-50%); width: min(560px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 22px; display: flex; flex-direction: column; gap: 16px; }
+.modal { position: fixed; z-index: 31; left: 50%; top: 50%; transform: translate(-50%, -50%); max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain; width: min(560px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 22px; display: flex; flex-direction: column; gap: 16px; }
 .palette { padding: 0; gap: 0; overflow: hidden; }
 .palette input { border: 0; border-bottom: 1px solid var(--line); height: 50px; padding: 0 18px; background: transparent; outline: none; font-size: 15px; width: 100%; }
 .palette ul { list-style: none; margin: 0; padding: 6px; max-height: 340px; overflow-y: auto; }
@@ -503,9 +503,13 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .editbox { display: flex; flex-direction: column; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 
 /* Wide dialog (plan review) */
-.modal.wide { width: min(940px, calc(100% - 32px)); top: 6vh; max-height: 88vh; overflow-y: auto; gap: 18px; }
+.modal.wide { width: min(940px, calc(100% - 32px)); gap: 18px; }
+/* The \u2318K palette stays near the top, like other command menus, so its results grow downward. */
+.modal.palette { top: 12vh; transform: translateX(-50%); max-height: calc(100vh - 24vh); }
+.modal.palette.enter { animation: popTop .16s ease-out; }
 .modal.enter { animation: pop .16s ease-out; }
-@keyframes pop { from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(.99); } }
+@keyframes pop { from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(.99); } }
+@keyframes popTop { from { opacity: 0; transform: translateX(-50%) translateY(8px) scale(.99); } }
 .modal.wide .prow, .plan-sheet .prow { grid-template-columns: 28px 22px minmax(0, 1fr) 96px 160px 64px; }
 .drawer.perm-sheet { width: min(620px, calc(100% - 48px)); padding-left: 32px; padding-right: max(32px, env(safe-area-inset-right, 0px)); }
 .drawer.plan-sheet { width: min(860px, calc(100% - 48px)); padding-left: 32px; padding-right: max(32px, env(safe-area-inset-right, 0px)); }

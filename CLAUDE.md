@@ -10,7 +10,7 @@ Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-C
 | --- | --- |
 | `apps/api` | Private Rust Worker: routes, `Workspace` and `Principal` Durable Objects |
 | `apps/gateway` | Public TypeScript Worker: Better Auth, Agent Auth, `/mcp` OAuth, capabilities |
-| `apps/demo` | A clickable UI prototype in one static HTML file, checked by `check.cjs`. It isn't a spec and isn't deployed |
+| `apps/demo` | A clickable UI prototype in one static HTML file, checked by `check.cjs` and served at `demo.podster.dev` by a static Worker. It isn't a spec |
 | `apps/runner` | Podster Runner, a Node app for an agent owner's own machine, not a Worker: pairing, its keychain store, the inbox loop, the pure run policy |
 | `crates/core` | Pure Rust: command decisions, task state machine, validation, limits |
 | `crates/policy` | Pure Rust: permission matrix and visibility |

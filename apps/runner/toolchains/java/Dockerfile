@@ -9,7 +9,7 @@
 # never the owner's to run by hand. It holds no key or secret.
 #
 # What it adds: the Eclipse Temurin JDK 25.0.5.1+2 (Java 25, the current LTS), from Adoptium's GitHub release tarball,
-# in /opt/java/jdk, and Apache Maven 3.10.1, from archive.apache.org, in /opt/java/maven; the JDK's programs and mvn are
+# in /opt/java/jdk, and Apache Maven 3.10.1, from Maven Central (repo.maven.apache.org), in /opt/java/maven; the JDK's programs and mvn are
 # linked into /usr/local/bin. There is no Gradle: a Gradle project uses its own wrapper, which fetches Gradle from
 # services.gradle.org when the room's network lists it. Runner passes ARCH, the Docker Engine's architecture as
 # Temurin names it (aarch64 or x64), so only that architecture's JDK is fetched, with either of Docker's builders; the
@@ -24,6 +24,9 @@
 # - Maven's SHA-512 from its .sha512 on archive.apache.org, after the tarball's detached signature (.asc) was checked
 #   against Apache Maven's KEYS file (the same on downloads.apache.org and archive.apache.org): it is signed by
 #   Tamas Cservenak's key 88BE 34F9 4BDB 2B53 5704 4E2E 3A38 7D43 9641 43E3, a Maven release manager listed in KEYS.
+#   Maven is fetched from Maven Central, Apache's own repository for Maven's artifacts, which serves the same tarball
+#   (org/apache/maven/apache-maven/3.10.1, -bin.tar.gz): its SHA-512 there, read 2026-11-24, is the one above, and so is
+#   its .sha512. It was archive.apache.org until 2026-11-24, which is slow and rate-limits, and failed a CI build.
 #
 # Java and Maven don't read HTTPS_PROXY, which Runner sets for a room whose network lists hosts, so the image points
 # both at Runner's egress proxy (`egress`, port 3128) itself: the JDK's conf/net.properties sets http(s).proxyHost and
@@ -45,7 +48,7 @@ ARG ARCH
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS fetch
 ARG ARCH
 ADD https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_${ARCH}_linux_hotspot_25.0.5.1_2.tar.gz /fetch/jdk.tar.gz
-ADD https://archive.apache.org/dist/maven/maven-3/3.10.1/binaries/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz
+ADD https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz
 RUN cd /fetch \
  && case "$ARCH/$(dpkg --print-architecture)" in \
       aarch64/arm64) printf '%s  %s\n' \

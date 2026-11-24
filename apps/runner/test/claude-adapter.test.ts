@@ -17,6 +17,7 @@ import { decideToolCall } from "../src/core/tool-policy.js";
 import { startBrokerListener, tokenMatches } from "../src/node/broker-listener.js";
 import { claudeEnv, ClaudeDriver, claudeExecArgs, claudeNames, claudeOptions, claudeRunArgs, CLAUDE_IN_CONTAINER, CONTAINER_CONFIG, CONTAINER_HOME, fixedOptionsRefusal, PLUGIN_ALLOWLIST, QUIET, relayRunArgs, runnerToolName, sdkToolName, spawnEnv, type ClaudeSdk, type DriverObservation, type ProcessControl } from "../src/node/claude-driver.js";
 import { installedClaudeVersions, readKeyFile, taskImage } from "../src/node/claude-engine.js";
+import { DetailedError } from "../src/core/errors.js";
 import { dockerHost, DockerSandbox, findDocker, homeLabel, LABEL_HOME, LABEL_ROLE, LABEL_RUN, LIMITS, limitsFor, RG_FLAGS, runArgs, TOOLCHAIN_IMAGE_UNAVAILABLE, TOOLCHAIN_LIMITS, toolArgv, type DockerCli } from "../src/node/docker-sandbox.js";
 import { answerUsage, envProxyRequested, ProviderKeyTransport, streamUsage } from "../src/node/provider-transport.js";
 import { ensureFolder, folderBytes, readNoFollow, UnsafePath } from "../src/node/safe-fs.js";
@@ -323,6 +324,21 @@ describe("the Docker task container", () => {
       await expect(sandbox.open(spec, new AbortController().signal)).rejects.toThrow(new RegExp(`^${TOOLCHAIN_IMAGE_UNAVAILABLE}$`));
       expect(calls.filter((c) => c.args[0] === "run")).toEqual([]);
     }
+  });
+
+  it("keeps a failed toolchain build's output tail in the refusal's detail, after Runner's own message, and nothing in its message", async () => {
+    const root = join(await temp(), "w");
+    const spec = containerSpec("run-1", facts(root, { tools: ["read", "shell"], shell: true, toolchains: ["java"] }));
+    const toolchainImage = async () => {
+      throw new DetailedError("Runner couldn't build a toolchain image", { exit_code: 1, stderr: "ERROR: failed to load https://example.test/maven.tar.gz: 429", cut: false });
+    };
+    const { calls, docker } = fakeDocker();
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", toolchainImage });
+    const error = (await sandbox.open(spec, new AbortController().signal).catch((e: Error) => e)) as DetailedError;
+    expect(error).toBeInstanceOf(DetailedError);
+    expect(error.message).toBe(TOOLCHAIN_IMAGE_UNAVAILABLE);
+    expect(error.detail).toEqual({ stderr: "Runner couldn't build a toolchain image\nERROR: failed to load https://example.test/maven.tar.gz: 429", exit_code: 1, cut: false });
+    expect(calls.filter((c) => c.args[0] === "run")).toEqual([]);
   });
 
   it("runs each tool from an argument array: rg with fixed flags, -e PATTERN -- ./path; no shell but the shell tool", async () => {

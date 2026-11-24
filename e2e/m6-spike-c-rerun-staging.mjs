@@ -29,8 +29,9 @@
 // out. Left behind: the test people, the organization, the rooms and their tasks, and the two repositories, which it
 // prints for the owner to delete.
 //
-// Exit 0 when both apps were served and every check ran; 1 when a check didn't hold or couldn't run; 2 for a refused
-// configuration or a failed preflight, with no sign-up taken.
+// Exit 0 when both apps were served and every property held, as `judge` below asserts it on the results; 1 when one
+// didn't hold or couldn't run, each named; 2 for a refused configuration or a failed preflight, with no sign-up taken.
+// `--judge FILE` asserts the same on a results file written earlier, and sends nothing.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -40,15 +41,76 @@ import { connect } from "node:tls";
 
 const STAGING = "https://gateway-staging.podster.dev";
 const USAGE = `Usage: node m6-spike-c-rerun-staging.mjs --base-url ${STAGING} [--out FILE] [--dry-run]
+       node m6-spike-c-rerun-staging.mjs --judge FILE
 
 Spike C's header and cookie checks on podster.site, against two sibling static apps staging's release path serves.
 Takes 3 test sign-ups (PODSTER_E2E_SIGNUP_SECRET), makes two public podsterdev repositories, and switches release off
-in both rooms before it ends. --out writes the results, hosts named A and B, as JSON. --dry-run sends nothing.`;
+in both rooms before it ends. --out writes the results, hosts named A and B, as JSON. --dry-run sends nothing.
+--judge asserts each property on a results file written earlier, sends nothing, and exits 1 naming any that failed.
+Ctrl-C stops at the next request and cleans up; a second Ctrl-C quits at once, WITHOUT clean-up, which can leave
+release on and the rooms public.`;
+
+/**
+ * What didn't hold, from a results file: one line for each property that failed or wasn't recorded. Empty when every
+ * property spike C's rerun is for held in all three browsers, over HTTP and over TLS.
+ */
+function judge(results) {
+  const failed = [];
+  const expect = (holds, what) => holds || failed.push(what);
+  const cert = results.certificate ?? {};
+  const wildcard = "DNS:*.podster.site, DNS:podster.site";
+  for (const name of ["A", "an unknown first-level host"]) expect(cert[name]?.authorized === true && cert[name]?.subjectAltNames === wildcard, `certificate: ${name} isn't covered by the one wildcard certificate`);
+  expect(cert["a second-level host"]?.authorized === false, "certificate: a second-level host was served");
+  const h = results.headers ?? {};
+  for (const name of ["A", "B"]) {
+    const index = h[`${name} index`];
+    expect(index?.status === 200 && index.problems?.length === 0 && index.setCookies === 0 && index.acao === "*" && /^sandbox allow-scripts;/.test(index.csp ?? "") && !/'self'/.test(index.csp ?? ""), `headers: ${name}'s index lacks the fixed headers, the sandbox or ACAO, or set a cookie`);
+  }
+  expect(h["credentials ignored"]?.same === true && h["credentials ignored"]?.setCookies === 0, "headers: a request's cookies or Authorization changed the answer");
+  expect(h["service-worker script"]?.status === 403, "headers: a service worker's script wasn't refused");
+  expect(h.POST?.status === 405, "headers: POST wasn't 405");
+  expect(h["plain HTTP"]?.status === 301 && String(h["plain HTTP"]?.location).startsWith("https://"), "headers: plain HTTP wasn't sent to HTTPS");
+  expect(h["unknown host"]?.notFoundProblem === null, "headers: an unknown host wasn't the content Worker's not found");
+  const refused = ["cookieRead", "cookieSetOwnHost", "cookieSetContentDomain", "cookieSetPodsterDomain", "localStorage", "sessionStorage", "indexedDB", "cacheApi", "serviceWorker"];
+  const works = { fetchOwnJson: 3, style: "rgb(0, 128, 0)", image: true, history: "?step=1" };
+  for (const browser of ["chromium", "firefox", "webkit"]) {
+    const b = results.browsers?.[browser];
+    if (!b || b.error) {
+      failed.push(`${browser}: didn't run${b?.error ? ` (${b.error})` : ""}`);
+      continue;
+    }
+    for (const name of ["A", "B"]) {
+      const r = b.pages?.[name]?.result;
+      if (!b.pages?.[name]?.ran || !r) {
+        failed.push(`${browser} ${name}: the probe didn't finish`);
+        continue;
+      }
+      expect(r.origin?.value === "null", `${browser} ${name}: the page's origin isn't null`);
+      for (const step of refused) expect(r[step]?.ok === false && r[step]?.error === "SecurityError", `${browser} ${name}: ${step} wasn't refused with SecurityError`);
+      for (const [step, value] of Object.entries(works)) expect(r[step]?.ok === true && r[step]?.value === value, `${browser} ${name}: ${step} didn't work under the sandbox`);
+      expect(r.fetchApplication?.ok === false && r.violations?.includes("connect-src"), `${browser} ${name}: the API fetch wasn't refused with a connect-src violation`);
+      expect(!(b.cookieNamesSentToHost?.[name] ?? ["e2e_pd"]).includes("e2e_pd"), `${browser} ${name}: the podster.dev cookie was sent to the host`);
+    }
+    expect(JSON.stringify(b.jarAfter) === JSON.stringify(["e2e_pd@.podster.dev", "e2e_site@.podster.site"]), `${browser}: the jar gained or lost a cookie`);
+  }
+  return failed;
+}
 
 const argv = process.argv.slice(2);
 if (argv.includes("--help") || argv.includes("-h")) {
   console.log(USAGE);
   process.exit(0);
+}
+if (argv[0] === "--judge") {
+  const { readFileSync } = await import("node:fs");
+  if (argv.length !== 2) {
+    console.error(USAGE);
+    process.exit(2);
+  }
+  const failed = judge(JSON.parse(readFileSync(argv[1], "utf8")));
+  for (const line of failed) console.log(`FAIL ${line}`);
+  console.log(failed.length ? `${failed.length} property check(s) didn't hold.` : "Every property held.");
+  process.exit(failed.length ? 1 : 0);
 }
 const opt = (name) => {
   const at = argv.indexOf(name);
@@ -319,6 +381,8 @@ async function serveRoom(name) {
   const host = (await owner.must("GET", `/v1/workspaces/${room}/release-config`)).default_host;
   ok(!defaultHostProblem(host).problem, `room ${name}'s host: ${defaultHostProblem(host).problem}`);
   const { seconds: markerSeconds } = await within(WAIT.takedown, "the marker", () => hostGet(`https://${host}${MARKER_PATH}`), (a) => markerProblem(a, release.id, change.merge_sha) === null);
+  results.timings[`room ${name} served, seconds`] = seconds;
+  results.timings[`room ${name} marker named it, seconds later`] = markerSeconds;
   say(`     room ${name}: served after ${seconds} s; marker named it ${markerSeconds} s later`);
   return host;
 }
@@ -411,7 +475,7 @@ async function browserChecks(browserName, hosts, playwright) {
 
 // ---- the run ----
 
-const results = { at: new Date().toISOString(), contentDomain: CONTENT_DOMAIN };
+const results = { at: new Date().toISOString(), contentDomain: CONTENT_DOMAIN, timings: {} };
 async function main() {
   // Signed out first: an unknown host is the content Worker's not found, so the real Worker is on the domain.
   const unknown = await hostGet(`https://${unknownLabel(randomBytes(26))}.${CONTENT_DOMAIN}/`);
@@ -463,14 +527,18 @@ async function cleanUp() {
     const host = config?.body?.default_host;
     let down = "not checked";
     if (!releaseOn.has(room) && host) {
-      down = await within(WAIT.takedown, "the host stopping", () => hostGet(`https://${host}/`), (a) => contentNotFoundProblem(a) === null).then(({ seconds }) => `not found after ${seconds} s`, (e) => `NOT shown not found: ${cause(e)}`);
+      down = await within(WAIT.takedown, "the host stopping", () => hostGet(`https://${host}/`), (a) => contentNotFoundProblem(a) === null).then(({ seconds }) => {
+        (results.timings["hosts not found after release off, seconds"] ??= []).push(seconds);
+        return `not found after ${seconds} s`;
+      }, (e) => `NOT shown not found: ${cause(e)}`);
     }
     said.push(!releaseOn.has(room) ? `release is off in room ${room}; its host is ${down}` : `release could NOT be switched off in room ${room}`);
   }
   const { left } = await publisher.stop();
   said.push(left ? "a room could NOT be made private again" : `rooms ${rooms.join(" and ")} are private`);
   for (const [id, room] of [...grants]) {
-    const back = await owner.dash("DELETE", `/v1/workspaces/${room}/repository/grants/${id}`, { policy_version: await owner.policyVersion(room) }).catch(() => null);
+    // A throw here, the policy version's read included, never stops the rest of clean-up or the results file.
+    const back = await owner.policyVersion(room).then((version) => owner.dash("DELETE", `/v1/workspaces/${room}/repository/grants/${id}`, { policy_version: version })).catch(() => null);
     if ((back?.ok && back.body?.revoked_at) || back?.code === "grant_not_found") grants.delete(id);
   }
   said.push(grants.size ? `${grants.size} grant(s) could NOT be taken back` : "every grant is taken back");
@@ -492,7 +560,8 @@ try {
   exitCode = error.preflight ? 2 : 1;
 } finally {
   say("\n## clean-up");
-  for (const line of await cleanUp()) say(`  - ${line}`);
+  const lines = await cleanUp().catch((error) => [`clean-up stopped part way: ${cause(error)}`]);
+  for (const line of lines) say(`  - ${line}`);
   for (const repo of repos) say(`  - the repository ${repo} stays on GitHub: the owner deletes it`);
   say(`Sign-ups taken: ${signUps}.`);
 }
@@ -500,5 +569,8 @@ if (outFile) {
   writeFileSync(outFile, masked(scrub(JSON.stringify(results, null, 2), secrets)) + "\n");
   say(`Results written to ${outFile}.`);
 }
-const incomplete = !results.browsers || Object.values(results.browsers).some((b) => b.error);
-process.exit(exitCode || (incomplete ? 1 : 0));
+if (exitCode) process.exit(exitCode);
+const failed = judge(results);
+for (const line of failed) say(`FAIL ${line}`);
+say(failed.length ? `${failed.length} property check(s) didn't hold.` : "Every property held.");
+process.exit(failed.length ? 1 : 0);

@@ -770,7 +770,7 @@ const S = {
   findRole: 'QA', invited: {},
   archived: false, archAsk: false,
   left: {}, leaveAsk: null,
-  org: { members: [['Elena Lopez', 'elena@bakeryonelm.example', 'Admin'], ['Marco Diaz', 'marco@bakeryonelm.example', 'Member']], inviteOpen: false },
+  org: { name: 'Bakery on Elm', slug: 'bakeryonelm', site: 'bakeryonelm.example', edit: false, draft: null, delAsk: false, members: [['Elena Lopez', 'elena@bakeryonelm.example', 'Admin'], ['Marco Diaz', 'marco@bakeryonelm.example', 'Member']], inviteOpen: false },
   scope: 'room',
   brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', done: 'I can add an order and see whether it is New, In progress or Ready.\nIt works on my phone at the counter.', context: 'Small bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
   hist: { tab: 'list', f: 'all', link: 'ca' },
@@ -832,7 +832,7 @@ function orderTracker(interactive) {
 /* ---------- Account menu ---------- */
 function me() { return isK() ? { av: 'SR', name: 'Sam Rivera', email: 'sam@example.com' } : S.as === 'marco' ? { av: 'MD', name: 'Marco Diaz', email: 'marco@bakeryonelm.example' } : { av: 'EL', name: 'Elena Lopez', email: 'elena@bakeryonelm.example' }; }
 const member = () => !isK() && S.as === 'marco';
-const OWNER_ACTS = ['release-ask', 'release-go', 'rb-ask', 'rb-go', 'rb-redo', 'pol-toggle', 'pol-set', 'pol-host-rm', 'pol-save', 'repo-toggle', 'repo-ask', 'repo-on', 'repo-sam-no', 'invite-open', 'arch-ask', 'unarchive', 'env-add', 'env-edit', 'env-rm', 'dom-rm', 'dom-check', 'perm-open', 'plan-open', 'org-invite', 'org-role', 'del-ask'];
+const OWNER_ACTS = ['release-ask', 'release-go', 'rb-ask', 'rb-go', 'rb-redo', 'pol-toggle', 'pol-set', 'pol-host-rm', 'pol-save', 'repo-toggle', 'repo-ask', 'repo-on', 'repo-sam-no', 'invite-open', 'arch-ask', 'unarchive', 'env-add', 'env-edit', 'env-rm', 'dom-rm', 'dom-check', 'perm-open', 'plan-open', 'org-invite', 'org-role', 'org-edit', 'org-del', 'del-ask'];
 function memberView(html, what) {
   if (!member()) return html;
   html = html.replace(new RegExp('data-act="(' + OWNER_ACTS.join('|') + ')"', 'g'), 'disabled aria-disabled="true" title="Only Elena can do this" data-act="$1"').replace(/data-act-change="(pol-sel)"/g, 'disabled data-act-change="$1"').replace(/<form class="row" data-form="(pol-host|dom-add)"/g, '<form class="row" style="display:none" data-form="$1"');
@@ -843,7 +843,7 @@ function userMenu() {
   const it = (href, icon, label, act) => act ? '<button class="it" role="menuitem" data-act="' + act + '">' + icon + label + '</button>' : '<a class="it" role="menuitem" href="' + href + '">' + icon + label + '</a>';
   return '<div class="umenu' + (S.collapsed ? ' narrow' : '') + (S.menuEnter ? ' enter' : '') + '" role="menu" aria-label="Account">' +
     '<div class="hd"><span class="av">' + m.av + '</span><span class="who-txt"><span>' + m.name + '</span><small>' + m.email + '</small></span></div><hr>' +
-    it(k ? '#k-me' : '#me', I.account, 'Account') + it('', I.today.replace('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>', '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>'), 'Keyboard shortcuts', 'keys') + it(k ? '#k-connect' : '#connect', I.swap.replace('M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7', 'M4 6h16v10H8l-4 4z'), 'Connect your chat') + it(k ? '#k-mail' : '#mail', I.bell, 'Notifications') + (k ? it('#k-record', I.ship, 'Track record') : it('#org', I.org, 'Bakery on Elm')) +
+    it(k ? '#k-me' : '#me', I.account, 'Account') + (k ? '' : it('#org', I.org, 'Organization')) + it('', I.today.replace('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>', '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>'), 'Keyboard shortcuts', 'keys') + it(k ? '#k-connect' : '#connect', I.swap.replace('M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7', 'M4 6h16v10H8l-4 4z'), 'Connect your chat') + it(k ? '#k-mail' : '#mail', I.bell, 'Notifications') + (k ? it('#k-record', I.ship, 'Track record') : it('#org', I.org, 'Bakery on Elm')) +
     '<hr>' + it('', I.swap, 'Demo · see it as ' + (k ? 'Elena, the owner' : 'Sam, a contributor'), 'persona') + (k ? '' : it('', I.swap, 'Demo · see it as ' + (S.as === 'marco' ? 'Elena, the owner' : 'Marco, a teammate'), 'as-marco')) +
     '<hr>' + it('#welcome', I.logout, 'Sign out') + '</div>';
 }
@@ -851,7 +851,7 @@ function roomMenu() {
   const bp = S.route === 'fresh'; const nc = needsCreator().length;
   const row = (href, mark, name, sub, on, extra) => '<a class="it" role="menuitemradio" aria-checked="' + on + '" href="' + href + '"><b>' + mark + '</b><span class="t"><span>' + name + '</span><small>' + sub + '</small></span>' + (extra || '') + (on ? '<span style="margin-left:' + (extra ? '6px' : 'auto') + '">' + I.check + '</span>' : '') + '</a>';
   return '<div class="rmenu' + (S.collapsed ? ' narrow' : '') + (S.menuEnter ? ' enter' : '') + '" role="menu" aria-label="Workrooms">' +
-    '<div class="lbl">Bakery on Elm</div>' +
+    '<div class="lbl" style="display:flex;align-items:center"><span style="flex:1">' + esc(S.org.name) + '</span><a href="#org" style="font-size:12px;text-decoration:none;color:var(--faint)">Settings</a></div>' +
     row('#home', 'OT', 'Customer order tracker', S.archived ? 'Archived' : 'Release ' + S.ship.live + ' is live', !bp, nc && !bp ? '<span class="pill" title="Needs you">' + nc + '</span>' : (nc ? '<span class="pill" title="Needs you" style="margin-left:auto">' + nc + '</span>' : '')) +
     row('#fresh', 'BP', 'Bakery preorders', S.fresh.lead ? 'Planning the first tasks' : 'New · fill a role', bp) +
     '<hr><a class="it" role="menuitem" href="#rooms">' + I.board + 'All workrooms</a>' +
@@ -1777,19 +1777,40 @@ function find() {
 
 /* ---------- Creator: Organization ---------- */
 function org() {
-  const o = S.org;
-  return '<div class="head"><div><h1>Bakery on Elm</h1><p>Your organization. People here can own workrooms; admins manage who\'s in it.</p></div><button class="btn" data-act="org-invite">' + (o.inviteOpen ? 'Cancel' : 'Add someone') + '</button></div>' +
-    (o.inviteOpen ? '<form class="panel" data-form="org-invite" style="padding:16px 18px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end"><div class="field" style="flex:1;min-width:220px"><label for="org-email">Email</label><input class="in" id="org-email" type="email" value="nadia@bakeryonelm.example"></div><button class="btn primary" type="submit">Send invite</button></form>' : '') +
-    '<section><span class="label">People</span><div class="panel" style="margin-top:10px">' + o.members.map((m, i) => '<div class="row" style="flex-wrap:wrap"><span class="av">' + m[0].split(' ').map((w) => w[0]).join('') + '</span><span style="flex:1;min-width:200px"><b style="font-weight:600">' + m[0] + (i === 0 ? ' <span class="faint" style="font-weight:400">· you</span>' : '') + '</b><br><span class="faint mono">' + m[1] + '</span></span><span class="stage">' + m[2] + '</span>' + (i === 0 ? '' : '<button class="btn ghost" data-act="org-role" data-i="' + i + '">' + (m[2] === 'Admin' ? 'Make member' : 'Make admin') + '</button>') + '</div>').join('') + '</div></section>' +
-    '<div class="grid2"><section><span class="label">Workrooms</span><div class="panel kvlist" style="padding:4px 18px;margin-top:10px"><div><span>Customer order tracker</span><span>Elena · private</span></div><div><span>Bakery preorders</span><span>Elena · private</span></div></div></section>' +
-    '<section><span class="label">Agents your organization runs</span><div class="panel" style="margin-top:10px"><a class="row roomrow" href="#org-agent" style="padding:13px 16px"><span class="av agent">MN</span><span style="flex:1;min-width:0"><b style="font-weight:600">Menu Agent</b><br><span class="faint" style="font-size:13px">Paired by Marco · ' + (S.orgPaused ? 'paused' : '1 item waiting') + '</span></span><span class="faint">' + I.arrow + '</span></a></div><p class="muted" style="font-size:13px;margin-top:8px">Admins see every inbox here, so nothing runs out of sight.</p></section></div>' +
-    '<section><span class="label">What happened</span><div class="panel" style="margin-top:10px">' + [['Today 3:12 PM', 'Elena approved #18 in Customer order tracker'], ['Tue 5:45 PM', 'Elena released release 3 of Customer order tracker'], ['Mon 9:12 AM', 'Elena started Customer order tracker']].map((e) => '<div class="row"><span class="faint" style="width:110px;font-size:13px">' + e[0] + '</span><span>' + e[1] + '</span></div>').join('') + '</div></section>';
+  const o = S.org; const d = o.draft;
+  const ini = o.name.split(/\s+/).filter((w) => /^[A-Za-z0-9]/.test(w) && !/^(on|of|the|and)$/i.test(w)).map((w) => w[0].toUpperCase()).join('').slice(0, 2) || 'O';
+  const profile = o.edit
+    ? '<form class="panel form" data-form="org-save" style="padding:18px 20px;max-width:none;display:flex;flex-direction:column;gap:14px">' +
+      '<div class="field"><label for="org-name">Name</label><input class="in" id="org-name" data-input="org-name" value="' + esc(d.name) + '"><span class="faint" style="font-size:12.5px">People see it on invites, workrooms and public pages.</span></div>' +
+      '<div class="field"><label for="org-slug">Web address</label><span style="display:flex;align-items:center;gap:0"><span class="in mono" style="width:auto;border-right:0;border-radius:8px 0 0 8px;background:var(--sunk);color:var(--faint);display:flex;align-items:center">podster.dev/</span><input class="in mono" id="org-slug" data-input="org-slug" value="' + esc(d.slug) + '" style="border-radius:0 8px 8px 0"></span><span class="faint" style="font-size:12.5px">' + (d.slug !== o.slug ? 'Old links to podster.dev/' + esc(o.slug) + ' keep working for 90 days.' : 'Lowercase letters, numbers and dashes.') + '</span></div>' +
+      '<div class="field"><label for="org-site">Website <span class="faint" style="font-weight:400">· optional</span></label><input class="in" id="org-site" data-input="org-site" value="' + esc(d.site) + '" placeholder="yourbusiness.com"></div>' +
+      '<span style="display:flex;gap:8px"><button class="btn primary" type="submit">Save</button><button class="btn ghost" type="button" data-act="org-edit">Cancel</button></span></form>'
+    : '<div class="panel kvlist" style="padding:4px 18px">' +
+      '<div style="align-items:center"><span>Logo</span><span style="display:flex;align-items:center;gap:10px"><span class="av" style="width:32px;height:32px;border-radius:8px">' + ini + '</span><button class="btn ghost" data-act="toast" data-msg="Pick a square image, at least 128 pixels.">Upload</button></span></div>' +
+      '<div><span>Name</span><span>' + esc(o.name) + '</span></div>' +
+      '<div><span>Web address</span><span class="mono">podster.dev/' + esc(o.slug) + '</span></div>' +
+      '<div><span>Website</span><span>' + (o.site ? esc(o.site) : '<span class="faint">Not set</span>') + '</span></div>' +
+      '</div>';
+  return '<div class="head"><div><h1>' + esc(o.name) + '</h1><p>Your organization. People here can own workrooms; admins manage who\'s in it and how it looks.</p></div></div>' +
+    '<div class="setgrid">' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Profile</span><div style="display:flex;flex-direction:column;gap:10px">' + profile + (o.edit ? '' : '<span><button class="btn" data-act="org-edit">Edit profile</button></span>') + '</div><p class="faint" style="font-size:13px;margin:0">Shown on invites, on your workrooms and on public pages.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">People</span><div style="display:flex;flex-direction:column;gap:10px">' +
+      (o.inviteOpen ? '<form class="panel" data-form="org-invite" style="padding:16px 18px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end"><div class="field" style="flex:1;min-width:220px"><label for="org-email">Email</label><input class="in" id="org-email" type="email" value="nadia@bakeryonelm.example"></div><button class="btn primary" type="submit">Send invite</button><button class="btn ghost" type="button" data-act="org-invite">Cancel</button></form>' : '') +
+      '<div class="panel">' + o.members.map((m, i) => '<div class="row" style="flex-wrap:wrap"><span class="av">' + m[0].split(' ').map((w) => w[0]).join('') + '</span><span style="flex:1;min-width:200px"><b style="font-weight:600">' + m[0] + (i === 0 ? ' <span class="faint" style="font-weight:400">· you</span>' : '') + '</b><br><span class="faint mono">' + m[1] + '</span></span><span class="stage">' + m[2] + '</span>' + (i === 0 ? '' : '<button class="btn ghost" data-act="org-role" data-i="' + i + '">' + (m[2] === 'Admin' ? 'Make member' : 'Make admin') + '</button>') + '</div>').join('') + '</div>' +
+      (o.inviteOpen ? '' : '<span><button class="btn" data-act="org-invite">Add someone</button></span>') + '</div>' +
+      '<p class="faint" style="font-size:13px;margin:0">Admins can edit the organization and see its agents\' inboxes. Members can own workrooms.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Workrooms</span><div class="panel kvlist" style="padding:4px 18px"><div><span>Customer order tracker</span><span>Elena · private</span></div><div><span>Bakery preorders</span><span>Elena · private</span></div></div></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Agents it runs</span><div class="panel"><a class="row roomrow" href="#org-agent" style="padding:13px 16px"><span class="av agent">MN</span><span style="flex:1;min-width:0"><b style="font-weight:600">Menu Agent</b><br><span class="faint" style="font-size:13px">Paired by Marco · ' + (S.orgPaused ? 'paused' : '1 item waiting') + '</span></span><span class="faint">' + I.arrow + '</span></a></div><p class="faint" style="font-size:13px;margin:0">Admins see every inbox here, so nothing runs out of sight.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">What happened</span><div class="panel">' + [['Today 3:12 PM', 'Elena approved #18 in Customer order tracker'], ['Tue 5:45 PM', 'Elena released release 3 of Customer order tracker'], ['Mon 9:12 AM', 'Elena started Customer order tracker']].map((e) => '<div class="row"><span class="faint" style="width:110px;font-size:13px">' + e[0] + '</span><span>' + e[1] + '</span></div>').join('') + '</div></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Delete organization</span><div class="panel" style="padding:16px 18px;display:flex;flex-direction:column;gap:10px"><span class="muted">Deleting it removes its people, agents and history. Its workrooms must be deleted or moved to another organization first.</span>' +
+      (o.delAsk ? '<div class="confirm"><b style="font-weight:600">2 workrooms are still here</b><span class="muted">Delete or move Customer order tracker and Bakery preorders first. Then you can delete ' + esc(o.name) + '.</span><span><button class="btn ghost" data-act="org-del">OK</button></span></div>' : '<button class="btn ghost danger" style="align-self:flex-start" data-act="org-del">Delete organization…</button>') + '</div></section>' +
+    '</div>';
 }
 
 /* ---------- Creator: Your workrooms ---------- */
 function rooms() {
   const nc = needsCreator().length;
-  return '<div class="head"><div><h1>Your workrooms</h1><p>Bakery on Elm</p></div><a class="btn primary" href="#start">Start a workroom</a></div>' +
+  return '<div class="head"><div><h1>Your workrooms</h1><p>' + esc(S.org.name) + ' · <a href="#org">Organization settings</a></p></div><a class="btn primary" href="#start">Start a workroom</a></div>' +
     (S.roomGone ? '<div class="confirm"><b style="font-weight:600">Customer order tracker was deleted</b><span class="muted">If that was a mistake, contact support within 7 days while a recoverable copy still exists.</span><button class="demo-note" data-act="room-back" style="align-self:flex-start">Demo · bring it back</button></div>' : '') +
     '<div class="panel">' +
     (S.roomGone ? '' : '<a class="roomrow" href="#home"><span class="mark">OT</span><span style="flex:1;min-width:0"><b style="font-weight:600">Customer order tracker</b><br><span class="muted">' + (S.archived ? 'Archived · release ' + S.ship.live + ' still live' : S.tasks.filter((t) => t.stage === 'done').length + ' tasks done · release ' + S.ship.live + ' is live') + '</span></span>' + (nc ? '<span class="pill" title="Needs you">' + nc + '</span>' : '') + '<span class="faint">' + I.arrow + '</span></a>') +
@@ -1808,7 +1829,7 @@ function start() {
   const sl = slug(st.name);
   const seg = (k, opts) => '<div class="seg" role="group" style="align-self:flex-start">' + opts.map((o) => '<button type="button" data-act="st-set" data-k="' + k + '" data-v="' + o[0] + '" aria-pressed="' + (st[k] === o[0]) + '">' + o[1] + '</button>').join('') + '</div>';
   const openings = st.roles.reduce((a, r) => a + r[2], 0);
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>Start a workroom</h1><p>A space where agents work toward one goal, with the roles, code and release setup it needs. You can change all of it later.</p></div></div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>Start a workroom</h1><p>A space where agents work toward one goal, with the roles, code and release setup it needs. You can change all of it later.</p><p class="faint" style="font-size:13px;margin-top:6px">In ' + esc(S.org.name) + ' · <a href="#org">Organization settings</a></p></div></div>' +
     '<form data-form="start" class="grid2" style="grid-template-columns:minmax(0,1.5fr) minmax(320px,1fr)">' +
     '<div style="display:flex;flex-direction:column;gap:18px">' +
     '<section class="panel form" style="padding:20px 22px;max-width:none"><span class="label">1 · Goal</span>' +
@@ -1969,8 +1990,8 @@ const ORG_INBOX = [
 ];
 function orgAgent() {
   const f = S.orgInbox; const rows = ORG_INBOX.filter((r) => f === 'all' || (f === 'waiting' ? r[4] === 'Waiting' : r[4] !== 'Waiting'));
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#org" style="text-decoration:none">Bakery on Elm</a> / Agents</p><h1 style="display:flex;align-items:center;gap:12px"><span class="av agent" style="width:34px;height:34px">MN</span>Menu Agent</h1><p>Paired by Marco Diaz on the shop\'s laptop · Product manager in Bakery preorders</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="org-pause">' + (S.orgPaused ? 'Resume' : 'Pause') + '</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Marco.">Message Marco</button></div></div>' +
-    '<div class="confirm" style="max-width:860px"><b style="font-weight:600">You can see everything this agent receives</b><span class="muted">Bakery on Elm owns it, and you\'re an admin. You can pause it, but you can\'t answer or act for it. Marco runs it. Items show as IDs. Open the workroom to read the message, if you\'re a member there.</span></div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#org" style="text-decoration:none">' + esc(S.org.name) + '</a> / Agents</p><h1 style="display:flex;align-items:center;gap:12px"><span class="av agent" style="width:34px;height:34px">MN</span>Menu Agent</h1><p>Paired by Marco Diaz on the shop\'s laptop · Product manager in Bakery preorders</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="org-pause">' + (S.orgPaused ? 'Resume' : 'Pause') + '</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Marco.">Message Marco</button></div></div>' +
+    '<div class="confirm" style="max-width:860px"><b style="font-weight:600">You can see everything this agent receives</b><span class="muted">' + esc(S.org.name) + ' owns it, and you\'re an admin. You can pause it, but you can\'t answer or act for it. Marco runs it. Items show as IDs. Open the workroom to read the message, if you\'re a member there.</span></div>' +
     (S.orgPaused ? '<div class="confirm" style="max-width:860px"><b style="font-weight:600">Paused by you</b><span class="muted">It keeps its role but won\'t run. Marco and the workroom\'s owner are told.</span></div>' : '') +
     '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="label" style="margin-right:auto">Inbox</span><div class="seg" role="group" aria-label="Filter">' + [['all', 'All'], ['waiting', 'Waiting'], ['done', 'Handled']].map((x) => '<button data-act="org-inbox" data-v="' + x[0] + '" aria-pressed="' + (f === x[0]) + '">' + x[1] + '</button>').join('') + '</div></div>' +
     '<div class="panel" style="overflow-x:auto"><table class="tbl" style="min-width:680px"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Workroom</th><th scope="col">Task</th><th scope="col">Item</th><th scope="col">State</th></tr></thead><tbody>' +
@@ -2527,6 +2548,8 @@ document.addEventListener('click', (e) => {
     case 'leave-yes': S.left[S.leaveAsk] = true; if (S.leaveAsk === 'planner:0') S.left.planner = true; S.leaveAsk = null; toast('Left the role. The owner is told.'); break;
     case 'org-role': { const m = S.org.members[Number(el.dataset.i)]; m[2] = m[2] === 'Admin' ? 'Member' : 'Admin'; break; }
     case 'org-invite': S.org.inviteOpen = !S.org.inviteOpen; break;
+    case 'org-edit': S.org.edit = !S.org.edit; S.org.draft = S.org.edit ? { name: S.org.name, slug: S.org.slug, site: S.org.site } : null; break;
+    case 'org-del': S.org.delAsk = !S.org.delAsk; break;
     case 'scope': S.scope = el.dataset.s; break;
     case 'answer': S.q.state = 'answered'; S.q.answer = Q_OPTS[Number(el.dataset.i)]; T(19).when = 'carrying on with your answer'; toast('Answered. Coding Agent carries on.'); break;
     case 'answer-custom': if (!S.q.custom.trim()) { toast('Write an answer first.'); break; } S.q.state = 'answered'; S.q.answer = S.q.custom.trim(); T(19).when = 'carrying on with your answer'; toast('Answered. Coding Agent carries on.'); break;
@@ -2607,6 +2630,7 @@ document.addEventListener('submit', (e) => {
   if (k === 'start') { S.fresh = { lead: false, created: true, plan: 'none' }; go('fresh'); toast('Bakery preorders is ready.'); return; }
   if (k === 'signin') { S.wl.step = 'check'; }
   if (k === 'xemail') { S.wl.step = 'check'; }
+  if (k === 'org-save') { const o = S.org; const d = o.draft; const name = d.name.trim(); const sl = d.slug.trim().toLowerCase(); if (!name) { toast('Give it a name.'); render(); return; } if (!/^[a-z0-9][a-z0-9-]{1,38}$/.test(sl)) { toast('Use lowercase letters, numbers and dashes for the address.'); render(); return; } const moved = sl !== o.slug; o.name = name; o.slug = sl; o.site = d.site.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); o.edit = false; o.draft = null; toast(moved ? 'Saved. Old links keep working for 90 days.' : 'Saved.'); }
   if (k === 'edit-task') { const t = T(S.taskId); t.title = document.getElementById('et-title').value.trim() || t.title; t.ask = document.getElementById('et-ask').value.trim() || t.ask; const d = document.getElementById('et-done').value.split('\n').map((x) => x.trim()).filter(Boolean); if (d.length) t.done = d; S.editTask = false; toast('Saved. Planner is told.'); }
   if (k === 'brief') { const b = S.brief; b.goal = document.getElementById('br-goal').value.trim() || b.goal; b.done = document.getElementById('br-done').value; b.context = document.getElementById('br-ctx').value; b.editing = false; toast('Brief saved. Planner is told.'); }
   if (k === 'newtask') {
@@ -2663,6 +2687,9 @@ document.addEventListener('input', (e) => {
   if (k === 'permnote') S.permReq.note = e.target.value;
   if (k === 'redonote') S.redoNote = e.target.value;
   if (k === 'polhost') S.policy.hostDraft = e.target.value;
+  if (k === 'org-name' && S.org.draft) S.org.draft.name = e.target.value;
+  if (k === 'org-site' && S.org.draft) S.org.draft.site = e.target.value;
+  if (k === 'org-slug' && S.org.draft) { S.org.draft.slug = e.target.value; render(); }
   if (k === 'deltext') { const before = S.delText; S.delText = e.target.value; const need = S.delAsk === 'room' ? 'Customer order tracker' : 'delete my account'; if ((before.trim() === need) !== (S.delText.trim() === need)) render(); }
   if (k === 'inl' && S.inl) S.inl.val = e.target.value;
   if (k === 'env-n') { const F = S.app.form; const was = looksSecret(F.n); F.n = e.target.value; if (!F.touched && looksSecret(F.n) !== was) { F.secret = looksSecret(F.n); F.prevMode = F.secret ? 'placeholder' : 'same'; render(); } else if (!F.secret && looksSecret(F.n) !== was) render(); }

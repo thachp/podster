@@ -9,13 +9,15 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { WORK_TREE_CACHES } from "../src/core/repository.js";
 import { TOOLCHAIN_ENV, TOOLCHAINS, type Toolchain } from "../src/core/toolchains.js";
-import type { DockerCli } from "../src/node/docker-sandbox.js";
+import { IMAGE_ID, type DockerCli } from "../src/node/docker-sandbox.js";
 import { EGRESS_ALIAS, EGRESS_PORT } from "../src/core/run-interface.js";
-import { ARCHES, BASE_TAG, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_ARCH, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES } from "../src/node/toolchain-images.js";
+import { DetailedError } from "../src/core/errors.js";
+import { ARCHES, BASE_TAG, BUILD_OUTPUT_TAIL_BYTES, BUILD_RETRY_DELAYS_MS, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_ARCH, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES, tailOf } from "../src/node/toolchain-images.js";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const id = (c: string) => `sha256:${c.repeat(64)}`;
 const BASE = id("b");
+
 const L = (c: string) => id(c);
 
 const temps: string[] = [];
@@ -152,10 +154,12 @@ describe("the toolchain Dockerfiles", () => {
     expect(code(text)).toContain("ln -s /opt/dotnet/dotnet /usr/local/bin/dotnet");
   });
 
-  it("java: Temurin JDK 25.0.5.1+2 from Adoptium's GitHub release and Maven 3.10.1 from archive.apache.org, with their checked sums", async () => {
+  it("java: Temurin JDK 25.0.5.1+2 from Adoptium's GitHub release and Maven 3.10.1 from Maven Central, with their checked sums", async () => {
     const text = await dockerfile("java");
     expect(text).toContain("ADD https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_${ARCH}_linux_hotspot_25.0.5.1_2.tar.gz /fetch/jdk.tar.gz");
-    expect(text).toContain("ADD https://archive.apache.org/dist/maven/maven-3/3.10.1/binaries/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz");
+    expect(text).toContain("ADD https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz");
+    // Never archive.apache.org, which is slow and rate-limits (CI run 45376832243).
+    expect(code(text)).not.toContain("archive.apache.org");
     expect(text).toMatch(/aarch64\/arm64\) printf '%s  %s\\n' \\\n +c37879e0d08eeb1baa69fcbb7758cd455b7b1c0ceab1e2a136ccb1713c530984 jdk\.tar\.gz > sums ;;/);
     expect(text).toMatch(/x64\/amd64\) printf '%s  %s\\n' \\\n +760f91b22c3efc9bd1b64ff950598231be82928cc807e30691a0e7a2995a62c0 jdk\.tar\.gz > sums ;;/);
     expect(text).toContain("8af2fcc48ee6b8f8fc0b21054226e14404b88500df6483cdeb3ae603408f6de27b1397ac591a9fb0d98fee64f4f624fee1383efd25b8998786cda1598fb9ea39 maven.tar.gz > sums512");
@@ -299,14 +303,57 @@ describe("ensureToolchainImage", () => {
     }
   });
 
-  it("stops with a fixed message when a build fails, saying nothing of Docker's output, and pins nothing", async () => {
+  it("stops with a fixed message when every try of a build fails, keeping only the tail of Docker's output in its detail, and pins nothing", async () => {
     const home = await temp();
-    const { docker } = fakeDocker(baseImages(), { build: () => ({ code: 1, stdout: "", stderr: "secret-ish build output" }) });
-    const error = await ensureToolchainImage(["python"], { home, docker, notify: () => undefined, base: BASE }).catch((e: Error) => e);
-    expect(error).toBeInstanceOf(Error);
+    const waits: number[] = [];
+    const { calls, docker } = fakeDocker(baseImages(), { build: () => ({ code: 1, stdout: "", stderr: "secret-ish build output" }) });
+    const error = await ensureToolchainImage(["python"], { home, docker, notify: () => undefined, base: BASE, wait: async (ms) => void waits.push(ms) }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(DetailedError);
     expect((error as Error).message).toBe(TOOLCHAIN_BUILD_FAILED);
     expect((error as Error).message).not.toContain("secret-ish");
+    // The output goes only to the detail, for the local diagnostics file, which redacts it.
+    expect((error as DetailedError).detail).toEqual({ exit_code: 1, stderr: "secret-ish build output", cut: false });
+    expect(calls.filter((c) => c[0] === "build").length).toBe(1 + BUILD_RETRY_DELAYS_MS.length);
+    expect(waits).toEqual([...BUILD_RETRY_DELAYS_MS]);
     expect(existsSync(join(home, pinName(["python"])))).toBe(false);
+    // A long output keeps only its last bytes, where Docker names the failing step.
+    const long = fakeDocker(baseImages(), { build: () => ({ code: 1, stdout: "", stderr: `${"x".repeat(10_000)}ERROR: failed to load https://example.test: 429` }) });
+    const cut = (await ensureToolchainImage(["python"], { home: await temp(), docker: long.docker, notify: () => undefined, base: BASE, wait: async () => undefined }).catch((e: Error) => e)) as DetailedError;
+    expect(cut.detail.stderr?.endsWith("ERROR: failed to load https://example.test: 429")).toBe(true);
+    expect(cut.detail.stderr?.startsWith("[cut]")).toBe(true);
+    expect(Buffer.byteLength(cut.detail.stderr ?? "")).toBe(BUILD_OUTPUT_TAIL_BYTES + "[cut]".length);
+    expect(tailOf("ab")).toBe("ab");
+    expect(tailOf("é".repeat(10), 5)).toBe("[cut]éé");
+  });
+
+  it("tries a failed build again after a wait, and pins what a later try built", async () => {
+    const home = await temp();
+    let tries = 0;
+    const waits: number[] = [];
+    const { calls, docker } = fakeDocker(baseImages(), { build: () => (++tries < 3 ? { code: 1, stdout: "", stderr: "429 Too Many Requests" } : null) });
+    const got = await ensureToolchainImage(["java"], { home, docker, notify: () => undefined, base: BASE, wait: async (ms) => void waits.push(ms) });
+    expect(IMAGE_ID.test(got)).toBe(true);
+    expect((await readFile(join(home, pinName(["java"])), "utf8")).trim()).toBe(got);
+    expect(calls.filter((c) => c[0] === "build").length).toBe(3);
+    expect(waits).toEqual([...BUILD_RETRY_DELAYS_MS]);
+    // Every try is the same build, so every pin and checksum is checked each time.
+    const builds = calls.filter((c) => c[0] === "build").map((c) => c.join(" "));
+    expect(new Set(builds).size).toBe(1);
+  });
+
+  it("doesn't try again a build that was killed (its time limit), stopped by the caller, or made an image Runner refuses", async () => {
+    const killed = fakeDocker(baseImages(), { build: () => ({ code: -1, stdout: "", stderr: "" }) });
+    await expect(ensureToolchainImage(["rust"], { home: await temp(), docker: killed.docker, notify: () => undefined, base: BASE, wait: async () => undefined })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
+    expect(killed.calls.filter((c) => c[0] === "build").length).toBe(1);
+    const bad = fakeDocker(baseImages(), { build: () => ({ code: 0, stdout: "not an id" }) });
+    await expect(ensureToolchainImage(["rust"], { home: await temp(), docker: bad.docker, notify: () => undefined, base: BASE, wait: async () => undefined })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
+    expect(bad.calls.filter((c) => c[0] === "build").length).toBe(1);
+    // Stopped during the wait: no other try.
+    const stop = new AbortController();
+    const failing = fakeDocker(baseImages(), { build: () => ({ code: 1, stdout: "", stderr: "502" }) });
+    const wait = async () => stop.abort();
+    await expect(ensureToolchainImage(["rust"], { home: await temp(), docker: failing.docker, notify: () => undefined, base: BASE, signal: stop.signal, wait })).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
+    expect(failing.calls.filter((c) => c[0] === "build").length).toBe(1);
   });
 
   it("builds only for arm64 and amd64 Engines, as aarch64 and x86_64", async () => {

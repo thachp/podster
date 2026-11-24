@@ -51,7 +51,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
     toolchains,
     caps: { spend_micro_usd: 1, run_time_ms: 900_000, turns: 1, output_tokens: 1, max_tokens: 1 },
   });
-  /** Opens a run, saying Runner's own fixed message for the step that failed, if one did. */
+  /** Opens a run, saying Runner's own fixed message for the step that failed, if one did, and for a failed build the tail of Docker's output. */
   const open = (ref: string, toolchains: Toolchain[]) =>
     sandbox.open(containerSpec(ref, facts(ref, toolchains)), signal).catch((error: Error & { detail?: { stderr?: string } }) => {
       throw new Error(`${error.message}: ${error.detail?.stderr ?? ""}`);

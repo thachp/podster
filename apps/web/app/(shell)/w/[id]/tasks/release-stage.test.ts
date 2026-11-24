@@ -4,7 +4,7 @@ import { deploymentStage, parseTaskRelease, releaseHeadline, releaseSwitchedOn, 
 const MERGED = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
 const OTHER = "ffffffffffffffffffffffffffffffffffffffff";
 const URL = "https://k3v9q2.apps.example/";
-const release = (over: Partial<TaskRelease> = {}): TaskRelease => ({ exists: true, release_id: `rel_${"a1".repeat(16)}`, commit_sha: MERGED, state: "served", observed_at: 5, failure_code: null, served: true, result_url: URL, ...over });
+const release = (over: Partial<TaskRelease> = {}): TaskRelease => ({ exists: true, release_id: `rel_${"a1".repeat(16)}`, commit_sha: MERGED, state: "served", observed_at: 5, failure_code: null, served: true, result_url: URL, waiting: null, ...over });
 const merged = { merge_state: "succeeded" as const, merge_sha: MERGED };
 const ok = <T,>(data: T) => ({ ok: true as const, data });
 const no = (status: number, code: string) => ({ ok: false as const, status, code });
@@ -27,6 +27,16 @@ describe("a task's release, read for shape (review standard 3)", () => {
     for (const bad of [null, {}, { release: undefined }, { release: { exists: true } }, { release: release({ served: "yes" as unknown as boolean }) }, { release: release({ state: "live" as never }) }, { release: release({ result_url: 3 as unknown as string }) }, { release: release({ commit_sha: "main" }) }, { release: { exists: "false" } }, "x"]) {
       expect(parseTaskRelease(bad), JSON.stringify(bad)).toEqual({ kind: "malformed" });
     }
+  });
+
+  it("reads the waiting word only from the known set: absent, null or unknown is none, and a non-string is malformed", () => {
+    const { waiting: _, ...older } = release();
+    expect(parseTaskRelease({ release: older })).toEqual({ kind: "release", release: release() });
+    expect(parseTaskRelease({ release: release({ state: "uploading", waiting: "upload_cap" }) })).toEqual({ kind: "release", release: release({ state: "uploading", waiting: "upload_cap" }) });
+    for (const unknown of ["release_upload_attempts", "UPLOAD_CAP", `rel_${"a1".repeat(16)}`, "<b>x</b>"]) {
+      expect(parseTaskRelease({ release: { ...release(), waiting: unknown } }), unknown).toEqual({ kind: "release", release: release() });
+    }
+    expect(parseTaskRelease({ release: { ...release(), waiting: 3 } })).toEqual({ kind: "malformed" });
   });
 });
 
@@ -82,6 +92,16 @@ describe("the deployment stage (DESIGN.md's release stages, UI-02)", () => {
     expect(at({ state: "replaced" })).toBe("Replaced");
     expect(at({ state: "unpublished" })).toBe("Unpublished");
     expect(at({ state: "served" })).toBe("Not live");
+  });
+
+  it("says why a deploying release waits, in fixed words of its own, and says nothing when it isn't waiting", () => {
+    const stage = (over: Partial<TaskRelease>) => deploymentStage({ switchedOn: true, read: { kind: "release", release: release({ served: false, result_url: null, ...over }) }, ...merged });
+    expect(stage({ state: "uploading", waiting: "upload_cap" })).toMatchObject({ label: "Deploying", text: "Podster is uploading this release. It isn't served yet. It's waiting because this workroom has used its upload attempts for the hour." });
+    expect(stage({ state: "queued", waiting: "idle" }).text).toMatch(/releases are paused/);
+    expect(stage({ state: "uploading", waiting: null }).text).toBe("Podster is uploading this release. It isn't served yet.");
+    const texts = (["upload_cap", "read_budget", "in_flight", "settling", "idle"] as const).map((waiting) => stage({ state: "uncertain", waiting }).text);
+    expect(new Set(texts).size).toBe(5);
+    for (const text of texts) expect(text).not.toMatch(/upload_cap|read_budget|in_flight|settling\b|idle\b/);
   });
 
   it("waits for the merge, is Off when nothing was asked for, and says when it couldn't read or isn't shown", () => {

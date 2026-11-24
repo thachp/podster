@@ -87,7 +87,7 @@ From [the gate's list](m6-plan.md#the-gate-on-the-release-path) and [stage 1's o
 3. **The second account's deploy credential** for the content Worker, and **the content Worker's deploy**.
 4. **The publishing and routing credentials:** two Cloudflare tokens, set as secrets on the API.
 5. **The read-only GitHub App** in `podsterdev` (Contents read, Metadata read), installed, with its key set.
-6. **Turning `RELEASES` on for staging and setting a content provider.** Before that, the guard ceiling's figures.
+6. **Turning `RELEASES` on for staging and setting a content provider.** Before that, the guard ceiling's figures. *2026-11-24: the owner approved the guard ceiling's figures as they stand, so they no longer wait on this.*
 7. **[code]** The **store spike's four short-lived tokens** (`kv`, `d1`, `scripts`, `read`), and a yes to what the spike makes and deletes.
 8. **[code]** The **write cap's figure**, and the **Durable Object class** on the second account that counts writes.
 9. **[code]** The **billing alert** on the second account.

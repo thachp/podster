@@ -87,7 +87,7 @@ use podster_core::release_uncertain::{script_write_outcome, WriteOutcome};
 /// same command directly.
 pub(crate) const INTERNAL_RELEASE_UPLOAD: &str = "/internal/release-upload";
 /// `waiting`, when the deployment has no provider to upload to; and the driver's code while it idles for that.
-pub(super) const NO_PROVIDER: &str = "content_provider_not_configured";
+pub(super) const NO_PROVIDER: &str = podster_core::release_driver::NO_CONTENT_PROVIDER;
 /// `waiting`, when the provider gave no answer to go on, at the session, a bucket or the script.
 const UPLOAD_UNAVAILABLE: &str = "release_upload_unavailable";
 

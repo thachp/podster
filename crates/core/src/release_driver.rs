@@ -58,8 +58,19 @@ pub const DRIVE_IDLE_MS: i64 = 10 * 60 * 1000;
 /// deadline and a minute for the room's checks and the revoke on either side. **Proposed.**
 pub const DRIVE_LEASE_MS: i64 = ATTEMPT_DEADLINE_MS + 60_000;
 
-/// The most upload attempts begun in one room in a rolling hour, over all its releases. **Proposed.**
+/// The most upload attempts begun in one room in a rolling hour, over all its releases. Proposed, then approved by the
+/// owner on 2026-11-24 for pilots.
 pub const MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR: u32 = 2;
+
+/// The job's code while an upload waits for the room's hourly upload attempts
+/// ([`MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR`]) to leave room for it.
+pub const UPLOAD_ATTEMPTS_WAITING: &str = "release_upload_attempts";
+
+/// The job's code while the driver does nothing: the deployment doesn't allow release, or the release path is closed.
+pub const DRIVER_IDLE: &str = "release_driver_idle";
+
+/// The job's code while no content provider is configured to upload to: the driver idles then too.
+pub const NO_CONTENT_PROVIDER: &str = "content_provider_not_configured";
 
 /// The most reads one upload attempt can reserve: the two trees, and each of the most files fetched twice.
 pub const MAX_ATTEMPT_READS: u32 = TREE_READS + FETCH_PASSES * MAX_FILES as u32;

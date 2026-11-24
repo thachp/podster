@@ -85,6 +85,7 @@ const REL = `rel_${"7b".repeat(16)}`;
 const PREV = `rel_${"4e".repeat(16)}`;
 const TASK = "tsk_rs_1";
 const T = 1_900_000_000_000;
+const HOUR = 60 * 60 * 1000;
 const POLL = 5_000;
 const WAIT = 30_000;
 let rooms = 0;
@@ -148,7 +149,7 @@ const shown = async (id: string) => {
   return got.body.release;
 };
 const attempt = (state: string, observed_at: number, more: object = {}) =>
-  ({ exists: true, release_id: REL, commit_sha: COMMIT, state, observed_at, failure_code: null, served: false, result_url: null, ...more });
+  ({ exists: true, release_id: REL, commit_sha: COMMIT, state, observed_at, failure_code: null, served: false, result_url: null, waiting: null, ...more });
 async function withStop<T>(run: () => Promise<T>): Promise<T> {
   await moderation().fetch("https://do/content-stop");
   await inModeration((s) => void s.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1"));
@@ -208,6 +209,30 @@ describe("a task's release beside its checks and merge (M6 step 7)", () => {
     await at(r.room, T + POLL);
     expect((await pass(r.room)).outcome).toBe("served");
     expect(await shown(r.room)).toEqual(attempt("served", T + POLL, { served: true, result_url: `https://${r.host}/` }));
+  });
+
+  it("says why a release waits while the room's upload cap holds it, and only while it does", async () => {
+    await github("/seed", repository(SITE));
+    await github("/fault", { token: 500 });
+    const r = await room();
+    // Two upload attempts in the hour, each left where it was by a read GitHub didn't answer: retried, not a named wait.
+    expect((await pass(r.room)).code).toBe("release_read_unavailable");
+    expect(await shown(r.room)).toEqual(attempt("uploading", T));
+    await at(r.room, T + WAIT);
+    expect((await pass(r.room)).code).toBe("release_read_unavailable");
+    // The third waits for the room's hourly upload attempts: the status says so, by a word of the closed set alone.
+    await at(r.room, T + 3 * WAIT);
+    expect((await pass(r.room)).code).toBe("release_upload_attempts");
+    expect(await shown(r.room)).toEqual(attempt("uploading", T, { waiting: "upload_cap" }));
+    // A step out now isn't waiting, whatever the job last said.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET leased_step = 'upload', leased_epoch = 2, leased_hold = 0"));
+    expect((await shown(r.room)).waiting).toBe(null);
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET leased_step = NULL, leased_epoch = NULL, leased_hold = NULL"));
+    expect((await shown(r.room)).waiting).toBe("upload_cap");
+    // The upload's hour ends the release: failed, and no longer waiting for anything.
+    await at(r.room, T + HOUR);
+    await pass(r.room);
+    expect(await shown(r.room)).toEqual(attempt("failed", T + HOUR, { failure_code: "release_upload_expired" }));
   });
 
   it("is Merged · Deployment failed when the marker never comes back, never live", async () => {

@@ -477,23 +477,48 @@ describe("asking the app", () => {
     expect([withCredentials.status, headersOf(withCredentials), await withCredentials.text()]).toEqual([without.status, headersOf(without), await without.text()]);
   });
 
-  it("answers not-found for a script that isn't there, and an error for any other failure", async () => {
+  it("answers a static host not-found for a script that isn't there, and for any other failure of the dispatch", async () => {
     const w = world();
     w.apps.delete(SCRIPT);
     const gone = await get(w);
-    expect([gone.status, headersOf(gone)]).toEqual([404, NOT_FOUND]);
-    // Only that exact message means the script isn't there.
+    expect([gone.status, headersOf(gone), await gone.text()]).toEqual([404, NOT_FOUND, "not_found\n"]);
+    // A static release has no code of its own to throw, so any rejection is the platform's, and the script can't be
+    // confirmed: not-found, never an error, whatever the message.
     for (const message of ["Worker not found", "worker not found.", "Worker not found. ", "Internal error", ""]) {
       w.apps.set(SCRIPT, () => { throw new Error(message); });
       const failed = await get(w);
-      expect([failed.status, headersOf(failed), await failed.text()], message).toEqual([502, OWN, "app_error\n"]);
+      expect([failed.status, headersOf(failed), await failed.text()], message).toEqual([404, NOT_FOUND, "not_found\n"]);
     }
     w.apps.set(SCRIPT, () => { throw "not an Error"; });
-    expect((await get(w)).status).toBe(502);
-    // The namespace itself throwing is an error too, and still this Worker's own answer and headers.
+    expect((await get(w)).status).toBe(404);
+    // The namespace itself throwing is not-found too, and still this Worker's own answer and headers.
     w.deps.apps = { get: () => { throw new Error("no namespace"); } };
     const broken = await get(w);
-    expect([broken.status, headersOf(broken)]).toEqual([502, OWN]);
+    expect([broken.status, headersOf(broken)]).toEqual([404, NOT_FOUND]);
+    // A HEAD gets the same, with no body.
+    const head = await get(w, "/", { method: "HEAD" });
+    expect([head.status, await head.text()]).toEqual([404, ""]);
+  });
+
+  it("never answers a taken-down app's host with an error while a cached entry still names its deleted script", async () => {
+    // M6-R14 on staging, 2026-11-24: a suspension removed the entry and then deleted the script, but the entry is read
+    // with an edge cache, so for some seconds the cached entry still named the script, and the dispatch to it
+    // rejected with a message other than "Worker not found." The host answered 502 where it must answer not-found.
+    const w = world();
+    expect((await get(w)).status).toBe(200);
+    // The takedown: the script is going and the entry the edge still holds names it. The platform's message while the
+    // script is being deleted is unknown, so a few are tried.
+    for (const message of ["Worker not found.", "Internal error", "The script is being deleted", "Network connection lost."]) {
+      w.apps.set(SCRIPT, () => { throw new Error(message); });
+      for (const init of [{}, { method: "HEAD" }]) {
+        const answer = await get(w, "/", init);
+        expect([answer.status, answer.headers.get("clear-site-data")], message).toEqual([404, '"cache"']);
+      }
+    }
+    // Then the cache catches up: no entry, and the namespace isn't asked at all.
+    w.kv.delete(HOST);
+    w.sent.length = 0;
+    expect([(await get(w)).status, w.sent]).toEqual([404, []]);
   });
 
   it("builds the request to the app from nothing, so nothing else of the visitor's request can ride along", async () => {

@@ -25,7 +25,8 @@
 //      (`counter.ts`, by the app's label) and then sent to the app with its body; over the budget, or with a budget
 //      that can't be read, it is refused and the app never sees it.
 //   7. The script that entry names, asked of the namespace, with a request built from nothing: three of the
-//      visitor's headers and nothing else of the visitor's.
+//      visitor's headers and nothing else of the visitor's. For a static host, a script that isn't there and any other
+//      rejection of the dispatch are both not-found: a cached entry can name a script a takedown just deleted.
 //   8. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
 //      then this Worker's own fixed set, the sandbox among them.
 //
@@ -213,6 +214,16 @@ function requestForApp(request: Request, url: URL, cls: RequestClass, body: Uint
  * The app's answer, from the dispatch namespace: the one place an app is asked. Asking the namespace for a script that
  * isn't there returns without error; the fetch is what rejects, with exactly this message (spikes A and C). Any other
  * rejection is an error, and nothing is served for it.
+ *
+ * **A static host answers both as not-found** (fix of 2026-11-24). A takedown removes the serve entry first and then
+ * deletes the script, but this Worker reads the entry with an edge cache (`KV_CACHE_SECONDS`, and up to 60 seconds by
+ * KV's documentation), so for some seconds a cached entry can still name a script that is deleted or being deleted.
+ * Staging saw that window answer `502 app_error` for 3 to 14 seconds after a suspension and after an unpublish
+ * (M6-R14, 2026-11-23 and 2026-11-24): the rejection's message there was something other than this one, which no
+ * spike recorded and nothing here logs. A static release's script has no code of the app's to throw, so any rejection
+ * is the platform's, and a script that can't be reached is one this Worker can't confirm: not-found, as everything
+ * else it can't confirm. Nothing is served either way. A host with code keeps the split, since there a rejection can
+ * be the app's own exception.
  */
 async function dispatch(deps: Deps, script: string, request: Request): Promise<Response | "missing" | "error"> {
   try {
@@ -374,8 +385,9 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     if (!read) return methodRefused();
 
     const answer = await dispatch(deps, script, requestForApp(request, url, "read"));
-    if (answer === "missing") return notFound(request, site);
-    if (answer === "error") return own(request, site, 502, "app_error");
+    // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
+    // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
+    if (answer === "missing" || answer === "error") return notFound(request, site);
     const headers = new Headers();
     if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, site, 502, "app_answer_unservable");
     if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {

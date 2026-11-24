@@ -25,7 +25,8 @@
 //      (`counter.ts`, by the app's label) and then sent to the app with its body; over the budget, or with a budget
 //      that can't be read, it is refused and the app never sees it.
 //   7. The script that entry names, asked of the namespace, with a request built from nothing: three of the
-//      visitor's headers and nothing else of the visitor's.
+//      visitor's headers and nothing else of the visitor's. For a static host, a script that isn't there and any other
+//      rejection of the dispatch are both not-found: a cached entry can name a script a takedown just deleted.
 //   8. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
 //      then this Worker's own fixed set, the sandbox among them.
 //
@@ -33,10 +34,11 @@
 // anything is read. (With it on, which only a test can do, every step before 6 that would refuse answers that `405`
 // instead, and so does a static host.) A static host's answers are exactly what they were before.
 //
-// Nothing is logged for a request (ADR 0010's "Logs").
+// One thing is logged, and only for a dispatch that failed: its fixed class and the release's ID (`DispatchLog`).
+// Nothing else of a request is ever logged: no message, host, label, path, header or body (ADR 0010's "Logs").
 import { BUDGET_REFUSAL_STATUS, retryAfterSeconds } from "./budget";
 import type { WriteGate } from "./counter";
-import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, STOP_KEY } from "./names";
+import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, scriptRelease, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
@@ -62,6 +64,14 @@ export interface Entries {
 export interface Apps {
   get(name: string): { fetch(request: Request): Promise<Response> };
 }
+/**
+ * The one line this Worker logs: a dispatch that failed. Its fixed class, and the release's ID from the script's name
+ * (null if the name isn't a script's, which a confirmed entry never is). Never the rejection's message, the host, the
+ * label, the path, a header or a body. It is the signal of a platform outage, which a static host answers as
+ * not-found and so can't show by its status.
+ */
+export type DispatchLog = { event: "dispatch_missing" | "dispatch_error"; release: string | null };
+
 /** What one running copy remembers of the stop. Only a read that answered is remembered. */
 export interface StopMemory {
   read: { at: number; stopped: boolean } | null;
@@ -85,6 +95,8 @@ export interface Deps {
    * write is sent to the app, and never for anything else. With the switch off it is never asked.
    */
   writes: WriteGate;
+  /** Where a failed dispatch's line goes. The Worker's entry writes it to the Worker's log; a test keeps it. */
+  log: (line: DispatchLog) => void;
 }
 
 /** The visitor's headers that go through to an app with a read. Each calls only for answer headers let through below. */
@@ -213,12 +225,32 @@ function requestForApp(request: Request, url: URL, cls: RequestClass, body: Uint
  * The app's answer, from the dispatch namespace: the one place an app is asked. Asking the namespace for a script that
  * isn't there returns without error; the fetch is what rejects, with exactly this message (spikes A and C). Any other
  * rejection is an error, and nothing is served for it.
+ *
+ * **A static host answers both as not-found** (fix of 2026-11-24). A takedown removes the serve entry first and then
+ * deletes the script, but this Worker reads the entry with an edge cache (`KV_CACHE_SECONDS`, and up to 60 seconds by
+ * KV's documentation), so for some seconds a cached entry can still name a script that is deleted or being deleted.
+ * Staging saw that window answer `502 app_error` for 3 to 14 seconds after a suspension and after an unpublish
+ * (M6-R14, 2026-11-23 and 2026-11-24): the rejection's message there was, by inference, something other than this
+ * one; no spike recorded it and nothing logged it. A static release's script has no code of the app's to throw, so any rejection
+ * is the platform's, and a script that can't be reached is one this Worker can't confirm: not-found, as everything
+ * else it can't confirm. Nothing is served either way. A host with code keeps the split, since there a rejection can
+ * be the app's own exception.
+ *
+ * **Every failure is logged, for both kinds of host,** as one `DispatchLog`: so an outage of the namespace, which every
+ * static host now answers as not-found, still shows. The line carries the class and the release's ID and nothing else;
+ * the rejection's message is never logged, since it may hold anything. A log that fails changes no answer.
  */
 async function dispatch(deps: Deps, script: string, request: Request): Promise<Response | "missing" | "error"> {
   try {
     return await deps.apps.get(script).fetch(request);
   } catch (error) {
-    return error instanceof Error && error.message === "Worker not found." ? "missing" : "error";
+    const missing = error instanceof Error && error.message === "Worker not found.";
+    try {
+      deps.log({ event: missing ? "dispatch_missing" : "dispatch_error", release: scriptRelease(script) });
+    } catch {
+      // Nothing: the answer is the same with or without the line.
+    }
+    return missing ? "missing" : "error";
   }
 }
 
@@ -374,8 +406,9 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     if (!read) return methodRefused();
 
     const answer = await dispatch(deps, script, requestForApp(request, url, "read"));
-    if (answer === "missing") return notFound(request, site);
-    if (answer === "error") return own(request, site, 502, "app_error");
+    // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
+    // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
+    if (answer === "missing" || answer === "error") return notFound(request, site);
     const headers = new Headers();
     if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, site, 502, "app_answer_unservable");
     if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {

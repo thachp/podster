@@ -103,7 +103,8 @@ scope for now: their checks always say SKIP and are listed apart.
   --setup-wait      seconds to wait for the room's repository to be ready (default 300).
   --merge-wait      seconds to wait for each merge (default 300).
   --release-wait    seconds to wait for a release to be served or to fail (default 300).
-  --takedown-wait   seconds to wait for the host to stop serving after a suspension or an unpublish (default 180).
+  --takedown-wait   seconds to wait for the host to stop serving after a suspension or an unpublish, and for its
+                    marker to name a release served again (default 180).
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed. Never printed.
 
@@ -206,6 +207,46 @@ export const markerBody = (releaseId, commit) => `{"release_id":"${releaseId}","
 export function markerProblem({ status, body }, releaseId, commit) {
   if (status !== 200) return `the marker answered ${status}`;
   return body === markerBody(releaseId, commit) ? null : "the marker names another release or commit";
+}
+
+/**
+ * The content Worker's edge cache of a host's serve entry, in seconds: `KV_CACHE_SECONDS` in apps/content/src/handle.ts,
+ * which the self-test reads there. A miss is cached too, so a host that answered not found can go on answering it this
+ * long after a new release is served.
+ */
+export const KV_CACHE_SECONDS = 30;
+/** KV's documented bound, in seconds, for a write to reach every location. */
+export const KV_PROPAGATION_SECONDS = 60;
+/**
+ * The least a wait for a host's answer to change may be: the edge cache, then propagation. `--takedown-wait`, the wait
+ * every host check uses, must be at least this; its default, 180, leaves 90 s of margin.
+ */
+export const HOST_CHANGE_SECONDS = KV_CACHE_SECONDS + KV_PROPAGATION_SECONDS;
+
+/**
+ * Where a host's marker stands, read while waiting for a release just served there: `named` when it names this release
+ * and commit; `waiting` while it answers anything but 200, as a cached miss can for up to HOST_CHANGE_SECONDS; `another`
+ * when a 200 names another release or commit, which is never waited out.
+ */
+export function markerWaitState(answer, releaseId, commit) {
+  if (answer.status !== 200) return "waiting";
+  return markerProblem(answer, releaseId, commit) === null ? "named" : "another";
+}
+
+/**
+ * The states of an approved release still on its way. An unpublish moves the room's epoch, and the job then ends such a
+ * release failed (M6-28): not in the unpublish's own transaction, so a read may find it here for a while.
+ */
+export const IN_FLIGHT = ["queued", "uploading", "uncertain"];
+/**
+ * The state a release in `state` ends in once its room's app is unpublished (crates/core release.rs, `next_state`): live
+ * or served ends unpublished, one still on its way ends failed, and a final state stays. Null for any other state,
+ * awaiting approval included, which this run doesn't show.
+ */
+export function stateAfterUnpublish(state) {
+  if (state === "live" || state === "served") return "unpublished";
+  if (IN_FLIGHT.includes(state)) return "failed";
+  return ["replaced", "unpublished", "declined", "failed"].includes(state) ? state : null;
 }
 
 /** The fixed headers every answer of the content Worker's carries, as `handle.ts` sets them. */

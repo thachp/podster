@@ -69,8 +69,8 @@ import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
 import { ASKPASS_SCRIPT, gitEnv } from "./m5-staging-lib.mjs";
 import {
-  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, maskedPath, markerProblem, MARKER_PATH, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, requestLine, resultUrlProblem,
-  runOutcome, scrub, secretProblem, SETTLED, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_APP, STAGING_ORG, statusProblems, Tally, unknownLabel, USAGE,
+  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, IN_FLIGHT, maskedPath, markerProblem, markerWaitState, MARKER_PATH, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, requestLine, resultUrlProblem,
+  runOutcome, scrub, secretProblem, SETTLED, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_APP, STAGING_ORG, stateAfterUnpublish, statusProblems, Tally, unknownLabel, USAGE,
 } from "./m6-release-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
 
@@ -461,6 +461,27 @@ async function hostDown(what) {
   const { seconds } = await within(options.takedownWait, what, () => hostAsk(`https://${host}/`), (answer) => contentNotFoundProblem(answer) === null);
   return seconds;
 }
+/**
+ * The host's marker naming `releaseId` and `commit`, within the same wait: a host that answered not found can go on
+ * answering it after a new release is served, for the content Worker's edge cache of the serve entry and KV's
+ * propagation (HOST_CHANGE_SECONDS, which the default wait outlasts). Any answer but 200 is waited out; a 200 naming another
+ * release or commit fails at once. Answers how long it took.
+ */
+async function markerNamed(releaseId, commit, what) {
+  let last;
+  try {
+    const { seconds } = await within(options.takedownWait, what, () => marker(host), (answer) => {
+      last = answer;
+      const state = markerWaitState(answer, releaseId, commit);
+      ok(state !== "another", `${what}: the marker names another release or commit`);
+      return state === "named";
+    });
+    return seconds;
+  } catch (error) {
+    if (error instanceof Halt || last?.status === 200) throw error;
+    throw new Error(`${cause(error)}; the marker last answered ${last?.status ?? "nothing"}`);
+  }
+}
 
 // ---- preflight, signed out ----
 
@@ -623,8 +644,8 @@ async function main() {
   let served;
   // R10's declined release of the first task's commit: from then on, the latest attempt for that commit.
   let declinedId;
-  // The latest attempt for the first task's commit, and the state it should be in once the app is unpublished.
-  let latest;
+  // The latest attempt for the first task's commit: set as each is asked for, so it never depends on how that check ended.
+  let latestId;
   await check("M6-R06", async () => {
     after("M6-R03");
     const once = key();
@@ -645,7 +666,7 @@ async function main() {
     eq(resultUrlProblem(status.release.result_url, host), null, "the result URL");
     eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
     first = served = asked.body.id;
-    latest = { id: first, unpublished: "unpublished" };
+    latestId = first;
     return `release ${first} served after ${seconds} s at the app's default host, label ${appLabel}`;
   });
 
@@ -734,7 +755,7 @@ async function main() {
     eq([declined.state, declined.declined_by], ["declined", admin.id], "the declined release");
     eq(markerProblem(await marker(host), first, t1.mergeSha), null, "the host's marker");
     declinedId = asked.id;
-    latest = { id: declinedId, unpublished: "declined" };
+    latestId = declinedId;
     // The status reports the latest attempt for the commit, declined, and `served` for the commit: still true, since
     // the first release of that commit is what the host serves (openapi.yaml's TaskRelease).
     const status = await statusOf(t1);
@@ -828,13 +849,13 @@ async function main() {
     after("M6-R06");
     const asked = await askRelease(member, t1);
     ok(asked.ok, `the member's request: HTTP ${asked.status} ${asked.code ?? ""}`);
+    latestId = asked.body.id;
     const held = [...grants].find(([, g]) => g.room === room && g.what === `${DEPLOY_GRANT.action} grant to ${member.id}`);
     ok(held, "the member's deploy grant isn't on the run's list");
     const back = await takeBack(held[0]);
     ok(back.ok, `taking the member's grant back: HTTP ${back.status} ${back.code ?? ""}`);
     const approved = await admin.dash("POST", `${releasesPath()}/${asked.body.id}/approve`, {});
     ok(approved.ok, `the approval after the grant was taken back answered HTTP ${approved.status} ${approved.code ?? ""}`);
-    if (approved.body.state === "failed") latest = { id: asked.body.id, unpublished: "failed" };
     eq([approved.body.id, approved.body.state, approved.body.failure_code, approved.body.result_url], [asked.body.id, "failed", GRANT_LOST_CODE, null], "the release approved after its requester's grant was taken back");
     // Nothing new is served, now or once the job has had time: the host keeps the release it served before.
     for (let looks = 0; looks < 3; looks++) {
@@ -882,22 +903,30 @@ async function main() {
     after("M6-R14");
     const asked = await askRelease(member, t1);
     ok(asked.ok, `the member's new request: HTTP ${asked.status} ${asked.code ?? ""}`);
-    // Still on its way when the app is unpublished, a release ends failed and is never served (M6-28).
-    latest = { id: asked.body.id, unpublished: "failed" };
+    latestId = asked.body.id;
     const { seconds } = await approveAndServe(t1, asked.body.id);
     const config = await configOf();
     const at = defaultHostProblem(config.default_host);
     ok(!at.problem, at.problem);
     [host, appLabel] = [config.default_host, at.label];
-    eq(markerProblem(await marker(host), asked.body.id, t1.mergeSha), null, "the host's marker");
+    // R14's reads left the host answering not found, and the content Worker may still hold that answer: so the marker
+    // is read until it names the new release, within the wait. One naming any other release fails at once.
+    const named = await markerNamed(asked.body.id, t1.mergeSha, "the host's marker naming the new release");
     served = asked.body.id;
-    latest = { id: served, unpublished: "unpublished" };
-    return `release ${asked.body.id} served after ${seconds} s`;
+    const index = await hostAsk(`https://${host}/`);
+    eq([index.status, index.body], [200, SITE["site/index.html"]], "the site's index once served again");
+    return `release ${asked.body.id} served after ${seconds} s; its marker named it ${named} s later`;
   });
 
   say("\n## unpublish");
   await check("M6-R16", async () => {
     after("M6-R06");
+    // The latest attempt's state before the switch, read here, decides the one it ends in: so this check stands on what
+    // the API says now, not on how an earlier check ended.
+    const before = (await statusOf(t1)).release;
+    eq([before?.exists, before?.release_id], [true, latestId], "the first task's latest release before release is switched off");
+    const ends = stateAfterUnpublish(before.state);
+    ok(ends, `the first task's latest release was ${before.state} before release was switched off, which this run doesn't show unpublished`);
     const config = await configOf();
     const off = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.version });
     eq(off.enabled, false, "the configuration switched off");
@@ -909,8 +938,9 @@ async function main() {
     const again = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: off.version });
     undo.releaseOn.add(room);
     eq(again.enabled, true, "the configuration switched on again");
-    const status = await statusOf(t1);
-    eq([status.release?.exists, status.release?.release_id, status.release?.state, status.release?.served, status.release?.result_url], [true, latest.id, latest.unpublished, false, null], "the first task's release once release is on again");
+    // A release still on its way is failed by the job, not by the switch: so its status is read until it has ended.
+    const { value: status } = await within(options.releaseWait, `release ${latestId} ending`, () => statusOf(t1), (s) => !IN_FLIGHT.includes(s.release?.state) && s.release?.state !== "live");
+    eq([status.release?.exists, status.release?.release_id, status.release?.state, status.release?.served, status.release?.result_url], [true, latestId, ends, false, null], `the first task's release once release is on again, ${before.state} before`);
     // Three looks, spaced, so a republish in the background would show.
     for (let look = 1; look <= 3; look++) {
       if (look > 1) await sleep(POLL_MS);

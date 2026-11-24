@@ -101,6 +101,8 @@ jobs:
           name: api-durations-1
           path: ${{ runner.temp }}/api-durations-1.json
           if-no-files-found: ignore
+          # A job run again in the same run replaces its report instead of failing on the name.
+          overwrite: true
           retention-days: 1
 
   api-2:
@@ -144,6 +146,8 @@ jobs:
           name: api-durations-2
           path: ${{ runner.temp }}/api-durations-2.json
           if-no-files-found: ignore
+          # A job run again in the same run replaces its report instead of failing on the name.
+          overwrite: true
           retention-days: 1
 
   api-3:
@@ -187,6 +191,8 @@ jobs:
           name: api-durations-3
           path: ${{ runner.temp }}/api-durations-3.json
           if-no-files-found: ignore
+          # A job run again in the same run replaces its report instead of failing on the name.
+          overwrite: true
           retention-days: 1
 
   # The three shards' reports, judged as one suite, so an entry on the owed list for a test in another shard isn't
@@ -497,7 +503,8 @@ jobs:
   e2e:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
-    # Its runs on main took 16 to 20 minutes on 2026-11-20, so a 20-minute cap cancelled passing runs.
+    # Its runs on main took 16 to 20 minutes on 2026-11-20, with the self-tests and the rehearsal still in this job, so a
+    # 20-minute cap cancelled passing runs. Alone, the stack run takes about six.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -538,8 +545,7 @@ jobs:
   rehearsal:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
-    # Its runs on main took 16 to 20 minutes on 2026-11-20, so a 20-minute cap cancelled passing runs.
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show

@@ -240,8 +240,8 @@ jobs:
         working-directory: apps/web
 
   # UI-10 and UI-11, against the real Workers in a real browser. Its own job, beside web's typecheck and tests instead of
-  # after them: the accessibility run alone takes over five minutes. It builds the web app itself, which the runs below
-  # then reuse (--skip-web-build).
+  # after them: the accessibility run alone takes five to eight minutes, the longest step in this workflow. It builds
+  # the web app itself, which the run then reuses (--skip-web-build).
   browser:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
@@ -291,8 +291,58 @@ jobs:
         working-directory: e2e
       - run: node run-a11y.mjs --skip-web-build
         working-directory: e2e
-      # The browser's path for a file's bytes, with the API that run built.
-      - run: node run-upload-browser.mjs --skip-build
+
+  # The two other browser-side runs, which were behind the accessibility run in the browser job and now run beside it.
+  # The setup is the browser job's.
+  uploads:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/web
+      - run: npm run build
+        working-directory: apps/web
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - run: npm ci
+        working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
+      - run: npm ci
+        working-directory: e2e
+      # The browser from Playwright's own host, then its system packages from apt with bounded retries. If the runner's
+      # package mirror is down, the job goes on only when the browser starts and has a font for each script the
+      # accessibility run times, using the Thai font pinned in e2e/package-lock.json, which the image lacks. The log
+      # then has a line starting "WARNING browser-system-packages-not-installed".
+      # Why, in e2e/install-browser.mjs and docs/m0-gate.md.
+      - run: node install-browser.mjs
+        working-directory: e2e
+      # The browser's path for a file's bytes. It builds the API itself, and reuses the web build above.
+      - run: node run-upload-browser.mjs --skip-web-build
         working-directory: e2e
       # A download's own headers through the built web Worker, in front of a stub gateway, and a page's CSP.
       - run: node run-download-headers.mjs --skip-web-build
@@ -482,12 +532,48 @@ jobs:
         working-directory: e2e
       - run: node run-local.mjs
         working-directory: e2e
-      # Staging's setup and the test sign-up, with nothing remote.
-      - run: node run-local.mjs --skip-build --rehearse-test-people
+
+  # Staging's setup and the test sign-up, with nothing remote. It ran after e2e's stack on that job's build; here it
+  # builds the API itself and runs beside it. The setup is e2e's.
+  rehearsal:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    # Its runs on main took 16 to 20 minutes on 2026-11-20, so a 20-minute cap cancelled passing runs.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # This uses the gateway's pinned wrangler.
+      - run: npm ci
+        working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
+      - run: npm ci
+        working-directory: e2e
+      - run: node run-local.mjs --rehearse-test-people
         working-directory: e2e
 
-  # The checks and self-tests of the scripts under e2e/ and scripts/, which start no Worker and build no API. They ran
-  # in the e2e job, ahead of its stack, and took four of its twelve minutes; here they run beside it. The setup is e2e's.
   selftests:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest

@@ -749,7 +749,7 @@ const S = {
   spend: { week: 7.4, cap: '25', perRun: '2', warn: true },
   checkFirst: { coder: false, planner: false, qa: false, fresh: true }, runFailed: false, runSent: false, redoOpen: false, redoNote: '',
   fresh: { lead: false, created: false, plan: 'none' },
-  start: { team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', deploy: true, domain: '', review: true, files: 0, roles: null },
+  start: { org: 'team', team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', deploy: true, domain: '', review: true, files: 0, roles: null },
   repo: { sam: false, ask: null, build: true, tests: true, releases: true, reviewer: 'comment' },
   agentRemoved: false,
   wl: { step: 'email', path: '', via: '' },
@@ -770,6 +770,7 @@ const S = {
   findRole: 'QA', invited: {},
   archived: false, archAsk: false,
   left: {}, leaveAsk: null,
+  teams: [], orgNew: { name: '', made: '' },
   org: { name: 'Bakery on Elm', slug: 'bakeryonelm', site: 'bakeryonelm.example', edit: false, draft: null, delAsk: false, members: [['Elena Lopez', 'elena@bakeryonelm.example', 'Admin'], ['Marco Diaz', 'marco@bakeryonelm.example', 'Member']], inviteOpen: false },
   scope: 'room',
   brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', done: 'I can add an order and see whether it is New, In progress or Ready.\nIt works on my phone at the counter.', context: 'Small bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
@@ -851,10 +852,13 @@ function roomMenu() {
   const bp = S.route === 'fresh'; const nc = needsCreator().length;
   const row = (href, mark, name, sub, on, extra) => '<a class="it" role="menuitemradio" aria-checked="' + on + '" href="' + href + '"><b>' + mark + '</b><span class="t"><span>' + name + '</span><small>' + sub + '</small></span>' + (extra || '') + (on ? '<span style="margin-left:' + (extra ? '6px' : 'auto') + '">' + I.check + '</span>' : '') + '</a>';
   return '<div class="rmenu' + (S.collapsed ? ' narrow' : '') + (S.menuEnter ? ' enter' : '') + '" role="menu" aria-label="Workrooms">' +
+    '<div class="lbl">Personal</div><a class="it" role="menuitem" href="#start" data-act="st-org" data-v="personal"><b>EL</b><span class="t"><span>Elena Lopez</span><small>No workrooms yet · start one</small></span></a><hr>' +
     '<div class="lbl" style="display:flex;align-items:center"><span style="flex:1">' + esc(S.org.name) + '</span><a href="#org" style="font-size:12px;text-decoration:none;color:var(--faint)">Settings</a></div>' +
     row('#home', 'OT', 'Customer order tracker', S.archived ? 'Archived' : 'Release ' + S.ship.live + ' is live', !bp, nc && !bp ? '<span class="pill" title="Needs you">' + nc + '</span>' : (nc ? '<span class="pill" title="Needs you" style="margin-left:auto">' + nc + '</span>' : '')) +
     row('#fresh', 'BP', 'Bakery preorders', S.fresh.lead ? 'Planning the first tasks' : 'New · fill a role', bp) +
+    S.teams.map((t) => '<hr><div class="lbl">' + esc(t) + '</div><a class="it" role="menuitem" href="#start" data-act="st-org" data-v="' + esc(t) + '"><b>' + esc(t.slice(0, 2).toUpperCase()) + '</b><span class="t"><span>No workrooms yet</span><small>Start one</small></span></a>').join('') +
     '<hr><a class="it" role="menuitem" href="#rooms">' + I.board + 'All workrooms</a>' +
+    '<a class="it" role="menuitem" href="#org-new">' + I.org + 'Create an organization</a>' +
     '<a class="it" role="menuitem" href="#start"><span style="width:16px;text-align:center;font-size:16px;line-height:1">+</span>Start a workroom</a></div>';
 }
 function logins() {
@@ -872,7 +876,7 @@ function logins() {
 function account() {
   const m = me();
   return '<div class="head"><div><h1>Account</h1><p>There\'s no password to manage. Sign in with an email link, or with any account connected below.</p></div></div>' +
-    '<div class="panel kvlist" style="padding:4px 18px;max-width:640px"><div><span>Name</span><span>' + m.name + '</span></div><div><span>Email</span><span class="mono">' + m.email + '</span></div><div><span>Signed in on</span><span>This browser · since Monday</span></div><div><span>Notifications</span><a href="#mail">Choose what to get</a></div></div>' + logins() +
+    '<div class="panel kvlist" style="padding:4px 18px;max-width:640px"><div><span>Name</span><span>' + m.name + '</span></div><div><span>Email</span><span class="mono">' + m.email + '</span></div><div><span>Signed in on</span><span>This browser · since Monday</span></div><div><span>Personal</span><span>' + (isK() ? 'Owns your agents and their record' : 'Your own workrooms and agents. Made when you signed up.') + '</span></div><div><span>Organizations</span><span>' + (isK() ? 'None' : [S.org.name].concat(S.teams).map(esc).join(', ') + ' · <a href="#org-new">Create one</a>') + '</span></div><div><span>Notifications</span><a href="#mail">Choose what to get</a></div></div>' + logins() +
     '<div class="panel" style="padding:14px 18px;max-width:640px;display:flex;align-items:center;gap:14px;flex-wrap:wrap"><span style="flex:1;min-width:180px"><b style="font-weight:600">Appearance</b><br><span class="muted">Follows your computer unless you pick one.</span></span><div class="seg" role="group" aria-label="Appearance">' + [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map((x) => '<button data-act="theme" data-v="' + x[0] + '" aria-pressed="' + (S.theme === x[0]) + '">' + x[1] + '</button>').join('') + '</div></div>' +
     '<a class="panel" href="#' + (isK() ? 'k-connect' : 'connect') + '" style="padding:16px 18px;max-width:640px;display:flex;align-items:center;gap:14px;text-decoration:none"><span style="flex:1"><b style="font-weight:600">Use Podster from your chat</b><br><span class="muted">' + (S.mcp.on ? (MCP_APPS.find((x) => x[0] === S.mcp.app) || MCP_APPS[0])[1] + ' is connected.' : 'Connect Claude, ChatGPT or Grok.') + '</span></span><span class="faint">' + I.arrow + '</span></a>' +
     '<div class="panel" style="padding:16px 18px;max-width:640px;display:flex;flex-direction:column;gap:10px"><b style="font-weight:600">Delete account</b><span class="muted">Removes you from every workroom. Work that was approved stays with its owners.</span>' + (S.delAsk === 'account' ? deleteBox('account') : '<button class="btn ghost danger" style="align-self:flex-start" data-act="del-ask" data-k="account">Delete account…</button>') + '</div>';
@@ -1793,7 +1797,7 @@ function org() {
       '</div>';
   return '<div class="head"><div><h1>' + esc(o.name) + '</h1><p>Your organization. People here can own workrooms; admins manage who\'s in it and how it looks.</p></div></div>' +
     '<div class="setgrid">' +
-    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Profile</span><div style="display:flex;flex-direction:column;gap:10px">' + profile + (o.edit ? '' : '<span><button class="btn" data-act="org-edit">Edit profile</button></span>') + '</div><p class="faint" style="font-size:13px;margin:0">Shown on invites, on your workrooms and on public pages.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Profile</span><div style="display:flex;flex-direction:column;gap:10px">' + profile + (o.edit ? '' : '<span><button class="btn" data-act="org-edit">Edit profile</button></span>') + '</div><p class="faint" style="font-size:13px;margin:0">A team owns workrooms and agents together. Your own work stays in Personal.</p></section>' +
     '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">People</span><div style="display:flex;flex-direction:column;gap:10px">' +
       (o.inviteOpen ? '<form class="panel" data-form="org-invite" style="padding:16px 18px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end"><div class="field" style="flex:1;min-width:220px"><label for="org-email">Email</label><input class="in" id="org-email" type="email" value="nadia@bakeryonelm.example"></div><button class="btn primary" type="submit">Send invite</button><button class="btn ghost" type="button" data-act="org-invite">Cancel</button></form>' : '') +
       '<div class="panel">' + o.members.map((m, i) => '<div class="row" style="flex-wrap:wrap"><span class="av">' + m[0].split(' ').map((w) => w[0]).join('') + '</span><span style="flex:1;min-width:200px"><b style="font-weight:600">' + m[0] + (i === 0 ? ' <span class="faint" style="font-weight:400">· you</span>' : '') + '</b><br><span class="faint mono">' + m[1] + '</span></span><span class="stage">' + m[2] + '</span>' + (i === 0 ? '' : '<button class="btn ghost" data-act="org-role" data-i="' + i + '">' + (m[2] === 'Admin' ? 'Make member' : 'Make admin') + '</button>') + '</div>').join('') + '</div>' +
@@ -1807,15 +1811,34 @@ function org() {
     '</div>';
 }
 
+/* ---------- Creator: Create an organization ---------- */
+function orgNew() {
+  const n = S.orgNew;
+  if (n.made) return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>' + esc(n.made) + ' is ready</h1><p>You\'re its first admin. It has no people, agents or workrooms yet.</p></div></div>' +
+    '<div class="panel" style="max-width:640px">' +
+    '<a class="row roomrow" href="#" style="padding:14px 16px" data-act="toast" data-msg="Opens this organization's settings, where you add people by email."><span class="av">+</span><span style="flex:1"><b style="font-weight:600">Add people</b><br><span class="faint" style="font-size:13px">Invite teammates by email. Admins can manage it with you.</span></span><span class="faint">' + I.arrow + '</span></a>' +
+    '<a class="row roomrow" href="#start" data-act="st-org" data-v="' + esc(n.made) + '" style="padding:14px 16px"><span class="av">' + I.board + '</span><span style="flex:1"><b style="font-weight:600">Start a workroom in it</b><br><span class="faint" style="font-size:13px">The team owns the workroom, not just you.</span></span><span class="faint">' + I.arrow + '</span></a></div>' +
+    '<span><button class="btn ghost" data-act="org-new-again">Create another</button></span>';
+  const ok = n.name.trim().length > 0 && n.name.trim().length <= 80;
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>Create an organization</h1><p>For a team, a business or a client. You already have Personal for work that\'s just yours.</p></div></div>' +
+    '<form class="panel form" data-form="org-new" style="padding:20px 22px;max-width:640px;display:flex;flex-direction:column;gap:16px">' +
+    '<div class="field"><label for="org-new-name">Name</label><input class="in" id="org-new-name" data-input="org-new-name" value="' + esc(n.name) + '" placeholder="Bakery on Elm, Rivera Labs…" maxlength="80"><span class="faint" style="font-size:12.5px">People see it on invites and on its workrooms. You can rename it later.</span></div>' +
+    '<div class="panel kvlist" style="padding:2px 16px;box-shadow:none;background:var(--sunk)"><div><span>You become</span><span>Its first admin</span></div><div><span>It owns</span><span>The workrooms and agents you put in it</span></div><div><span>It can\'t see</span><span>Your Personal workrooms, or other organizations</span></div></div>' +
+    '<span style="display:flex;gap:8px"><button class="btn primary" type="submit"' + (ok ? '' : ' disabled') + '>Create organization</button><a class="btn ghost" href="#rooms">Cancel</a></span></form>';
+}
+
 /* ---------- Creator: Your workrooms ---------- */
 function rooms() {
   const nc = needsCreator().length;
-  return '<div class="head"><div><h1>Your workrooms</h1><p>' + esc(S.org.name) + ' · <a href="#org">Organization settings</a></p></div><a class="btn primary" href="#start">Start a workroom</a></div>' +
+  const grp = (name, sub, extra, body) => '<section style="display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:baseline;gap:10px"><span class="label" style="flex:1">' + esc(name) + ' <span class="faint" style="text-transform:none;letter-spacing:0;font-weight:400">· ' + sub + '</span></span>' + extra + '</div>' + body + '</section>';
+  return '<div class="head"><div><h1>Your workrooms</h1><p>Grouped by who owns them.</p></div><span style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" href="#org-new">Create an organization</a><a class="btn primary" href="#start">Start a workroom</a></span></div>' +
     (S.roomGone ? '<div class="confirm"><b style="font-weight:600">Customer order tracker was deleted</b><span class="muted">If that was a mistake, contact support within 7 days while a recoverable copy still exists.</span><button class="demo-note" data-act="room-back" style="align-self:flex-start">Demo · bring it back</button></div>' : '') +
-    '<div class="panel">' +
+    grp('Personal', 'Elena Lopez · just you', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms here yet. Workrooms you start for yourself live here.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="personal">Start one</a></div>') +
+    grp(S.org.name, 'Team · you\'re an admin', '<a href="#org" style="font-size:13px">Settings</a>', '<div class="panel">' +
     (S.roomGone ? '' : '<a class="roomrow" href="#home"><span class="mark">OT</span><span style="flex:1;min-width:0"><b style="font-weight:600">Customer order tracker</b><br><span class="muted">' + (S.archived ? 'Archived · release ' + S.ship.live + ' still live' : S.tasks.filter((t) => t.stage === 'done').length + ' tasks done · release ' + S.ship.live + ' is live') + '</span></span>' + (nc ? '<span class="pill" title="Needs you">' + nc + '</span>' : '') + '<span class="faint">' + I.arrow + '</span></a>') +
     '<a class="roomrow" href="#fresh"><span class="mark">BP</span><span style="flex:1;min-width:0"><b style="font-weight:600">Bakery preorders</b><br><span class="muted">' + (S.fresh.lead ? 'Planner joined · planning the first tasks' : 'New · fill a role to get started') + '</span></span><span class="faint">' + I.arrow + '</span></a>' +
-    '</div>';
+    '</div>') +
+    S.teams.map((t) => grp(t, 'Team · you\'re its admin', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms yet.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="' + esc(t) + '">Start one</a></div>')).join('');
 }
 
 /* ---------- Creator: Start a workroom ---------- */
@@ -1829,7 +1852,7 @@ function start() {
   const sl = slug(st.name);
   const seg = (k, opts) => '<div class="seg" role="group" style="align-self:flex-start">' + opts.map((o) => '<button type="button" data-act="st-set" data-k="' + k + '" data-v="' + o[0] + '" aria-pressed="' + (st[k] === o[0]) + '">' + o[1] + '</button>').join('') + '</div>';
   const openings = st.roles.reduce((a, r) => a + r[2], 0);
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>Start a workroom</h1><p>A space where agents work toward one goal, with the roles, code and release setup it needs. You can change all of it later.</p><p class="faint" style="font-size:13px;margin-top:6px">In ' + esc(S.org.name) + ' · <a href="#org">Organization settings</a></p></div></div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>Start a workroom</h1><p>A space where agents work toward one goal, with the roles, code and release setup it needs. You can change all of it later.</p><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px"><span class="muted" style="font-size:13.5px">Owned by</span><div class="seg" role="group" aria-label="Owned by">' + [['personal', 'Personal'], ['team', S.org.name]].concat(S.teams.map((t) => [t, t])).map((o) => '<button type="button" data-act="st-org" data-v="' + esc(o[0]) + '" aria-pressed="' + (S.start.org === o[0]) + '">' + esc(o[1]) + '</button>').join('') + '</div><span class="faint" style="font-size:13px">' + (S.start.org === 'personal' ? 'Only you own it. You can still invite people and agents.' : 'Admins of ' + esc(S.start.org === 'team' ? S.org.name : S.start.org) + ' can take it over if you leave.') + '</span></div></div></div>' +
     '<form data-form="start" class="grid2" style="grid-template-columns:minmax(0,1.5fr) minmax(320px,1fr)">' +
     '<div style="display:flex;flex-direction:column;gap:18px">' +
     '<section class="panel form" style="padding:20px 22px;max-width:none"><span class="label">1 · Goal</span>' +
@@ -2247,6 +2270,7 @@ function paletteItems() {
     ['Find contributors', 'Creator', () => go('find')],
     ['First day as a contributor', 'Demo', () => go('k-new')],
     ['Organization', 'Creator', () => go('org')],
+    ['Create an organization', 'Creator', () => go('org-new'), 'new team business org'],
     ['Switch demo view', 'Demo', () => go(isK() ? 'home' : 'k-home')]
   ].concat(S.tasks.map((t) => ['#' + t.id + ' ' + t.title, stageOf(t.stage).name, () => openTask(t.id)]));
   S.tasks.forEach((t, i) => { all[all.length - S.tasks.length + i][3] = t.ask + ' ' + t.done.join(' '); });
@@ -2326,7 +2350,7 @@ function connect() {
 }
 
 /* ---------- Render + routing ---------- */
-const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => memberView(appSettings(), 'change secrets and domains'), 'Customer order tracker / Ship / <b>App settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => memberView(ship(), 'release, or go back to an earlier release'), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
+const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => memberView(appSettings(), 'change secrets and domains'), 'Customer order tracker / Ship / <b>App settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => memberView(ship(), 'release, or go back to an earlier release'), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], 'org-new': [orgNew, 'Your workrooms / <b>Create an organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
 function render() {
   const v = VIEWS[S.route] || VIEWS.home;
   const active = document.activeElement && document.activeElement.id;
@@ -2487,6 +2511,7 @@ document.addEventListener('click', (e) => {
     case 'claim-withdraw': delete S.claimed[el.dataset.id]; break;
     case 'pick': { const it = paletteItems()[Number(el.dataset.i)]; S.palette = false; if (it) it[2](); break; }
     case 'toast': toast(el.dataset.msg); break;
+    case 'st-org': S.start.org = el.dataset.v; if (el.tagName === 'A') { S.roomMenu = false; } break;
     case 'st-set': S.start[el.dataset.k] = el.dataset.v; if (el.dataset.k === 'team') S.start.roles = null; break;
     case 'st-toggle': S.start[el.dataset.k] = !S.start[el.dataset.k]; break;
     case 'st-open': { const r = S.start.roles[Number(el.dataset.i)]; r[2] = Math.max(1, Math.min(10, r[2] + Number(el.dataset.d))); break; }
@@ -2550,6 +2575,7 @@ document.addEventListener('click', (e) => {
     case 'org-invite': S.org.inviteOpen = !S.org.inviteOpen; break;
     case 'org-edit': S.org.edit = !S.org.edit; S.org.draft = S.org.edit ? { name: S.org.name, slug: S.org.slug, site: S.org.site } : null; break;
     case 'org-del': S.org.delAsk = !S.org.delAsk; break;
+    case 'org-new-again': S.orgNew = { name: '', made: '' }; break;
     case 'scope': S.scope = el.dataset.s; break;
     case 'answer': S.q.state = 'answered'; S.q.answer = Q_OPTS[Number(el.dataset.i)]; T(19).when = 'carrying on with your answer'; toast('Answered. Coding Agent carries on.'); break;
     case 'answer-custom': if (!S.q.custom.trim()) { toast('Write an answer first.'); break; } S.q.state = 'answered'; S.q.answer = S.q.custom.trim(); T(19).when = 'carrying on with your answer'; toast('Answered. Coding Agent carries on.'); break;
@@ -2630,6 +2656,7 @@ document.addEventListener('submit', (e) => {
   if (k === 'start') { S.fresh = { lead: false, created: true, plan: 'none' }; go('fresh'); toast('Bakery preorders is ready.'); return; }
   if (k === 'signin') { S.wl.step = 'check'; }
   if (k === 'xemail') { S.wl.step = 'check'; }
+  if (k === 'org-new') { const nm = S.orgNew.name.trim(); if (!nm) { render(); return; } if (nm === S.org.name || S.teams.includes(nm)) { toast('You already have an organization called ' + nm + '.'); render(); return; } S.teams.push(nm); S.orgNew = { name: '', made: nm }; toast(nm + ' created. You\'re its admin.'); }
   if (k === 'org-save') { const o = S.org; const d = o.draft; const name = d.name.trim(); const sl = d.slug.trim().toLowerCase(); if (!name) { toast('Give it a name.'); render(); return; } if (!/^[a-z0-9][a-z0-9-]{1,38}$/.test(sl)) { toast('Use lowercase letters, numbers and dashes for the address.'); render(); return; } const moved = sl !== o.slug; o.name = name; o.slug = sl; o.site = d.site.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); o.edit = false; o.draft = null; toast(moved ? 'Saved. Old links keep working for 90 days.' : 'Saved.'); }
   if (k === 'edit-task') { const t = T(S.taskId); t.title = document.getElementById('et-title').value.trim() || t.title; t.ask = document.getElementById('et-ask').value.trim() || t.ask; const d = document.getElementById('et-done').value.split('\n').map((x) => x.trim()).filter(Boolean); if (d.length) t.done = d; S.editTask = false; toast('Saved. Planner is told.'); }
   if (k === 'brief') { const b = S.brief; b.goal = document.getElementById('br-goal').value.trim() || b.goal; b.done = document.getElementById('br-done').value; b.context = document.getElementById('br-ctx').value; b.editing = false; toast('Brief saved. Planner is told.'); }
@@ -2690,6 +2717,7 @@ document.addEventListener('input', (e) => {
   if (k === 'org-name' && S.org.draft) S.org.draft.name = e.target.value;
   if (k === 'org-site' && S.org.draft) S.org.draft.site = e.target.value;
   if (k === 'org-slug' && S.org.draft) { S.org.draft.slug = e.target.value; render(); }
+  if (k === 'org-new-name') { S.orgNew.name = e.target.value; render(); }
   if (k === 'deltext') { const before = S.delText; S.delText = e.target.value; const need = S.delAsk === 'room' ? 'Customer order tracker' : 'delete my account'; if ((before.trim() === need) !== (S.delText.trim() === need)) render(); }
   if (k === 'inl' && S.inl) S.inl.val = e.target.value;
   if (k === 'env-n') { const F = S.app.form; const was = looksSecret(F.n); F.n = e.target.value; if (!F.touched && looksSecret(F.n) !== was) { F.secret = looksSecret(F.n); F.prevMode = F.secret ? 'placeholder' : 'same'; render(); } else if (!F.secret && looksSecret(F.n) !== was) render(); }

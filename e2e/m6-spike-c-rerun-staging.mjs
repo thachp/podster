@@ -484,12 +484,12 @@ async function cleanUp() {
   return said;
 }
 
-let code = 0;
+let exitCode = 0;
 try {
   await main();
 } catch (error) {
   say(`\nThe run stopped: ${cause(error)}`);
-  code = error.preflight ? 2 : 1;
+  exitCode = error.preflight ? 2 : 1;
 } finally {
   say("\n## clean-up");
   for (const line of await cleanUp()) say(`  - ${line}`);
@@ -501,4 +501,4 @@ if (outFile) {
   say(`Results written to ${outFile}.`);
 }
 const incomplete = !results.browsers || Object.values(results.browsers).some((b) => b.error);
-process.exit(code || (incomplete ? 1 : 0));
+process.exit(exitCode || (incomplete ? 1 : 0));

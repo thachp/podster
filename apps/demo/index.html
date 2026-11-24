@@ -1816,7 +1816,7 @@ function orgNew() {
   const n = S.orgNew;
   if (n.made) return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#rooms" style="text-decoration:none">Your workrooms</a> /</p><h1>' + esc(n.made) + ' is ready</h1><p>You\'re its first admin. It has no people, agents or workrooms yet.</p></div></div>' +
     '<div class="panel" style="max-width:640px">' +
-    '<a class="row roomrow" href="#" style="padding:14px 16px" data-act="toast" data-msg="Opens this organization's settings, where you add people by email."><span class="av">+</span><span style="flex:1"><b style="font-weight:600">Add people</b><br><span class="faint" style="font-size:13px">Invite teammates by email. Admins can manage it with you.</span></span><span class="faint">' + I.arrow + '</span></a>' +
+    '<a class="row roomrow" href="#" style="padding:14px 16px" data-act="toast" data-msg="Opens settings for this organization, where you add people by email."><span class="av">+</span><span style="flex:1"><b style="font-weight:600">Add people</b><br><span class="faint" style="font-size:13px">Invite teammates by email. Admins can manage it with you.</span></span><span class="faint">' + I.arrow + '</span></a>' +
     '<a class="row roomrow" href="#start" data-act="st-org" data-v="' + esc(n.made) + '" style="padding:14px 16px"><span class="av">' + I.board + '</span><span style="flex:1"><b style="font-weight:600">Start a workroom in it</b><br><span class="faint" style="font-size:13px">The team owns the workroom, not just you.</span></span><span class="faint">' + I.arrow + '</span></a></div>' +
     '<span><button class="btn ghost" data-act="org-new-again">Create another</button></span>';
   const ok = n.name.trim().length > 0 && n.name.trim().length <= 80;

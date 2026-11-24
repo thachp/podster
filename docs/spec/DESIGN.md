@@ -1,10 +1,10 @@
 # Podster — Product Design Spec
 
-Status: **proposed for review** · Owner: Patrick Thach · Last updated: 2026-11-04
+Status: **proposed for review**, except the visual direction and interaction patterns the owner chose on 2026-11-22 and 2026-11-23, which are marked as owner-approved where they appear ([section 5](#5-interaction-patterns), [section 10](#10-visual-foundation)). Behavior the demo shows but no spec settles is marked **Proposed**. · Owner: Patrick Thach · Last updated: 2026-11-24
 
-Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Concept mockups](../mockups/README.md) · [Task planning handoff](TASK-PLANNING.md) · [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md)
+Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access control](ACCESS-CONTROL.md) · [Demo](../../apps/demo/README.md) · [Concept mockups](../mockups/README.md) · [Task planning handoff](TASK-PLANNING.md) · [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md)
 
-Nothing here is built. This document turns the concept mockups into one consistent interface specification: navigation, vocabulary, states, screens, patterns and tokens. When sources disagree, access rules in ACCESS-CONTROL.md win, then behavior in PRODUCT.md, then this document, then the images. The images are historical concepts; [section 11](#11-mockup-reconciliation) lists where each one must change.
+Nothing here is built. This document turns the concept mockups into one consistent interface specification: navigation, vocabulary, states, screens, patterns and tokens. When sources disagree on authority, permissions, visibility, data or security, ACCESS-CONTROL.md, PRODUCT.md and ARCHITECTURE.md win. On layout, visuals, interaction flow, navigation and on-screen wording, the demo wins over this document, as the note below says, and this document wins over the images. The images are historical concepts; [section 11](#11-mockup-reconciliation) lists where each one must change.
 
 > **2026-11-24:** Screens and visuals now follow [`apps/demo`](../../apps/demo/README.md) (demo.podster.dev), the UI/UX source of truth. Where this document and the demo differ on layout, visuals, interaction flow, navigation or on-screen wording, the demo wins and this document is to be brought in line. Authority, permissions, visibility, data and security still follow ACCESS-CONTROL.md, PRODUCT.md and ARCHITECTURE.md.
 
@@ -20,6 +20,23 @@ Nothing here is built. This document turns the concept mockups into one consiste
 
 ### Application shell
 
+**Approved reference (2026-11-24).** The shell and screens follow the [demo](../../apps/demo/README.md) at demo.podster.dev (`apps/demo/index.html`). On 2026-11-23 the owner judged its clickable prototype "closer" than every canvas mockup and asked to extend it. On 2026-11-24 the owner made it the UI/UX source of truth (note above). The demo's shell:
+
+| Part | Design | Decided |
+| --- | --- | --- |
+| Sidebar, creator | Podster mark; a **workroom card** naming the current workroom, which links to **Your workrooms**; then **Today, Brief, Board, Ship, History, Team, Rules** | Owner, 2026-11-23: keep the card as a link. A dropdown was tried and reverted |
+| Sidebar, contributor | Podster mark; **Today, Your agents, Spend, Track record, Explore**. No workroom card | Demo, 2026-11-24. Spend and Track record are **Proposed** and deferred: Runner keeps budgets local, and track record is a gated future concept in [Contributors and limits](CONTRIBUTORS-AND-LIMITS.md) |
+| Counts | A count beside a nav item only when something there needs the viewer | Demo, 2026-11-24 |
+| Collapse | The sidebar collapses to icons | Owner, 2026-11-23 |
+| Account menu | Bottom left, slides out shadcn-style: Account, Organization, Notifications, Connect your chat, Keyboard shortcuts, Sign out. The demo's "see it as" persona switch is demo-only | Owner, 2026-11-23 |
+| Main area | Full width, one working column per page ([section 10](#10-visual-foundation)) | Owner, 2026-11-23 |
+| Footer | A small GitHub-style footer | Owner, 2026-11-23 |
+| Phone | Not a design goal. The owner doesn't care about a phone view (2026-11-23); the 375 px rules in [section 9](#9-accessibility-and-responsive-behavior) still hold | Owner, 2026-11-23 |
+
+The workroom card is a link, not a selector, so it doesn't bring back the in-place target switch that AC-21 guards against.
+
+The rest of this subsection is the 2026-11-04 shell. Where it differs from the demo, the demo wins.
+
 Use a shadcn/ui **Sidebar** on every signed-in screen. It holds the Podster mark and these primary items:
 
 | Item | Purpose |
@@ -34,6 +51,8 @@ The **profile button is anchored at the bottom left**. Its menu contains the cur
 ### Routes
 
 Route names are proposed; final routing depends on the host decision in [ARCHITECTURE.md](ARCHITECTURE.md#public-surfaces).
+
+*2026-11-24:* the demo calls the person's decision screen **Today**; this table, PRODUCT.md ("shown as **Needs attention**") and the staging route still say Needs attention and `/attention`. Whether to rename the label and route is [open question 7](#13-open-design-questions).
 
 | Route | Screen |
 | --- | --- |
@@ -117,6 +136,27 @@ Show a compound result when needed, such as **Approved · Merge failed** or **Me
 
 ## 5. Interaction patterns
 
+### Patterns from the approved demo
+
+These come from the [demo](../../apps/demo/README.md). "Owner" means the owner chose it on that date; "Demo" means it is in the demo the owner made the UI source of truth on 2026-11-24 (#575, #576, #577).
+
+| Pattern | Rule | Decided |
+| --- | --- | --- |
+| Detail and review open as a wide right-side Sheet | Task detail and reviewing Planner's plan open as a wide Sheet on the right. Both a full page and a centered dialog were rejected for plan review. Task detail has content on the left, a properties column on the right and one combined activity stream. A full task page with the same layout stays available | Owner, 2026-11-23 |
+| Sheet widths | Task about 1,080 px, plan about 860 px, permission request about 620 px, others about 520 px; all leave a margin and take full width on narrow screens. These replace the `md` and `lg` widths below | Demo, 2026-11-24 |
+| Centered modals | Short, self-contained forms and lists (New task, Keyboard shortcuts, What can go wrong) are centered. A tall modal scrolls inside itself and never runs off the window | Demo, 2026-11-24 (#577) |
+| ⌘K palette | Opens near the top, like other command menus. It jumps to anything or runs a typed command. Commands that approve, release or allow only link to the real confirm screen; they never act on their own | Owner, 2026-11-23 |
+| No Podster-run chatbot | Instead of a chat assistant, ⌘K commands plus **Connect your chat**, which connects the person's own chat (Claude, ChatGPT, Grok) over MCP | Owner, 2026-11-23 |
+| Inline editing | Click text, such as a brief or a task's instructions, to edit it in place. GitHub-flavored Markdown works. ⌘↵ saves and Esc cancels. The rendered result follows [section 8](#8-agent-authored-content)'s allowlist | Demo, 2026-11-24 |
+| Agent content is inert | Agent Markdown renders as text formatting only. Its links show the address and aren't clickable. Task-list boxes are disabled | Demo, 2026-11-24; stricter than section 8, which shows the host |
+| Review panel over the preview | On review, the checklist and actions float over the right side of the live preview. **Hide** (or `]`) hides the panel to show the whole app; a chip shows progress, such as "2 of 4 checked · Show review", and brings it back | Demo, 2026-11-24 |
+| One send button | **Post** sends a message. **Assign to…** hands over work. Never two "send" buttons with different meanings | Owner, 2026-11-23 |
+| Keyboard | `?` lists shortcuts. `J` goes to the next thing that needs you | Demo, 2026-11-24 |
+| Lists | The last row of a list or table has no divider below it | Demo, 2026-11-24 |
+| Settings rows | Label left, with a short description under it; the control or value right. One column below 900 px | Demo, 2026-11-24 |
+
+The rest of section 5 is from 2026-11-04 and still holds where the table above doesn't replace it.
+
 ### Right-side Sheet
 
 The **Sheet** (`side="right"`) is the default for task, agent, connection and access details.
@@ -126,7 +166,7 @@ The **Sheet** (`side="right"`) is the default for task, agent, connection and ac
 - **One at a time.** No Sheet opens another Sheet. Dialogs may open above a Sheet only for confirmation.
 - **Focus.** Focus moves to the title on open, stays trapped while open, and returns to the launching control on close. Escape and the close button behave like Cancel.
 - **Unsaved edits.** Show *Unsaved changes*, and ask before discarding them. Cancel never saves.
-- **Width.** `md` (about 480 px) for access and agent details; `lg` (about 720 px) for tasks. Full width below 640 px.
+- **Width.** `md` (about 480 px) for access and agent details; `lg` (about 720 px) for tasks. Full width below 640 px. *Superseded 2026-11-24 by the demo's wider Sheets, in the table above.*
 - **Full page.** A task Sheet may offer **Open full page**, using the same component and data, for long reviews with release detail. It is an expansion of the Sheet, not a different design.
 
 ### Dialogs and confirmations
@@ -164,7 +204,55 @@ Use an AlertDialog only to confirm a consequence: revoke access, disconnect an a
 
 ## 6. Screens
 
+*2026-11-24:* the [demo](../../apps/demo/README.md) is the approved reference for every screen's layout and wording; its README lists them. The subsections below describe the screens the demo added or renamed. Where a screen's behavior isn't in PRODUCT.md, the design is described and the behavior is marked **Proposed**. [docs/staging-demo-gap-map.md](../staging-demo-gap-map.md) maps each demo step to what staging runs.
+
+### Sign in
+
+A focused page without the Sidebar: **Continue with** buttons for each provider, then **Email me a link**. There's no password, and signing in and signing up are the same page. The demo shows Google, GitHub and X; staging offers GitHub and email only. If X shares no email address, the next page asks for one and confirms it with a link. **Proposed:** Google and X, and adding an email after X ([open question 9](#13-open-design-questions)).
+
+### Role choice after sign-in
+
+**Proposed (behavior):** shown once, after a new person's first sign-in. It asks "What do you want to do first?" with two cards, each with a small preview, three steps and what they'll need:
+
+- **Get something built**: start a workroom. You don't need an agent of your own.
+- **Bring your coding agent**: pair it with Runner, then claim open roles.
+
+The continue button names the path ("Start a workroom" or "Pair my agent"). A quiet link offers "Just looking? Browse public workrooms". The choice only picks where the person starts. It grants nothing and doesn't limit what they can do later. PRODUCT.md has no first-run step, so this needs a ruling there (gap map C3, slice S2).
+
+### Today
+
+The demo's name for [Needs attention](#needs-attention); the owner uses "Today" (2026-11-23). Renaming the label and the `/attention` route is [open question 7](#13-open-design-questions). Layout:
+
+- One decision card per item, newest first. The card says what kind of decision it is with an orange dot and plain words, then the title, one sentence of context and one primary action. Only cards that wait on the viewer are orange.
+- A creator's cards: ready for review (with a thumbnail of the app), an agent's question with answer buttons, a plan proposal, a permission request, and approved-not-live.
+- A contributor's cards: allowing a run, and a role invitation for their agent.
+- Below the cards, quiet secondary content in sentences, not number tiles.
+
+**Proposed (behavior):** an agent's question that pauses a task, Planner plan proposals, egress permission requests, a person allowing a run from the dashboard, and a person accepting a role invitation for their agent. None of these is in PRODUCT.md, and two contradict it ([open questions 11–13](#13-open-design-questions)).
+
+### Your workrooms
+
+Replaces the directory's **My workrooms** tab. Workrooms are grouped by the organization that owns them: **Personal** first (the person's personal organization, [decision 23](PRODUCT.md#decisions-needed)), then each team organization, labeled with the viewer's role there, such as "Team · you're an admin", with a **Settings** link for admins. Each row shows the workroom, one line of status and a count when something needs the viewer. An empty group says what goes there and offers **Start one**. The header has **Create an organization** and **Start a workroom**. Explore moved to the contributor's Sidebar.
+
+### Create an organization
+
+A short form for a team, a business or a client. A summary panel says the creator becomes its first admin and that it owns the workrooms and agents made in it, as PRODUCT.md's Organization entry says. **Proposed:** the web address, website and logo fields ([open question 10](#13-open-design-questions)).
+
+### Organization settings
+
+Label-left rows ([section 5](#patterns-from-the-approved-demo)), in sections: **Profile** (name, web address, website, logo), **People**, **Workrooms**, **Agents it runs**, **What happened** and **Delete organization**. Read mode shows values; **Edit** turns the profile into a form. Members who aren't admins see it read-only, with a note on what they can't change. **Proposed:** web address, website and logo, because the gateway stores only the name ([open question 10](#13-open-design-questions)).
+
+### Rules
+
+A workroom's rules in label-left rows: **Joining** (who can join, accept proven agents automatically), **What agents may do** (take tasks sent to them, push to their own branches but never to main, post in discussions, suggest new tasks), **Websites agents can reach**, and review and run limits such as the longest run accepted and whether approvers may approve their own agents' work. Members who can't change rules see them read-only. **Proposed (behavior):** each switch maps onto existing access presets, grants and rules only where ACCESS-CONTROL.md defines one; the rest need rulings. The websites list is Runner's egress allowlist, which RUNNER.md keeps on the agent owner's machine.
+
+### App settings
+
+Under Ship. Label-left rows: **Environment variables**, plain and secret, which the app reads by name, and **Domains**. Secrets never appear in code, the repository, logs or anything an agent receives. **Proposed (behavior):** M6 apps are static files ([decision 214](PRODUCT.md#decisions-needed)), so runtime variables need a ruling before this ships.
+
 ### Needs attention
+
+*2026-11-24:* the demo shows this screen as [Today](#today). The text below is from 2026-11-04 and still describes what may appear there.
 
 Items that need **this person** to decide, grouped by type and then newest first: reviews assigned to them, role invitations awaiting them, wake or connection problems on agents they own, release approvals and, once [Runner](RUNNER.md) ships and if the owner opted in, requests to run a task, which are the owner's decision to let their agent's machine run it. Row actions open the relevant Sheet. Agent-owned work, such as a task awaiting an agent's acceptance, is not an item here; the concept dashboard's "Awaiting acceptance" and "Completed" groups move to the Tasks tab. Items clear when the decision is made. Acknowledging affects only this person's queue.
 
@@ -317,6 +405,50 @@ Target **WCAG 2.2 AA**, verified by automated checks and a manual keyboard and s
 
 ## 10. Visual foundation
 
+### Approved direction
+
+On 2026-11-22 the owner rejected five looks: sparse and warm ("too simple"), crisp product, dark workbench, bold editorial, and the staging app as it stood ("too noisy"). On 2026-11-23 the owner chose the demo's look as "closer". Its rules:
+
+| Rule | Detail | Decided |
+| --- | --- | --- |
+| Monochrome shell | Greys for surfaces, lines and text. Blue marks work being built, green marks done, grey marks planned; each with a dot and a word, never a colored badge alone | Owner, 2026-11-23 |
+| Orange means "this needs you" | `--need` is used only where the viewer must decide or act: Today's cards, the review stage, a primary Approve, a nav count. Nothing else is orange | Owner, 2026-11-23 |
+| Type | Geist for text, Geist Mono for IDs, commits, URLs and code. Body 14 px; page titles 26 px | Owner, 2026-11-23 |
+| Light and dark | Both, through CSS tokens. The theme follows the system unless the person picks one | Demo, 2026-11-24 |
+| One working column per page | A full-width main area with one column of work. Very little explanatory text | Owner, 2026-11-23 |
+| Quiet secondary content | One tinted focus panel per screen. Everything else is quiet: dots plus plain words instead of colored badges, sentences instead of number tiles | Owner, 2026-11-23 |
+| Fewer nouns | Say "Send to Coding Agent", not "Offer to Frontend engineer". PR and merge details sit under **Details** | Owner, 2026-11-23 |
+| Calm through hierarchy | Calm a busy screen by reducing visual weight and vocabulary, never by removing structure. A stripped one-column "calm" pass was judged "even worse" | Owner, 2026-11-23 |
+
+The demo's tokens, from the top of `apps/demo/index.html`:
+
+| Token | Light | Dark | Use |
+| --- | --- | --- | --- |
+| `--bg` | `#f5f6f8` | `#0e1014` | Page |
+| `--surface` | `#ffffff` | `#16191f` | Panels, Sidebar, Sheets |
+| `--sunk` | `#eef0f3` | `#1c2028` | Hover, selected nav, wells |
+| `--line` | `#e3e6eb` | `#262b34` | Borders and dividers |
+| `--text` | `#14161b` | `#e9ebef` | Body text |
+| `--muted` | `#5c6270` | `#a3a9b5` | Secondary text |
+| `--faint` | `#8b909b` | `#6f7580` | Metadata |
+| `--ink` / `--ink-text` | `#14161b` / `#ffffff` | `#e9ebef` / `#0e1014` | Primary buttons |
+| `--need`, `--need-soft`, `--need-line` | `#d9480f`, `#fff0e6`, `#ffd2b8` | `#ff7b3d`, `#2a1a11`, `#5a2f17` | "Needs you" only |
+| `--build` | `#2f6bd8` | `#6b9cff` | Being built; focus ring |
+| `--done` | `#1d8a4e` | `#3fbf78` | Done |
+| `--planned` | `#9aa0ab` | `#6f7580` | Planned |
+
+**Contrast, measured 2026-11-24** with the WCAG relative-luminance formula. These pass 4.5:1 for normal text: `--text` and `--muted` on `--bg` and `--surface` in both themes, `--build` on `--surface` in both, and `--need` and `--done` on `--surface` in dark. These don't, so the tokens need adjusting before UI-11 can pass:
+
+| Pair | Light | Dark | Needs |
+| --- | --- | --- | --- |
+| `--faint` on `--bg` / `--surface` | 2.96 / 3.20 | 4.11 / 3.80 | 4.5 for metadata text |
+| `--need` on `--surface` | 4.30 | 6.83 | 4.5 when orange is text |
+| White text on `--need` (Approve button, nav counts) | 4.30 | 2.58 | 4.5 |
+| `--done` on `--surface` | 4.38 | 7.49 | 4.5 when green is text |
+| `--line` on `--surface` | 1.25 | 1.24 | 3 for input and control borders |
+
+The rest of this section is the 2026-11-04 foundation. Its components, icons, spacing and "no raw colors" rules still hold. Its indigo palette and token table are superseded by the tokens above as of 2026-11-24, and its contrast figures describe that old palette.
+
 Use shadcn/ui components and Lucide icons with semantic CSS variables. Mockups suggest an indigo, quiet, light interface, but they vary, so these tokens are the proposed single source. Do not use raw color values in components.
 
 Measured with the WCAG relative-luminance formula. Every text pair below is above the 4.5:1 AA threshold, and `border-input` is above the 3:1 threshold for control boundaries.
@@ -342,6 +474,8 @@ Warnings, including merge consequences, use amber. Reserve red for failure and d
 **Brand mark:** the mockups show several marks and accent values. Choose one mark after brand clearance; until then, use the wordmark without treating any image as final.
 
 ## 11. Mockup reconciliation
+
+*Superseded 2026-11-24.* The [demo](../../apps/demo/README.md) replaces the concept images in `docs/mockups/` as the visual reference. The table below is kept as a record of what each image got wrong. Its resolutions on authority and state still hold; its layout resolutions give way to the demo where the two differ.
 
 | Mockup | Finding | Resolution |
 | --- | --- | --- |
@@ -401,3 +535,16 @@ All are **not run**: no interface exists. They complement AC-20 and AC-21 in ACC
 4. **Real-time updates:** Recommendation: refresh on focus and after actions; add streaming only if research shows people wait on a page.
 5. **Public read surface:** the exact layout follows the PRODUCT.md decision.
 6. **Research:** no user research has validated these flows. Test create-workroom, review-and-merge and manage-access with real agent owners before visual polish.
+
+**Added 2026-11-24: where the demo shows behavior the specs don't allow or don't settle.** The demo wins on how things look and flow, but these are behavior, authority or data, so the specs win until ruled. Each belongs in PRODUCT.md, ACCESS-CONTROL.md or RUNNER.md, not here. None is decided.
+
+7. **Today or Needs attention.** The owner and the demo say **Today**; PRODUCT.md says the person's inbox is "shown as **Needs attention**", and the route is `/attention`. Rename the label, the route, both or neither? (PRODUCT.md)
+8. **Approve, merge and release.** The demo merges on approval ("Approved. It's in your code now"). The specs keep three separate decisions: the reviewer's approval (`verifyTask`), a merge by someone with a live `merge` grant (`mergeTask`, AC-17), and a release asked for and then approved by the room's owner or admin. PRODUCT.md allows **Approve and merge** only for a viewer holding both authorities. How should the demo's one-step flow show the second and third steps? (PRODUCT.md, ACCESS-CONTROL.md; [gap map](../staging-demo-gap-map.md#approval-merge-and-release-are-three-separate-decisions))
+9. **Google and X sign-in.** The demo offers Google, GitHub, X and email. Staging offers GitHub and email. Google needs the owner's provider secrets; X has no source, and its missing email needs a confirm step. Which providers ship? (PRODUCT.md)
+10. **Organization web address, website and logo.** The demo's Create an organization and Organization settings edit them; the gateway stores only the name. Does an organization get a public web address, and who may set a logo another person sees? (PRODUCT.md, ACCESS-CONTROL.md)
+11. **After a run.** On 2026-11-23 the owner agreed: work that passes its checks goes straight to the owner's review; failed runs always return to the contributor, never the owner; the contributor can take work back until review starts; **Check before sending** is a per-agent opt-in, off by default. None of this is in RUNNER.md or PRODUCT.md yet. The demo also lets a contributor **Allow run** on Today and shows a room owner egress requests, but [decision 226](PRODUCT.md#decisions-needed) keeps run approval on the owner's machine in M7, and egress is Runner-local. (RUNNER.md, PRODUCT.md)
+12. **Planner plan proposals and agent questions.** The demo has Planner propose a plan that a person approves before tasks exist, and an agent pause a task with a question. No plan-proposal object or question state exists. (PRODUCT.md)
+13. **A person accepting a role for their agent.** The demo's contributor Today has "Accept with QA Agent". Today only the agent claims (AC-09). (ACCESS-CONTROL.md, PRODUCT.md)
+14. **Four stages or kernel columns.** The demo's Board has four stages, **Planned → Being built → Your review → Done**, which the owner chose on 2026-11-23. [Section 4](#4-status-vocabulary) and [Task planning](TASK-PLANNING.md) use the kernel's states and columns. Are the four stages labels over the kernel states (and where do Open, Awaiting acceptance and Canceled go), or new states? (PRODUCT.md, TASK-PLANNING.md)
+15. **Live preview in review.** The owner likes reviewing the real app with a live preview and a phone toggle (2026-11-23). [Decision 214](PRODUCT.md#decisions-needed) says M6 has no preview of unmerged code. (PRODUCT.md, ARCHITECTURE.md)
+16. **Rules and App settings controls.** The demo's Rules switches and App settings' runtime environment variables and secrets have no matching grants or app model in the specs. Which map to existing presets and grants, and which need new ones? (ACCESS-CONTROL.md, PRODUCT.md)

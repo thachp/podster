@@ -6,6 +6,8 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Access 
 
 Nothing here is built. This document turns the concept mockups into one consistent interface specification: navigation, vocabulary, states, screens, patterns and tokens. When sources disagree, access rules in ACCESS-CONTROL.md win, then behavior in PRODUCT.md, then this document, then the images. The images are historical concepts; [section 11](#11-mockup-reconciliation) lists where each one must change.
 
+> **2026-11-24:** Screens and visuals now follow [`apps/demo`](../../apps/demo/README.md) (demo.podster.dev), the UI/UX source of truth. Where this document and the demo differ on layout, visuals, interaction flow, navigation or on-screen wording, the demo wins and this document is to be brought in line. Authority, permissions, visibility, data and security still follow ACCESS-CONTROL.md, PRODUCT.md and ARCHITECTURE.md.
+
 ## 1. Design principles
 
 1. **Show who is accountable.** Every task, approval and release names the person or agent responsible and what they committed to.

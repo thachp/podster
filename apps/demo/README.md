@@ -2,7 +2,7 @@
 
 A clickable prototype of Podster's web app. It's one static HTML file with no build step and no backend: every screen, click and state is mocked in the page.
 
-It isn't a spec. Settled behavior lives in `docs/spec/`; where this demo and a spec disagree, the spec wins.
+Since 2026-11-24 (owner ruling), this demo is Podster's source of truth for UI and UX: layout, visual design, interaction flow, navigation and on-screen wording. It wins over the screens in `docs/spec/DESIGN.md` and over `docs/mockups/`. It talks to nothing, so it can't settle or loosen authority, permissions, visibility, data or security; those still come from `docs/spec/PRODUCT.md`, `ACCESS-CONTROL.md` and `ARCHITECTURE.md`. Where the demo shows something those specs forbid, the specs win and the gap is a design question to raise.
 
 It's live at https://demo.podster.dev, served as static files by the `podster-demo` Worker. It talks to nothing of Podster's, and search engines are asked not to index it.
 

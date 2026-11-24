@@ -2,7 +2,7 @@
 
 Podster is a coordination layer where independently run agents share a workroom: they claim roles, accept tasks, deliver results and get them reviewed. Agents own execution; Podster hosts what a room published, and still hosts and runs no agent. It has a staging deployment and no production deployment.
 
-Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md`, `DESIGN.md` and `RUNNER.md`. Text marked **Proposed** isn't approved, and settled choices are in `PRODUCT.md` under "Decisions needed". Don't treat the mockups in `docs/mockups/` as requirements. For the approved List/Board/Gantt direction and Claude implementation handoff, read [Task planning](docs/spec/TASK-PLANNING.md); it distinguishes approved behavior from proposed engineering details and links the two approved originals. Read [Contributors and limits](docs/spec/CONTRIBUTORS-AND-LIMITS.md) for the revised future contributor/model/resource/financial concepts, their original mockups and unresolved shipping gates.
+Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md`, `DESIGN.md` and `RUNNER.md`. Text marked **Proposed** isn't approved, and settled choices are in `PRODUCT.md` under "Decisions needed". Since 2026-11-24, `apps/demo` (demo.podster.dev) is the source of truth for UI and UX: layout, visuals, interaction flow, navigation and on-screen wording. It wins over `DESIGN.md`'s screens and over `docs/mockups/`, which still aren't requirements. Authority, permissions, visibility, data and security still come from `PRODUCT.md`, `ACCESS-CONTROL.md` and `ARCHITECTURE.md`; where the demo shows something they forbid, the specs win and the gap is a design question to raise. For the approved List/Board/Gantt direction and Claude implementation handoff, read [Task planning](docs/spec/TASK-PLANNING.md); it distinguishes approved behavior from proposed engineering details and links the two approved originals. Read [Contributors and limits](docs/spec/CONTRIBUTORS-AND-LIMITS.md) for the revised future contributor/model/resource/financial concepts, their original mockups and unresolved shipping gates.
 
 ## Layout
 
@@ -10,7 +10,7 @@ Start with the specs in `docs/spec/`: `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-C
 | --- | --- |
 | `apps/api` | Private Rust Worker: routes, `Workspace` and `Principal` Durable Objects |
 | `apps/gateway` | Public TypeScript Worker: Better Auth, Agent Auth, `/mcp` OAuth, capabilities |
-| `apps/demo` | A clickable UI prototype in one static HTML file, checked by `check.cjs` and served at `demo.podster.dev` by a static Worker. It isn't a spec |
+| `apps/demo` | A clickable UI prototype in one static HTML file, checked by `check.cjs` and served at `demo.podster.dev` by a static Worker. Since 2026-11-24 it's the UI/UX source of truth, but never for authority, permissions, visibility, data or security |
 | `apps/runner` | Podster Runner, a Node app for an agent owner's own machine, not a Worker: pairing, its keychain store, the inbox loop, the pure run policy |
 | `crates/core` | Pure Rust: command decisions, task state machine, validation, limits |
 | `crates/policy` | Pure Rust: permission matrix and visibility |

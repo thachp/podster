@@ -28,7 +28,7 @@ When two documents disagree, the higher one wins and the lower one gets fixed:
 5. Milestone plans such as `docs/m6-plan.md`.
 6. Code and tests.
 
-Text marked **Proposed** has no authority at any level. Mockups in `docs/mockups/` are never requirements. `CLAUDE.md` is the working summary for agents; if it disagrees with this document, that is a bug in one of them.
+Text marked **Proposed** has no authority at any level. Mockups in `docs/mockups/` are never requirements. Since 2026-11-24, `apps/demo` is the UI/UX reference (layout, visuals, interaction flow, navigation, on-screen wording), but it never settles or loosens authority, permissions, visibility, data or security; where it shows something the specs forbid, the specs win. `CLAUDE.md` is the working summary for agents; if it disagrees with this document, that is a bug in one of them.
 
 ## Articles
 

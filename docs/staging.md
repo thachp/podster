@@ -622,7 +622,7 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 ## M6's release-on staging run
 
-*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there. It gives the `deploy` grant through the repository grant route, which takes the action `deploy` since PR #566. It still reads `packages/contracts/openapi.yaml` first and refuses, exit 3, with nothing sent, if a checkout's grant route doesn't list `deploy`.
+*Added 2026-11-23.* `e2e/m6-release-staging.mjs` is M6's acceptance run with release switched **on**, for static sites. `e2e/m6-staging.mjs` stays the run for release switched off. **It hasn't run against staging,** because release isn't on there. *2026-11-24: superseded. It ran on staging from main `d7c7247d`: 17 passed, 0 failed, 4 out of scope, and the owner called the static-site gate met ([the call](m6-plan.md#the-owners-call-2026-11-24-static-sites)).* It gives the `deploy` grant through the repository grant route, which takes the action `deploy` since PR #566. It still reads `packages/contracts/openapi.yaml` first and refuses, exit 3, with nothing sent, if a checkout's grant route doesn't list `deploy`.
 
 It releases a tiny static site through the real flow: a managed repository in `podsterdev`, the coding agent's pull request, the room's admin's review and merge, a member's request and the admin's approval. Then it checks each part of [the gate](m6-plan.md#the-gate) a script can show from outside, M6-R01 to M6-R17:
 
@@ -662,7 +662,7 @@ The run, once release is on with a provider:
 cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m6-release-staging.mjs --base-url https://gateway-staging.podster.dev
 ```
 
-`node m6-release-staging-selftest.mjs` checks its pure parts, its dry run, and each refusal against a stand-in that answers on this machine, and CI runs it. Nothing has shown the run past the owner's first sign-up.
+`node m6-release-staging-selftest.mjs` checks its pure parts, its dry run, and each refusal against a stand-in that answers on this machine, and CI runs it. Nothing has shown the run past the owner's first sign-up. *(2026-11-24: superseded; the full run passed on staging, [above](#m6s-release-on-staging-run).)*
 
 ## Explore's cursor key
 

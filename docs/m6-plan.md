@@ -10,6 +10,8 @@
 - **Spikes A, B, C, E and F ran on 2026-11-12.** Spike C ran on `opster.dev`, the content domain, and everything it created is deleted: [what it found](#spike-c-results). Spike A ran on a dispatch namespace the owner approved for staging: [what it found](#spike-a-results). Everything it created is deleted, and the namespace is left empty. So Workers for Platforms is on the account that holds `podster.dev`. Spikes E and F ran with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). Spike B ran with three short-lived tokens the owner made, and everything it created is deleted: [what it found](#spike-b-results). It found no token that can publish to the namespace and can't also replace the account's other Workers, so it proposes keeping the second account. **D and G haven't run,** so the routing token, custom hostnames, the serve entry's speed, resolving a TXT record and a Worker's memory are untried. **Spike F ran and didn't answer its question:** no credential it was allowed could put a workflow file in a repository. Answering it takes a person with write access pushing one workflow file to a test repository's branch and reading the runs. *(This line said "The other four haven't", which miscounted: seven spikes are listed.)* *Later that day the owner changed the content domain to `podster.site`: "i actually would like to use podster.site domain iinsite". Spike C's results on `opster.dev` stand as what ran, and carry over by reasoning; a short confirming rerun on `podster.site` is owed before anything is served there ([Cloud resources](#cloud-resources)).*
 - **No contract, migration or feature code exists for M6.** The cloud resources that exist for it are listed under [Cloud resources](#cloud-resources).
 
+*2026-11-24: superseded for static sites. The owner called the static-site release gate met; [the call](#the-owners-call-2026-11-24-static-sites). Still open: apps with code (M6-X13); custom domains (M6-X14, M6-X15 and M6-X26); [spike C's rerun on `podster.site`](#cloud-resources); and `RELEASES` for production, which is the owner's.*
+
 *As first written on 2026-11-10: the architect drafted this plan from the specs while the owner was away.* Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, are legal text, or loosen a security stance, so the architect can't settle them alone. [How far this was checked](#how-far-this-was-checked) says what was read.
 
 ## For the owner
@@ -703,6 +705,16 @@ From the specs. Nothing may say release works until all of these pass on staging
 - **A security review** of the built system against the [threat model](#threat-model), with the result written into this plan.
 
 The architect proposes the gate call, for the owner to review.
+
+### The owner's call, 2026-11-24: static sites
+
+**The owner said "Gate met" for M6's static-site release gate** on 2026-11-24, on that day's staging run of `e2e/m6-release-staging.mjs`:
+
+- **17 passed, 0 failed, 4 out of scope** (the four `SKIP`s [staging.md](staging.md#m6s-release-on-staging-run) names).
+- **Run from** main `d7c7247d`, against the staging API at `a5f42b4a` and the content Worker at `0597239b`, which the owner deployed with `scripts/deploy-content`.
+- **The fixes that got there:** PR #584, a static host answers not found on any dispatch rejection, with an ID-only dispatch log line; and PR #585, the run waits for a re-served marker.
+
+**Still open, and not covered by this call:** apps with code (M6-X13); custom domains (M6-X14, M6-X15 and M6-X26); [spike C's rerun on `podster.site`](#cloud-resources); and `RELEASES` for production, which is the owner's. The gate above, as written, still holds for those.
 
 ## What M6 needs from earlier milestones
 

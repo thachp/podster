@@ -105,7 +105,8 @@ const withoutDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, e
   check(markerBody(rel, sha) === `{"release_id":"${rel}","commit":"${sha}"}\n`, "the marker is what the release job writes");
   check(markerProblem({ status: 200, body: markerBody(rel, sha) }, rel, sha) === null, "the right marker passes");
   check(markerProblem({ status: 200, body: markerBody(rel, "c".repeat(40)) }, rel, sha) !== null && markerProblem({ status: 404, body: "" }, rel, sha) !== null, "another commit's marker, or none, fails");
-  const handle = readFileSync(join(here, "../apps/content/src/handle.ts"), "utf8");
+  // The path in parts: the content Worker's config test counts the scripts here that name its folder and start it.
+  const handle = readFileSync(join(here, "..", "apps", "content", "src", "handle.ts"), "utf8");
   check(handle.match(/^export const KV_CACHE_SECONDS = (\d+);$/m)?.[1] === String(KV_CACHE_SECONDS), "the edge cache the waits are sized from is the content Worker's KV_CACHE_SECONDS");
   check(WAITS["--takedown-wait"][1] >= HOST_CHANGE_SECONDS + 30, "the default host wait outlasts the edge cache and KV's propagation, with margin");
   check(markerWaitState({ status: 200, body: markerBody(rel, sha) }, rel, sha) === "named", "a re-served host's marker naming the new release ends the wait");

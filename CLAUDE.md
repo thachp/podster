@@ -51,7 +51,7 @@ cd apps/api && npm ci && npm test
 cd apps/gateway && npm ci && npm run typecheck && npm test
 ```
 
-Both `npm test`s first run `e2e/test-timing-check.mjs`, which CI's e2e job also runs; on its own, `node ../../e2e/test-timing-check.mjs` from either folder.
+Both `npm test`s first run `e2e/test-timing-check.mjs`, which CI's selftests job also runs; on its own, `node ../../e2e/test-timing-check.mjs` from either folder.
 
 A change to `apps/runner` also runs the gateway suite, because `apps/gateway/test/runner-core.spec.ts` drives Runner against the real API.
 

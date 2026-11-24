@@ -57,7 +57,10 @@ jobs:
       - run: npm test
         working-directory: packages/contracts
 
-  api:
+  # The API's specs, a third of the files in each of three jobs (vitest's --shard), since run together they took seven
+  # minutes, the longest wait in this workflow after e2e. The three jobs are the same but for the shard's number. Each
+  # builds the API with failpoints itself, and hands vitest's JSON report to the api job below.
+  api-1:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
@@ -88,20 +91,138 @@ jobs:
         working-directory: apps/api
       # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
       - run: scripts/ci-workerd-installed apps/api
-      # vitest's JSON report is read by the step after this one. The two other reporters are what CI printed before.
-      - run: npm test -- --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations.json"
+      # vitest's JSON report goes to the api job, which reads all three. The two other reporters are what CI printed before.
+      - run: npm test -- --shard=1/3 --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations-1.json"
         working-directory: apps/api
+      # After a failed run too, so the api job can still print the slowest tests. A build that failed leaves no report.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-durations-1
+          path: ${{ runner.temp }}/api-durations-1.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  api-2:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/api
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/api
+      # vitest's JSON report goes to the api job, which reads all three. The two other reporters are what CI printed before.
+      - run: npm test -- --shard=2/3 --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations-2.json"
+        working-directory: apps/api
+      # After a failed run too, so the api job can still print the slowest tests. A build that failed leaves no report.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-durations-2
+          path: ${{ runner.temp }}/api-durations-2.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  api-3:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/api
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/api
+      # vitest's JSON report goes to the api job, which reads all three. The two other reporters are what CI printed before.
+      - run: npm test -- --shard=3/3 --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations-3.json"
+        working-directory: apps/api
+      # After a failed run too, so the api job can still print the slowest tests. A build that failed leaves no report.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-durations-3
+          path: ${{ runner.temp }}/api-durations-3.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # The three shards' reports, judged as one suite, so an entry on the owed list for a test in another shard isn't
+  # called stale. It runs when a shard failed too, and then fails itself, so this job is green only when the whole
+  # API suite passed.
+  api:
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/')) }}
+    needs: [api-1, api-2, api-3]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: api-durations-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/api-durations
       # Each test's time against its own bound: over a third is a warning, naming its entry in e2e/test-durations-allow.json
       # (the owed list) or saying it has none; over two thirds fails, listed or not. The ten slowest are printed either
-      # way, and after a failed run too, so a slow runner shows before a test times out.
-      - run: node test-durations.mjs --suite api --package apps/api --report "$RUNNER_TEMP/api-durations.json"
-        if: ${{ !cancelled() }}
+      # way, and after a failed run too, so a slow runner shows before a test times out. A shard with no report fails this.
+      - run: node test-durations.mjs --suite api --package apps/api --report "$RUNNER_TEMP/api-durations/api-durations-1.json" --report "$RUNNER_TEMP/api-durations/api-durations-2.json" --report "$RUNNER_TEMP/api-durations/api-durations-3.json"
         working-directory: e2e
+      - name: Fail unless all three shards passed
+        if: ${{ !cancelled() }}
+        env:
+          SHARDS: ${{ needs.api-1.result }} ${{ needs.api-2.result }} ${{ needs.api-3.result }}
+        run: |
+          echo "api-1, api-2, api-3: $SHARDS"
+          [ "$SHARDS" = "success success success" ]
 
   web:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -117,7 +238,25 @@ jobs:
         working-directory: apps/web
       - run: npm run build
         working-directory: apps/web
-      # UI-10 and UI-11, against the real Workers in a real browser.
+
+  # UI-10 and UI-11, against the real Workers in a real browser. Its own job, beside web's typecheck and tests instead of
+  # after them: the accessibility run alone takes over five minutes. It builds the web app itself, which the runs below
+  # then reuse (--skip-web-build).
+  browser:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/web
+      - run: npm run build
+        working-directory: apps/web
       - run: rustup show
       # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
       # image and the pinned toolchain, so a change to any of them builds it again.
@@ -341,6 +480,49 @@ jobs:
       - run: scripts/ci-workerd-installed apps/gateway
       - run: npm ci
         working-directory: e2e
+      - run: node run-local.mjs
+        working-directory: e2e
+      # Staging's setup and the test sign-up, with nothing remote.
+      - run: node run-local.mjs --skip-build --rehearse-test-people
+        working-directory: e2e
+
+  # The checks and self-tests of the scripts under e2e/ and scripts/, which start no Worker and build no API. They ran
+  # in the e2e job, ahead of its stack, and took four of its twelve minutes; here they run beside it. The setup is e2e's.
+  selftests:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # This uses the gateway's pinned wrangler.
+      - run: npm ci
+        working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
+      - run: npm ci
+        working-directory: e2e
       # Every script here, read without running it: an assignment to a constant, a name nothing declares, and a
       # declaration that hides an assigned outer one. The staging scripts run nowhere else before they run on staging.
       - run: node static-check.mjs --self-test
@@ -379,7 +561,7 @@ jobs:
       # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
       - run: node child-env-selftest.mjs
         working-directory: e2e
-      # The web job's browser install: when it retries, when it goes on without apt's packages, and when it stops.
+      # The browser job's install of its browser: when it retries, when it goes on without apt's packages, and when it stops.
       - run: node install-browser-selftest.mjs
         working-directory: e2e
       # The accessibility run writes into the Workers' files once they've stopped, so "stopped" has to mean every process.
@@ -437,8 +619,3 @@ jobs:
       # The Runner test pre-release's script: every refusal, both stages with stand-ins for gh and npm, and the version edit
       # on the real Runner files in a scratch repository. It pushes, dispatches and approves nothing outside that folder.
       - run: scripts/test/release-runner-test-selftest
-      - run: node run-local.mjs
-        working-directory: e2e
-      # Staging's setup and the test sign-up, with nothing remote.
-      - run: node run-local.mjs --skip-build --rehearse-test-people
-        working-directory: e2e

@@ -9,8 +9,11 @@
 //
 // The ten slowest are printed either way, so a slow runner shows in the log before it turns into a timeout.
 //
-//   node test-durations.mjs --suite api --package apps/api --report FILE
+//   node test-durations.mjs --suite api --package apps/api --report FILE [--report FILE ...]
 //   node test-durations.mjs --self-test
+//
+// A suite run in shards has one report per shard: give them all, and they're judged as one suite. Judged apart, each
+// would call the owed list's entries for the other shards' tests stale.
 //
 // Each test's bound is `meta.bound`, which apps/<package>/test/bound-meta.ts records from the test's own timeout (the
 // config's testTimeout, or the one the test passes). A test that ran without one fails the step: the setup file is
@@ -39,6 +42,11 @@ export function tests(report, packageDir) {
       .filter((result) => JUDGED.has(result.status))
       .map((result) => ({ file: relative(packageDir, module.name).split("\\").join("/"), test: result.fullName, status: result.status, ms: Math.round(result.duration ?? 0), bound: result.meta?.bound })),
   );
+}
+
+/** Several reports of one suite, one per shard, as one report. */
+export function merged(reports) {
+  return { testResults: reports.flatMap((report) => report.testResults) };
 }
 
 const pct = (share) => `${Math.round(share * 100)}%`;
@@ -143,6 +151,12 @@ function selfTest() {
   const failing = run(report(["slow", 20001, 30000]), [entry()], options);
   check(failing.code === 1 && failing.lines.includes("::error file=apps/api/test/a.spec.ts::test/a.spec.ts › slow: 20001 ms is 67%25 of its 30000 ms bound, over 67%25, so the step fails. On the owed list: pass the limit in from the test") && /failed \(1\)$/.test(failing.lines.at(-1)), "band 3's run annotates the test as an error and exits 1, listed or not", failing.lines.join(" | "));
 
+  // Two shards' reports: an entry for a test in the other shard is stale in either alone, and not in both together.
+  const [first, second] = [report(["slow", 12000, 30000]), report(["quick", 10, 30000])];
+  const apart = judge(tests(second, pkg), [entry()], "api");
+  const together = judge(tests(merged([first, second]), pkg), [entry()], "api");
+  check(apart.stale.length === 1 && together.stale.length === 0 && together.warned.length === 1 && tests(merged([first, second]), pkg).length === 2, "shards' reports are judged as one suite, so another shard's entry isn't stale");
+
   const list = JSON.parse(readFileSync(ALLOW, "utf8"));
   const problems = list.entries.map((e) => entryProblem(e)).filter(Boolean);
   check(Array.isArray(list.entries) && problems.length === 0 && list.entries.every((e) => ["api", "gateway"].includes(e.suite)), "every entry in test-durations-allow.json is well formed", problems.join("; "));
@@ -158,18 +172,19 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     const at = argv.indexOf(name);
     return at >= 0 ? argv[at + 1] : undefined;
   };
-  const [suite, packageName, reportPath] = [option("--suite"), option("--package"), option("--report")];
-  if (!suite || !packageName || !reportPath) {
-    console.error("usage: node test-durations.mjs --suite api --package apps/api --report FILE");
+  const [suite, packageName] = [option("--suite"), option("--package")];
+  const reportPaths = argv.flatMap((arg, at) => (arg === "--report" && argv[at + 1] ? [argv[at + 1]] : []));
+  if (!suite || !packageName || !reportPaths.length) {
+    console.error("usage: node test-durations.mjs --suite api --package apps/api --report FILE [--report FILE ...]");
     process.exit(2);
   }
   let report;
   let allow;
   try {
-    report = JSON.parse(readFileSync(resolve(reportPath), "utf8"));
+    report = merged(reportPaths.map((path) => JSON.parse(readFileSync(resolve(path), "utf8"))));
     allow = JSON.parse(readFileSync(ALLOW, "utf8")).entries;
   } catch (error) {
-    console.error(`test-durations: couldn't read the report or the allow-list: ${error.message}. The suite may not have run.`);
+    console.error(`test-durations: couldn't read a report or the allow-list: ${error.message}. The suite may not have run.`);
     process.exit(2);
   }
   const { lines, code } = run(report, allow, { suite, packageDir: join(root, packageName), packageName });

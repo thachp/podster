@@ -273,6 +273,17 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .msgbody { margin-top: 2px; }
 .msgbody .md p:last-child, .msgbody .md ul:last-child { margin-bottom: 0; }
 .review.codewide { grid-template-columns: minmax(0, 2.3fr) minmax(300px, 1fr); }
+.review.float { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.review.float > .frame { grid-area: 1 / 1; }
+.review.float > aside { grid-area: 1 / 1; justify-self: end; align-self: start; width: min(380px, calc(100% - 28px)); margin: 56px 14px 14px 0; max-height: calc(100vh - 150px); overflow: auto; z-index: 3; box-shadow: 0 2px 6px rgba(0,0,0,.12), 0 18px 48px rgba(0,0,0,.22); }
+.review.float.full > aside { display: none; }
+.review.float > .chip { grid-area: 1 / 1; justify-self: end; align-self: start; position: sticky; top: 76px; margin: 56px 14px 0 0; z-index: 3; box-shadow: 0 2px 6px rgba(0,0,0,.12), 0 10px 28px rgba(0,0,0,.2); }
+.side-head { display: flex; align-items: center; gap: 8px; margin: -6px -6px -6px 0; }
+.side-head b { flex: 1; font-weight: 600; }
+.panelbtn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; flex: none; white-space: nowrap; }
+.panelbtn:hover { color: var(--text); border-color: var(--muted); }
+.panelbtn svg { width: 15px; height: 15px; }
+.panelbtn.need { border-color: var(--need-line); background: var(--need-soft); color: var(--text); }
 .codeview { display: grid; grid-template-columns: 190px minmax(0, 1fr); min-height: 420px; }
 .cfiles { display: flex; flex-direction: column; gap: 2px; padding: 12px 8px; border-right: 1px solid var(--line); background: var(--surface); }
 .cfile { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; border: 0; border-radius: 7px; background: transparent; font-size: 12.5px; text-align: left; cursor: pointer; }
@@ -1197,10 +1208,13 @@ function review() {
   const roundHtml = r2 ? '<div class="round"><div style="display:flex;align-items:baseline;gap:8px"><b style="font-weight:600">Round ' + r.round + ' \u00b7 what changed</b><span class="faint" style="font-size:12.5px;margin-left:auto">since your notes</span></div>' +
     r.asked.map((a) => '<div class="ask"><span class="ok">' + I.check + '</span><span><span class="faint" style="font-size:12px">You asked</span><br>' + esc(a) + '</span></div>').join('') +
     '<span class="faint" style="font-size:12.5px">2 files changed, +14 \u22123. \u201cMove an order\u201d was unticked because that part changed; try it again.</span></div>' : '';
+  const panIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>' + (S.rvPanel ? '<path d="m9 10 2 2-2 2"/>' : '<path d="m11 10-2 2 2 2"/>') + '</svg>';
+  const panelBtn = '<button class="panelbtn chip' + (t.stage === 'review' ? ' need' : '') + '" data-act="rv-panel" title="Show the review panel (])">' + panIcon + (t.stage === 'review' ? n + ' of 4 checked \u00b7 Show review' : 'Show review') + '</button>';
   return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#board" style="text-decoration:none">Board</a> / #18</p><h1>' + t.title + '</h1><p>' + stageLabel(t.stage) + (r2 ? ' &nbsp;\u00b7&nbsp; Round ' + r.round : '') + ' &nbsp;\u00b7&nbsp; Coding Agent, guided by Sam Rivera</p></div></div>' +
-    '<div class="review' + (r.view === 'code' ? ' codewide' : '') + '"><div class="frame"><div class="framebar"><div class="seg" role="group" aria-label="View"><button data-act="rv-view" data-v="preview" aria-pressed="' + (r.view !== 'code') + '">Preview</button><button data-act="rv-view" data-v="code" aria-pressed="' + (r.view === 'code') + '">Code</button></div>' + (r.view === 'code' ? '<span class="url mono">agent/coding/orders-page \u2192 main \u00b7 pull request #4</span><span style="display:none">' : '<span class="url mono">preview-18.orders.bakeryonelm.example</span><span>') + '<div class="seg" role="group" aria-label="Device"><button data-act="device" data-d="desktop" aria-pressed="' + (r.device === 'desktop') + '">Desktop</button><button data-act="device" data-d="phone" aria-pressed="' + (r.device === 'phone') + '">Phone</button></div></span></div>' +
+    '<div class="review float' + (S.rvPanel ? '' : ' full') + '"><div class="frame"><div class="framebar"><div class="seg" role="group" aria-label="View"><button data-act="rv-view" data-v="preview" aria-pressed="' + (r.view !== 'code') + '">Preview</button><button data-act="rv-view" data-v="code" aria-pressed="' + (r.view === 'code') + '">Code</button></div>' + (r.view === 'code' ? '<span class="url mono">agent/coding/orders-page \u2192 main \u00b7 pull request #4</span><span style="display:none">' : '<span class="url mono">preview-18.orders.bakeryonelm.example</span><span>') + '<div class="seg" role="group" aria-label="Device"><button data-act="device" data-d="desktop" aria-pressed="' + (r.device === 'desktop') + '">Desktop</button><button data-act="device" data-d="phone" aria-pressed="' + (r.device === 'phone') + '">Phone</button></div></span></div>' +
     (r.view === 'code' ? codeView() + '</div>' : '<div class="stagewrap">' + (r.device === 'phone' ? '<div class="phone">' + orderTracker(true) + '</div>' : '<div style="width:100%;border-radius:10px;overflow:hidden;border:1px solid var(--line)">' + orderTracker(true) + '</div>') + '</div></div>') +
-    '<aside class="panel side-panel">' + roundHtml + '<div style="display:flex;flex-direction:column;gap:2px"><span class="label">Try it on the left, then check</span><span class="faint" style="font-size:13px">' + n + ' of 4 checked</span></div>' +
+    (S.rvPanel ? '' : panelBtn) +
+    '<aside class="panel side-panel"><div class="side-head"><b>Review</b><button class="panelbtn" data-act="rv-panel" title="Hide the panel to see the whole app (])" aria-label="Hide review panel">' + panIcon + 'Hide</button></div>' + roundHtml + '<div style="display:flex;flex-direction:column;gap:2px"><span class="label">Try the app, then check</span><span class="faint" style="font-size:13px">' + n + ' of 4 checked</span></div>' +
     '<div>' + t.done.map((c, i) => '<label class="check"><input type="checkbox" data-act="crit" data-i="' + i + '"' + (r.crit[i] ? ' checked' : '') + (t.stage !== 'review' ? ' disabled' : '') + '><span>' + c + '</span></label>').join('') + '</div>' +
     '<div class="note"><div class="by">Coding Agent wrote</div>' + (r2 ? 'Made the status buttons 44px tall and added a \u201cNo orders yet\u201d line for an empty list. Checked it at phone width this time.' : 'Orders save, so they stay after a reload. I added tests for adding and moving orders. I did not test it on a phone.') + '</div>' +
     fileList(18, t.stage === 'review') +
@@ -1311,7 +1325,7 @@ function everything() {
 }
 
 /* ---------- Keyboard shortcuts and appearance ---------- */
-const KEYS = [['\u2318 K', 'Jump to anything, or type a command'], ['J', 'Next thing that needs you (in a task)'], ['\u2318 \u21b5', 'Save what you\'re editing'], ['Esc', 'Close or cancel'], ['\u2191 \u2193', 'Move through \u2318K results'], ['?', 'This list']];
+const KEYS = [['\u2318 K', 'Jump to anything, or type a command'], ['J', 'Next thing that needs you (in a task)'], ['\u2318 \u21b5', 'Save what you\'re editing'], ['Esc', 'Close or cancel'], ['\u2191 \u2193', 'Move through \u2318K results'], [']', 'Hide or show the review panel'], ['?', 'This list']];
 function setTheme(t) { S.theme = t; try { localStorage.setItem('podster-theme', t); } catch (err) {} try { if (document.documentElement) { if (t === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t; } } catch (err) {} }
 
 /* ---------- Creator: Ship ---------- */
@@ -2526,6 +2540,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'nt-file': S.newFiles += 1; break;
+    case 'rv-panel': S.rvPanel = !S.rvPanel; try { localStorage.setItem('podster-rvpanel', S.rvPanel ? '1' : '0'); } catch (err) {} break;
     case 'collapse': S.collapsed = !S.collapsed; try { localStorage.setItem('podster-side', S.collapsed ? '1' : '0'); } catch (err) {} break;
     case 'view': S.view = el.dataset.v; break;
     case 'listf': S.listF = el.dataset.f; break;
@@ -2734,6 +2749,7 @@ document.addEventListener('keydown', (e) => {
   if (S.inl && e.key === 'Escape') { e.preventDefault(); S.inl = null; render(); return; }
   if (S.inl && e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveInl(); render(); return; }
   if (e.key === 'Enter' && e.target.classList && (e.target.classList.contains('xrow') || e.target.classList.contains('inl'))) { e.preventDefault(); e.target.click(); return; }
+  if (e.key === ']' && S.route === 'review' && !e.metaKey && !e.ctrlKey && !/^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '') && !(e.target && e.target.isContentEditable)) { e.preventDefault(); S.rvPanel = !S.rvPanel; try { localStorage.setItem('podster-rvpanel', S.rvPanel ? '1' : '0'); } catch (err) {} render(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'b') { e.preventDefault(); S.collapsed = !S.collapsed; try { localStorage.setItem('podster-side', S.collapsed ? '1' : '0'); } catch (err) {} render(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); S.palette = !S.palette; S.pq = ''; S.psel = 0; render(); return; }
   if (e.key === 'Escape' && (S.assignOpen || S.reviewOpen)) { S.assignOpen = false; S.reviewOpen = false; render(); return; }
@@ -2745,6 +2761,7 @@ document.addEventListener('keydown', (e) => {
 });
 window.addEventListener('hashchange', fromHash);
 try { S.collapsed = localStorage.getItem('podster-side') === '1'; } catch (err) { S.collapsed = false; }
+try { S.rvPanel = localStorage.getItem('podster-rvpanel') !== '0'; } catch (err) { S.rvPanel = true; }
 try { const mq = window.matchMedia('(max-width: 760px)'); S.narrow = mq.matches; mq.addEventListener('change', (ev) => { S.narrow = ev.matches; render(); }); } catch (err) { S.narrow = false; }
 try { const t0 = localStorage.getItem('podster-theme'); if (t0) setTheme(t0); } catch (err) {}
 fromHash();

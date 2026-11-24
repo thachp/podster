@@ -12,6 +12,13 @@ import type { PullRequestChange } from "./task-change";
 export const RELEASE_STATUS_STATES = ["awaiting_approval", "queued", "uploading", "uncertain", "awaiting_confirmation", "served", "replaced", "unpublished", "declined", "failed"] as const;
 export type ReleaseStatusState = (typeof RELEASE_STATUS_STATES)[number];
 
+/**
+ * Why a release is waiting, `podster_core::release_status::ReleaseWaiting`'s words as the contract lists them. Only a
+ * word from this list is ever shown, as fixed text of our own: never what the server sent.
+ */
+export const RELEASE_WAITINGS = ["upload_cap", "read_budget", "in_flight", "settling", "idle"] as const;
+export type ReleaseWaiting = (typeof RELEASE_WAITINGS)[number];
+
 export type TaskRelease = {
   exists: true;
   release_id: string;
@@ -21,6 +28,8 @@ export type TaskRelease = {
   failure_code: string | null;
   served: boolean;
   result_url: string | null;
+  /** Why it waits, only while it does. A word this app doesn't know is read as none. */
+  waiting: ReleaseWaiting | null;
 };
 
 /**
@@ -48,8 +57,11 @@ export function parseTaskRelease(body: unknown): ReleaseRead {
     typeof release.observed_at === "number" &&
     (release.failure_code === null || typeof release.failure_code === "string") &&
     typeof release.served === "boolean" &&
-    (release.result_url === null || typeof release.result_url === "string");
-  return fine ? { kind: "release", release: release as TaskRelease } : { kind: "malformed" };
+    (release.result_url === null || typeof release.result_url === "string") &&
+    (release.waiting === undefined || release.waiting === null || typeof release.waiting === "string");
+  if (!fine) return { kind: "malformed" };
+  const waiting = (RELEASE_WAITINGS as readonly unknown[]).includes(release.waiting) ? (release.waiting as ReleaseWaiting) : null;
+  return { kind: "release", release: { ...(release as Omit<TaskRelease, "waiting">), waiting } };
 }
 
 /**
@@ -77,6 +89,16 @@ export type DeploymentStage = {
 };
 
 export const RELEASE_UNAVAILABLE = "Release isn't available on this Podster deployment, so nothing from this task is published.";
+
+/** What each waiting word says. Fixed text only: the server's word picks one, and is never shown itself. */
+const WAITING_TEXT: Record<ReleaseWaiting, string> = {
+  upload_cap: "It's waiting because this workroom has used its upload attempts for the hour.",
+  read_budget: "It's waiting for room in Podster's hourly reads from the repository.",
+  in_flight: "It's waiting for another release of this app to finish switching.",
+  settling: "It's waiting while Podster checks how an earlier upload ended.",
+  idle: "It's waiting because releases are paused on this Podster deployment.",
+};
+const waitingText = (waiting: ReleaseWaiting | null) => (waiting ? ` ${WAITING_TEXT[waiting]}` : "");
 
 const reason = (code: string | null) => (code && /^[a-z0-9_]{1,64}$/.test(code) ? ` Reason code: ${code}.` : "");
 
@@ -123,7 +145,7 @@ export function deploymentStage({ switchedOn, read, merge_state, merge_sha }: St
     case "queued":
     case "uploading":
     case "uncertain":
-      return { label: "Deploying", tone: "blue", text: "Podster is uploading this release. It isn't served yet.", link: null, ...at };
+      return { label: "Deploying", tone: "blue", text: `Podster is uploading this release. It isn't served yet.${waitingText(release.waiting)}`, link: null, ...at };
     case "awaiting_confirmation":
       return { label: "Deploying", tone: "blue", text: "Podster switched the app to this release and is waiting to confirm it's served. It isn't live until then.", link: null, ...at };
     case "failed":

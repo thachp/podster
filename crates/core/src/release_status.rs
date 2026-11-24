@@ -353,6 +353,88 @@ pub fn release_report<'a>(
     })
 }
 
+/// Why a release that hasn't gone live yet is waiting, as the task's release status says it (2026-11-24). A small,
+/// closed set of words, read from the code the release's job last recorded: nothing else is ever said, so no ID, no
+/// provider text and no code the room doesn't list here reaches the status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseWaiting {
+    /// The room's upload attempts for the rolling hour are used up
+    /// (`release_driver::MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR`).
+    UploadCap,
+    /// The owner's share of the deployment's hourly reads, or the deployment's hour itself, has no room for a full
+    /// attempt.
+    ReadBudget,
+    /// Another release's commit or rollback is waiting for its marker.
+    InFlight,
+    /// Another release is being settled after an upload whose outcome wasn't known.
+    Settling,
+    /// The driver does nothing: the deployment doesn't allow release, the release path is closed, or no content
+    /// provider is configured.
+    Idle,
+}
+
+impl ReleaseWaiting {
+    pub const ALL: [ReleaseWaiting; 5] = [
+        ReleaseWaiting::UploadCap,
+        ReleaseWaiting::ReadBudget,
+        ReleaseWaiting::InFlight,
+        ReleaseWaiting::Settling,
+        ReleaseWaiting::Idle,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ReleaseWaiting::UploadCap => "upload_cap",
+            ReleaseWaiting::ReadBudget => "read_budget",
+            ReleaseWaiting::InFlight => "in_flight",
+            ReleaseWaiting::Settling => "settling",
+            ReleaseWaiting::Idle => "idle",
+        }
+    }
+
+    /// The word for a job's code, or `None` for a code that isn't a wait the status names.
+    pub fn of_code(code: &str) -> Option<ReleaseWaiting> {
+        use crate::release::ReleaseCapRefusal;
+        use crate::release_driver::{
+            DRIVER_IDLE, IN_FLIGHT_WAITING, NO_CONTENT_PROVIDER, READ_SHARE_WAITING,
+            UPLOAD_ATTEMPTS_WAITING,
+        };
+        use crate::release_uncertain::COMMIT_WAITS_UNCERTAIN;
+        match code {
+            UPLOAD_ATTEMPTS_WAITING => Some(ReleaseWaiting::UploadCap),
+            READ_SHARE_WAITING => Some(ReleaseWaiting::ReadBudget),
+            code if code == ReleaseCapRefusal::ReadBudget.code() => {
+                Some(ReleaseWaiting::ReadBudget)
+            }
+            IN_FLIGHT_WAITING => Some(ReleaseWaiting::InFlight),
+            COMMIT_WAITS_UNCERTAIN => Some(ReleaseWaiting::Settling),
+            DRIVER_IDLE | NO_CONTENT_PROVIDER => Some(ReleaseWaiting::Idle),
+            _ => None,
+        }
+    }
+}
+
+/// The release's job, as the room holds it, for [`release_waiting`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JobHeld<'a> {
+    /// A step of the release is out now.
+    pub leased: bool,
+    /// Why the job last said the release waits, or the code its last step gave.
+    pub last_code: Option<&'a str>,
+}
+
+/// Why the release is waiting, **only while it is**: the attempt is queued, uploading or `uncertain`, no step of it is
+/// out, and its job's last code is a wait the status names ([`ReleaseWaiting::of_code`]). Anything else, `None`: a
+/// release with no job, one whose step is running, and every other state, live or ended, says nothing of waiting.
+pub fn release_waiting(state: ReleaseStatusState, job: Option<JobHeld>) -> Option<ReleaseWaiting> {
+    let before_live = matches!(
+        state,
+        ReleaseStatusState::Queued | ReleaseStatusState::Uploading | ReleaseStatusState::Uncertain
+    );
+    let job = job.filter(|job| before_live && !job.leased)?;
+    ReleaseWaiting::of_code(job.last_code?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +621,82 @@ mod tests {
         assert_eq!(at("failed"), Some(90));
         // One nobody asked Podster for: when it was seen.
         assert_eq!(at("not_requested"), Some(70));
+    }
+
+    #[test]
+    fn a_waiting_reason_is_named_only_from_the_closed_set() {
+        let named = [
+            ("release_upload_attempts", ReleaseWaiting::UploadCap),
+            ("release_reads_share", ReleaseWaiting::ReadBudget),
+            ("release_reads_budget", ReleaseWaiting::ReadBudget),
+            ("release_in_flight", ReleaseWaiting::InFlight),
+            ("release_uncertain", ReleaseWaiting::Settling),
+            ("release_driver_idle", ReleaseWaiting::Idle),
+            ("content_provider_not_configured", ReleaseWaiting::Idle),
+        ];
+        for (code, word) in named {
+            assert_eq!(ReleaseWaiting::of_code(code), Some(word), "{code}");
+        }
+        for code in [
+            "",
+            "release_attempts_exhausted",
+            "release_step_no_progress",
+            "release_driver_moved",
+            "release_drive_lease_lost",
+            "rel_0123456789abcdef0123456789abcdef",
+            "UPLOAD_CAP",
+            "upload_cap",
+        ] {
+            assert_eq!(ReleaseWaiting::of_code(code), None, "{code}");
+        }
+        let names: Vec<&str> = ReleaseWaiting::ALL.iter().map(|w| w.name()).collect();
+        assert_eq!(
+            names,
+            ["upload_cap", "read_budget", "in_flight", "settling", "idle"]
+        );
+        assert!(names
+            .iter()
+            .all(|name| name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
+    }
+
+    #[test]
+    fn a_release_says_why_it_waits_only_while_it_waits() {
+        let capped = JobHeld {
+            leased: false,
+            last_code: Some("release_upload_attempts"),
+        };
+        for state in [
+            ReleaseStatusState::Queued,
+            ReleaseStatusState::Uploading,
+            ReleaseStatusState::Uncertain,
+        ] {
+            assert_eq!(
+                release_waiting(state, Some(capped)),
+                Some(ReleaseWaiting::UploadCap),
+                "{state:?}"
+            );
+            // A step out now isn't waiting, whatever the job last said; nor is a release with no job or no code.
+            let leased = JobHeld {
+                leased: true,
+                ..capped
+            };
+            assert_eq!(release_waiting(state, Some(leased)), None);
+            assert_eq!(release_waiting(state, None), None);
+            let none = JobHeld {
+                leased: false,
+                last_code: None,
+            };
+            assert_eq!(release_waiting(state, Some(none)), None);
+        }
+        for state in ReleaseStatusState::ALL.into_iter().filter(|state| {
+            !matches!(
+                state,
+                ReleaseStatusState::Queued
+                    | ReleaseStatusState::Uploading
+                    | ReleaseStatusState::Uncertain
+            )
+        }) {
+            assert_eq!(release_waiting(state, Some(capped)), None, "{state:?}");
+        }
     }
 }

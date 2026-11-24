@@ -924,16 +924,17 @@ pub fn repo_unpublish_owed(status: crate::repositories::LinkStatus, anything_up:
     link_status_unpublishes(status) && anything_up
 }
 
-/// **The ceiling on unpublishes for a repository's link, Proposed** (decided by the architect on 2026-11-14, for the
-/// owner to review). At most this many rooms' apps are unpublished as `RepositoryNotReady` in one
-/// [`REPO_UNPUBLISH_WINDOW_MS`], or [`REPO_UNPUBLISH_CEILING_PERCENT`] of the rooms with apps, whichever is smaller.
-/// Past it, the rest are held for an operator, so a GitHub incident that reads as many links not ready at once can't
-/// retire every app's address.
+/// **The ceiling on unpublishes for a repository's link** (decided by the architect on 2026-11-14 as Proposed, for the
+/// owner to review; approved by the owner on 2026-11-24, as it stands). At most this many rooms' apps are unpublished
+/// as `RepositoryNotReady` in one [`REPO_UNPUBLISH_WINDOW_MS`], or [`REPO_UNPUBLISH_CEILING_PERCENT`] of the rooms with
+/// apps, whichever is smaller. Past it, the rest are held for an operator, so a GitHub incident that reads as many
+/// links not ready at once can't retire every app's address.
 pub const REPO_UNPUBLISH_CEILING: u32 = 5;
-/// The share of rooms with apps that the ceiling allows in one window, in percent, rounded up. Proposed.
+/// The share of rooms with apps that the ceiling allows in one window, in percent, rounded up. Approved by the owner on
+/// 2026-11-24.
 pub const REPO_UNPUBLISH_CEILING_PERCENT: u64 = 10;
 /// The window the ceiling counts over: there is no shared pass over rooms' repositories, since each room reads its own
-/// link, so the deployment's one object counts by time. Proposed.
+/// link, so the deployment's one object counts by time. Approved by the owner on 2026-11-24.
 pub const REPO_UNPUBLISH_WINDOW_MS: i64 = 60 * 60 * 1000;
 
 /// How many rooms' apps may be unpublished for a repository's link in one window, given how many rooms have apps:

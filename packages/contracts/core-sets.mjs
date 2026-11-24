@@ -59,6 +59,8 @@ export function coreSets(root) {
   const claimStates = enumNames(requests, "HostnameClaimState", "name");
   // A task's release status says the room's states in its own words (M6 step 7): `live` is never one of them.
   const releaseStatusStates = enumNames(read(root, "crates/core/src/release_status.rs"), "ReleaseStatusState", "name");
+  // Why a release waits, as the status says it while it does (2026-11-24): a closed set of words, never the job's code.
+  const releaseWaitings = enumNames(read(root, "crates/core/src/release_status.rs"), "ReleaseWaiting", "name");
   // An app's data deleted (S4 of the store plan): why it is owed, what the commands answer of it, and the owner's words.
   const appStore = readFileSync(new URL("crates/core/src/app_store.rs", root), "utf8");
   const notice = appStore.match(/pub const DATA_DELETED_NOTICE: &str = "([^"\\]+)";/)?.[1];
@@ -69,6 +71,7 @@ export function coreSets(root) {
     dataDeletedNotice: notice,
     releaseStates,
     releaseStatusStates,
+    releaseWaitings,
     servingReleaseStates: subset(release, "ReleaseState", "serves", releaseStates),
     hostnameClaimStates: claimStates,
     holdingHostnameClaimStates: subset(requests, "HostnameClaimState", "holds", claimStates),

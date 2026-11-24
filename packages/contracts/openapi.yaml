@@ -1370,7 +1370,7 @@ components:
       type: object
       description: "The release part of a task's release status (M6 step 7, ADR 0010): the latest attempt to release the task's merged commit. It never says live: whether the app is live is only `served` and `result_url`."
       additionalProperties: false
-      required: [exists, release_id, commit_sha, state, observed_at, failure_code, served, result_url]
+      required: [exists, release_id, commit_sha, state, observed_at, failure_code, served, result_url, waiting]
       properties:
         exists: { type: boolean, enum: [true] }
         release_id: { type: string, pattern: "^rel_[0-9a-f]{32}$" }
@@ -1380,6 +1380,7 @@ components:
         failure_code: { type: [string, "null"], description: "A reason code while `failed`, and null in every other state. Never a provider's message text." }
         served: { type: boolean, description: "Whether the commit is what the room's default host serves: an attempt for it was recorded `served` by its marker, the host is still set to it, the room is public now, nothing holds or suspends the app, and the content domain's stop was read and is clear. Never true for `awaiting_confirmation`." }
         result_url: { type: [string, "null"], description: "The default host's address, `https://<label>.<content domain>/`, only while `served` and a content domain is configured." }
+        waiting: { type: [string, "null"], enum: [upload_cap, read_budget, in_flight, settling, idle, null], description: "Why the release is waiting, only while it is: the attempt is `queued`, `uploading` or `uncertain`, no step of it is running, and its job last waited for one of these (`podster_core::release_status::ReleaseWaiting`, 2026-11-24). `upload_cap`: the room's upload attempts for the rolling hour are used up. `read_budget`: the owner's share of the deployment's hourly reads, or the deployment's hour, has no room for a full attempt. `in_flight`: another release's commit or rollback is waiting for its marker. `settling`: another release is being settled after an upload whose outcome wasn't known. `idle`: release isn't allowed on the deployment now, the release path is closed, or no content provider is configured. Null in every other case. A closed set of words: never an ID, a provider's text or the job's own code." }
     MergeTask:
       type: object
       additionalProperties: false

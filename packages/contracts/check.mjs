@@ -213,7 +213,7 @@ for (const [name, cap] of Object.entries(capabilities)) {
 const root = new URL("../../", import.meta.url);
 const core = coreSets(root);
 const releaseEnums = {
-  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStatusStates.join(),
+  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(), "TaskRelease.state": core.releaseStatusStates.join(), "TaskRelease.waiting": [...core.releaseWaitings, null].join(),
   "AppHostnameRequest.state": core.hostnameRequestStates.join(),
   "AppDataDeletion.data": core.dataStates.join(), "AppDataDeletion.cause": [...core.deleteCauses, null].join(),
 };

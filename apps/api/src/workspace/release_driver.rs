@@ -74,9 +74,9 @@ use podster_core::release_uncertain::{
 pub(crate) const INTERNAL_RELEASE_DRIVE: &str = "/internal/release-drive";
 
 /// `last_code` while the driver does nothing: the deployment doesn't allow release, or the release path is closed.
-const IDLE: &str = "release_driver_idle";
+const IDLE: &str = podster_core::release_driver::DRIVER_IDLE;
 /// `last_code` while an upload waits for the room's hourly upload attempts to leave room for it.
-const UPLOAD_ATTEMPTS: &str = "release_upload_attempts";
+const UPLOAD_ATTEMPTS: &str = podster_core::release_driver::UPLOAD_ATTEMPTS_WAITING;
 /// What a step answers, as `waiting`, when its lease ran out before it was done: it asked nothing more and wrote
 /// nothing from there.
 pub(super) const LEASE_LOST: &str = "release_drive_lease_lost";

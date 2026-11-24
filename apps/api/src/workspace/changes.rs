@@ -27,8 +27,8 @@ use crate::github::{
 use podster_core::provider_deliveries::{poll_wait_ms, read_allowed, stale, ChangeWatch, Stale};
 use podster_core::rate_limit::limit_repeated_after_reset;
 use podster_core::release_status::{
-    release_report, report, summarize_checks, AttemptHeld, CheckSeen, ChecksReport, HostHeld,
-    ReleaseReport, StopSeen,
+    release_report, release_waiting, report, summarize_checks, AttemptHeld, CheckSeen,
+    ChecksReport, HostHeld, JobHeld, ReleaseReport, ReleaseWaiting, StopSeen,
 };
 use podster_core::repo_merge::{ObservedMerge, PullState};
 use podster_core::repositories::{
@@ -1476,9 +1476,24 @@ fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bo
                 (true, Some(label), Some(domain)) => json!(format!("https://{label}.{domain}/")),
                 _ => Value::Null,
             };
+            // Why it waits, a word from core's closed set, only while it does: never the job's code itself.
+            let job = rows(
+                sql,
+                "SELECT leased_step, last_code FROM release_job WHERE release_id = ?",
+                vec![id.into()],
+            )?;
+            let waiting = release_waiting(
+                state,
+                job.first().map(|row| JobHeld {
+                    leased: !row["leased_step"].is_null(),
+                    last_code: row["last_code"].as_str(),
+                }),
+            )
+            .map(ReleaseWaiting::name);
             json!({
                 "exists": true, "release_id": id, "commit_sha": commit, "state": state.name(),
                 "observed_at": observed_at, "failure_code": failure_code, "served": served, "result_url": result_url,
+                "waiting": waiting,
             })
         }
     })

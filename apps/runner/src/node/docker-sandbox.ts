@@ -365,8 +365,12 @@ export class DockerSandbox implements TaskSandbox {
         chosen = await this.toolchainImage(spec.toolchains, signal);
       } catch (error) {
         if (signal.aborted) throw new Error("halted");
-        // Runner's own fixed message for the step that failed, for the diagnostics file; Docker's output never.
-        throw new DetailedError(TOOLCHAIN_IMAGE_UNAVAILABLE, { stderr: error instanceof Error ? error.message : "" });
+        // Runner's own fixed message for the step that failed, for the diagnostics file, and for a failed build the tail
+        // of Docker's error output after it (redacted there, never logged), so a person can see which fetch failed.
+        const message = error instanceof Error ? error.message : "";
+        if (error instanceof DetailedError && typeof error.detail.stderr === "string" && error.detail.stderr !== "")
+          throw new DetailedError(TOOLCHAIN_IMAGE_UNAVAILABLE, { stderr: `${message}\n${error.detail.stderr}`, exit_code: error.detail.exit_code, cut: error.detail.cut });
+        throw new DetailedError(TOOLCHAIN_IMAGE_UNAVAILABLE, { stderr: message });
       }
       if (!IMAGE_ID.test(chosen)) throw new Error(TOOLCHAIN_IMAGE_UNAVAILABLE);
       image = chosen;

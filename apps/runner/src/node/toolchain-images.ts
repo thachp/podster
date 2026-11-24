@@ -21,6 +21,14 @@
  *   or `x86_64` for Rust and Python, `arm64` or `x64` for .NET, `aarch64` or `x64` for Java: `TOOLCHAIN_ARCH`), and
  *   fetches only that architecture's tarballs; any other architecture refuses the build.
  *
+ * - **Retried, a few times.** Every toolchain is fetched by the build's own `ADD` from its download sites, which can
+ *   answer slowly, refuse for a while (a rate limit) or drop a connection. A build Docker ran and that failed is run
+ *   again after `BUILD_RETRY_DELAYS_MS`, three tries in all; one that timed out or was stopped, or that made an image
+ *   Runner refuses, is not. Every pin and checksum in the Dockerfile is checked on every try.
+ * - **The failing build's output kept.** A build that fails on its last try stops with the fixed message and keeps the
+ *   last `BUILD_OUTPUT_TAIL_BYTES` of Docker's error output in its detail, which goes only to the local diagnostics file,
+ *   redacted there (`diagnostics.ts`), as a failed `docker run` does: never a log line, Podster or the network.
+ *
  * The `docker` program goes through Runner's own `DockerCli`. Nothing from the task or Podster reaches a build: the names
  * are the policy's known toolchains, and every argument is fixed or an image ID.
  */
@@ -28,6 +36,7 @@ import { createHash } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DetailedError } from "../core/errors.js";
 import { isToolchainList, TOOLCHAIN_INFO, type Toolchain } from "../core/toolchains.js";
 import { IMAGE_ID, type DockerCli } from "./docker-sandbox.js";
 import { noSuchImage } from "./image-pin.js";
@@ -49,6 +58,30 @@ export const BASE_TAG = "podster-runner-base";
 const RECIPE_VERSION = "podster-runner-toolchain-v1";
 /** A build's bound: Rust's tarballs and Debian's packages take minutes on a slow link. */
 const BUILD_TIMEOUT_MS = 30 * 60_000;
+/** The waits before a failed build's second and third tries. */
+export const BUILD_RETRY_DELAYS_MS: readonly number[] = Object.freeze([15_000, 45_000]);
+/** How much of a failed build's error output its detail keeps: the end, where Docker names the step and the cause. */
+export const BUILD_OUTPUT_TAIL_BYTES = 4096;
+
+/** A wait that ends early, and quietly, when `signal` is aborted. */
+const pause = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+
+/** The last `max` bytes of `text`, without half a character. */
+export function tailOf(text: string, max = BUILD_OUTPUT_TAIL_BYTES): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength <= max) return text;
+  return `[cut]${bytes.subarray(bytes.byteLength - max).toString("utf8").replace(/\uFFFD/g, "")}`;
+}
 
 /** The pin file for a sorted set of toolchains, such as `toolchain-image-python-rust`. */
 export const pinName = (set: readonly Toolchain[]) => `toolchain-image-${set.join("-")}`;
@@ -59,7 +92,7 @@ const words = (set: readonly Toolchain[]) => {
 };
 /** The fixed line said before a build. */
 export const buildingLine = (set: readonly Toolchain[]) => `Building Runner's task image with the ${words(set)} toolchain${set.length === 1 ? "" : "s"}, from its packaged Dockerfile${set.length === 1 ? "" : "s"}, for a room that names ${set.length === 1 ? "it" : "them"}. This happens once and takes a few minutes.`;
-/** The fixed messages a failure stops with. Docker's own output never reaches them. */
+/** The fixed messages a failure stops with. Docker's own output never reaches them; a failed build keeps it in its detail. */
 export const TOOLCHAIN_BUILD_FAILED = "Runner couldn't build a toolchain image, so the run didn't start. Check that Docker Desktop is running and this machine can reach the toolchain's download sites, then try again.";
 export const TOOLCHAIN_INSPECT_FAILED = "Runner couldn't check a toolchain image with Docker, so the run didn't start. Check that Docker Desktop is running, then try again.";
 export const TOOLCHAIN_PIN_INVALID = "A toolchain image pin in Runner's home isn't an image ID (sha256:…), so the run didn't start. Remove the toolchain-image-… file named for the room's toolchains, and Runner builds it again.";
@@ -129,7 +162,16 @@ async function engineArch(docker: DockerCli, signal?: AbortSignal): Promise<stri
   return ARCHES[arch];
 }
 
-type Opts = { home: string; docker: DockerCli; notify: (line: string) => void; base: string; signal?: AbortSignal; readSource?: (name: Toolchain) => Promise<Buffer> };
+type Opts = {
+  home: string;
+  docker: DockerCli;
+  notify: (line: string) => void;
+  base: string;
+  signal?: AbortSignal;
+  readSource?: (name: Toolchain) => Promise<Buffer>;
+  /** The wait between a failed build's tries; tests pass one that doesn't wait. */
+  wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+};
 /** How a step runs: `run` with the signal its build should end on. The default runs it at once, on the caller's signal. */
 export type StepGate = (pin: string, run: (signal: AbortSignal | undefined) => Promise<string>) => Promise<string>;
 
@@ -152,9 +194,20 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
   const tag = `${BASE_TAG}:${parent.slice("sha256:".length)}`;
   const tagged = await opts.docker(["tag", parent, tag], { signal: opts.signal, timeoutMs: 60_000, maxOutputBytes: 4096 });
   if (tagged.code !== 0) throw new Error(TOOLCHAIN_BUILD_FAILED);
-  const built = await opts.docker(["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${TOOLCHAIN_ARCH[name][arch]}`, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]], { signal: opts.signal, timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
+  const args = ["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${TOOLCHAIN_ARCH[name][arch]}`, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]];
+  const build = () => opts.docker(args, { signal: opts.signal, timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
+  let built = await build();
+  // A build Docker ran and that failed, most often a download site refusing or dropping a fetch, is tried again; one
+  // killed (-1: its time limit or a stop) or stopped by the caller isn't.
+  for (const delay of BUILD_RETRY_DELAYS_MS) {
+    if (built.code === 0 || built.code === -1 || opts.signal?.aborted) break;
+    await (opts.wait ?? pause)(delay, opts.signal);
+    if (opts.signal?.aborted) break;
+    built = await build();
+  }
+  if (built.code !== 0) throw new DetailedError(TOOLCHAIN_BUILD_FAILED, { exit_code: built.code, stderr: tailOf(built.stderr), cut: built.cut });
   const id = built.stdout.trim();
-  if (built.code !== 0 || built.cut || !IMAGE_ID.test(id)) throw new Error(TOOLCHAIN_BUILD_FAILED);
+  if (built.cut || !IMAGE_ID.test(id)) throw new Error(TOOLCHAIN_BUILD_FAILED);
   // Exactly the parent plus this toolchain's layers, with this recipe, whatever the tag named during the build.
   if (!fits(await inspect(opts.docker, id, opts.signal))) throw new Error(TOOLCHAIN_BUILD_FAILED);
   await rm(path, { force: true });

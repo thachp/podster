@@ -1,0 +1,14 @@
+{
+  // The demo: a static Worker that serves only index.html at demo.podster.dev. It has no code, no bindings and no secret,
+  // and it talks to nothing of Podster's. Deploy with `npm run deploy` (README.md).
+  //
+  // No account_id: the account that holds podster.dev comes from CLOUDFLARE_ACCOUNT_ID at deploy time, as for staging
+  // (docs/staging.md), and its ID is never written in this repository.
+  "name": "podster-demo",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "demo.podster.dev", "custom_domain": true }],
+  // Only public/ is served: its _headers, and the copy of index.html that `npm run deploy` puts there.
+  "assets": { "directory": "./public", "not_found_handling": "single-page-application" }
+}

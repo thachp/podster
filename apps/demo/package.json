@@ -1,0 +1,11 @@
+{
+  "name": "podster-demo",
+  "private": true,
+  "scripts": {
+    "check": "node check.cjs",
+    "deploy": "node check.cjs && cp index.html public/index.html && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.157.0"
+  }
+}

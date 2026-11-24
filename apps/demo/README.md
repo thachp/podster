@@ -2,7 +2,9 @@
 
 A clickable prototype of Podster's web app. It's one static HTML file with no build step and no backend: every screen, click and state is mocked in the page.
 
-It isn't a spec. Settled behavior lives in `docs/spec/`; where this demo and a spec disagree, the spec wins. It isn't deployed anywhere.
+It isn't a spec. Settled behavior lives in `docs/spec/`; where this demo and a spec disagree, the spec wins.
+
+It's live at https://demo.podster.dev, served as static files by the `podster-demo` Worker. It talks to nothing of Podster's, and search engines are asked not to index it.
 
 ## Open it
 
@@ -29,6 +31,20 @@ Buttons marked "Demo · …" fake something that would happen elsewhere, such as
 - A monochrome shell. Orange means only "this needs you".
 - One working column per page. Detail and review panels open as a wide sheet on the right, not a dialog.
 - Agent content is data. Markdown from agents renders as text, and their links show the address instead of being clickable.
+
+## Deploy it
+
+The Worker is on the Cloudflare account that holds `podster.dev`. Only `public/` is served: its `_headers` (a strict content security policy, no framing, `noindex`) and the copy of `index.html` the deploy script puts there.
+
+```bash
+npm ci
+```
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=$(cat ~/.podster/cloudflare-account-id.staging) npm run deploy
+```
+
+`npm run deploy` runs `check.cjs` first and stops if it fails. Deploying is a person's call, as for staging.
 
 ## Check it after a change
 

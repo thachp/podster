@@ -997,7 +997,7 @@ function taskPage(sheet) {
   const nextCard = (need, kind, body, btns) => '<div class="next' + (need ? ' need' : '') + '"><span class="kind">' + (need ? '<span class="dot" style="background:var(--need)"></span>' : '') + kind + '</span>' + (body ? '<span class="nbody">' + body + '</span>' : '') + (btns ? '<div class="nbtns">' + btns + '</div>' : '') + '</div>';
   const next = qOpen ? nextCard(true, 'Coding Agent asks you', Q_TEXT, Q_OPTS.map((o, i) => '<button class="btn" data-act="answer" data-i="' + i + '">' + o + '</button>').join('') + '<a class="btn ghost" href="#t-talk" data-act="focus-draft">Write an answer</a>')
     : t.blocked ? nextCard(true, t.blocked, t.blockedWhy, act)
-      : t.stage === 'review' ? nextCard(true, 'Ready for you to check', 'Coding Agent finished it 30 minutes ago.', act.replace('class="btn need"', 'class="btn need"'))
+      : t.stage === 'review' ? nextCard(true, 'Ready for you to check', 'Coding Agent finished it 30 minutes ago.', act)
         : t.ship === 'ready' ? nextCard(false, 'Approved, not live yet', 'Customers see it when you release.', act)
           : t.id === 20 && t.stage === 'planned' ? nextCard(false, 'Waiting for a tester', 'Nobody fills QA yet.', act)
             : t.stage === 'building' ? nextCard(false, 'Being built', t.who + ' \u00b7 ' + t.when + '. You\'ll be asked to check it when it\'s done.', '')

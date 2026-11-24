@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, deployGrantProblem, EXIT, fixedHeaderProblems, LABEL, markerBody, markerProblem, maskedPath, parseArgs, PLAN, REFUSED_SITE, resultUrlProblem, runOutcome, SIGN_UPS, SITE, STAGING,
-  statusProblems, Tally, unknownLabel,
+  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, deployGrantProblem, EXIT, fixedHeaderProblems, HOST_CHANGE_SECONDS, KV_CACHE_SECONDS, LABEL, markerBody, markerProblem, markerWaitState, maskedPath, parseArgs, PLAN, REFUSED_SITE, resultUrlProblem, runOutcome, SIGN_UPS, SITE, STAGING,
+  stateAfterUnpublish, statusProblems, Tally, unknownLabel, WAITS,
 } from "./m6-release-staging-lib.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
@@ -105,6 +105,17 @@ const withoutDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, e
   check(markerBody(rel, sha) === `{"release_id":"${rel}","commit":"${sha}"}\n`, "the marker is what the release job writes");
   check(markerProblem({ status: 200, body: markerBody(rel, sha) }, rel, sha) === null, "the right marker passes");
   check(markerProblem({ status: 200, body: markerBody(rel, "c".repeat(40)) }, rel, sha) !== null && markerProblem({ status: 404, body: "" }, rel, sha) !== null, "another commit's marker, or none, fails");
+  // The path in parts: the content Worker's config test counts the scripts here that name its folder and start it.
+  const handle = readFileSync(join(here, "..", "apps", "content", "src", "handle.ts"), "utf8");
+  check(handle.match(/^export const KV_CACHE_SECONDS = (\d+);$/m)?.[1] === String(KV_CACHE_SECONDS), "the edge cache the waits are sized from is the content Worker's KV_CACHE_SECONDS");
+  check(WAITS["--takedown-wait"][1] >= HOST_CHANGE_SECONDS + 30, "the default host wait outlasts the edge cache and KV's propagation, with margin");
+  check(markerWaitState({ status: 200, body: markerBody(rel, sha) }, rel, sha) === "named", "a re-served host's marker naming the new release ends the wait");
+  check(["", "not_found"].every((body) => markerWaitState({ status: 404, body }, rel, sha) === "waiting") && markerWaitState({ status: 502, body: "" }, rel, sha) === "waiting", "a cached not found, or another error, is waited out");
+  check(markerWaitState({ status: 200, body: markerBody(`rel_${"d".repeat(32)}`, sha) }, rel, sha) === "another" && markerWaitState({ status: 200, body: markerBody(rel, "c".repeat(40)) }, rel, sha) === "another", "a served marker naming an old release, or another commit, is never waited out");
+  check(stateAfterUnpublish("served") === "unpublished" && stateAfterUnpublish("live") === "unpublished", "a served or live release ends unpublished");
+  check(["queued", "uploading", "uncertain"].every((state) => stateAfterUnpublish(state) === "failed"), "a release still on its way ends failed");
+  check(["declined", "failed", "replaced", "unpublished"].every((state) => stateAfterUnpublish(state) === state), "an ended release stays as it ended");
+  check(stateAfterUnpublish("awaiting_approval") === null && stateAfterUnpublish(undefined) === null, "a release awaiting approval, or none, isn't judged");
   check(maskedPath(`https://${host}/.well-known/podster-release.json`) === `https://[app host].${CONTENT_DOMAIN}/.well-known/podster-release.json` && !maskedPath(`https://${host}/`).includes(label), "request lines never name an app's label");
   check(maskedPath(`${STAGING}/api/v1/me?x=1`) === "/api/v1/me", "request lines carry no query");
   const fixed = [["referrer-policy", "no-referrer"], ["x-content-type-options", "nosniff"], ["strict-transport-security", "max-age=31536000; includeSubDomains"], ["content-security-policy", "sandbox allow-scripts; default-src https://x"]];

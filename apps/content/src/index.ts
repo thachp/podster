@@ -1,7 +1,7 @@
 // The content Worker's entry (M6 step 4(b), ADR 0010). Its bindings are the serve entries, to read, the dispatch
 // namespace, and its own write counter's namespace (stage 1, S6); its variables are the content domain's name and the
-// write cap's two settings. It holds no binding to the gateway, the API, D1 or R2, and no secret. It logs nothing for
-// a request.
+// write cap's two settings. It holds no binding to the gateway, the API, D1 or R2, and no secret. It logs one line for
+// a dispatch that failed, its class and the release's ID, and nothing else of a request.
 import { capFromSettings } from "./budget";
 import { WriteCounter, writeCounter } from "./counter";
 import { CODE_APPS_ENABLED, handle, type StopMemory } from "./handle";
@@ -41,6 +41,8 @@ export default {
       // Asked only for a write to a host with code, which the switch keeps from getting this far. Either setting
       // missing or malformed is no cap, and every write is refused.
       writes: writeCounter(env.WRITE_COUNTER, capFromSettings(env.WRITE_BUDGET_WRITES, env.WRITE_BUDGET_WINDOW_MS)),
+      // The one line logged, for a failed dispatch: its two fields, built in the handler, and nothing else.
+      log: (line) => console.log(JSON.stringify({ event: line.event, release: line.release })),
     });
   },
 } satisfies ExportedHandler<Env>;

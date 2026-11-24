@@ -31,10 +31,12 @@ type World = {
   budget: Admission;
   /** The order in which the counter and the app were asked. */
   order: ("count" | "dispatch")[];
+  /** Every line logged. */
+  logged: unknown[];
 };
 
 function world(): World {
-  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, counted: [], budget: { ok: true }, order: [], deps: undefined as unknown as Deps };
+  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, counted: [], budget: { ok: true }, order: [], logged: [], deps: undefined as unknown as Deps };
   w.apps.set(SCRIPT, () => new Response("<h1>app</h1>", { headers: { "content-type": "text/html" } }));
   w.deps = {
     entries: {
@@ -68,6 +70,7 @@ function world(): World {
         return w.budget;
       },
     },
+    log: (line) => w.logged.push(line),
   };
   return w;
 }
@@ -498,6 +501,41 @@ describe("asking the app", () => {
     // A HEAD gets the same, with no body.
     const head = await get(w, "/", { method: "HEAD" });
     expect([head.status, await head.text()]).toEqual([404, ""]);
+  });
+
+  it("logs each failed dispatch as its class and its release's ID, and nothing else of the request or the error", async () => {
+    const RELEASE = SCRIPT.slice(SCRIPT.indexOf(".") + 1);
+    const w = world();
+    // A dispatch that answers logs nothing.
+    expect([(await get(w)).status, w.logged]).toEqual([200, []]);
+    // A message that carries things that must never reach a log: a host, a path, a header, a token.
+    const secret = `failed for ${HOST}/private/path?token=abc cookie: a=b`;
+    w.apps.set(SCRIPT, () => { throw new Error(secret); });
+    await get(w, "/private/path?token=abc", { headers: { cookie: "a=b", accept: "text/html" } });
+    w.apps.delete(SCRIPT);
+    await get(w, "/other", { method: "HEAD" });
+    w.deps.apps = { get: () => { throw new Error(secret); } };
+    await get(w);
+    expect(w.logged).toEqual([
+      { event: "dispatch_error", release: RELEASE },
+      { event: "dispatch_missing", release: RELEASE },
+      { event: "dispatch_error", release: RELEASE },
+    ]);
+    for (const line of w.logged) {
+      expect(Object.keys(line as object).sort()).toEqual(["event", "release"]);
+      const text = JSON.stringify(line);
+      for (const word of [HOST, "k3v9q2", DOMAIN, "/private", "token", "cookie", "failed", "text/html"]) expect(text, word).not.toContain(word);
+    }
+    // A host with code logs its failures the same way.
+    const c = codeWorld();
+    c.apps.set(SCRIPT, () => { throw new Error(secret); });
+    await get(c, "/api/items", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+    expect(c.logged).toEqual([{ event: "dispatch_error", release: RELEASE }]);
+    // A log that fails changes no answer.
+    const f = world();
+    f.apps.delete(SCRIPT);
+    f.deps.log = () => { throw new Error("log down"); };
+    expect((await get(f)).status).toBe(404);
   });
 
   it("never answers a taken-down app's host with an error while a cached entry still names its deleted script", async () => {

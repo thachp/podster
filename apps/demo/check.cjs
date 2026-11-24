@@ -70,7 +70,7 @@ location.hash = '#k-home'; __t.fromHash(); if (html.indexOf('A test failed') < 0
 console.log('K-OK');
 // Rules page
 __t.S.palette = false; __t.S.modal = null; location.hash = '#rules'; __t.fromHash();
-if (html.indexOf('Websites agents can reach') < 0 || html.indexOf('registry.npmjs.org') < 0 || html.indexOf('href="#rules"') < 0) throw new Error('rules');
+if (html.indexOf('Websites agents can reach') < 0 || html.indexOf('data-act="pol-host-rm" data-i="1"') < 0 || html.indexOf('href="#rules"') < 0) throw new Error('rules');
 __t.S.policy.draft = { join: 'ask', propose: true }; __t.render(); if (html.indexOf('savebar') < 0 || html.indexOf('Save 2 changes') < 0 || html.indexOf('Accept proven agents') < 0 || html.indexOf('Not available in public rooms') < 0) throw new Error('rules draft');
 __t.S.policy.draft = null; location.hash = '#team'; __t.fromHash(); if (html.indexOf('href="#rules"') < 0) throw new Error('team link');
 console.log('RULES-OK');

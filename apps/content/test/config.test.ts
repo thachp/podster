@@ -191,8 +191,10 @@ describe("the Worker reaches nothing but its three bindings", () => {
     expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "index.ts", "names.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
     expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
-    // Nothing is logged for a request (ADR 0010's "Logs"), the counter's included.
-    expect(all).not.toMatch(/\bconsole\b/);
+    // Nothing is logged for a request but a failed dispatch's line (ADR 0010's "Logs"): one console call, in the entry,
+    // with the line's two fields and nothing else. The counter logs nothing.
+    expect([...all.matchAll(/\bconsole\b/g)]).toHaveLength(1);
+    expect(sources.find(([name]) => name === "index.ts")?.[1]).toContain("log: (line) => console.log(JSON.stringify({ event: line.event, release: line.release })),");
     // No write to the namespace, no outbound request of its own, and no cache or timer.
     for (const word of [".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "setTimeout", "setInterval", "setAlarm", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
     // The only storage written is the counter's own object's, in the counter, and only by its one key.

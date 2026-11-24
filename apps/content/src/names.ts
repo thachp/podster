@@ -104,6 +104,11 @@ export function isWrittenHost(host: string): boolean {
   }
 }
 
+/** The release's ID a script's name ends with, `rel_` and 32 hex digits, or null if it isn't a script's name. */
+export function scriptRelease(script: string): string | null {
+  return isScriptName(script) ? script.slice(script.indexOf(".") + 1) : null;
+}
+
 /** The label a script's name begins with, or null if it isn't a script's name. */
 export function scriptLabel(script: string): string | null {
   return isScriptName(script) ? script.slice(0, script.indexOf(".")) : null;

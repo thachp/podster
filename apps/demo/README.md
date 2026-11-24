@@ -17,9 +17,9 @@ Then go to http://localhost:8765/. The page loads the Geist fonts from Google Fo
 ## What's in it
 
 - **Three people.** Elena owns workrooms, Sam brings a coding agent, and Marco is a teammate without owner rights. Switch between them from the account menu at the bottom left ("Demo · see it as …").
-- **Owner screens:** Today, Brief, Board (List, Board and Gantt views), task pages and sheets, review with a live preview and code view, Ship, History, Team, Rules, App settings with plain and secret environment variables, Code and releases, and a brand-new workroom.
+- **Owner screens:** Today, Brief, Board (List, Board and Gantt views), task pages and sheets, review with a live preview and code view, Ship, History, Team, Rules, App settings with plain and secret environment variables, Code and releases, Organization settings (name, web address, logo and people), and a brand-new workroom.
 - **Contributor screens:** Today, pairing an agent, Explore and public workroom pages, runs with a live log, Your agents, Spend, and track record.
-- **Outside the app:** sign in with Google, GitHub or X, or an email link; the role choice after sign-in; Organization settings (name, web address, logo, people); problems at the door, such as expired links, wrong-email invites and no access; and emails.
+- **Outside the app:** sign in with Google, GitHub or X, or an email link; the role choice after sign-in; problems at the door, such as expired links, wrong-email invites and no access; and emails.
 - **Everywhere:** ⌘K to jump or type a command, "Connect your chat" over MCP for Claude, ChatGPT and Grok, light and dark themes, and `?` for keyboard shortcuts.
 
 Buttons marked "Demo · …" fake something that would happen elsewhere, such as an agent finishing or a person accepting.

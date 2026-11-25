@@ -622,9 +622,10 @@ fn a_code_release_that_fails_cores_checks_fails_by_its_first_problems_code_and_i
 
 #[test]
 #[allow(clippy::assertions_on_constants)]
-fn the_gate_for_apps_with_code_is_closed_and_one_constant() {
-    // Flipped only by the PR that shows stage 1's "before code is turned on" items (the M6 plan's gate).
-    assert!(!CODE_RELEASES_COMPLETE);
+fn the_gate_for_apps_with_code_is_open_and_one_constant() {
+    // Opened 2026-11-25 by the PR that cites spike H for stage 1's four "before code is turned on" items (the M6
+    // plan's gate). Setting it back to false closes code again; `admit`'s closed path is tested below either way.
+    assert!(CODE_RELEASES_COMPLETE);
     assert_eq!(
         CodeProblem::CodeNotAvailable.code(),
         "release_code_not_available"
@@ -677,4 +678,54 @@ fn open_the_gate_answers_the_upload_form_unchanged() {
         admit(refused, true).map_err(|p| p.code()),
         Err("release_module_kind")
     );
+}
+
+#[test]
+fn the_assets_configuration_is_fixed_and_never_runs_an_apps_script_first() {
+    // Spike H, item 1: the marker's static file is served before an app's script only while the upload never sends
+    // `run_worker_first`. The configuration is one constant, exactly these two keys and values.
+    assert_eq!(
+        ASSETS_CONFIG,
+        r#"{"html_handling":"auto-trailing-slash","not_found_handling":"none"}"#
+    );
+    assert_eq!(ASSETS_CONFIG_KEYS, ["html_handling", "not_found_handling"]);
+    let keys: Vec<&str> = ASSETS_CONFIG
+        .split('"')
+        .enumerate()
+        .filter(|(i, part)| i % 4 == 1 && !part.is_empty())
+        .map(|(_, part)| part)
+        .collect();
+    assert_eq!(keys, ASSETS_CONFIG_KEYS);
+    assert!(!ASSETS_CONFIG.contains("run_worker_first"));
+    assert!(!ASSETS_CONFIG.contains("worker"));
+}
+
+#[test]
+fn a_manifest_can_never_set_the_assets_configuration_or_run_worker_first() {
+    // Neither as a key of its own nor inside `assets`: each is refused as configuration, and so nothing in a
+    // release's files reaches the metadata Podster writes.
+    for bytes in [
+        &br#"{"main":"index.js","store":true,"run_worker_first":true}"#[..],
+        br#"{"main":"index.js","store":true,"assets":{"run_worker_first":true}}"#,
+        br#"{"main":"index.js","store":true,"assets":{"config":{"run_worker_first":["/*"]}}}"#,
+    ] {
+        let codes: Vec<_> = parse_manifest(bytes)
+            .unwrap_err()
+            .iter()
+            .map(CodeProblem::code)
+            .collect();
+        assert!(
+            codes == ["release_manifest_config"] || codes == ["release_manifest_unreadable"],
+            "{}: {codes:?}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    assert!(CONFIG_KEYS.contains(&"run_worker_first"));
+    assert!(CONFIG_KEYS.contains(&"assets"));
+    // And the release with such a manifest fails whole, never uploaded.
+    assert!(upload_form(
+        &plan(app(vec![])),
+        Some(br#"{"main":"index.js","store":true,"run_worker_first":true}"#)
+    )
+    .is_err());
 }

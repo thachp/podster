@@ -724,9 +724,14 @@ describe("the upload's own boundaries", () => {
       ['"compatibility_date\\":', '"compatibility_flags\\":'],
       ['"bindings\\":', '"compatibility_date\\":', '"compatibility_flags\\":', '"main_module\\":'],
     ]);
-    // The assets configuration is one constant, with two fields and nothing a repository could reach.
-    expect(source.match(/const ASSETS_CONFIG: &str =\s*r#"([^#]+)"#;/)?.[1]).toBe('{"html_handling":"auto-trailing-slash","not_found_handling":"none"}');
-    expect(source.match(/ASSETS_CONFIG/g)).toHaveLength(3);
+    // The assets configuration is core's one constant, with two fields and nothing a repository could reach (its value
+    // and the rule that it never runs an app's script first are core's tests), used in one place here.
+    expect(source).toContain("const ASSETS_CONFIG: &str = podster_core::app_code::ASSETS_CONFIG;");
+    expect(source.match(/\{ASSETS_CONFIG\}/g)).toHaveLength(1);
+    // Spike H, item 1: the marker's static file comes before an app's script only while no upload sends
+    // `run_worker_first`. No code of the API names it, outside its comments, so no code path can write it.
+    const code = (text: string) => text.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+    for (const [path, text] of Object.entries(sources)) expect(code(text), path).not.toMatch(/run_worker_first|runWorkerFirst/i);
     for (const word of ["durable_objects", "kv_namespaces", "d1_databases", "migrations", "compatibility_flags\\\":[\"", "tail_consumers"]) expect(source, word).not.toContain(word);
     // The test-only switches are compiled only into test builds.
     for (const name of ["test_release_upload_provider", "test_release_upload_before_check", "test_release_upload_clock"]) {

@@ -87,7 +87,8 @@ pub(super) const NOT_UPLOADED: &str = "release_not_uploaded";
 /// switched on and a provider configured refuses every release command (`Workspace::release_path_open`). What had to
 /// be true before it was flipped is in `docs/m6-plan.md`, under "The gate on the release path". **Flipped on
 /// 2026-11-23, for static sites only:** a release that carries code is refused `release_code_not_available` by its
-/// own gate, `podster_core::app_code::CODE_RELEASES_COMPLETE`, still false, and no store is made while that is false.
+/// own gate, `podster_core::app_code::CODE_RELEASES_COMPLETE`, then false, and no store is made while that is false
+/// (*opened 2026-11-25*).
 /// Flipping this serves nothing by itself: `RELEASES` and a provider are each the owner's to set.
 pub(crate) const RELEASE_PATH_COMPLETE: bool = true;
 

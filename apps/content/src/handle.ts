@@ -4,6 +4,8 @@
 // not-found, or for a method other than GET and HEAD, today's refusal of that method: it fails closed.
 //
 // For each request:
+//   0. A path where a certificate authority validates a name (`isValidationPath`) is this Worker's own not-found, on
+//      every host, over HTTP and HTTPS, for every method, before anything else: nothing is read and no app is asked.
 //   1. A GET or HEAD that carries a `Service-Worker` header is refused.
 //   2. The host must be an app's default host, `<label>.<content domain>`, or a custom hostname: a host off the content
 //      domain (step 8c). Any other name on the content domain, anything that isn't a host, and every host while no
@@ -53,6 +55,20 @@ import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, check
  * variable or setting, so no configuration can turn it either way; the package's configuration test holds it so.
  */
 export const CODE_APPS_ENABLED: boolean = true;
+
+// The two folders a certificate authority reads on a name to validate it over HTTP: ACME's HTTP-01 and the PKI file
+// method. Since the content zone routes every host here (`*/*`, M6 step 8c), a custom hostname's validation would reach
+// this Worker, and an app answering it could get a certificate issued for a customer's name. So no request at or under
+// them is ever sent to an app, on any host. The zone also has routes on these paths that run no Worker
+// (`scripts/deploy-content`), so Cloudflare's edge answers its own validations; this is the second lock.
+// `podster_core::release_tree`'s `VALIDATION_DIRECTORIES` keeps a release from holding files there, the third.
+export const VALIDATION_PATHS = ["/.well-known/acme-challenge", "/.well-known/pki-validation"] as const;
+
+/** Whether a request's path is at or under one of `VALIDATION_PATHS`, in any case, as the URL parser hands it over. */
+export function isValidationPath(pathname: string): boolean {
+  const path = pathname.toLowerCase();
+  return VALIDATION_PATHS.some((dir) => path === dir || path.startsWith(`${dir}/`));
+}
 
 /** How long a read of a serve entry or of the stop may be cached where it was read: the shortest a read may ask for. */
 export const KV_CACHE_SECONDS = 30;
@@ -429,6 +445,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   // Learned once the entry is confirmed, so an error after it is answered as that kind of host's own.
   let kind: HostKind | null = null;
   try {
+    // Never an app's to answer, on any host or scheme, and before the redirect to HTTPS: see `VALIDATION_PATHS`.
+    if (isValidationPath(url.pathname)) return notFound(request, site);
     const read = isRead(request.method);
     // Any other method is refused as it always was, unless the host is confirmed to have code: so a static host, and
     // anything that isn't confirmed, gets exactly today's answer.

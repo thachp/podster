@@ -182,6 +182,49 @@ fn the_platforms_names_and_the_marker_are_refused_anywhere() {
 }
 
 #[test]
+fn nothing_is_served_where_a_certificate_authority_validates_a_name() {
+    // HTTP-01 and the PKI file method read these two folders on the name being validated. A room's release must hold
+    // nothing there, so its content can't answer a validation for a custom hostname (M6 step 8c, the `*/*` route).
+    assert_eq!(
+        VALIDATION_DIRECTORIES,
+        [".well-known/acme-challenge", ".well-known/pki-validation"]
+    );
+    for path in [
+        ".well-known/acme-challenge",
+        ".well-known/acme-challenge/token",
+        ".well-known/acme-challenge/deep/token.html",
+        ".well-known/pki-validation",
+        ".well-known/pki-validation/fileauth.txt",
+        ".WELL-KNOWN/ACME-CHALLENGE/token",
+        ".well-known/Pki-Validation/x.txt",
+        // Served at the folder's own address once `.html` is stripped.
+        ".well-known/acme-challenge.html",
+        ".well-known/pki-validation.html",
+    ] {
+        assert!(refused_name(path), "{path}");
+        assert!(
+            problems(&[file(path, 1), file("index.html", 1)])
+                .contains(&ContentProblem::RefusedName(path.to_owned())),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        ContentProblem::RefusedName(".well-known/acme-challenge/x".into()).code(),
+        "release_refused_name"
+    );
+    // Neighbours that aren't those folders pass.
+    for fine in [
+        ".well-known/acme-challengex",
+        ".well-known/pki-validation.txt",
+        "acme-challenge/token",
+        "x/.well-known/acme-challenge/token",
+        ".well-known/security.txt",
+    ] {
+        assert!(!refused_name(fine), "{fine}");
+    }
+}
+
+#[test]
 fn only_files_and_directories_pass_and_symlinks_and_submodules_fail() {
     let plan = check_release_tree(
         &[

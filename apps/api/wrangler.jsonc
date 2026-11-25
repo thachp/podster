@@ -83,6 +83,10 @@
         // undecided and takes nothing down (docs/staging.md, "Switching release off for the deployment"). Nothing is
         // served until the owner also sets the content provider's secrets. Production needs its own yes.
         "RELEASES": "true",
+        // The DNS-over-HTTPS resolver a custom hostname's proof and recheck ask (M6 step 8), staging only: a test fails
+        // if the top level or any other environment sets it. Ruled by the architect on 2026-11-23 (#565, after spike G).
+        // The Public Suffix List isn't a setting: it is compiled in from third_party/public-suffix-list.
+        "HOSTNAME_RESOLVER_URL": "https://cloudflare-dns.com/dns-query",
         "GITHUB_ORG_LOGIN": "podsterdev",
         "GITHUB_ORG_ID": "354820586",
         "GITHUB_PROVISION_APP_ID": "5695065",

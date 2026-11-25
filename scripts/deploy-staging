@@ -23,6 +23,9 @@ It refuses, before changing anything, unless:
     build needs. When rustup is on PATH, that toolchain is put first on PATH (scripts/lib/rust-toolchain.sh),
     ahead of any other rustc, such as Homebrew's; nothing is installed, so a missing one is refused
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
+  - the Public Suffix List snapshot the API compiles in passes scripts/public-suffix-list check: its
+    recorded SHA-256, its MPL-2.0 header and both sections, and at most 90 days old. From 60 days
+    it deploys with the check's warning printed
   - apps/api/wrangler.jsonc's staging variables don't switch MANAGED_REPOSITORIES on without a
     well-formed REPOSITORY_REQUESTERS beside it (scripts/requesters-rule.mjs). Unset, that list
     means everyone, and staging's sign-in is open to anyone. Only the file is read: a variable
@@ -30,7 +33,7 @@ It refuses, before changing anything, unless:
   - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
     run is looked into, not deployed
   - the API Worker on staging holds no secret named as a setting the API reads as plain configuration,
-    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_SUFFIX_RULES, PUBLIC_ROOMS or MANAGED_REPOSITORIES.
+    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_ROOMS or MANAGED_REPOSITORIES.
     The API reads those through env.var and crate::setting, which take a secret too, so one would switch
     a feature on and survive every deploy. The names come from apps/api/src (scripts/setting-names.mjs),
     and the secrets from a read-only list of staging's API Worker secrets after npm ci, which gives
@@ -181,6 +184,9 @@ here=$(git rev-parse HEAD)
 tip=$(git rev-parse --verify --quiet origin/main) || refuse "origin/main doesn't exist"
 if [ "$here" != "$tip" ]; then refuse "the checkout is at $here, and origin/main is at $tip"; fi
 if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
+# The suffix list compiled into the API: its hash, shape and age. A warning from 60 days is printed, and deploys.
+suffix_list=$(scripts/public-suffix-list check 2>&1) || refuse "${suffix_list:-scripts/public-suffix-list check failed}"
+printf '%s\n' "$suffix_list"
 # Managed repositories on with nobody named to ask for one would open them to anyone who signs in on staging.
 requesters=$(node scripts/requesters-rule.mjs apps/api/wrangler.jsonc 2>&1) \
   || refuse "${requesters:-scripts/requesters-rule.mjs could not check apps/api/wrangler.jsonc}"

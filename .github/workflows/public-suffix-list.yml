@@ -1,0 +1,29 @@
+name: Public Suffix List age
+
+# The Public Suffix List snapshot the API compiles in (third_party/public-suffix-list, docs/m6-plan.md step 8a) must
+# be refreshed before it is 90 days old. `cargo test` doesn't check its age, so no pull request starts failing by the
+# calendar (the architect, 2026-11-25); this weekly run does, with `scripts/public-suffix-list check`: a warning from 60
+# days, a failure from 91. scripts/deploy-staging runs the same check before each deploy. Run by hand too:
+# `gh workflow run public-suffix-list.yml`. It holds no secret, no token and no environment, reaches no network, and
+# reads nothing but this repository.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-suffix-list
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: scripts/public-suffix-list check

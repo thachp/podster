@@ -168,6 +168,28 @@ with_api_config() {
   quiet git -C "$tmp/seed" push "$origin" main
   quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
 }
+# suffix_list DAYS-AGO [SHA [BODY-FILE]]: a stand-in Public Suffix List snapshot in the seed, with its MPL-2.0 header and
+# both sections, or BODY-FILE's text instead, retrieved DAYS-AGO days before today, and SNAPSHOT recording SHA, or the
+# file's own SHA-256 when SHA is empty or not given.
+suffix_list() {
+  local dir="$tmp/seed/third_party/public-suffix-list" now retrieved sum
+  mkdir -p "$dir"
+  printf '%s\n' '// This Source Code Form is subject to the terms of the Mozilla Public' '// ===BEGIN ICANN DOMAINS===' com \
+    '// ===END ICANN DOMAINS===' '// ===BEGIN PRIVATE DOMAINS===' github.io '// ===END PRIVATE DOMAINS===' > "$dir/public_suffix_list.dat"
+  if [ -n "${3:-}" ]; then cp "$3" "$dir/public_suffix_list.dat"; fi
+  now=$(( $(date -u +%s) - $1 * 86400 ))
+  retrieved=$(date -u -d "@$now" +%Y-%m-%d 2> /dev/null || date -u -r "$now" +%Y-%m-%d)
+  sum=${2:-$( (command -v sha256sum > /dev/null && sha256sum "$dir/public_suffix_list.dat" || shasum -a 256 "$dir/public_suffix_list.dat") | cut -d' ' -f1)}
+  printf 'source=https://publicsuffix.org/list/public_suffix_list.dat\nretrieved=%s\nsha256=%s\n' "$retrieved" "$sum" > "$dir/SNAPSHOT"
+}
+# with_suffix_list DAYS-AGO [SHA]: main's tip now has that snapshot, and the checkout is detached at it.
+with_suffix_list() {
+  suffix_list "$@"
+  git -C "$tmp/seed" add -A
+  git -C "$tmp/seed" -c user.name=selftest -c user.email=selftest@example.invalid commit --quiet --allow-empty -m "suffix list"
+  quiet git -C "$tmp/seed" push "$origin" main
+  quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+}
 origin="$tmp/origin.git"
 work="$tmp/work"
 quiet() { "$@" > /dev/null 2>&1; }
@@ -179,7 +201,9 @@ fresh() {
   rm -f "$fix"/*
   healthy_staging
   mkdir -p "$tmp/seed/scripts" "$tmp/seed/apps/api/migrations" "$tmp/seed/apps/gateway/migrations" "$tmp/seed/apps/web"
-  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$scripts/requesters-rule.mjs" "$scripts/setting-names.mjs" "$tmp/seed/scripts/"
+  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$scripts/requesters-rule.mjs" "$scripts/setting-names.mjs" \
+    "$scripts/public-suffix-list" "$tmp/seed/scripts/"
+  suffix_list 0
   # The API's source as far as the secret check reads it: two modules that name settings by a constant, one that reads
   # one by a string literal and one only in test builds, and one that names a secret.
   mkdir -p "$tmp/seed/apps/api/src/workspace"
@@ -362,6 +386,25 @@ refused "a checkout ahead of origin/main" 'origin/main is at'
 
 echo scratch > "$work/pr-body.md"
 refused "an untracked file" 'changed or untracked'
+
+# --- the Public Suffix List snapshot the API compiles in: its hash, shape and age ---
+fresh
+check "a fresh snapshot deploys: exit 0" deploy 0
+check "  and the suffix list was checked" said '^public-suffix-list: ok, retrieved .* \(0 days ago\)'
+with_suffix_list 70
+check "a snapshot 70 days old still deploys: exit 0" deploy 0
+check "  with the check's warning printed" said 'public-suffix-list: WARNING the Public Suffix List snapshot is 70 days old; it fails at 90'
+fresh
+with_suffix_list 90
+check "a snapshot 90 days old still deploys: exit 0" deploy 0
+fresh
+with_suffix_list 91
+refused "a snapshot 91 days old" 'the snapshot is 91 days old, more than 90'
+with_suffix_list 0 "$(printf '0%.0s' {1..64})"
+refused "a snapshot whose SHA-256 isn't the one recorded" "the snapshot's SHA-256 is"
+printf '// another header\ncom\n' > "$tmp/no-header.dat"
+with_suffix_list 0 "" "$tmp/no-header.dat"
+refused "a snapshot without its licence header or sections" 'lacks the MPL-2.0 header'
 
 # --- managed repositories never go to staging switched on with nobody named to ask ---
 with_api_config '"MANAGED_REPOSITORIES": "true"'
@@ -816,7 +859,7 @@ check "the secret check never prints a value: the script prints only what settin
 
 # The names from the API's real source: the switches, and none the code reads as a secret or staging sets as one.
 real=$(node "$scripts/setting-names.mjs" names "$scripts/../apps/api/src")
-for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_SUFFIX_RULES PUBLIC_ROOMS MANAGED_REPOSITORIES REPOSITORY_REQUESTERS \
+for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_ROOMS MANAGED_REPOSITORIES REPOSITORY_REQUESTERS \
   GITHUB_AGENT_APP_READS_CHECKS GATEWAY_URL APP_URL GITHUB_ORG_LOGIN; do
   check "the real source gives $name" grep -q -x "$name" <<< "$real"
 done

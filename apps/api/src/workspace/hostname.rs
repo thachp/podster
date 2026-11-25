@@ -36,7 +36,7 @@
 //! everything switching release on reads, so with `RELEASES` unset the route answers as one that doesn't exist, and
 //! with `RELEASES` on and a content provider it is refused (`release_not_available`) while the release path's own
 //! constant (`release_commit::RELEASE_PATH_COMPLETE`) is false; the proof job looks only while release is on for the
-//! deployment and in the room, with a resolver and the Public Suffix List bound, which no environment binds; and the
+//! deployment and in the room, with a resolver bound, which only staging binds (the Public Suffix List is compiled in); and the
 //! custom hostname at Cloudflare is created only once `RELEASE_PATH_COMPLETE` is true, everywhere (`custom_hostname`).
 //! Only a test build closes it again, for a room a test gives `test_hostname_claims_closed`, so the closed path, which
 //! refuses an ask and keeps the proof job from looking or asking, each with one log line by its code, can still be
@@ -56,9 +56,9 @@ use podster_core::hostname_requests::{
     HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
-    challenge_record_name, challenge_value, cname_target, mappable, next_proof_check, normalize,
-    public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, RecheckOutcome,
-    PENDING_TTL_MS,
+    challenge_record_name, challenge_value, cname_target, mappable_by, next_proof_check, normalize,
+    public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, PublicSuffixRules,
+    RecheckOutcome, PENDING_TTL_MS,
 };
 use podster_policy::release::{
     authorize_custom_hostname, hostname_proof_room, HostnameChange, HostnameProofRoom,
@@ -68,9 +68,24 @@ use release_config::ConfigReads;
 
 /// A hostname request's ID begins with this, then 32 lower-case hexadecimal digits.
 pub(crate) const HOSTNAME_REQUEST_PREFIX: &str = "hnr_";
-/// The setting that holds the Public Suffix List's rules, as the list writes them. Bound in no environment: with none,
-/// every name is refused `hostname_unavailable`.
-const PUBLIC_SUFFIX_RULES: &str = "PUBLIC_SUFFIX_RULES";
+/// The Public Suffix List, compiled in from the dated snapshot under `third_party/public-suffix-list` (MPL-2.0, kept
+/// unmodified; `SNAPSHOT` there records its source, date and SHA-256, and `scripts/public-suffix-list` refreshes it).
+/// The whole list is read, ICANN and private sections alike, so a shared apex such as `github.io` is refused as browsers
+/// treat it (docs/m6-plan.md, step 8a, open question 1; the architect, 2026-11-25). Every build and environment has
+/// it, so it is no setting; `scripts/public-suffix-list check` warns at 60 days and fails at 90, weekly in CI and
+/// before each staging deploy.
+const PUBLIC_SUFFIX_LIST: &str =
+    include_str!("../../../../third_party/public-suffix-list/public_suffix_list.dat");
+
+/// The list's rules, read once per isolate on the first ask. `None` if any rule couldn't be read, which refuses every
+/// name `hostname_unavailable`.
+fn suffix_rules() -> Option<&'static PublicSuffixRules> {
+    static RULES: std::sync::OnceLock<Option<PublicSuffixRules>> = std::sync::OnceLock::new();
+    RULES
+        .get_or_init(|| PublicSuffixRules::parse(&public_suffix_rules(PUBLIC_SUFFIX_LIST)))
+        .as_ref()
+}
+
 /// **Whether custom hostname claims are complete.** True since 2026-11-18, once 8b (a committed claim's long end, #403)
 /// and 8d (the daily recheck, #444) had both merged, and this is the only place it is set. While it was false, every
 /// build and environment refused every ask for a hostname and its proof job neither looked nor asked
@@ -95,7 +110,6 @@ pub(super) struct RequestReads {
     /// when it couldn't be read.
     object: Option<(bool, u64)>,
     domain: Option<String>,
-    rules: Option<String>,
 }
 
 /// Who may ask for or remove a custom hostname, by the room's rows: checked first, so nobody else makes the room ask
@@ -333,11 +347,10 @@ pub(super) fn handle_request(
     let (suspended, generation) = reads
         .object
         .ok_or_else(super::release_recheck::standing_unknown)?;
-    let rules = reads.rules.as_deref().unwrap_or("");
-    let name = mappable(
+    let name = mappable_by(
         &asked.input,
         reads.domain.as_deref().unwrap_or(""),
-        &public_suffix_rules(rules),
+        suffix_rules(),
         suspended,
         usize::try_from(open).unwrap_or(usize::MAX),
     )
@@ -471,15 +484,7 @@ pub(super) fn handle_remove(
     open_view(sql, now, domain)
 }
 
-/// The deployment's Public Suffix List rules, if it holds them. No environment does.
-fn rules(env: &Env) -> Option<String> {
-    match crate::setting(env, PUBLIC_SUFFIX_RULES) {
-        crate::Setting::Text(rules) => Some(rules),
-        _ => None,
-    }
-}
-
-/// The deployment's resolver, if one is configured. No environment has one. Test builds can also take it away from one
+/// The deployment's resolver, if one is configured. Only staging has one. Test builds can also take it away from one
 /// room, while the room holds a table named `test_hostname_resolver_off`, so the unconfigured case can be shown beside
 /// the configured one.
 pub(super) fn resolver(sql: &SqlStorage, env: &Env) -> Option<Resolver> {
@@ -603,7 +608,6 @@ impl Workspace {
             config,
             object,
             domain: crate::content_provider::content_domain(&self.env),
-            rules: rules(&self.env),
         })
     }
 

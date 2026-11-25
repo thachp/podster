@@ -2,13 +2,14 @@
 // ADR 0010's "Custom domains"). It runs in the test runner, as the Workers' outbound service, so no test or CI run
 // ever asks a real resolver.
 //
-// **Its answers are the documented JSON form, not a record.** No spike has asked a real resolver: `Status` is the DNS
-// response code, and `Answer` holds the records, each `{ name, type, data }`, a TXT record's `data` in its quoted
-// presentation form. A name nobody set answers `Status: 3`, no such name.
+// **Its answers are the documented JSON form.** Spike G asked the real resolver, `https://cloudflare-dns.com/dns-query`,
+// from inside a Worker on 2026-11-23 (spikes/m6-spike-g, docs/m6-plan.md), and it answered in this form: `Status` is
+// the DNS response code, and `Answer` holds the records, each `{ name, type, data }`, a TXT record's `data` in its
+// quoted presentation form. A name nobody set answers `Status: 3`, no such name.
 //
 // A test sets what a name answers through `resolver-fake.example.com`, and reads back which names were asked for.
 
-/** Test values only. No environment binds `HOSTNAME_RESOLVER_URL`. */
+/** Test values only. Only staging binds `HOSTNAME_RESOLVER_URL`, to the real resolver. */
 export const FAKE_RESOLVER = { url: "https://doh-test.example.com/dns-query" };
 
 /** What a name answers: a JSON body as it is, or an HTTP status with no body. */

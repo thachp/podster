@@ -223,6 +223,32 @@ pub fn public_suffix_rules(list: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The Public Suffix List's rules, each read once (docs/m6-plan.md, step 8a: the snapshot the API is built with). The
+/// API builds this once per isolate from the whole list, ICANN and private sections alike, and passes it to
+/// [`mappable_by`] for each ask, so the rules aren't read again on every ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicSuffixRules(Vec<SuffixRule>);
+
+impl PublicSuffixRules {
+    /// The rules, as the list writes them (pass [`public_suffix_rules`]'s answer). `None`, which [`mappable_by`]
+    /// refuses as `hostname_unavailable`, when there are none or any one can't be read: one unreadable rule fails the
+    /// whole list closed.
+    pub fn parse(rules: &[&str]) -> Option<Self> {
+        let rules: Option<Vec<SuffixRule>> = rules.iter().map(|r| suffix_rule(r)).collect();
+        rules.filter(|r| !r.is_empty()).map(Self)
+    }
+
+    /// How many rules were read.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are none. Never true of a value [`PublicSuffixRules::parse`] gave.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// One rule of the Public Suffix List, as the deployment holds it: a plain rule (`co.uk`), a wildcard (`*.ck`), or an
 /// exception (`!www.ck`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,6 +348,24 @@ pub fn mappable(
     suspended: bool,
     room_hostnames: usize,
 ) -> Result<String, HostnameRefusal> {
+    mappable_by(
+        input,
+        content_domain,
+        PublicSuffixRules::parse(public_suffix_rules).as_ref(),
+        suspended,
+        room_hostnames,
+    )
+}
+
+/// [`mappable`], with the rules already read: `None` stands for rules that are missing or couldn't be read, and is
+/// refused as `hostname_unavailable` at the same point [`mappable`] refuses them.
+pub fn mappable_by(
+    input: &str,
+    content_domain: &str,
+    rules: Option<&PublicSuffixRules>,
+    suspended: bool,
+    room_hostnames: usize,
+) -> Result<String, HostnameRefusal> {
     let name = normalize(input)?;
     if !name.contains('.') {
         return Err(HostnameRefusal::SingleLabel);
@@ -337,13 +381,11 @@ pub fn mappable(
     {
         return Err(HostnameRefusal::Reserved);
     }
-    let rules: Option<Vec<SuffixRule>> =
-        public_suffix_rules.iter().map(|r| suffix_rule(r)).collect();
     let rules = rules
         .filter(|r| !r.is_empty())
         .ok_or(HostnameRefusal::Unclassified)?;
     let labels: Vec<&str> = name.split('.').collect();
-    let suffix = public_suffix_len(&labels, &rules).ok_or(HostnameRefusal::Unclassified)?;
+    let suffix = public_suffix_len(&labels, &rules.0).ok_or(HostnameRefusal::Unclassified)?;
     if suffix >= labels.len() {
         return Err(HostnameRefusal::PublicSuffix);
     }

@@ -62,6 +62,9 @@ KV=00112233445566778899aabbccddeeff
 TOKEN_ID=abcdefabcdefabcdefabcdefabcdef12
 TOKEN=selftestFAKEtoken_0123456789abcdefghijklmnopqrstuv
 DOMAIN=content-selftest.example
+ZONE=99887766554433221100ffeeddccbbaa
+# podster-content's deployed settings as Cloudflare answers them: APPS naming podster-outbound as outbound.
+CONTENT_SETTINGS_OK='{"success":true,"result":{"bindings":[{"type":"kv_namespace","name":"SERVE","namespace_id":"00112233445566778899aabbccddeeff"},{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound","environment":"production"},"params":[]}}]}}'
 echo "$TOKEN" > "$fix/token-expected"
 
 # A stand-in that hangs (gh-hangs, deploy-hangs, probe-hangs) becomes one perl process that writes its marker and then
@@ -93,41 +96,48 @@ stub npm <<'EOF'
 fix="$(dirname "$0")/../fix"
 echo "npm $* [in $(basename "$PWD")]" >> "$fix/calls"
 [ -f "$fix/npm-fails" ] && exit 1
+[ -f "$fix/npm-fails-$(basename "$PWD")" ] && exit 1
 mkdir -p node_modules/.bin
 cp "$fix/../wrangler-stub" node_modules/.bin/wrangler
 chmod +x node_modules/.bin/wrangler
 EOF
 
-# wrangler, as apps/content/node_modules/.bin/wrangler. It records what a deploy was given: whether the token arrived,
-# whether anything else of the caller's environment did, an exported function included, where it ran, and the
-# configuration and .env file it was pointed at.
+# wrangler, as apps/content/node_modules/.bin/wrangler and apps/outbound/node_modules/.bin/wrangler. It records which
+# package's copy ran and what a deploy was given: the Worker's name, whether the token arrived, whether anything else of
+# the caller's environment did, an exported function included, where it ran, and the configuration and .env file it was
+# pointed at. A file named for a Worker makes that Worker's deploy fail or hang.
 {
   echo '#!/usr/bin/env bash'
   printf 'fix=%q\nowner_home=%q\n' "$fix" "$tmp/home"
   cat <<'EOF'
 expected=$(cat "$fix/token-expected")
 for arg in "$@"; do [[ "$arg" == *"$expected"* ]] && echo "TOKEN-IN-ARGV wrangler" >> "$fix/calls"; done
-if [ "$1" = --version ]; then cat "$fix/wrangler-version"; exit; fi
+app=$(basename "$(cd "$(dirname "$0")/../.." && pwd)")
+if [ "$1" = --version ]; then
+  if [ -f "$fix/wrangler-version-$app" ]; then cat "$fix/wrangler-version-$app"; else cat "$fix/wrangler-version"; fi
+  exit
+fi
 if [ "$1" = deploy ] && [ "$2" = --config ] && [ "$4" = --env-file ]; then
+  name=$(jq -r .name "$3")
   auth=missing; [ "${CLOUDFLARE_API_TOKEN:-}" = "$expected" ] && auth=ok
   canary=absent; [ -n "${SELFTEST_CANARY:-}" ] && canary=present
   account=absent; [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && account=present
   proxy=absent; [ -n "${HTTPS_PROXY:-}${https_proxy:-}" ] && proxy=present
   func=absent; declare -F selftest_function > /dev/null && func=present
   private=no; [ -d "$HOME" ] && [ "$HOME" != "$owner_home" ] && [ "$(dirname "$HOME")" = "$(dirname "$3")" ] && private=yes
-  runs_in=elsewhere; [ "$PWD" = "$(dirname "$3")/run" ] && [ -z "$(ls -A .)" ] && runs_in=own-empty-folder
+  runs_in=elsewhere; [[ "$PWD" == "$(dirname "$3")"/run-* ]] && [ -z "$(ls -A .)" ] && runs_in=own-empty-folder
   envfile=other; [ -f "$5" ] && [ ! -s "$5" ] && envfile=empty
-  echo "wrangler deploy auth=$auth canary=$canary account_env=$account proxy=$proxy function=$func home_private=$private cwd=$runs_in env_file=$envfile ci=${CI:-}" >> "$fix/calls"
-  cp "$3" "$fix/deployed-config.json"
+  echo "wrangler deploy $name from=$app auth=$auth canary=$canary account_env=$account proxy=$proxy function=$func home_private=$private cwd=$runs_in env_file=$envfile ci=${CI:-}" >> "$fix/calls"
+  cp "$3" "$fix/deployed-$name.json"
   dirname "$3" > "$fix/work-dir"
-  echo "Uploaded podster-content"
-  if [ -f "$fix/deploy-hangs" ]; then
+  echo "Uploaded $name"
+  if [ -f "$fix/deploy-hangs-$name" ]; then
     exec perl -e 'open my $f, ">", $ARGV[0] or die; close $f; sleep' "$fix/deploying" # one process; see the note above the stand-ins
   fi
   [ -f "$fix/wrangler-leaks" ] && echo "debug: Authorization: Bearer $CLOUDFLARE_API_TOKEN"
   [ -f "$fix/wrangler-log-leaks" ] && echo "token $CLOUDFLARE_API_TOKEN" > "$WRANGLER_LOG_PATH/wrangler.log"
-  [ -f "$fix/deploy-fails" ] && { echo "✘ [ERROR] something went wrong" >&2; exit 1; }
-  echo "Current Version ID: 11111111-2222-3333-4444-555555555555"
+  [ -f "$fix/deploy-fails-$name" ] && { echo "✘ [ERROR] something went wrong" >&2; exit 1; }
+  if [ "$name" = podster-outbound ]; then echo "Current Version ID: 22222222-3333-4444-5555-666666666666"; else echo "Current Version ID: 11111111-2222-3333-4444-555555555555"; fi
   exit 0
 fi
 echo "stand-in wrangler: unexpected: $*" >&2
@@ -184,6 +194,10 @@ case "$url" in
       "/accounts?per_page=50") key=accounts ;;
       "/zones?name=podster.dev&per_page=50") key=zone-podster ;;
       "/zones?name="*) key=zone-content ;;
+      /accounts/*/workers/scripts) key=scripts ;;
+      /accounts/*/workers/scripts/podster-outbound/subdomain) key=outbound-subdomain ;;
+      /accounts/*/workers/scripts/podster-content/settings) key=content-settings ;;
+      /zones/*/workers/routes) key=routes ;;
       /accounts/*/workers/dispatch/namespaces/*) key=namespace ;;
       /accounts/*/storage/kv/namespaces/*) key=kv ;;
       *) echo "stand-in curl: unexpected API path $path" >&2; exit 97 ;;
@@ -260,9 +274,9 @@ probe() { # probe KEY STATUS BODY [EXTRA-HEADER-LINE]
   own_headers "$2" "${4:-}" > "$fix/$1.headers"
 }
 healthy() {
-  rm -f "$fix"/api-* "$fix"/probe-* "$fix/calls" "$fix/deployed-config.json" "$fix/work-dir" "$fix/npm-fails" "$fix/deploy-fails" \
-    "$fix/wrangler-leaks" "$fix/wrangler-log-leaks" "$fix/deploy-hangs" "$fix/deploying" "$fix/gh-hangs" "$fix/checking" \
-    "$fix/probe-hangs" "$fix/probing"
+  rm -f "$fix"/api-* "$fix"/probe-* "$fix/calls" "$fix"/deployed-*.json "$fix/work-dir" "$fix"/npm-fails* "$fix"/deploy-fails-* \
+    "$fix/wrangler-leaks" "$fix/wrangler-log-leaks" "$fix"/deploy-hangs-* "$fix/deploying" "$fix/gh-hangs" "$fix/checking" \
+    "$fix/probe-hangs" "$fix/probing" "$fix"/wrangler-version-*
   : > "$fix/calls"
   echo 4.157.0 > "$fix/wrangler-version"
   printf 'completed\\tsuccess' > "$fix/main-ci"
@@ -272,7 +286,11 @@ healthy() {
   api self-account 403 '{"success":false,"errors":[]}'
   api accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT\"}]}"
   api zone-podster 200 '{"success":true,"result":[]}'
-  api zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+  api zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+  api scripts 200 '{"success":true,"result":[{"id":"podster-content"},{"id":"podster-outbound"}]}'
+  api routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r2","pattern":"content-selftest.example/x"}]}'
+  api outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":false}}'
+  api content-settings 200 "$CONTENT_SETTINGS_OK"
   api namespace 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'
   api kv 200 "{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
   probe probe-unknown 404 not_found
@@ -291,7 +309,7 @@ quiet() { "$@" > /dev/null 2>&1; }
 fresh() {
   rm -rf "$origin" "$work" "$tmp/seed" "$home"
   healthy
-  mkdir -p "$tmp/seed/scripts" "$tmp/seed/e2e" "$tmp/seed/apps/content/src" "$tmp/seed/apps/api"
+  mkdir -p "$tmp/seed/scripts" "$tmp/seed/e2e" "$tmp/seed/apps/content/src" "$tmp/seed/apps/outbound/src" "$tmp/seed/apps/api"
   cp "$scripts/deploy-content" "$tmp/seed/scripts/"
   cp "$scripts/../e2e/jsonc.mjs" "$tmp/seed/e2e/"
   cp "$scripts/../apps/content/wrangler.jsonc" "$tmp/seed/apps/content/"
@@ -300,6 +318,13 @@ fresh() {
   if [ -n "${SEED_EDIT:-}" ]; then
     sed -e "$SEED_EDIT" "$scripts/../apps/content/wrangler.jsonc" > "$tmp/seed/apps/content/wrangler.jsonc"
   fi
+  cp "$scripts/../apps/outbound/wrangler.jsonc" "$tmp/seed/apps/outbound/"
+  # The same for the outbound Worker's file: OUTBOUND_SEED_EDIT, one sed expression.
+  if [ -n "${OUTBOUND_SEED_EDIT:-}" ]; then
+    sed -e "$OUTBOUND_SEED_EDIT" "$scripts/../apps/outbound/wrangler.jsonc" > "$tmp/seed/apps/outbound/wrangler.jsonc"
+  fi
+  echo '{}' > "$tmp/seed/apps/outbound/package.json"
+  echo 'export default {};' > "$tmp/seed/apps/outbound/src/index.ts"
   echo '{}' > "$tmp/seed/apps/content/package.json"
   echo 'export default {};' > "$tmp/seed/apps/content/src/index.ts"
   printf 'node_modules/\n.wrangler/\n.env*\n' > "$tmp/seed/.gitignore"
@@ -644,16 +669,16 @@ bad_api "podster.dev's answer with an object for a result is refused" "the answe
 bad_api "podster.dev's answer that isn't a success is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '{"success":false,"result":[]}'
 bad_api "podster.dev's answer that isn't JSON is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '<html>'
 bad_api "a content domain the token can't see is refused" "the token doesn't see the content domain as one zone" zone-content 200 '{"success":true,"result":[]}'
-bad_api "a content domain on another account is refused" "the content domain's zone isn't on the configuration's account" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$OTHER\"}}]}"
-bad_api "a content domain not active yet is refused" "the content domain's zone isn't active yet \\(pending\\)" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"pending\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
-bad_api "a content zone with no account is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":[{"name":"content-selftest.example","status":"active"}]}'
-bad_api "a content zone with no status is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a content domain on another account is refused" "the content domain's zone isn't on the configuration's account" zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$OTHER\"}}]}"
+bad_api "a content domain not active yet is refused" "the content domain's zone isn't active yet \\(pending\\)" zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"pending\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a content zone with no account is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":[{"id":"99887766554433221100ffeeddccbbaa","name":"content-selftest.example","status":"active"}]}'
+bad_api "a content zone with no status is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
 bad_api "a content zone answer of null is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":null}'
-bad_api "a zone answer naming another zone is refused" "the zone Cloudflare answered with isn't the content domain" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"other.example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a zone answer naming another zone is refused" "the zone Cloudflare answered with isn't the content domain" zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"other.example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
 bad_api "a verification of two documents is refused" "Cloudflare's verification of the token isn't in the shape expected" verify-user 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}" verify-account 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"
 bad_api "an account list of two documents is refused" "the list of accounts the token sees isn't in the shape expected" accounts 200 "{\"success\":false}{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT\"}]}"
 bad_api "podster.dev's answer of two documents is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '{"success":false}{"success":true,"result":[]}'
-bad_api "a zone answer of two documents is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":false}{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a zone answer of two documents is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":false}{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
 bad_api "a namespace answer of two documents is refused" "the answer about the dispatch namespace isn't that namespace" namespace 200 '{"success":false}{"success":true,"result":{"namespace_name":"podster-apps"}}'
 bad_api "a KV answer of two documents is refused" "the answer about the KV namespace isn't that namespace" kv 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
 bad_api "a missing dispatch namespace is refused" "the dispatch namespace wasn't found" namespace 404 '{"success":false}'
@@ -670,7 +695,7 @@ fresh; api verify-user 401 '{"success":false}'; api verify-account 200 "{\"succe
 check "an account-owned token that can't read tokens passes" said "ok   the token is active \\(account token\\)"
 fresh; api accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT_UPPER\"}]}"; api kv 200 "{\"success\":true,\"result\":{\"id\":\"$(printf '%s' "$KV" | tr a-f A-F)\"}}"; dc 0 "${files[@]}" || true
 check "Cloudflare's IDs in capitals still match" bash -c "[ $LAST -eq 0 ]"
-fresh; api zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"Content-Selftest.Example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"; dc 0 "${files[@]}" || true
+fresh; api zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"Content-Selftest.Example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"; dc 0 "${files[@]}" || true
 check "a zone name in capitals still matches the content domain" bash -c "[ $LAST -eq 0 ]"
 
 # --- a report: every check, nothing changed ---
@@ -678,7 +703,11 @@ fresh; dc 0 "${files[@]}" || true
 check "without --deploy: exit 0, every check passed, nothing deployed" bash -c "[ $LAST -eq 0 ] && grep -q 'Nothing was deployed: this run had no --deploy' '$tmp/out'"
 check "  it says what it would deploy, and where" bash -c "grep -q -E \"would deploy podster-content at [0-9a-f]{40}, origin/main's tip with ci.yml green\" '$tmp/out' && grep -q -F 'on the route *.content-selftest.example/*, with the content domain content-selftest.example' '$tmp/out'"
 check "  every API call was a GET, -q first, the token on stdin, nothing of the caller's environment" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
-check "  it read all seven things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 7 ]"
+check "  it read all nine things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 9 ]"
+check "  it listed the account's scripts and the content zone's routes, by the zone's ID" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/scripts auth=ok' '$fix/calls' && grep -q '^curl GET /zones/$ZONE/workers/routes auth=ok' '$fix/calls'"
+check "  it says podster-outbound exists, and the deploy replaces it" said "^ok   the account's scripts can be listed: podster-outbound exists, and the deploy replaces it$"
+check "  it says what it would deploy first: the outbound Worker, with no route, no address and no binding" said "^would deploy, first, podster-outbound at [0-9a-f]{40} to the configuration's account, with no route, no workers.dev$"
+check "  and that the content Worker's dispatch binding names it as outbound" said "^the dispatch binding APPS naming podster-outbound as the namespace's outbound Worker,$"
 check "  no deploy, no probe, the token nowhere" unchanged
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
 check "  it says it would deploy the write counter, with the cap from the committed file" said "^and its write counter \\(migration v1, the class WriteCounter\\) with a cap of 300 writes per 600000 ms for each app\\.$"
@@ -714,6 +743,43 @@ committed_refused "another migration" 's/"tag": "v1"/"tag": "v2"/' '"tag": "v2"'
 committed_refused "a migration that deletes the class" 's/"new_sqlite_classes": \["WriteCounter"\] }/"new_sqlite_classes": ["WriteCounter"] }, { "tag": "v2", "deleted_classes": ["WriteCounter"] }/' '"deleted_classes"' "migrations aren't exactly v1"
 committed_refused "the counter's migration as a key-value class" 's/"new_sqlite_classes"/"new_classes"/' '"new_classes"' "migrations aren't exactly v1"
 
+# --- the outbound Worker: its package, its file, and what the account holds ---
+fresh; mkdir -p "$work/apps/outbound/.wrangler/deploy"; echo '{}' > "$work/apps/outbound/.wrangler/deploy/config.json"; dc 1 "${files[@]}" || true
+check "a wrangler redirect in apps/outbound is refused" refused "apps/outbound/.wrangler/deploy/config.json exists"
+fresh; echo 'CLOUDFLARE_ACCOUNT_ID=x' > "$work/apps/outbound/.env"; dc 1 "${files[@]}" || true
+check "a .env in apps/outbound is refused, though git ignores it" refused "apps/outbound/.env exists"
+fresh; echo 'X=1' > "$work/apps/outbound/.env.production"; dc 1 "${files[@]}" || true
+check "a .env.production in apps/outbound is refused" refused "apps/outbound/.env.production exists"
+fresh; touch "$fix/npm-fails-outbound"; dc 1 "${files[@]}" || true
+check "npm ci failing in apps/outbound is refused" refused "npm ci failed in apps/outbound"
+check "  after npm ci ran in both packages, content first" bash -c "[ \"\$(grep '^npm ' '$fix/calls' | sed 's/.*\\[in //; s/\\]//' | tr '\\n' ' ')\" = 'content outbound ' ]"
+fresh; echo "4.156.0" > "$fix/wrangler-version-outbound"; dc 1 "${files[@]}" || true
+check "another wrangler in apps/outbound is refused" refused "apps/outbound's wrangler is '4.156.0', not 4.157.0"
+outbound_refused() { # outbound_refused TITLE SED-EXPRESSION PATTERN-THE-EDIT-LEAVES
+  OUTBOUND_SEED_EDIT=$2 fresh
+  check "$1: the edit was committed" quiet grep -q -F -- "$3" "$work/apps/outbound/wrangler.jsonc"
+  dc 1 "${files[@]}" || true
+  check "  refused, nothing deployed" refused "apps/outbound/wrangler.jsonc must hold exactly its name podster-outbound"
+}
+outbound_refused "the outbound Worker with a route" 's/"preview_urls": false/"preview_urls": false, "routes": [{ "pattern": "x.example\/*", "zone_name": "x.example" }]/' '"routes": [{'
+outbound_refused "the outbound Worker on workers.dev" 's/"workers_dev": false/"workers_dev": true/' '"workers_dev": true'
+outbound_refused "the outbound Worker with previews" 's/"preview_urls": false/"preview_urls": true/' '"preview_urls": true'
+outbound_refused "the outbound Worker with a binding" 's/"preview_urls": false/"preview_urls": false, "kv_namespaces": [{ "binding": "K", "id": "x" }]/' '"kv_namespaces"'
+outbound_refused "the outbound Worker under another name" 's/"name": "podster-outbound"/"name": "podster-elsewhere"/' '"podster-elsewhere"'
+outbound_refused "the outbound Worker with another entry point" 's/"main": "src\/index.ts"/"main": "..\/content\/src\/index.ts"/' '"main": "../content/src/index.ts"'
+outbound_refused "the outbound Worker with a variable" 's/"preview_urls": false/"preview_urls": false, "vars": { "A": "b" }/' '"vars"'
+bad_api "a zone answer with no ID is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a zone ID that isn't one is refused" "Cloudflare's answer about the content domain's zone didn't give its ID" zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"x\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "an error listing the account's scripts is refused" "listing the account's Worker scripts failed \\(HTTP 403\\)" scripts 403 '{"success":false,"errors":[]}'
+bad_api "a list of scripts that isn't a list is refused" "the list of the account's Worker scripts isn't in the shape expected" scripts 200 '{"success":true,"result":{"id":"podster-outbound"}}'
+bad_api "a list of scripts of two documents is refused" "the list of the account's Worker scripts isn't in the shape expected" scripts 200 '{"success":false}{"success":true,"result":[]}'
+bad_api "a route on the content zone that runs the outbound Worker is refused" "a route on the content domain's zone runs podster-outbound" routes 200 '{"success":true,"result":[{"id":"r","pattern":"x.content-selftest.example/*","script":"podster-outbound"}]}'
+bad_api "an error listing the content zone's routes is refused" "listing the routes on the content domain's zone failed \\(HTTP 403\\)" routes 403 '{"success":false,"errors":[]}'
+bad_api "a list of routes in another shape is refused" "the list of routes on the content domain's zone isn't in the shape expected" routes 200 '{"success":true,"result":[{"id":"r"}]}'
+fresh; api scripts 200 '{"success":true,"result":[{"id":"podster-content"}]}'; dc 0 "${files[@]}" || true
+check "a first report, with no outbound Worker yet: exit 0, saying the deploy makes it" bash -c "[ $LAST -eq 0 ] && grep -q \"^ok   the account's scripts can be listed: podster-outbound doesn't exist yet, and the deploy makes it$\" '$tmp/out'"
+check "  no deploy, no probe, the token nowhere" unchanged
+
 # --- --deploy needs a person ---
 fresh; dc 1 "${files[@]}" --deploy < /dev/null || true
 check "--deploy without a terminal is refused, after every check, with nothing deployed" refused "--deploy needs a person at a terminal"
@@ -725,12 +791,18 @@ check "--deploy with nothing typed is refused" bash -c "[ $LAST -eq 1 ] && grep 
 
 # --- a deploy ---
 fresh; at_terminal 0 "$DOMAIN" "CLOUDFLARE_ACCOUNT_ID=$OTHER" -- "${files[@]}" --deploy || true
-check "--deploy at a terminal, with the domain typed: exit 0, and the success line" bash -c "[ $LAST -eq 0 ] && grep -q 'deploy-content: deployed podster-content at [0-9a-f]\\{40\\} (version 11111111-2222-3333-4444-555555555555) to $DOMAIN, and every probe passed' '$tmp/out'"
-check "  wrangler ran once: the token, nothing of the caller's (CLOUDFLARE_ACCOUNT_ID, proxies, a canary), a private home, its own empty folder, an empty .env file" \
-  called "^wrangler deploy auth=ok canary=absent account_env=absent proxy=absent function=absent home_private=yes cwd=own-empty-folder env_file=empty ci=true$"
-check "  exactly one deploy" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
+check "--deploy at a terminal, with the domain typed: exit 0, and the success line" bash -c "[ $LAST -eq 0 ] && grep -q 'deploy-content: deployed podster-outbound (version 22222222-3333-4444-5555-666666666666) and podster-content at [0-9a-f]\\{40\\} (version 11111111-2222-3333-4444-555555555555) to $DOMAIN, and every probe passed' '$tmp/out'"
+check "  wrangler ran twice, each time with the token, nothing of the caller's (CLOUDFLARE_ACCOUNT_ID, proxies, a canary), a private home, its own empty folder, an empty .env file" \
+  bash -c "[ \$(grep -c -E '^wrangler deploy podster-(outbound from=outbound|content from=content) auth=ok canary=absent account_env=absent proxy=absent function=absent home_private=yes cwd=own-empty-folder env_file=empty ci=true$' '$fix/calls') -eq 2 ]"
+check "  exactly two deploys: the outbound Worker first, from its own package, then the content Worker from its own" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 2 ] && [ \"\$(grep '^wrangler deploy' '$fix/calls' | cut -d' ' -f3,4 | tr '\n' ' ')\" = 'podster-outbound from=outbound podster-content from=content ' ]"
+check "  the outbound Worker's configuration: the owner's account, both public addresses off, and nothing else: no route, no binding" \
+  quiet jq -e --arg a "$ACCOUNT" '(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"]) and .name == "podster-outbound" and .account_id == $a and .workers_dev == false and .preview_urls == false and .compatibility_date == "2026-08-01" and (.main | endswith("/apps/outbound/src/index.ts"))' "$fix/deployed-podster-outbound.json"
+check "  between the two, it saw podster-outbound on the account" said "^ok      podster-outbound is on the account"
+check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out'"
+check "  it says an app's fetch being refused is NOT SHOWN" said "^NOT SHOWN an app's fetch refused by podster-outbound: that needs an app with code"
+check "  every API call, before and after the deploy, was a GET with the token on stdin" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
-  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
+  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-podster-content.json"
 check "  one request waiting for the route, then four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
   bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
 check "  the route answered at once: no wait" bash -c "grep -q '^ok      the route answers (HTTP 404, try 1)' '$tmp/out' && ! grep -q '^sleep ' '$fix/calls'"
@@ -739,8 +811,9 @@ check "  the token is in no argument and no output" no_token
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 
-fresh; touch "$fix/deploy-fails"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a failed wrangler deploy: exit 3, stopped part-way" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy exited with status 1' '$tmp/out'"
+fresh; touch "$fix/deploy-fails-podster-content"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out'"
+check "  no probe ran" never_called "^probe "
 fresh; touch "$fix/wrangler-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "wrangler output holding the token: exit 3, redacted, not printed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler.s output or its log held the token' '$tmp/out' && grep -q 'redacted token' '$tmp/out'"
 check "  the token is in no output" no_token
@@ -748,11 +821,43 @@ fresh; touch "$fix/wrangler-log-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}"
 check "wrangler's log holding the token: exit 3, not printed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler.s output or its log held the token' '$tmp/out'"
 check "  the token is in no output" no_token
 
+# --- the outbound Worker's deploy ---
+fresh; touch "$fix/deploy-fails-podster-outbound"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "a failed deploy of the outbound Worker: exit 3, and the content Worker never deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the outbound Worker exited with status 1' '$tmp/out' && grep -q 'The content Worker wasn.t deployed' '$tmp/out' && [ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ] && grep -q '^wrangler deploy podster-outbound ' '$fix/calls'"
+check "  no probe ran" never_called "^probe "
+fresh; api scripts 200 '{"success":true,"result":[{"id":"podster-content"}]}'; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "the outbound Worker not on the account after its deploy: exit 3, and the content Worker never deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED Cloudflare.s list of the account.s scripts (HTTP 200) doesn.t show podster-outbound after its deploy' '$tmp/out' && [ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ] && ! grep -q '^wrangler deploy podster-content' '$fix/calls'"
+check "  no probe ran, and the token is in no output" bash -c "! grep -q '^probe ' '$fix/calls' && ! grep -q -F '$TOKEN' '$tmp/out' '$fix/calls'"
+fresh; touch "$fix/wrangler-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "the outbound Worker's wrangler output holding the token: exit 3, the content Worker never deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'the outbound Worker may or may not be deployed. The content Worker wasn.t deployed.' '$tmp/out' && [ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
+check "  the token is in no output" no_token
+fresh; touch "$fix/deploy-hangs-podster-outbound"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/deploying" -- "${files[@]}" --deploy || true
+check "SIGINT during the outbound Worker's deploy: exit 130, the content Worker not deployed, and it says so" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT while deploying the outbound Worker. podster-outbound may or may not be deployed, and the content Worker wasn.t' '$tmp/out' && ! grep -q '^wrangler deploy podster-content' '$fix/calls'"
+
+# --- the checks of the outbound Worker after the deploy ---
+outbound_check() { # outbound_check TITLE EXPECTED-EXIT PATTERN KEY STATUS BODY
+  fresh
+  api "$4" "$5" "$6"
+  at_terminal "$2" "$DOMAIN" -- "${files[@]}" --deploy || true
+  check "$1" bash -c "[ $LAST -eq $2 ] && grep -q -E \"\$1\" '$tmp/out'" _ "$3"
+}
+outbound_check "the outbound Worker on workers.dev after the deploy: exit 4" 4 "^FAIL    podster-outbound is on workers.dev" outbound-subdomain 200 '{"success":true,"result":{"enabled":true,"previews_enabled":false}}'
+outbound_check "the outbound Worker with previews on: exit 4" 4 "^FAIL    podster-outbound has preview addresses on" outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":true}}'
+outbound_check "its workers.dev setting unreadable: exit 4, not verified" 4 "^FAIL    podster-outbound's workers.dev setting couldn't be read \\(HTTP 403\\): not verified" outbound-subdomain 403 '{"success":false,"errors":[]}'
+outbound_check "  a setting of another shape is unreadable too" 4 "^FAIL    podster-outbound's workers.dev setting couldn't be read" outbound-subdomain 200 '{"success":true,"result":{"enabled":"no"}}'
+outbound_check "a workers.dev setting that doesn't say previews: passes, and says that one is NOT SHOWN" 0 "^NOT SHOWN whether podster-outbound has preview addresses" outbound-subdomain 200 '{"success":true,"result":{"enabled":false}}'
+outbound_check "a binding that names no outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS to the namespace naming podster-outbound" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps"}]}}'
+outbound_check "a binding naming another outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"elsewhere"}}}]}}'
+outbound_check "a binding to another namespace: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"other","outbound":{"worker":{"service":"podster-outbound"}}}]}}'
+outbound_check "settings that can't be read: NOT SHOWN, never a pass, and exit 0" 0 "^NOT SHOWN whether podster-content's deployed binding names podster-outbound as outbound: its settings couldn't be read in the shape expected \\(HTTP 403\\)" content-settings 403 '{"success":false,"errors":[]}'
+check "  and no PASS for the binding" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out'"
+outbound_check "settings in another shape: NOT SHOWN, never a pass" 0 "^NOT SHOWN whether podster-content's deployed binding" content-settings 200 '{"success":true,"result":{"bindings":{}}}'
+
 probe_fails() { # probe_fails TITLE KEY STATUS BODY [EXTRA]
   fresh
   probe "$2" "$3" "$4" "${5:-}"
   at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
-  check "$1: exit 4, deployed and NOT verified" bash -c "[ $LAST -eq 4 ] && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
+  check "$1: exit 4, deployed and NOT verified" bash -c "[ $LAST -eq 4 ] && grep -q 'the Workers are deployed and NOT verified' '$tmp/out'"
 }
 probe_fails "an unknown host answered by something else" probe-unknown 200 "<html>parked</html>"
 check "  a wrong answer is never asked again: one request before the probes, no wait" bash -c "[ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && ! grep -q '^sleep ' '$fix/calls' && grep -q 'FAIL    an unknown host: HTTP 200' '$tmp/out'"
@@ -769,7 +874,7 @@ check "  the token is in no output" no_token
 fresh; printf 'unreachable\n530\n' > "$fix/probe-unknown.before"; at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "no answer, then 530, then the Worker's not-found: exit 0, after two waits" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 2 ] && grep -q 'HTTP 000), trying again' '$tmp/out' && grep -q 'HTTP 530), trying again' '$tmp/out'"
 fresh; probe probe-unknown 522 "error code: 522"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a route that never answers: waits, stops at the clock's bound, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^sleep 2$' '$fix/calls' && grep -q '^wait    the route still isn.t answering after [0-9]* tries and [0-9]* s (HTTP 522): probing anyway' '$tmp/out' && grep -q 'FAIL    an unknown host: HTTP 522' '$tmp/out' && grep -q 'the Worker is deployed and NOT verified' '$tmp/out'"
+check "a route that never answers: waits, stops at the clock's bound, then the probes anyway, and exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^sleep 2$' '$fix/calls' && grep -q '^wait    the route still isn.t answering after [0-9]* tries and [0-9]* s (HTTP 522): probing anyway' '$tmp/out' && grep -q 'FAIL    an unknown host: HTTP 522' '$tmp/out' && grep -q 'the Workers are deployed and NOT verified' '$tmp/out'"
 check "  each try while waiting gave curl 5 s, and the probes their own 30 s" bash -c "n=\$(grep -c '^probe GET https://<host>/ ' '$fix/calls'); [ \$(grep -c '^max-time probe-unknown 5$' '$fix/calls') -eq \$((n - 1)) ] && [ \$(grep -c '^max-time probe-unknown 30$' '$fix/calls') -eq 1 ] && ! grep -q '^max-time probe-[a-z]* none$' '$fix/calls' && [ -z \"\$(grep '^max-time probe-' '$fix/calls' | grep -v -E '^max-time probe-[a-z]+ (5|30)$')\" ]"
 # Every try slow: each uses its whole 5 s, so the clock, not a count of tries, ends the wait. At 5 s a try and 2 s a
 # pause, a try may start only while it and its pause end within 30 s of the first: no more than 4. Then the first probe
@@ -792,21 +897,21 @@ check "the not-found without its nosniff header: exit 4, and the header named" b
 fresh; touch "$fix/gh-hangs"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/checking" -- "${files[@]}" --deploy || true
 check "SIGINT while checking: exit 130, nothing deployed, and it says so" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT before anything was deployed. Nothing changed.' '$tmp/out'"
 check "  nothing was deployed and nothing probed" unchanged
-fresh; touch "$fix/deploy-hangs"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/deploying" -- "${files[@]}" --deploy || true
-check "SIGINT during wrangler deploy: exit 130, and it says the Worker may or may not be deployed" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT during wrangler deploy. The Worker may or may not be deployed' '$tmp/out'"
+fresh; touch "$fix/deploy-hangs-podster-content"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/deploying" -- "${files[@]}" --deploy || true
+check "SIGINT during wrangler deploy: exit 130, and it says the Worker may or may not be deployed" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT during wrangler deploy of the content Worker. podster-outbound is deployed; the content Worker may or may not be deployed' '$tmp/out'"
 check "  no probe ran" never_called "^probe "
 check "  the token is in no output" no_token
 check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
-fresh; touch "$fix/deploy-hangs"; at_terminal 143 "$DOMAIN" --signal SIGTERM --when "$fix/deploying" -- "${files[@]}" --deploy || true
-check "SIGTERM during wrangler deploy: exit 143, and it says so" bash -c "[ $LAST -eq 143 ] && grep -q 'STOPPED by SIGTERM during wrangler deploy' '$tmp/out'"
+fresh; touch "$fix/deploy-hangs-podster-content"; at_terminal 143 "$DOMAIN" --signal SIGTERM --when "$fix/deploying" -- "${files[@]}" --deploy || true
+check "SIGTERM during wrangler deploy: exit 143, and it says so" bash -c "[ $LAST -eq 143 ] && grep -q 'STOPPED by SIGTERM during wrangler deploy of the content Worker' '$tmp/out'"
 check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 
-fresh; touch "$fix/deploy-hangs"; at_terminal 129 "$DOMAIN" --signal SIGHUP --when "$fix/deploying" -- "${files[@]}" --deploy || true
-check "SIGHUP during wrangler deploy: exit 129, and it says so" bash -c "[ $LAST -eq 129 ] && grep -q 'STOPPED by SIGHUP during wrangler deploy. The Worker may or may not be deployed' '$tmp/out'"
+fresh; touch "$fix/deploy-hangs-podster-content"; at_terminal 129 "$DOMAIN" --signal SIGHUP --when "$fix/deploying" -- "${files[@]}" --deploy || true
+check "SIGHUP during wrangler deploy: exit 129, and it says so" bash -c "[ $LAST -eq 129 ] && grep -q 'STOPPED by SIGHUP during wrangler deploy of the content Worker. podster-outbound is deployed; the content Worker may or may not be deployed' '$tmp/out'"
 check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 fresh; touch "$fix/probe-hangs"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/probing" -- "${files[@]}" --deploy || true
-check "SIGINT during the probes: exit 130, deployed and NOT verified" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT during the probes. The Worker is deployed and NOT verified.' '$tmp/out'"
-check "  it had deployed once, and the token is in no output" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
+check "SIGINT during the probes: exit 130, deployed and NOT verified" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT during the probes. The Workers are deployed and NOT verified.' '$tmp/out'"
+check "  it had deployed both Workers" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 2 ]"
 check "  the token is in no output" no_token
 
 finish deploy-content

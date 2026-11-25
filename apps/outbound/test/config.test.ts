@@ -1,9 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-// The outbound Worker deploys nowhere until the owner wires it as the dispatch namespace's outbound Worker on the
-// second account, and never to the account that holds podster.dev (M6 stage 1; docs/m6-plan.md, "The outbound
-// Worker"). These read the package as it is checked in, and hold it to the guard `apps/content` set:
+// The outbound Worker deploys only through `scripts/deploy-content`, to the second account, first, and is named there as
+// the dispatch namespace's outbound Worker; never to the account that holds podster.dev (M6 stage 1; docs/m6-plan.md,
+// "The outbound Worker"; docs/content-deploy.md). These read the package as it is checked in, and hold it to the guard
+// `apps/content` set:
 //   - With no configuration file, `wrangler deploy` configures the project and deploys it (Cloudflare's "automatic
 //     configuration", since wrangler 4.68). So the package carries a default-named `wrangler.jsonc`.
 //   - That file's `account_id` is no account, and holds characters wrangler refuses before any call scoped to an
@@ -77,14 +78,14 @@ describe("the package can't be deployed by accident", () => {
     expect(source).toMatch(/function validateAccountId\(accountId, source\) \{\s*if \(!ACCOUNT_ID_PATTERN\.test\(accountId\)\) \{\s*throw new UserError\(/);
   });
 
-  it("has no deploy script, isn't known to any deploy, and CI only checks and tests it", () => {
+  it("has no deploy script, is known only to scripts/deploy-content, and CI only checks and tests it", () => {
     const pkg = JSON.parse(read("package.json"));
     expect(pkg.name).toBe("@podster/outbound");
     expect(Object.keys(pkg.scripts).sort()).toEqual(["test", "typecheck"]);
     expect(JSON.stringify(pkg)).not.toMatch(/deploy/);
     expect(Object.keys(pkg.devDependencies).sort()).toEqual(["@cloudflare/workers-types", "@types/node", "typescript", "vitest", "wrangler"]);
     expect(pkg.dependencies).toBeUndefined();
-    for (const script of ["scripts/deploy-staging", "scripts/staging-probes", "scripts/deploy-content"]) expect(repo(script), script).not.toMatch(/apps\/outbound|podster-outbound/);
+    for (const script of ["scripts/deploy-staging", "scripts/staging-probes"]) expect(repo(script), script).not.toMatch(/apps\/outbound|podster-outbound/);
     const ci = repo(".github/workflows/ci.yml");
     const [from, to] = [ci.indexOf("\n  outbound:"), ci.indexOf("\n  content:")];
     expect(from).toBeGreaterThan(0);
@@ -93,6 +94,34 @@ describe("the package can't be deployed by accident", () => {
     expect(job).toContain("working-directory: apps/outbound");
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|secrets\./);
     expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+  });
+});
+
+describe("scripts/deploy-content deploys it with no route, address or binding, and names it as outbound", () => {
+  const script = repo("scripts/deploy-content");
+  // The configuration the script builds for this Worker, as written in the script: the owner's account, both public
+  // addresses off, and nothing else. The self-test (`scripts/test/deploy-content-selftest`) checks what it writes.
+  const outboundConfig = (() => {
+    const start = script.indexOf('> "$work/wrangler-outbound.json"');
+    expect(start).toBeGreaterThan(0);
+    const from = script.lastIndexOf("jq -n", start);
+    return script.slice(from, start);
+  })();
+
+  it("takes from this file only the name, entry point and compatibility date, and refuses the file holding anything else", () => {
+    expect(outboundConfig).toMatch(/name: \$c\.name, main: \$main, compatibility_date: \$c\.compatibility_date, account_id: \$account,\s+workers_dev: false, preview_urls: false\s+\}'/);
+    for (const key of FORBIDDEN_KEYS) expect(outboundConfig, key).not.toMatch(new RegExp(`\\b${key}:`));
+    expect(script).toContain('(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"])');
+    expect(script).toContain('readFileSync("apps/outbound/wrangler.jsonc", "utf8")');
+    expect(script).toMatch(/^OUTBOUND=podster-outbound$/m);
+  });
+
+  it("deploys it before the content Worker, whose dispatch binding names it as outbound", () => {
+    const outbound = script.indexOf('wrangler_deploy outbound outbound "$work/wrangler-outbound.json"');
+    const content = script.indexOf('wrangler_deploy content content "$work/wrangler.json"');
+    expect(outbound).toBeGreaterThan(0);
+    expect(content).toBeGreaterThan(outbound);
+    expect(script).toContain('dispatch_namespaces: [{ binding: "APPS", namespace: $namespace, outbound: { service: $outbound } }],');
   });
 });
 

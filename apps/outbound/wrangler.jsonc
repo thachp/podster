@@ -9,9 +9,10 @@
   //     call that is scoped to an account. Wrangler uses the file's `account_id` ahead of `CLOUDFLARE_ACCOUNT_ID` in
   //     the environment (read in the source of the wrangler version `test/config.test.ts` names).
   //   - Both public addresses are off, and there is no route, no custom domain, no environment and no binding.
-  // `test/config.test.ts` fails if any of that changes. Wiring it as the namespace's outbound Worker on the second
-  // account is the owner's setup, from a configuration outside this folder that is never committed. Neither account's
-  // ID is ever written in this repository.
+  // `test/config.test.ts` fails if any of that changes. It deploys only through `scripts/deploy-content`, which builds
+  // its configuration from this file's name, entry point and compatibility date and the owner's account, in a temporary
+  // folder, never committed, deploys it before the content Worker, and names it on the content Worker's dispatch binding
+  // as the namespace's outbound Worker (docs/content-deploy.md). Neither account's ID is ever written in this repository.
   "name": "podster-outbound",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",

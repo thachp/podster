@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# The one way to deploy the content Worker, apps/content, to the second Cloudflare account (M6 step 4(b), ADR 0010,
-# decision 217). It never uses apps/content/wrangler.jsonc's account or a wrangler login: the account, the content
-# domain and the two namespaces come from the owner's configuration file, and the token from the owner's token file.
-# docs/content-deploy.md is the guide.
+# The one way to deploy the content Worker, apps/content, and the outbound Worker, apps/outbound, to the second
+# Cloudflare account (M6 step 4(b), ADR 0010 and its revision's question 8, decision 217). The outbound Worker always
+# deploys first, with no route, no address and no binding, and the content Worker's dispatch binding names it as the
+# namespace's outbound Worker. It never uses either package's wrangler.jsonc account or a wrangler login: the account,
+# the content domain and the two namespaces come from the owner's configuration file, and the token from the owner's
+# token file. docs/content-deploy.md is the guide.
 #
 # WHAT IT DEFENDS AGAINST: accidents in the owner's shell. A stray exported function or alias from dotfiles, tracing
 # left on, a proxy or a .curlrc, a leftover token variable, the wrong account in the environment. It does NOT defend
@@ -106,10 +108,13 @@ usage() {
   cat <<'EOF'
 Usage: scripts/deploy-content --token-file <absolute path> --config-file <absolute path> [--deploy]
 
-Deploys the content Worker, apps/content, to the account that holds the content domain, and nowhere
-else. Without --deploy it only reports: it runs every check below, reads Cloudflare's API, and prints
-what it would deploy, changing nothing. With --deploy it also deploys, and then probes the content
-domain signed out.
+Deploys two Workers to the account that holds the content domain, and nowhere else: first the
+outbound Worker, apps/outbound, as podster-outbound, with no route, no workers.dev address, no preview
+address and no binding; then the content Worker, apps/content, whose dispatch binding APPS names
+podster-outbound as the namespace's outbound Worker. The outbound Worker always deploys: no flag or
+key leaves it out. Without --deploy it only reports: it runs every check below, reads Cloudflare's
+API, and prints what it would deploy, both Workers, changing nothing. With --deploy it also deploys
+both, checks the outbound Worker by Cloudflare's API, and probes the content domain signed out.
 
 AGENTS run it only without --deploy, and only when the owner asks. --deploy needs a person at a
 terminal: stdin and stdout must be terminals, and the owner types the content domain to confirm.
@@ -147,8 +152,11 @@ It refuses, before changing anything, unless:
     compared without regard to case
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked,
     and ci.yml's run on main for that commit finished as success
-  - apps/content has no .wrangler/deploy/config.json and no .env file of any name, and its pinned
-    wrangler is 4.157.0
+  - apps/content and apps/outbound each have no .wrangler/deploy/config.json and no .env file of
+    any name, and each one's pinned wrangler is 4.157.0
+  - apps/outbound/wrangler.jsonc names the Worker podster-outbound, switches both public addresses
+    off, and holds nothing but its name, entry point, compatibility date, placeholder account and
+    those two switches. The deploy carries the name, entry point and compatibility date alone.
   - apps/content/wrangler.jsonc names the Worker podster-content and holds the write counter in
     exactly the committed shape: the binding WRITE_COUNTER to this Worker's own class WriteCounter,
     the one migration v1 making it a SQLite-backed class, and WRITE_BUDGET_WRITES and
@@ -162,7 +170,12 @@ It refuses, before changing anything, unless:
       the token sees no zone named podster.dev
       the content domain is one active zone, on that account
       the dispatch namespace and the KV namespace exist on that account
+      the account's Worker scripts can be listed (it says whether podster-outbound exists yet)
+      no route on the content domain's zone names podster-outbound
     Any error, or an answer of any other shape, refuses.
+
+The deploy runs wrangler twice, outbound first. If the outbound Worker's deploy fails, or Cloudflare's
+list of scripts doesn't then show podster-outbound, the content Worker isn't deployed (exit 3).
 
 After a deploy it waits up to 30 s, by the clock, for the route: until a new route takes effect,
 Cloudflare answers a host on it with a 52x or not at all, so it sends the first probe's request,
@@ -172,10 +185,16 @@ Then it probes the content domain signed out: on a random host, an unknown host 
 own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
 a request with a Service-Worker header gets 403; and the content domain itself serves nothing. A
 host two labels deep is not shown: the zone's certificate covers one level.
+Then it checks by Cloudflare's API, with the token: podster-outbound exists, has no workers.dev or
+preview address, and no route on the content domain's zone names it (other zones the token can't
+see, and can't add routes on); and, from podster-content's deployed settings, that its APPS binding
+names podster-outbound as outbound. If those settings can't be read, it says NOT SHOWN, not passed.
+An app's fetch being refused is NOT SHOWN: it needs an app with code, and none exists yet.
 
 Exit codes: 0 reported (no --deploy), or deployed and every probe passed; 1 refused, nothing changed;
-2 wrong usage; 3 the deploy failed part-way (the output says what wrangler said, redacted); 4
-deployed, but a probe failed: the Worker is deployed and not verified; 129, 130 or 143 stopped by
+2 wrong usage; 3 the deploy failed part-way (the output says what wrangler said, redacted, and which
+Worker was deployed); 4 deployed, but a probe or check failed: the Workers are deployed and not
+verified; 129, 130 or 143 stopped by
 SIGHUP, SIGINT or SIGTERM, and the output says whether anything had been deployed.
 EOF
 }
@@ -229,8 +248,9 @@ on_signal() { # on_signal NAME CODE
   echo
   case "$phase" in
     checking) echo "STOPPED by $1 before anything was deployed. Nothing changed." ;;
-    deploying) echo "STOPPED by $1 during wrangler deploy. The Worker may or may not be deployed: check the account before running this again." ;;
-    probing) echo "STOPPED by $1 during the probes. The Worker is deployed and NOT verified." ;;
+    deploying-outbound) echo "STOPPED by $1 while deploying the outbound Worker. podster-outbound may or may not be deployed, and the content Worker wasn't: check the account before running this again." ;;
+    deploying) echo "STOPPED by $1 during wrangler deploy of the content Worker. podster-outbound is deployed; the content Worker may or may not be deployed: check the account before running this again." ;;
+    probing) echo "STOPPED by $1 during the probes. The Workers are deployed and NOT verified." ;;
   esac
   dc_meant=1
   exit "$2"
@@ -350,11 +370,20 @@ fi
 for envfile in apps/content/.env apps/content/.env.*; do
   if [ -e "$envfile" ] || [ -L "$envfile" ]; then refuse "${envfile} exists. Remove it: no .env file belongs in apps/content."; fi
 done
+# The outbound Worker's package, the same way: it deploys with its own wrangler, from the same kind of folder.
+if [ -e apps/outbound/.wrangler/deploy/config.json ] || [ -L apps/outbound/.wrangler/deploy/config.json ]; then
+  refuse "apps/outbound/.wrangler/deploy/config.json exists: it would point wrangler at another configuration. Remove it."
+fi
+for envfile in apps/outbound/.env apps/outbound/.env.*; do
+  if [ -e "$envfile" ] || [ -L "$envfile" ]; then refuse "${envfile} exists. Remove it: no .env file belongs in apps/outbound."; fi
+done
 
-step "npm ci in apps/content"
-(cd apps/content && npm ci --ignore-scripts) || refuse "npm ci failed in apps/content"
-wrangler_version=$(cd apps/content && node_modules/.bin/wrangler --version 2> /dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
-[ "$wrangler_version" = 4.157.0 ] || refuse "apps/content's wrangler is '${wrangler_version:-missing}', not 4.157.0"
+for app in content outbound; do
+  step "npm ci in apps/$app"
+  (cd "apps/$app" && npm ci --ignore-scripts) || refuse "npm ci failed in apps/$app"
+  wrangler_version=$(cd "apps/$app" && node_modules/.bin/wrangler --version 2> /dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+  [ "$wrangler_version" = 4.157.0 ] || refuse "apps/$app's wrangler is '${wrangler_version:-missing}', not 4.157.0"
+done
 
 # --- Cloudflare's API, read with the token ---
 # curl_clean ARG...: curl with -q first, so no .curlrc is read, and an environment of PATH and an empty home alone, so
@@ -372,7 +401,11 @@ cf() {
   [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
   if leaked "$work/body" "$work/curl.err" "$work/status"; then
     redact "$work/body"
-    refuse "Cloudflare's answer to GET $1 held the token. It wasn't printed."
+    if [ "$phase" = checking ]; then refuse "Cloudflare's answer to GET $1 held the token. It wasn't printed."; fi
+    echo "STOPPED Cloudflare's answer to GET $1 held the token. It wasn't printed."
+    echo "deploy-content: stopped after deploying, while $phase. What was deployed is NOT verified. Make a new token."
+    dc_meant=1
+    exit 3
   fi
 }
 # shaped FILTER [ARG...]: the body is a success in exactly the shape FILTER describes. jq's arguments follow the filter.
@@ -392,7 +425,11 @@ shaped() {
 ARRAY='(.result | type) == "array"'
 TOKEN_SHAPE='(.result | type) == "object" and (.result.id | type) == "string" and (.result.status | type) == "string"'
 ACCOUNTS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string")'
-ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.name | type) == "string" and (.status | type) == "string" and (.account | type) == "object" and (.account.id | type) == "string")'
+ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string" and (.name | type) == "string" and (.status | type) == "string" and (.account | type) == "object" and (.account.id | type) == "string")'
+SCRIPTS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string")'
+# A route's script may be absent or null: a route that runs no Worker.
+ROUTES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.pattern | type) == "string" and ((.script // "") | type) == "string")'
+OUTBOUND=podster-outbound
 
 step "reading Cloudflare's API with the token"
 cf /user/tokens/verify
@@ -447,6 +484,8 @@ shaped "$ZONES_SHAPE" || refuse "the answer about the content domain isn't a lis
 [ "$(jq -r '.result[0].name | ascii_downcase' "$work/body")" = "$domain" ] || refuse "the zone Cloudflare answered with isn't the content domain"
 [ "$(jq -r '.result[0].account.id | ascii_downcase' "$work/body")" = "$account" ] || refuse "the content domain's zone isn't on the configuration's account"
 [ "$(jq -r '.result[0].status' "$work/body")" = active ] || refuse "the content domain's zone isn't active yet ($(jq -r '.result[0].status' "$work/body"))"
+zone_id=$(jq -r '.result[0].id | ascii_downcase' "$work/body")
+[[ "$zone_id" =~ ^[0-9a-f]{32}$ ]] || refuse "Cloudflare's answer about the content domain's zone didn't give its ID"
 echo "ok   the content domain is an active zone on that account"
 
 cf "/accounts/$account/workers/dispatch/namespaces/$namespace"
@@ -457,6 +496,24 @@ cf "/accounts/$account/storage/kv/namespaces/$kv"
 [ "$status" = 200 ] || refuse "the KV namespace wasn't found on that account (HTTP $status)"
 shaped '(.result | type) == "object" and (.result.id | ascii_downcase) == $k' --arg k "$kv" || refuse "the answer about the KV namespace isn't that namespace"
 echo "ok   the KV namespace exists"
+
+# The outbound Worker: whether it exists yet, and that no route on the content domain's zone runs it. A deploy with no
+# route leaves a script's existing routes alone, so one made by hand would outlive every deploy: it is refused here.
+cf "/accounts/$account/workers/scripts"
+[ "$status" = 200 ] || refuse "listing the account's Worker scripts failed (HTTP $status)"
+shaped "$SCRIPTS_SHAPE" || refuse "the list of the account's Worker scripts isn't in the shape expected"
+if jq -e --arg o "$OUTBOUND" 'any(.result[]; .id == $o)' "$work/body" > /dev/null; then
+  echo "ok   the account's scripts can be listed: $OUTBOUND exists, and the deploy replaces it"
+else
+  echo "ok   the account's scripts can be listed: $OUTBOUND doesn't exist yet, and the deploy makes it"
+fi
+cf "/zones/$zone_id/workers/routes"
+[ "$status" = 200 ] || refuse "listing the routes on the content domain's zone failed (HTTP $status)"
+shaped "$ROUTES_SHAPE" || refuse "the list of routes on the content domain's zone isn't in the shape expected"
+if jq -e --arg o "$OUTBOUND" 'any(.result[]; (.script // "") == $o)' "$work/body" > /dev/null; then
+  refuse "a route on the content domain's zone runs $OUTBOUND. The outbound Worker has no route: remove it."
+fi
+echo "ok   no route on the content domain's zone runs $OUTBOUND"
 
 # --- what would be deployed ---
 # The committed file gives the Worker's name, entry point and compatibility date, the write counter (its binding and its
@@ -483,24 +540,44 @@ jq -e '.migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}]' <
 jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,9})$") and (length < 10 or . <= "4294967295"))
   and (.window_ms | type == "string" and test("^[1-9][0-9]{0,18}$") and (length < 19 or . <= "9223372036854775807"))' <<< "$committed" > /dev/null \
   || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings the content Worker takes as a cap: writes 0 to 4294967295, the window 1 to 9223372036854775807"
+# The outbound Worker's committed file: exactly its six keys, its name, both public addresses off. Its placeholder
+# account is never used: the deploy's configuration carries the owner's. Nothing else is taken from it.
+outbound_committed=$(node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { parseJsonc } from "./e2e/jsonc.mjs";
+process.stdout.write(JSON.stringify(parseJsonc(readFileSync("apps/outbound/wrangler.jsonc", "utf8"))));
+') || refuse "couldn't read apps/outbound/wrangler.jsonc"
+jq -e --arg o "$OUTBOUND" '(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"])
+  and .name == $o and .workers_dev == false and .preview_urls == false
+  and .main == "src/index.ts" and (.compatibility_date | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' <<< "$outbound_committed" > /dev/null \
+  || refuse "apps/outbound/wrangler.jsonc must hold exactly its name $OUTBOUND, entry point src/index.ts, compatibility date, placeholder account and both public addresses off, and nothing else: no route and no binding"
 writes=$(jq -r .writes <<< "$committed")
 window_ms=$(jq -r .window_ms <<< "$committed")
 route="*.$domain/*"
 jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< "$committed")" --arg account "$account" \
-  --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" '{
+  --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" --arg outbound "$OUTBOUND" '{
     name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
     workers_dev: false, preview_urls: false,
     routes: [{ pattern: $route, zone_name: $domain }],
     vars: { CONTENT_DOMAIN: $domain, WRITE_BUDGET_WRITES: $c.writes, WRITE_BUDGET_WINDOW_MS: $c.window_ms },
     kv_namespaces: [{ binding: "SERVE", id: $kv }],
-    dispatch_namespaces: [{ binding: "APPS", namespace: $namespace }],
+    dispatch_namespaces: [{ binding: "APPS", namespace: $namespace, outbound: { service: $outbound } }],
     durable_objects: $c.durable_objects,
     migrations: $c.migrations
   }' > "$work/wrangler.json"
+# The outbound Worker's: name, entry point and compatibility date from its file, the owner's account, both public
+# addresses off, and nothing else. No route, no binding, no variable.
+jq -n --argjson c "$outbound_committed" --arg main "$root/apps/outbound/$(jq -r .main <<< "$outbound_committed")" --arg account "$account" '{
+    name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
+    workers_dev: false, preview_urls: false
+  }' > "$work/wrangler-outbound.json"
 
 echo
-echo "would deploy podster-content at $here, origin/main's tip with ci.yml green, to the configuration's account,"
+echo "would deploy, first, $OUTBOUND at $here to the configuration's account, with no route, no workers.dev"
+echo "address, no preview address and no binding: the dispatch namespace's outbound Worker, which refuses every request."
+echo "then it would deploy podster-content at $here, origin/main's tip with ci.yml green, to the configuration's account,"
 echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace,"
+echo "the dispatch binding APPS naming $OUTBOUND as the namespace's outbound Worker,"
 echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
 echo "No other route, no workers.dev address and no preview address."
 
@@ -520,40 +597,72 @@ IFS= read -r typed || typed=""
 [ "$typed" = "$domain" ] || refuse "what was typed isn't the content domain"
 
 # --- the deploy ---
-step "wrangler deploy"
-mkdir -m 700 "$work/home" "$work/logs" "$work/cache" "$work/xdg" "$work/run"
+mkdir -m 700 "$work/home" "$work/cache" "$work/xdg"
 : > "$work/empty.env"
+# wrangler_deploy WHICH APP CONFIG: runs APP's own pinned wrangler on CONFIG, leaving its output in $work/deploy-WHICH.out
+# and its log in $work/logs-WHICH, and sets deploy_status. env -i with an allow-list: nothing of the caller's
+# environment, exported functions included, reaches wrangler. The small shell reads the token on its stdin, from the
+# file, so it is in no command's arguments, and exports it to wrangler alone. It runs from $work/run-WHICH, an empty
+# folder of the script's own, with --env-file at an empty file, so wrangler reads no .env.
+wrangler_deploy() {
+  local which=$1 app=$2 config=$3
+  mkdir -m 700 "$work/logs-$which" "$work/run-$which"
+  deploy_status=0
+  /usr/bin/env -i PATH="$PATH" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
+    WRANGLER_LOG_PATH="$work/logs-$which" WRANGLER_SEND_METRICS=false CI=true \
+    /bin/bash --noprofile --norc -c 'set -eu; IFS= read -r CLOUDFLARE_API_TOKEN; export CLOUDFLARE_API_TOKEN; cd "$1"; exec "$2" deploy --config "$3" --env-file "$4" < /dev/null' \
+    deploy-content "$work/run-$which" "$root/apps/$app/node_modules/.bin/wrangler" "$config" "$work/empty.env" \
+    < "$token_file" > "$work/deploy-$which.out" 2>&1 || deploy_status=$?
+}
+# deployed_output WHICH WHAT-ELSE: prints wrangler's output, redacted, and stops with exit 3 if it or the log held the
+# token or wrangler failed. WHAT-ELSE says what that means for the other Worker.
+deployed_output() {
+  local which=$1 else_said=$2 logs
+  logs=$(find "$work/logs-$which" -type f 2> /dev/null || true)
+  # shellcheck disable=SC2086
+  if leaked "$work/deploy-$which.out" $logs; then
+    redact "$work/deploy-$which.out"
+    sed 's/^/        | /' "$work/deploy-$which.out"
+    echo
+    echo "STOPPED wrangler's output or its log held the token. It was redacted above and not printed."
+    echo "deploy-content: the $which Worker may or may not be deployed. $else_said Read wrangler's output above, and make a new token."
+    dc_meant=1
+    exit 3
+  fi
+  sed 's/^/        | /' "$work/deploy-$which.out"
+  if [ "$deploy_status" -ne 0 ]; then
+    echo
+    echo "STOPPED wrangler deploy of the $which Worker exited with status $deploy_status"
+    echo "deploy-content: the deploy failed part-way. $else_said Read wrangler's output above for what changed."
+    dc_meant=1
+    exit 3
+  fi
+}
+
+# First the outbound Worker. The content Worker's binding names it, so the content Worker never deploys without it.
+step "wrangler deploy: $OUTBOUND, the outbound Worker"
+phase=deploying-outbound
+wrangler_deploy outbound outbound "$work/wrangler-outbound.json"
+deployed_output outbound "The content Worker wasn't deployed."
+outbound_version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-outbound.out" | head -n 1 | sed 's/.*: //' || true)
+echo "version $OUTBOUND ${outbound_version:-not printed by wrangler}"
+
+# It must be there, by Cloudflare's own list, before anything names it.
+cf "/accounts/$account/workers/scripts"
+if [ "$status" != 200 ] || ! shaped "$SCRIPTS_SHAPE" || ! jq -e --arg o "$OUTBOUND" 'any(.result[]; .id == $o)' "$work/body" > /dev/null; then
+  echo
+  echo "STOPPED Cloudflare's list of the account's scripts (HTTP $status) doesn't show $OUTBOUND after its deploy."
+  echo "deploy-content: the content Worker wasn't deployed, since its binding would name an outbound Worker that isn't there. Check the account before running this again."
+  dc_meant=1
+  exit 3
+fi
+echo "ok      $OUTBOUND is on the account"
+
+step "wrangler deploy: podster-content"
 phase=deploying
-deploy_status=0
-# env -i with an allow-list: nothing of the caller's environment, exported functions included, reaches wrangler. The
-# small shell reads the token on its stdin, from the file, so it is in no command's arguments, and exports it to
-# wrangler alone. It runs from $work/run, a folder of the script's own, with --env-file at an empty file, so wrangler
-# reads no .env.
-/usr/bin/env -i PATH="$PATH" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
-  WRANGLER_LOG_PATH="$work/logs" WRANGLER_SEND_METRICS=false CI=true \
-  /bin/bash --noprofile --norc -c 'set -eu; IFS= read -r CLOUDFLARE_API_TOKEN; export CLOUDFLARE_API_TOKEN; cd "$1"; exec "$2" deploy --config "$3" --env-file "$4" < /dev/null' \
-  deploy-content "$work/run" "$root/apps/content/node_modules/.bin/wrangler" "$work/wrangler.json" "$work/empty.env" \
-  < "$token_file" > "$work/deploy.out" 2>&1 || deploy_status=$?
-logs=$(find "$work/logs" -type f 2> /dev/null || true)
-# shellcheck disable=SC2086
-if leaked "$work/deploy.out" $logs; then
-  redact "$work/deploy.out"
-  sed 's/^/        | /' "$work/deploy.out"
-  echo
-  echo "STOPPED wrangler's output or its log held the token. It was redacted above and not printed."
-  echo "deploy-content: the Worker may or may not be deployed. Read wrangler's output above, and make a new token."
-  dc_meant=1
-  exit 3
-fi
-sed 's/^/        | /' "$work/deploy.out"
-if [ "$deploy_status" -ne 0 ]; then
-  echo
-  echo "STOPPED wrangler deploy exited with status $deploy_status"
-  echo "deploy-content: the deploy failed part-way. Read wrangler's output above for what changed."
-  dc_meant=1
-  exit 3
-fi
-version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy.out" | head -n 1 | sed 's/.*: //' || true)
+wrangler_deploy content content "$work/wrangler.json"
+deployed_output content "$OUTBOUND is deployed."
+version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-content.out" | head -n 1 | sed 's/.*: //' || true)
 echo "version podster-content ${version:-not printed by wrangler}"
 
 # --- signed-out probes of the content domain ---
@@ -638,11 +747,56 @@ case "$status" in
 esac
 echo "NOT SHOWN a host two labels deep, such as a.$host: the zone's certificate covers one level, so HTTPS there can't be probed"
 
+# --- the outbound Worker, by Cloudflare's API with the token ---
+step "checking $OUTBOUND and the dispatch binding by Cloudflare's API"
+cf "/accounts/$account/workers/scripts"
+if [ "$status" = 200 ] && shaped "$SCRIPTS_SHAPE" && jq -e --arg o "$OUTBOUND" 'any(.result[]; .id == $o)' "$work/body" > /dev/null; then
+  pass "$OUTBOUND exists on the account"
+else
+  fail "$OUTBOUND isn't in the account's list of scripts (HTTP $status)"
+fi
+cf "/accounts/$account/workers/scripts/$OUTBOUND/subdomain"
+if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.enabled | type) == "boolean"'; then
+  if [ "$(jq -r .result.enabled "$work/body")" = false ]; then pass "$OUTBOUND has no workers.dev address"; else fail "$OUTBOUND is on workers.dev"; fi
+  case "$(jq -r '.result.previews_enabled | if type == "boolean" then tostring else "unread" end' "$work/body")" in
+    false) pass "$OUTBOUND has no preview address" ;;
+    true) fail "$OUTBOUND has preview addresses on" ;;
+    *) echo "NOT SHOWN whether $OUTBOUND has preview addresses: Cloudflare's answer didn't say" ;;
+  esac
+else
+  fail "$OUTBOUND's workers.dev setting couldn't be read (HTTP $status): not verified"
+fi
+cf "/zones/$zone_id/workers/routes"
+if [ "$status" = 200 ] && shaped "$ROUTES_SHAPE"; then
+  if jq -e --arg o "$OUTBOUND" 'any(.result[]; (.script // "") == $o)' "$work/body" > /dev/null; then
+    fail "a route on the content domain's zone runs $OUTBOUND"
+  else
+    pass "no route on the content domain's zone runs $OUTBOUND (the token sees no other zone, and can make routes on none)"
+  fi
+else
+  fail "the routes on the content domain's zone couldn't be read (HTTP $status): not verified"
+fi
+# The binding as Cloudflare holds it, from podster-content's deployed settings. An answer that can't be read, or isn't
+# in the shape expected, is said so: never taken for a pass.
+cf "/accounts/$account/workers/scripts/podster-content/settings"
+if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.bindings | type) == "array"'; then
+  apps_binding=$(jq -c '[.result.bindings[] | select(type == "object" and .name == "APPS")]' "$work/body")
+  if jq -e --arg n "$namespace" --arg o "$OUTBOUND" 'length == 1 and (.[0] | .type == "dispatch_namespace" and .namespace == $n
+      and (.outbound | type) == "object" and (.outbound.worker | type) == "object" and .outbound.worker.service == $o)' <<< "$apps_binding" > /dev/null; then
+    pass "podster-content's deployed binding APPS names $OUTBOUND as the namespace's outbound Worker"
+  else
+    fail "podster-content's deployed settings have no binding APPS to the namespace naming $OUTBOUND as outbound"
+  fi
+else
+  echo "NOT SHOWN whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
+fi
+echo "NOT SHOWN an app's fetch refused by $OUTBOUND: that needs an app with code, and none exists yet"
+
 echo
 if [ "$probe_failures" -ne 0 ]; then
-  echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed: the Worker is deployed and NOT verified."
+  echo "deploy-content: deployed $OUTBOUND (version ${outbound_version:-unknown}) and podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed: the Workers are deployed and NOT verified."
   dc_meant=1
   exit 4
 fi
-echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}) to $domain, and every probe passed."
+echo "deploy-content: deployed $OUTBOUND (version ${outbound_version:-unknown}) and podster-content at $here (version ${version:-unknown}) to $domain, and every probe passed."
 dc_meant=1

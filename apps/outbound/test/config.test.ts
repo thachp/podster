@@ -87,13 +87,16 @@ describe("the package can't be deployed by accident", () => {
     expect(pkg.dependencies).toBeUndefined();
     for (const script of ["scripts/deploy-staging", "scripts/staging-probes"]) expect(repo(script), script).not.toMatch(/apps\/outbound|podster-outbound/);
     const ci = repo(".github/workflows/ci.yml");
-    const [from, to] = [ci.indexOf("\n  outbound:"), ci.indexOf("\n  content:")];
+    // Its steps are in the `small` job, with four other short checks. Nothing in that job deploys or reads a secret.
+    const [from, to] = [ci.indexOf("\n  small:"), ci.indexOf("\n  api-1:")];
     expect(from).toBeGreaterThan(0);
     expect(to).toBeGreaterThan(from);
     const job = ci.slice(from, to);
-    expect(job).toContain("working-directory: apps/outbound");
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|secrets\./);
-    expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+    // These three are every step in the workflow that runs in the package.
+    expect([...job.matchAll(/- run: (.+)\n(?: +if: .+\n)? +working-directory: apps\/outbound\n/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+    expect(ci.split("apps/outbound").length - 1).toBe(job.split("working-directory: apps/outbound\n").length - 1);
+    expect(job.split("working-directory: apps/outbound\n").length - 1).toBe(3);
   });
 });
 

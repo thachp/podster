@@ -177,11 +177,17 @@ describe("the package can't be deployed by accident", () => {
     for (const script of ["scripts/deploy-staging", "scripts/staging-probes"]) expect(repo(script), script).not.toMatch(/apps\/content|podster-content/);
     // CI checks and tests the package and does nothing else with it.
     const ci = repo(".github/workflows/ci.yml");
-    const job = ci.slice(ci.indexOf("\n  content:"), ci.indexOf("\n  gateway:"));
-    expect(job).toContain("working-directory: apps/content");
+    // Its steps are in the `small` job, with four other short checks. Nothing in that job deploys or reads a secret.
+    const [from, to] = [ci.indexOf("\n  small:"), ci.indexOf("\n  api-1:")];
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    const job = ci.slice(from, to);
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|secrets\./);
-    // It installs without running any package's install script: the tests only read wrangler's source.
-    expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+    // It installs without running any package's install script: the tests only read wrangler's source. These three are
+    // every step in the workflow that runs in the package.
+    expect([...job.matchAll(/- run: (.+)\n(?: +if: .+\n)? +working-directory: apps\/content\n/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+    expect(ci.split("apps/content").length - 1).toBe(job.split("working-directory: apps/content\n").length - 1);
+    expect(job.split("working-directory: apps/content\n").length - 1).toBe(3);
   });
 });
 

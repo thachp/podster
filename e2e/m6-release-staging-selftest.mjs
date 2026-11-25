@@ -170,8 +170,11 @@ const withoutDeploy = contract.replace(GRANT_ACTIONS, "action: { type: string, e
 // ---- the script's source ----
 
 {
-  const source = readFileSync(join(here, "m6-release-staging.mjs"), "utf8");
-  check(/spawn\("git", \[[^\]]*\], \{ cwd, env: gitEnv\(/.test(source) && (source.match(/spawn\(/g) ?? []).length === 1, "the one child process it starts is git, with gitEnv's environment");
+  // The run's steps are split between the script and m6-release-run.mjs, which it shares with m6-code-app-staging.mjs.
+  const script = readFileSync(join(here, "m6-release-staging.mjs"), "utf8");
+  const shared = readFileSync(join(here, "m6-release-run.mjs"), "utf8");
+  const source = `${script}\n${shared}`;
+  check(/spawn\("git", \[[^\]]*\], \{ cwd, env: gitEnv\(/.test(shared) && (source.match(/spawn\(/g) ?? []).length === 1, "the one child process it starts is git, with gitEnv's environment");
   check(!/api\.cloudflare\.com|wrangler|gh run/.test(source), "it calls no Cloudflare API, no wrangler and no gh run");
   check(source.includes("publisher.stop()") && source.includes("takeBack(id)") && source.includes("/disconnect"), "clean-up makes the room private, takes grants back and disconnects the agent");
 }

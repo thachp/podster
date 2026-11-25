@@ -51,6 +51,7 @@ export const NOT_ENTRY = {
   "e2e/m6-staging-standin.mjs": "a preload m6-staging-selftest.mjs loads with --import, never run by itself",
   "e2e/m6-release-staging-lib.mjs": "a library m6-release-staging.mjs and its self-test import",
   "e2e/m6-release-staging-standin.mjs": "a preload m6-release-staging-selftest.mjs loads with --import, never run by itself",
+  "e2e/m6-code-app-staging-lib.mjs": "a library m6-code-app-staging.mjs and its self-test import",
   "scripts/requesters-rule.mjs": "a module merge-gate's rule is read from, not executable",
   "scripts/setting-names.mjs": "a module deploy-staging's secret-name check is read from, not executable",
   "scripts/lib/rust-toolchain.sh": "sourced by deploy-staging and with-pinned-rust, not executable",

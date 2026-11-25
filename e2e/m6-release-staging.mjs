@@ -42,6 +42,9 @@
 // M6-R12 run in a room of their own, the failing room, with its own repository, grants and admin approval: a release
 // served there, then the failing one. The run's room spends M6-R06's and M6-R15's. Each room spends at most 2.
 //
+// Its steps (sign-ups, git, merges, releases, the host's answers, clean-up) are in m6-release-run.mjs since 2026-11-25,
+// shared with m6-code-app-staging.mjs.
+//
 // GitHub: two public repositories in podsterdev, made by Podster, one for the run's room and one for the failing room.
 // The coding agent pushes with its
 // short-lived token through `git`, a child process with child-env.mjs's environment, a home of its own and the token
@@ -60,17 +63,14 @@
 // back, the agent disconnected, every session signed out. Left behind, as every staging run's are: the test people, the
 // organization, the three rooms and their tasks, and the two repositories, which this script can't delete: it prints
 // their names for the owner to archive or delete on GitHub.
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
-import { ASKPASS_SCRIPT, gitEnv } from "./m5-staging-lib.mjs";
 import {
-  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, IN_FLIGHT, maskedPath, markerProblem, markerWaitState, MARKER_PATH, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, requestLine, resultUrlProblem,
-  runOutcome, scrub, secretProblem, SETTLED, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_APP, STAGING_ORG, stateAfterUnpublish, statusProblems, Tally, unknownLabel, USAGE,
+  CONTENT_DOMAIN, contentNotFoundProblem, GRANT_LOST_CODE, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, fixedHeaderProblems, IN_FLIGHT, markerProblem, outOfScopeReason, parseArgs, PLAN, REFUSED_SITE, resultUrlProblem,
+  runOutcome, secretProblem, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_APP, STAGING_ORG, stateAfterUnpublish, statusProblems, Tally, unknownLabel, USAGE,
 } from "./m6-release-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
 
@@ -123,55 +123,23 @@ const grantProblem = deployGrantProblem(contractText);
 }
 
 // The clients come with the e2e packages, which a dry run doesn't need.
-const { eq, key, McpAgent, ok, Person, sleep, Target } = await import("./lib.mjs");
+const { eq, key, ok, Person, sleep } = await import("./lib.mjs");
+// The run-time parts this run shares with m6-code-app-staging.mjs.
+const { cause, Halt, NotOn, POLL_MS, refusedAs, refusedCode, releaseRun } = await import("./m6-release-run.mjs");
 
-const POLL_MS = 3000;
-const requests = [];
-const secrets = [signupSecret];
-/** Keeps a credential out of the run's output. Answers it. */
-const secret = (value) => {
-  if (typeof value === "string" && value.length >= 8 && !secrets.includes(value)) secrets.push(value);
-  return value;
-};
-const say = (line = "") => console.log(scrub(line, secrets));
-/** Every request the run sends, each logged as it ends: start, method, path (an app's host masked), status, ms. Never a body, header or query. */
-function logRequest({ url, ...request }) {
-  const entry = { ...request, path: maskedPath(url) };
-  requests.push(entry);
-  console.log(scrub(requestLine(entry), secrets));
-}
-const target = new Target(STAGING, { pollMs: POLL_MS, onRequest: logRequest });
 const RUN = `M6 release ${new Date().toISOString().slice(0, 16)}`;
+const run = releaseRun({ signupSecret, options, runName: RUN, workPrefix: "podster-m6-release-" });
+const { target, requests, say, secret, within, pause, signUpCookie, person, agentOf, leftBehind, hostAsk, marker, grants, repos, takeBack, preflight, deployReleaseListed } = run;
 const tally = new Tally(PLAN, say);
 
 // ---- checks ----
 
 /** A check that can't run here, with why. */
 class Skip extends Error {}
-/** The run can't go on. */
-class Stop extends Error {}
-/** Release isn't on with a provider: the run ends with exit 3. */
-class NotOn extends Error {}
-/** The run was told to stop. */
-class Halt extends Error {}
-let stopping = false;
-process.on("SIGINT", () => {
-  if (stopping) process.exit(130);
-  stopping = true;
-  console.log("\nStopping at the next request; clean-up follows. Press Ctrl-C again to quit at once, without it.");
-});
-const cause = (error) => {
-  const parts = [];
-  for (let at = error, depth = 0; at && depth < 4; at = at.cause, depth++) {
-    const said = [at.code, at.message].filter(Boolean).join(" ");
-    if (said && !parts.includes(said)) parts.push(said);
-  }
-  return parts.join(": ") || String(error);
-};
-async function check(id, run) {
-  if (stopping) throw new Halt("stopped by a signal");
+async function check(id, body) {
+  if (run.stopping) throw new Halt("stopped by a signal");
   try {
-    tally.add(id, "pass", (await run()) ?? "");
+    tally.add(id, "pass", (await body()) ?? "");
     return true;
   } catch (error) {
     if (error instanceof Halt || error instanceof NotOn) throw error;
@@ -184,143 +152,13 @@ const after = (...ids) => {
   const missing = ids.filter((id) => !tally.passed(id));
   if (missing.length) throw new Error(`not shown: it needs ${missing.join(" and ")} to have passed`);
 };
-const pause = async (ms) => {
-  if (stopping) throw new Halt("stopped by a signal");
-  await sleep(ms);
-};
-/** A person's refusal: exactly this status and this code. */
-const refusedAs = (result, status, code, label) => eq([result.status, result.code ?? null], [status, code], label);
-/** An agent's refusal over MCP, which carries a code and no status. */
-const refusedCode = (result, code, label) => eq([result.ok, result.code ?? null], [false, code], label);
-/** Polls `read` until `done` accepts its answer, for at most `seconds`. Answers the value and how long it took. */
-async function within(seconds, what, read, done, stepMs = POLL_MS) {
-  const start = Date.now();
-  for (;;) {
-    const value = await read();
-    if (done(value)) return { value, seconds: Math.round((Date.now() - start) / 100) / 10 };
-    ok(Date.now() - start < seconds * 1000, `${what} didn't happen within ${seconds} s`);
-    await pause(stepMs);
-  }
-}
-
-// ---- people and the agent ----
-
-const sessions = [];
-const leftBehind = [];
-let signUpsAsked = 0;
-let signUpUnknown = false;
-/** One take of the test sign-up, never sent twice: an answer lost in transport may have been taken. */
-async function signUpCookie(label, body) {
-  ok(!signUpUnknown, `the test sign-up for ${label} wasn't asked for: an earlier sign-up's outcome is unknown`);
-  if (stopping) throw new Halt("stopped by a signal");
-  signUpsAsked++;
-  let res;
-  try {
-    res = await target.http("/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}`, ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined, retry: false });
-  } catch (error) {
-    signUpUnknown = true;
-    throw new Error(`the test sign-up for ${label} failed in transport (${cause(error)}). Whether staging took it is unknown, so it wasn't asked again`);
-  }
-  ok(res.status === 200, `the test sign-up for ${label} answered ${res.status}. A 404 means it's off on staging, or PODSTER_E2E_SIGNUP_SECRET is wrong.`);
-  const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value);
-  sessions.push(cookie);
-  return cookie;
-}
-async function person(label) {
-  const made = await Person.fromCookie(target, label, await signUpCookie(label));
-  leftBehind.push(`${label} ${made.id}`);
-  return made;
-}
-const agents = [];
-async function agentOf(linker, label) {
-  const agent = await McpAgent.connect(target, linker, `${RUN} ${label}`);
-  agents.push({ agent, linker });
-  const keep = (held) => {
-    secret(held?.access_token);
-    secret(held?.refresh_token);
-  };
-  keep(agent.provider?.tokens?.());
-  const save = agent.provider?.saveTokens;
-  if (typeof save === "function") {
-    agent.provider.saveTokens = (held) => {
-      keep(held);
-      return save(held);
-    };
-  }
-  return agent;
-}
-
-// ---- GitHub and git ----
-
-async function github(path, { token, method = "GET", body } = {}) {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method,
-    redirect: "manual",
-    headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "e2e-check", ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body ? { "content-type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
-  });
-  const text = await res.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    // Not JSON: only the status is used.
-  }
-  return { status: res.status, body: json };
-}
-const work = mkdtempSync(join(tmpdir(), "podster-m6-release-"));
-const askpass = join(work, "askpass.sh");
-writeFileSync(askpass, ASKPASS_SCRIPT, { mode: 0o700 });
-chmodSync(askpass, 0o700);
-function git(args, { cwd = work, credential } = {}) {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["-c", "credential.helper=", "-c", "http.followRedirects=false", ...args], { cwd, env: gitEnv({ home: work, askpass, credential }), stdio: ["ignore", "pipe", "pipe"] });
-    const out = { stdout: "", stderr: "" };
-    child.stdout.on("data", (chunk) => (out.stdout += chunk));
-    child.stderr.on("data", (chunk) => (out.stderr += chunk));
-    const timer = setTimeout(() => child.kill("SIGKILL"), 120_000);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ code: -1, stdout: "", stderr: error.code ?? "spawn_failed" });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, stdout: scrub(out.stdout, secrets), stderr: scrub(out.stderr, secrets) });
-    });
-  });
-}
-async function mustGit(args, opts, label) {
-  const done = await git(args, opts);
-  ok(done.code === 0, `${label}: git exited ${done.code}: ${done.stderr.trim().split("\n").at(-1)?.slice(0, 200) ?? ""}`);
-  return done;
-}
-
-// ---- the app's host, asked directly ----
-
-/** One request to a host on the content domain, logged with the host masked. Answers status, headers and body text. */
-async function hostAsk(url, { method = "GET", headers = {} } = {}) {
-  const at = new Date().toISOString();
-  const begun = performance.now();
-  try {
-    const res = await fetch(url, { method, redirect: "manual", headers: { "cache-control": "no-cache", ...headers }, signal: AbortSignal.timeout(30_000) });
-    const body = method === "HEAD" ? "" : await res.text();
-    logRequest({ url, method, at, ms: Math.round(performance.now() - begun), status: res.status });
-    return { status: res.status, headers: [...res.headers], setCookies: res.headers.getSetCookie(), body };
-  } catch (error) {
-    logRequest({ url, method, at, ms: Math.round(performance.now() - begun), error: error?.name ?? "Error" });
-    throw new Error(`a request to the app's host failed in transport (${error?.name ?? "Error"})`);
-  }
-}
-const marker = (at) => hostAsk(`https://${at}${MARKER_PATH}`);
 
 /** Playwright's Chromium, with child-env.mjs's environment: never a secret of ours. */
-async function withBrowser(run) {
+async function withBrowser(body) {
   const playwright = await import("playwright");
   const browser = await playwright.chromium.launch({ env: childEnv() });
   try {
-    return await run(browser);
+    return await body(browser);
   } finally {
     await browser.close().catch(() => null);
   }
@@ -334,179 +172,33 @@ let team;
 let room, otherRoom, otherTask;
 /** M6-R11's room, with a repository of its own: a room has 2 uploads an hour, and the run's room spends its own. */
 let failRoom;
-/** Each room's repository, by room. */
-const repos = new Map();
 /** The app's default host and label, once it has one. */
 let host, appLabel;
 const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, sleep });
 /** What clean-up must undo, set as each is done and cleared once undone. `releaseOn` holds the rooms release may be on in. */
 const undo = { releaseOn: new Set(), suspended: null, delegationTaken: false };
-/** Grants the run gave, by ID, with the room each is in, that clean-up takes back unless seen ended. */
-const grants = new Map();
 const tasks = {};
 
 const releasesPath = (at = room) => `/v1/workspaces/${at}/releases`;
-const statusOf = async (task) => owner.must("GET", `/v1/workspaces/${task.room}/tasks/${task.id}/release-status`);
-const taskRead = async (task) => owner.must("GET", `/v1/workspaces/${task.room}/tasks/${task.id}`);
+const statusOf = async (task) => run.statusOf(owner, task);
+const taskRead = async (task) => run.taskRead(owner, task);
 const configOf = async (at = room) => owner.must("GET", `/v1/workspaces/${at}/release-config`);
 /** A member's request for a release of `task`'s merged commit, in the task's room. */
 const askRelease = (who, task, body = {}, options = undefined) => who.dash("POST", releasesPath(task.room), { task_id: task.id, commit_sha: task.mergeSha, ...body }, options);
-
-/** A grant the run gives in room `at`, noted for clean-up before anything is asserted about it. */
-async function give(principal, action, at = room) {
-  const answer = await owner.dash("POST", `/v1/workspaces/${at}/repository/grants`, { policy_version: await owner.policyVersion(at), principal_id: principal.id, action });
-  if (answer.body?.id) grants.set(answer.body.id, { what: `${action} grant to ${principal.id}`, room: at });
-  if (action === DEPLOY_GRANT.action && answer.status === 400 && answer.code === "invalid_argument") throw new NotOn("staging's grant route refuses the action deploy: no route gives a deploy grant there, so nothing can be released");
-  ok(answer.ok, `giving a ${action} grant to ${principal.id}: HTTP ${answer.status} ${answer.code ?? ""}`);
-  eq([answer.body.principal_id, answer.body.action, answer.body.state], [principal.id, action, "live"], `the ${action} grant`);
-  return answer.body;
-}
-async function takeBack(id) {
-  const { room: at } = grants.get(id);
-  const back = await owner.dash("DELETE", `/v1/workspaces/${at}/repository/grants/${id}`, { policy_version: await owner.policyVersion(at) });
-  if ((back.ok && back.body?.revoked_at) || (back.status === 404 && back.code === "grant_not_found")) grants.delete(id);
-  return back;
-}
-
+/** A grant the owner gives in room `at`, noted for clean-up before anything is asserted about it. */
+const give = (principal, action, at = room) => run.give(owner, principal, action, at);
 /** Adds a person of the run's organization to room `at`, in `role`. */
-async function addPerson(who, role, at) {
-  await owner.must("POST", `/v1/workspaces/${at}/members`, { principal_id: who.id, kind: "person", org_id: team, role, policy_version: await owner.policyVersion(at) });
-}
-
-/** Asks Podster for room `at`'s public repository in podsterdev, and waits for it. Answers it, noted by room. */
-async function setUpRepository(at, tag) {
-  const name = `e2e-m6-${tag}-${new Date().toISOString().slice(0, 16).replace(/\D/g, "")}-${randomBytes(2).toString("hex")}`;
-  const asked = await owner.dash("POST", `/v1/workspaces/${at}/repository`, { name, visibility: "public" });
-  leftBehind.push(`possibly the repository ${STAGING_ORG}/${name} on GitHub`);
-  // Noted before it is ready, so clean-up names it even if its setup fails.
-  repos.set(at, { full: `${STAGING_ORG}/${name}` });
-  ok(asked.ok && asked.body?.request?.state === "pending", `asking for the repository: HTTP ${asked.status} ${asked.code ?? ""}`);
-  const { value: read, seconds } = await within(options.setupWait, "the repository's setup", () => owner.must("GET", `/v1/workspaces/${at}/repository`), (r) => r.request?.state !== "pending");
-  eq([read.request.state, read.repository?.status, read.repository?.full_name], ["ready", "ready", `${STAGING_ORG}/${name}`], "the room's repository");
-  const repo = { id: read.repository.provider_repo_id, full: read.repository.full_name, defaultBranch: read.repository.default_branch, cloneUrl: `https://github.com/${read.repository.full_name}.git` };
-  repos.set(at, repo);
-  say(`     repository ${repo.id}, ${repo.full}, ready after ${seconds} s`);
-  return repo;
-}
-
-/** A task for the coder in room `at`, accepted, reviewed by the admin. Its name is its branch's, so unique in the run. */
-async function newTask(name, at = room) {
-  const made = await owner.must("POST", `/v1/workspaces/${at}/tasks`, { title: `${RUN} ${name}`, instructions: "Change the site.", acceptance_criteria: "A pull request.", assignee: coder.id, reviewer: admin.id }, { idempotencyKey: key() });
-  const ids = { workspace_id: at, task_id: made.id };
-  const accepted = await coder.must("accept_task", { ...ids, version: made.version });
-  leftBehind.push(`task ${made.id}`);
-  say(`     task ${name}: ${made.id}`);
-  return (tasks[name] = { id: made.id, room: at, at: ids, version: accepted.version, name, title: made.title ?? `${RUN} ${name}` });
-}
-/**
- * The coder's change for a task: its token, a branch off the default branch with one commit of `files`, pushed, and a
- * pull request; submitted; approved by the admin; merged by the admin, a person with a merge grant who doesn't control
- * the coder. Answers the task with its head and its merge commit.
- */
-async function changeAndMerge(task, files) {
-  const access = await coder.must("get_repo_access", task.at, false);
-  ok(typeof access?.token === "string" && access.token.length >= 20, "the coder was given no token");
-  const token = secret(access.token);
-  const repo = repos.get(task.room);
-  const dir = join(work, task.name);
-  const branch = `e2e/${task.name}`;
-  await mustGit(["clone", "-q", repo.cloneUrl, dir], {}, "git clone");
-  await mustGit(["checkout", "-q", "-b", branch], { cwd: dir }, "git checkout");
-  for (const [path, content] of Object.entries(files)) {
-    mkdirSync(dirname(join(dir, path)), { recursive: true });
-    writeFileSync(join(dir, path), content);
-  }
-  await mustGit(["add", "--", ...Object.keys(files)], { cwd: dir }, "git add");
-  await mustGit(["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", "commit", "-q", "-m", `e2e: ${task.name}`], { cwd: dir }, "git commit");
-  const head = (await mustGit(["rev-parse", "HEAD"], { cwd: dir }, "git rev-parse")).stdout.trim();
-  await mustGit(["push", "-q", "origin", branch], { cwd: dir, credential: token }, "pushing the task's branch");
-  const opened = await github(`/repos/${repo.full}/pulls`, { token, method: "POST", body: { title: `e2e: ${task.name}`, head: branch, base: repo.defaultBranch } });
-  eq([opened.status, opened.body?.head?.sha], [201, head], "opening the pull request");
-  await coder.must("submit_task", { ...task.at, version: task.version, note: "Ready for review.", commit_sha: head, pr_number: opened.body.number });
-  await admin.must("POST", `/v1/workspaces/${task.room}/tasks/${task.id}/verify`, { submission_no: 1, commit_sha: head });
-  const asked = await admin.must("POST", `/v1/workspaces/${task.room}/tasks/${task.id}/merge`, { submission_no: 1, commit_sha: head });
-  eq(asked.merge_state, "requested", "the merge as asked for");
-  const { value: change, seconds } = await within(options.mergeWait, "the merge", async () => (await taskRead(task)).change, (c) => ["succeeded", "failed", "outcome_unknown"].includes(c?.merge_state));
-  eq([change.merge_state, change.merge_reason ?? null], ["succeeded", null], "the merge");
-  ok(/^[0-9a-f]{40}$/.test(change.merge_sha ?? ""), "the merge recorded no commit");
-  Object.assign(task, { head, pr: opened.body.number, mergeSha: change.merge_sha });
-  say(`     ${task.name}: pull request ${task.pr}, head ${head}, merged as ${task.mergeSha} after ${seconds} s`);
-  return task;
-}
-
-/** Waits for the latest release of `task` to be `releaseId` and settled. Answers the release part of its status. */
-async function settled(task, releaseId) {
-  const { value, seconds } = await within(options.releaseWait, `release ${releaseId} settling`, () => statusOf(task), (s) => s.release?.release_id === releaseId && SETTLED.includes(s.release?.state));
-  return { status: value, seconds };
-}
-/** Approves a release as the admin, and waits for it to be served. Answers the status and the seconds it took. */
-async function approveAndServe(task, releaseId) {
-  const approved = await admin.must("POST", `${releasesPath(task.room)}/${releaseId}/approve`, {});
-  eq([approved.id, approved.approved_by], [releaseId, admin.id], "the approval");
-  ok(approved.state !== "failed", `the approval ended the release failed, ${approved.failure_code}`);
-  let outcome;
-  try {
-    outcome = await settled(task, releaseId);
-  } catch (error) {
-    const last = (await statusOf(task).catch(() => null))?.release;
-    const stuck = ["queued", "uploading", "uncertain", "awaiting_confirmation"].includes(last?.state);
-    throw new Error(`${cause(error)}; it was last ${last?.state ?? "unread"}${stuck ? ". A release stays queued or uploading when no content provider is configured, or when its room has spent its 2 uploads in the hour" : ""}`);
-  }
-  const problems = statusProblems(outcome.status, { taskId: task.id, mergeSha: task.mergeSha, release: { id: releaseId, state: "served", served: true } });
-  ok(problems.length === 0, problems.join("; "));
-  return outcome;
-}
-/** The host's not found, within the wait. Answers how long it took. */
-async function hostDown(what) {
-  const { seconds } = await within(options.takedownWait, what, () => hostAsk(`https://${host}/`), (answer) => contentNotFoundProblem(answer) === null);
-  return seconds;
-}
-/**
- * The host's marker naming `releaseId` and `commit`, within the same wait: a host that answered not found can go on
- * answering it after a new release is served, for the content Worker's edge cache of the serve entry and KV's
- * propagation (HOST_CHANGE_SECONDS, which the default wait outlasts). Any answer but 200 is waited out; a 200 naming another
- * release or commit fails at once. Answers how long it took.
- */
-async function markerNamed(releaseId, commit, what) {
-  let last;
-  try {
-    const { seconds } = await within(options.takedownWait, what, () => marker(host), (answer) => {
-      last = answer;
-      const state = markerWaitState(answer, releaseId, commit);
-      ok(state !== "another", `${what}: the marker names another release or commit`);
-      return state === "named";
-    });
-    return seconds;
-  } catch (error) {
-    if (error instanceof Halt || last?.status === 200) throw error;
-    throw new Error(`${cause(error)}; the marker last answered ${last?.status ?? "nothing"}`);
-  }
-}
-
-// ---- preflight, signed out ----
-
-async function preflight() {
-  const card = await target.http("/.well-known/agent-configuration", { headers: { accept: "application/json" } });
-  ok(card.status === 200 && /json/.test(card.headers.get("content-type") ?? ""), `staging's agent configuration answered ${card.status}, not 200 with JSON`);
-  const signedOut = await target.http("/api/v1/workspaces", { headers: { origin: target.base } });
-  const body = await signedOut.json().catch(() => null);
-  ok(signedOut.status === 401 && body?.error?.code === "sign_in_required", `a signed-out request answered ${signedOut.status} ${body?.error?.code ?? ""}, not 401 sign_in_required`);
-}
-/** Whether staging lists deploy_release, signed out: every page of capabilities discovery, bounded at 20. */
-async function deployReleaseListed() {
-  let cursor = 0;
-  for (let pages = 0; pages < 20; pages++) {
-    const res = await target.http(`/api/auth/capability/list?limit=100&cursor=${cursor}`, { headers: { accept: "application/json" } });
-    ok(res.status === 200, `capabilities discovery answered ${res.status}`);
-    const page = JSON.parse(await res.text());
-    ok(Array.isArray(page?.capabilities), "capabilities discovery answered without a list");
-    if (page.capabilities.some((c) => c?.name === "deploy_release")) return true;
-    if (!page.has_more || page.capabilities.length === 0) return false;
-    cursor += page.capabilities.length;
-  }
-  throw new Error("capabilities discovery ran past 20 pages");
-}
-
+const addPerson = (who, role, at) => run.addPerson(owner, team, who, role, at);
+const setUpRepository = (at, tag) => run.setUpRepository(owner, at, tag);
+/** A task for the coder in room `at`, accepted, reviewed by the admin. */
+const newTask = async (name, at = room) => (tasks[name] = await run.newTask({ owner, coder, reviewer: admin }, name, at));
+/** The coder's change for a task, merged by the admin. */
+const changeAndMerge = (task, files) => run.changeAndMerge({ owner, coder, merger: admin }, task, files);
+const settled = (task, releaseId) => run.settled(owner, task, releaseId);
+/** Approves a release as the admin, and waits for it to be served. */
+const approveAndServe = (task, releaseId) => run.approveAndServe({ owner, approver: admin }, task, releaseId);
+const hostDown = (what) => run.hostDown(host, what);
+const markerNamed = (releaseId, commit, what) => run.markerNamed(host, releaseId, commit, what);
 // ---- the run ----
 
 async function main() {
@@ -990,17 +682,7 @@ async function cleanUp() {
   }
   const { left } = await publisher.stop();
   if (left) said.push(`${[...publisher.published.keys()].map((at) => `room ${at}`).join(" and ")} could NOT be made private again`);
-  for (const [id, { what }] of [...grants]) {
-    const back = await takeBack(id).catch(() => null);
-    if (grants.has(id)) said.push(`the ${what} (${id}) could NOT be taken back (${back ? `HTTP ${back.status} ${back.code ?? ""}` : "no answer"})`);
-  }
-  for (const { agent, linker } of agents) {
-    await agent.close().catch(() => null);
-    const gone = await linker.dash("POST", `/agents/${agent.id}/disconnect`, {}).catch(() => null);
-    said.push(`agent ${agent.id} ${gone?.status === 200 ? "disconnected" : "could NOT be disconnected: its credential stays valid until it expires"}`);
-  }
-  for (const cookie of sessions.splice(0)) await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
-  rmSync(work, { recursive: true, force: true });
+  said.push(...(await run.cleanUpShared()));
   return said;
 }
 
@@ -1008,8 +690,8 @@ const started = Date.now();
 try {
   await preflight();
 } catch (error) {
-  console.error(scrub(`\nRefused: the signed-out preflight failed: ${cause(error)}.\nNo sign-up was taken.`, secrets));
-  rmSync(work, { recursive: true, force: true });
+  console.error(run.out(`\nRefused: the signed-out preflight failed: ${cause(error)}.\nNo sign-up was taken.`));
+  run.removeWork();
   process.exit(EXIT.refused);
 }
 {
@@ -1027,8 +709,8 @@ try {
     refusal = `whether release is on couldn't be read: ${cause(error)}`;
   }
   if (refusal) {
-    console.error(scrub(`\nRefused: ${refusal}. Release isn't on with a provider on staging.\nNo sign-up was taken.`, secrets));
-    rmSync(work, { recursive: true, force: true });
+    console.error(run.out(`\nRefused: ${refusal}. Release isn't on with a provider on staging.\nNo sign-up was taken.`));
+    run.removeWork();
     process.exit(EXIT.releaseNotOn);
   }
   say("     signed out: deploy_release is listed, and the content domain answers an unknown host with the content Worker's not found");
@@ -1043,7 +725,7 @@ try {
   halted = error instanceof Halt;
   say(`\nThe run stopped: ${cause(error)}`);
 } finally {
-  const notRun = stopping || halted ? "not run: the run was stopped by a signal" : "not run: the run stopped before it";
+  const notRun = run.stopping || halted ? "not run: the run was stopped by a signal" : "not run: the run stopped before it";
   for (const entry of PLAN) if (!tally.has(entry.id)) tally.add(entry.id, "skip", entry.outOfScope ? outOfScopeReason(entry) : notRun);
   cleanupLines = await cleanUp();
 }
@@ -1051,14 +733,14 @@ say("\n## clean-up");
 for (const line of cleanupLines) say(`  - ${line}`);
 for (const { full } of repos.values()) say(`  - the repository ${full} stays on GitHub: the owner archives or deletes it`);
 if (notOn) {
-  say(`\nRelease isn't on with a provider on staging: ${notOn}. Sign-ups taken: ${signUpsAsked}.`);
+  say(`\nRelease isn't on with a provider on staging: ${notOn}. Sign-ups taken: ${run.signUpsAsked}.`);
   say(`Left behind on staging: ${leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);
   say(slowestLine(requests));
   process.exit(EXIT.releaseNotOn);
 }
 const outcome = runOutcome(tally, PLAN);
-say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${signUpsAsked}.`);
-if (signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
+say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${run.signUpsAsked}.`);
+if (run.signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
 say(`Out of scope for now, skipped by design and not counted: ${PLAN.filter((e) => e.outOfScope).map((e) => `${e.id} (${e.outOfScope})`).join(", ")}.`);
 if (outcome.unshown.length) say(`Not shown, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
 say(`Left behind on staging: ${leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);

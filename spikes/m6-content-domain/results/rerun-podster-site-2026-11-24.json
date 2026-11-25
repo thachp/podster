@@ -1,0 +1,545 @@
+{
+  "at": "2026-11-24T23:24:06.390Z",
+  "contentDomain": "podster.site",
+  "certificate": {
+    "A": {
+      "authorized": true,
+      "error": null,
+      "issuer": "Let's Encrypt",
+      "subjectAltNames": "DNS:*.podster.site, DNS:podster.site",
+      "validFrom": "Nov 22 13:50:29 2026 GMT",
+      "validTo": "Feb 20 13:50:28 2027 GMT"
+    },
+    "an unknown first-level host": {
+      "authorized": true,
+      "error": null,
+      "issuer": "Let's Encrypt",
+      "subjectAltNames": "DNS:*.podster.site, DNS:podster.site",
+      "validFrom": "Nov 22 13:50:29 2026 GMT",
+      "validTo": "Feb 20 13:50:28 2027 GMT"
+    },
+    "a second-level host": {
+      "authorized": false,
+      "error": "ERR_SSL_SSL/TLS_ALERT_HANDSHAKE_FAILURE"
+    },
+    "the apex": {
+      "authorized": false,
+      "error": "ENOTFOUND"
+    }
+  },
+  "headers": {
+    "A index": {
+      "status": 200,
+      "problems": [],
+      "csp": "sandbox allow-scripts; default-src https://<A>; script-src https://<A>; style-src https://<A> 'unsafe-inline'; img-src https://<A> data:; connect-src https://<A>; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+      "acao": "*",
+      "cacheControl": "max-age=60, no-transform",
+      "setCookies": 0
+    },
+    "B index": {
+      "status": 200,
+      "problems": [],
+      "csp": "sandbox allow-scripts; default-src https://<B>; script-src https://<B>; style-src https://<B> 'unsafe-inline'; img-src https://<B> data:; connect-src https://<B>; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+      "acao": "*",
+      "cacheControl": "max-age=60, no-transform",
+      "setCookies": 0
+    },
+    "credentials ignored": {
+      "same": true,
+      "status": 200,
+      "setCookies": 0
+    },
+    "service-worker script": {
+      "status": 403,
+      "body": "no_service_workers"
+    },
+    "sw.js without the header": {
+      "status": 200
+    },
+    "POST": {
+      "status": 405
+    },
+    "plain HTTP": {
+      "status": 301,
+      "location": "https://<A>/probe.js"
+    },
+    "unknown host": {
+      "status": 404,
+      "notFoundProblem": null,
+      "clearSiteData": "\"cache\""
+    }
+  },
+  "browsers": {
+    "chromium": {
+      "pages": {
+        "A": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        },
+        "B": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        }
+      },
+      "cookieNamesSentToHost": {
+        "A": [
+          "(no cookie header)",
+          "e2e_site"
+        ],
+        "B": [
+          "(no cookie header)",
+          "e2e_site"
+        ]
+      },
+      "jarAfter": [
+        "e2e_pd@.podster.dev",
+        "e2e_site@.podster.site"
+      ],
+      "chromiumServiceWorkers": 0
+    },
+    "firefox": {
+      "pages": {
+        "A": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        },
+        "B": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        }
+      },
+      "cookieNamesSentToHost": {
+        "A": [
+          "(no cookie header)",
+          "e2e_site"
+        ],
+        "B": [
+          "(no cookie header)",
+          "e2e_site"
+        ]
+      },
+      "jarAfter": [
+        "e2e_pd@.podster.dev",
+        "e2e_site@.podster.site"
+      ],
+      "chromiumServiceWorkers": null
+    },
+    "webkit": {
+      "pages": {
+        "A": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        },
+        "B": {
+          "status": 200,
+          "ran": true,
+          "result": {
+            "violations": [
+              "connect-src"
+            ],
+            "origin": {
+              "ok": true,
+              "value": "null"
+            },
+            "cookieRead": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetOwnHost": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetContentDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cookieSetPodsterDomain": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "localStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "sessionStorage": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "indexedDB": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "cacheApi": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "serviceWorker": {
+              "ok": false,
+              "error": "SecurityError"
+            },
+            "fetchOwnJson": {
+              "ok": true,
+              "value": 3
+            },
+            "fetchApplication": {
+              "ok": false,
+              "error": "TypeError"
+            },
+            "style": {
+              "ok": true,
+              "value": "rgb(0, 128, 0)"
+            },
+            "image": {
+              "ok": true,
+              "value": true
+            },
+            "history": {
+              "ok": true,
+              "value": "?step=1"
+            }
+          }
+        }
+      },
+      "cookieNamesSentToHost": {
+        "A": [
+          "(no cookie header)",
+          "e2e_site"
+        ],
+        "B": [
+          "(no cookie header)",
+          "e2e_site"
+        ]
+      },
+      "jarAfter": [
+        "e2e_pd@.podster.dev",
+        "e2e_site@.podster.site"
+      ],
+      "chromiumServiceWorkers": null
+    }
+  }
+}

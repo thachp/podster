@@ -2,6 +2,8 @@
 
 **Status, 2026-11-12 UTC: run once, from 09:28 to 09:32 UTC, and cleaned up.** Every resource it created is deleted, confirmed by listing; the owner's wildcard DNS record and the architect's namespace are left. Nothing builds on this folder. Its results are below and in the [M6 plan](../../docs/m6-plan.md#spike-c-results); what they change in [ADR 0010](../../docs/adr/0010-release-and-the-content-domain.md) is proposed there, not written into the ADR.
 
+*2026-11-24: rerun on `podster.site` against two apps the real content Worker served, with nothing from this folder deployed: [the results](../../docs/m6-plan.md#spike-c-rerun-on-podstersite-2026-11-24), from [`e2e/m6-spike-c-rerun-staging.mjs`](../../e2e/m6-spike-c-rerun-staging.mjs), and recorded in `results/rerun-podster-site-2026-11-24.json`.*
+
 It answers risks 6, 12 and 13 of the [M6 plan](../../docs/m6-plan.md#risks-to-test), and ADR 0010's open items 8 and 10:
 
 - one wildcard route and one certificate serve arbitrary per-room hosts under `opster.dev`;

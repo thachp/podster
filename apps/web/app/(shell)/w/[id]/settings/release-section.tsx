@@ -1,5 +1,6 @@
 "use client";
 
+import { Check, Copy } from "lucide-react";
 import { useId, useRef, useState } from "react";
 import { cn } from "cn";
 import { ReadFailure } from "@/components/shell/read-failure";
@@ -20,6 +21,79 @@ const Row = ({ term, children, mono = false }: { term: string; children: React.R
     <dd className={cn("min-w-0 break-all", mono && "font-mono")}>{children}</dd>
   </>
 );
+
+/**
+ * A value to publish at a DNS provider, in monospace, with a Copy button. The button copies exactly what the server
+ * gave, which is what DNS needs; the text shown is the same value with nothing hidden in it. Copying changes nothing.
+ */
+function CopyText({ value, what }: { value: string; what: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  }
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex min-w-0 items-start gap-2">
+        <span className="min-w-0 flex-1 font-mono break-all">{visibleText(value)}</span>
+        <Button type="button" variant="outline" size="sm" className={`${MOBILE_TARGET} shrink-0`} aria-label={`Copy ${what}`} onClick={() => void copy()}>
+          {state === "copied" ? <Check aria-hidden /> : <Copy aria-hidden />} Copy
+        </Button>
+      </span>
+      <span role="status" className="text-xs text-muted-foreground">
+        {state === "copied" ? "Copied." : state === "failed" ? "Couldn't copy. Select it and copy it yourself." : ""}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The two records a room's owner publishes for a custom domain, as the demo's Domains panel lists a record: its type,
+ * its name and its value, each to copy. The TXT record proves control and is checked every day; the CNAME points the
+ * name at the content domain's fallback origin, the target the server names from its own configuration, never this
+ * page's.
+ */
+function DnsRecords({ request }: { request: HostnameRequest }) {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">At the company that runs DNS for {visibleText(request.hostname)}, add these two records:</p>
+      <div className="divide-y rounded-md border">
+        <section aria-label="TXT record" className="space-y-2 p-3">
+          <p className="text-sm font-medium">1. Prove you control the name</p>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+            <Row term="Type">TXT</Row>
+            <Row term="Name">
+              <CopyText value={request.challenge_name} what="TXT record name" />
+            </Row>
+            <Row term="Value">
+              <CopyText value={request.challenge_value} what="TXT record value" />
+            </Row>
+          </dl>
+        </section>
+        <section aria-label="CNAME record" className="space-y-2 p-3">
+          <p className="text-sm font-medium">2. Point the name at Podster</p>
+          {request.cname_target ? (
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
+              <Row term="Type">CNAME</Row>
+              <Row term="Name">
+                <CopyText value={request.hostname} what="CNAME record name" />
+              </Row>
+              <Row term="Points to">
+                <CopyText value={request.cname_target} what="CNAME record target" />
+              </Row>
+            </dl>
+          ) : (
+            <p className="text-sm text-muted-foreground">Podster can&apos;t name this record yet: this deployment has no app domain set up.</p>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Release in Workroom Settings (M6 step 10(a), ADR 0010). Its state is what the server's reads say, and its controls are a
@@ -153,7 +227,7 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
   const held = holdsName(request);
   const shown = request ? describeHostname(request) : null;
 
-  const ask = () => send(base, { hostname: name.trim() }, "Asked for the name. Publish the record shown here; nothing is held until Podster reads it.", { method: "PUT", explain: explainReleaseRefusal, onOk: () => setName("") });
+  const ask = () => send(base, { hostname: name.trim() }, "Asked for the name. Publish the two records shown here; nothing is held until Podster reads the TXT record.", { method: "PUT", explain: explainReleaseRefusal, onOk: () => setName("") });
   const remove = () => send(base, {}, request?.state === "pending" ? "The request is dropped." : "This workroom has stopped using the name. Podster is removing it.", { method: "DELETE", explain: explainReleaseRefusal });
 
   return (
@@ -172,20 +246,10 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
             <Row term="Hostname" mono>
               {visibleText(request.hostname)}
             </Row>
-            {request.state === "pending" ? (
-              <>
-                <Row term="Record type">TXT</Row>
-                <Row term="Record name" mono>
-                  {visibleText(request.challenge_name)}
-                </Row>
-                <Row term="Record value" mono>
-                  {visibleText(request.challenge_value)}
-                </Row>
-                <Row term="Ends">{`${new Date(request.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC, if the record isn't read by then`}</Row>
-              </>
-            ) : null}
+            {request.state === "pending" ? <Row term="Ends">{`${new Date(request.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC, if the TXT record isn't read by then`}</Row> : null}
             <Row term="Asked on">{byWhom(dayOf(request.requested_at), requestedByName)}</Row>
           </dl>
+          {request.state === "pending" || request.state === "claimed" ? <DnsRecords request={request} /> : null}
         </>
       ) : null}
 
@@ -238,7 +302,7 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
             label="Ask for this domain"
             disabled={retrying || problem !== null}
             title="Ask to use this hostname?"
-            description="Podster gives you a TXT record to publish at your DNS provider. Nothing is held until Podster reads it, and the request ends after 72 hours. This maps no address by itself: the app is served there only while release is on and a release is served."
+            description="Podster gives you a TXT record and a CNAME record to publish at your DNS provider. Nothing is held until Podster reads the TXT record, and the request ends after 72 hours. This maps no address by itself: the app is served there only while release is on and a release is served."
             confirm="Ask for the record"
             action={ask}
             focusAfter={after}

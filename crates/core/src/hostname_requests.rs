@@ -64,6 +64,55 @@ impl HostnameRequestState {
     }
 }
 
+/// Where a request's setup stands, in the few words a room's owner is shown (2026-11-25): from the request's own state
+/// and what Cloudflare last read of its custom hostname. Display only: it decides nothing, and routing asks everything
+/// again (`route_local`, `route_claim`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameSetup {
+    /// Pending: Podster hasn't yet read the room's TXT record, or the hostname's object hasn't answered.
+    ProofPending,
+    /// Claimed, and Cloudflare hasn't read the custom hostname `active`, or hasn't been asked yet.
+    ProviderPending,
+    /// Claimed, and Cloudflare's last read was exactly `active`.
+    Active,
+    /// Being removed, or removed.
+    Ended,
+    /// Refused, or expired before the record was read.
+    Failed,
+}
+
+impl HostnameSetup {
+    pub fn name(self) -> &'static str {
+        match self {
+            HostnameSetup::ProofPending => "proof_pending",
+            HostnameSetup::ProviderPending => "provider_pending",
+            HostnameSetup::Active => "active",
+            HostnameSetup::Ended => "ended",
+            HostnameSetup::Failed => "failed",
+        }
+    }
+
+    pub const ALL: [HostnameSetup; 5] = [
+        HostnameSetup::ProofPending,
+        HostnameSetup::ProviderPending,
+        HostnameSetup::Active,
+        HostnameSetup::Ended,
+        HostnameSetup::Failed,
+    ];
+}
+
+/// A request's setup, from its state as the room reads it (a pending request past its time reads `Expired`) and whether
+/// Cloudflare's last read of its custom hostname was exactly `active`, which counts only for a claimed request.
+pub fn setup_status(state: HostnameRequestState, provider_active: bool) -> HostnameSetup {
+    match state {
+        HostnameRequestState::Pending => HostnameSetup::ProofPending,
+        HostnameRequestState::Claimed if provider_active => HostnameSetup::Active,
+        HostnameRequestState::Claimed => HostnameSetup::ProviderPending,
+        HostnameRequestState::Ending | HostnameRequestState::Ended => HostnameSetup::Ended,
+        HostnameRequestState::Refused | HostnameRequestState::Expired => HostnameSetup::Failed,
+    }
+}
+
 /// Where a claim stands in the hostname's own object, which keeps every claim there has been. Core's
 /// [`crate::hostnames::HostnameRecord`] is what the object decides from: `Live` and `Ending` are its `claim` with
 /// `ending` false and true, and `Ended` is a claim that was freed and holds nothing.

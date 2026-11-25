@@ -836,7 +836,7 @@ paths:
     get:
       operationId: getAppHostname
       tags: [queries]
-      summary: "The room's request to map a custom hostname to its app (M6, ADR 0010, decision 207), or null. While `pending` it carries the TXT record the room's owner publishes: its name, `_podster-challenge.<hostname>`, and its value, made for this request alone. For the room's owner or one of its admins, as a person. **Built in M6 step 8's first PR, behind the switch.** It answers the room's open request, or else its latest, or null; a pending request past its 72 hours whose proof was never taken to the hostname's object reads as `expired`. A read: it grants nothing, and asks nobody's organization. Anyone else in the room, and every agent, gets `not_allowed`. While release is switched off, which is every deployment, this can't be told from a path nobody defined: the room answers it as an unknown route (`not_found`, or to that caller `workspace_not_found`, `access_revoked` or `invalid_argument`)"
+      summary: "The room's request to map a custom hostname to its app (M6, ADR 0010, decision 207), or null. While `pending` it carries the TXT record the room's owner publishes: its name, `_podster-challenge.<hostname>`, and its value, made for this request alone. It also carries the `CNAME` target the hostname points at, the content domain's fallback origin, and `setup_status`, a fixed word for where the setup stands (both 2026-11-25, display only, no wider than the read already was). For the room's owner or one of its admins, as a person. **Built in M6 step 8's first PR, behind the switch.** It answers the room's open request, or else its latest, or null; a pending request past its 72 hours whose proof was never taken to the hostname's object reads as `expired`. A read: it grants nothing, and asks nobody's organization. Anyone else in the room, and every agent, gets `not_allowed`. While release is switched off, which is every deployment, this can't be told from a path nobody defined: the room answers it as an unknown route (`not_found`, or to that caller `workspace_not_found`, `access_revoked` or `invalid_argument`)"
       responses: { "200": { description: "The room's hostname request, or null", content: { application/json: { schema: { $ref: "#/components/schemas/AppHostname" } } } }, default: { $ref: "#/components/responses/Error" } }
     put:
       operationId: requestAppHostname
@@ -1585,13 +1585,15 @@ components:
       type: object
       description: "A room's request to map a custom hostname to its app (M6, ADR 0010, decision 207). Its states are the rules' own (`podster_core::hostname_requests::HostnameRequestState`): `pending` holds nothing and expires at `expires_at`, 72 hours after it was made; `claimed` once the room's challenge was read from DNS and the hostname's own object gave this room the claim; `ending` while a claim is being ended, which still counts as the room's one hostname until Cloudflare reports the custom hostname gone; `refused` when the hostname's object refused the claim; `expired`; and `ended`. The challenge is a TXT record, which is public once published, so it isn't a secret."
       additionalProperties: false
-      required: [id, hostname, state, challenge_name, challenge_value, requested_by, requested_at, expires_at, end_reason]
+      required: [id, hostname, state, setup_status, challenge_name, challenge_value, cname_target, requested_by, requested_at, expires_at, end_reason]
       properties:
         id: { type: string }
         hostname: { type: string, description: "Normalized: lower case, no trailing dot, international names in their ASCII form." }
         state: { type: string, enum: [pending, claimed, ending, refused, expired, ended] }
+        setup_status: { type: string, enum: [proof_pending, provider_pending, active, ended, failed], description: "Where the setup stands, in core's fixed words (`podster_core::hostname_requests::setup_status`, 2026-11-25), from `state` as read here and Cloudflare's last read of the custom hostname: `proof_pending` while `pending`; `provider_pending` while `claimed` and Cloudflare hasn't read it exactly `active`; `active` while `claimed` and it has; `ended` while `ending` or `ended`; `failed` when `refused` or `expired`. Display only: it decides nothing, and `active` doesn't say the app is served there, which needs a served release and routing's own checks." }
         challenge_name: { type: string, description: "`_podster-challenge.<hostname>`." }
         challenge_value: { type: string }
+        cname_target: { type: [string, "null"], description: "Where the room's owner points the hostname's `CNAME`: the content domain's fallback origin, `fallback.<content domain>` (`podster_core::hostnames::cname_target`). Fixed by the deployment's configuration, never by anything a caller sends; null while no content domain is configured. Cloudflare reads the custom hostname `active` only once this record is in place (spike D)." }
         requested_by: { type: string }
         requested_at: { type: integer }
         expires_at: { type: integer }

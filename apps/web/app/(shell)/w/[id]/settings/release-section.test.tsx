@@ -10,8 +10,10 @@ const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
   id: "hr_1",
   hostname: "app.example.com",
   state: "pending",
+  setup_status: "proof_pending",
   challenge_name: "_podster-challenge.app.example.com",
   challenge_value: "c2b1f0e9d8",
+  cname_target: "fallback.apps.example",
   requested_by: "per_owner",
   requested_at: Date.UTC(2026, 10, 12),
   expires_at: Date.UTC(2026, 10, 15),
@@ -150,7 +152,8 @@ describe("switching release on and off", () => {
 
   it("someone who may not configure, or an archived room, sees the state and no control", () => {
     const first = show(releaseView({ kind: "on", data: config({ enabled: true }) }, ready), { mayConfigure: false, hostname: { request: request() } });
-    expect(screen.queryByRole("button")).toBeNull();
+    // Copying a record changes nothing, so it is the only button shown.
+    expect(screen.queryAllByRole("button").filter((button) => button.textContent !== " Copy")).toEqual([]);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByText("Only this workroom's owner and admins can change release.")).toBeInTheDocument();
     first.unmount();
@@ -185,7 +188,7 @@ describe("the custom domain", () => {
     show(on());
     await userEvent.type(screen.getByLabelText("Hostname"), "app.example.com");
     await userEvent.click(screen.getByRole("button", { name: "Ask for this domain" }));
-    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Nothing is held until Podster reads it");
+    expect(await screen.findByRole("alertdialog")).toHaveTextContent("Nothing is held until Podster reads the TXT record");
     await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Ask for the record" }));
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ method: "PUT", url: "/api/v1/workspaces/ws_1/app-hostname", body: { hostname: "app.example.com" } });
@@ -200,12 +203,17 @@ describe("the custom domain", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("A Podster operator has suspended that name");
   });
 
-  it("pending: shows the TXT record to publish, as text, and offers to drop the request, but no second name", async () => {
+  it("pending: shows the TXT and CNAME records to publish, as text, and offers to drop the request, but no second name", async () => {
     show(on(), { hostname: { request: request() } });
     expect(screen.getByText("Waiting for proof")).toBeInTheDocument();
-    expect(screen.getByText("TXT")).toBeInTheDocument();
-    expect(screen.getByText("_podster-challenge.app.example.com")).toBeInTheDocument();
-    expect(screen.getByText("c2b1f0e9d8")).toBeInTheDocument();
+    const txt = within(screen.getByRole("region", { name: "TXT record" }));
+    expect(txt.getByText("TXT")).toBeInTheDocument();
+    expect(txt.getByText("_podster-challenge.app.example.com")).toBeInTheDocument();
+    expect(txt.getByText("c2b1f0e9d8")).toBeInTheDocument();
+    const cname = within(screen.getByRole("region", { name: "CNAME record" }));
+    expect(cname.getByText("CNAME")).toBeInTheDocument();
+    expect(cname.getByText("app.example.com")).toBeInTheDocument();
+    expect(cname.getByText("fallback.apps.example")).toBeInTheDocument();
     expect(screen.queryByLabelText("Hostname")).toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
     await confirm("Drop this request", "Drop the request");
@@ -214,10 +222,36 @@ describe("the custom domain", () => {
     expect(sent[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("claimed: says so, hides the record, and removing says serving stops first", async () => {
-    show(on(), { hostname: { request: request({ state: "claimed" }) } });
-    expect(screen.getByText("Claimed")).toBeInTheDocument();
-    expect(screen.queryByText("c2b1f0e9d8")).toBeNull();
+  it("copies each record's name and value exactly, and says so", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    show(on(), { hostname: { request: request() } });
+    for (const what of ["TXT record name", "TXT record value", "CNAME record name", "CNAME record target"]) await user.click(screen.getByRole("button", { name: `Copy ${what}` }));
+    expect(writeText.mock.calls).toEqual([["_podster-challenge.app.example.com"], ["c2b1f0e9d8"], ["app.example.com"], ["fallback.apps.example"]]);
+    expect(await screen.findAllByText("Copied.")).toHaveLength(4);
+    expect(sent).toEqual([]);
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    await user.click(screen.getByRole("button", { name: "Copy TXT record value" }));
+    expect(await screen.findByText("Couldn't copy. Select it and copy it yourself.")).toBeInTheDocument();
+  });
+
+  it("with no CNAME target from the server, says so and invents none", () => {
+    show(on(), { hostname: { request: request({ cname_target: null }) } });
+    const cname = within(screen.getByRole("region", { name: "CNAME record" }));
+    expect(cname.getByText(/this deployment has no app domain set up/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Copy CNAME/ })).toBeNull();
+  });
+
+  it("claimed: waits for DNS until Cloudflare reads the name active, keeps the records shown, and removing says serving stops first", async () => {
+    const first = show(on(), { hostname: { request: request({ state: "claimed", setup_status: "provider_pending" }) } });
+    expect(screen.getByText("Waiting for DNS")).toBeInTheDocument();
+    expect(screen.getByText("c2b1f0e9d8")).toBeInTheDocument();
+    expect(screen.getByText("fallback.apps.example")).toBeInTheDocument();
+    first.unmount();
+    show(on(), { hostname: { request: request({ state: "claimed", setup_status: "active" }) } });
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText(/Cloudflare reports it active/)).toBeInTheDocument();
+    expect(screen.queryByRole("link")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Remove this domain" }));
     expect(await screen.findByRole("alertdialog")).toHaveTextContent("The app stops being served on this name first");
   });
@@ -225,6 +259,7 @@ describe("the custom domain", () => {
   it("ending holds the room's one name with no control; a refused one says why and offers a new request", () => {
     const first = show(on(), { hostname: { request: request({ state: "ending" }) } });
     expect(screen.getByText("Being removed")).toBeInTheDocument();
+    expect(screen.queryByText("c2b1f0e9d8")).toBeNull();
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Switch release off"]);
     expect(screen.queryByLabelText("Hostname")).toBeNull();
     first.unmount();

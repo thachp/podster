@@ -328,7 +328,7 @@ describe("workroom settings' release section", () => {
   it("sends its client components only props React can serialize, in every release state", async () => {
     const clients = await clientComponents();
     state.repository = readyRepository;
-    state.hostname = { ok: true, data: { request: { id: "hr_1", hostname: "app.example.com", state: "pending", challenge_name: "_podster-challenge.app.example.com", challenge_value: "v", requested_by: "per_heir", requested_at: 1, expires_at: 2, end_reason: null } } };
+    state.hostname = { ok: true, data: { request: { id: "hr_1", hostname: "app.example.com", state: "pending", setup_status: "proof_pending", challenge_name: "_podster-challenge.app.example.com", challenge_value: "v", cname_target: "fallback.apps.example", requested_by: "per_heir", requested_at: 1, expires_at: 2, end_reason: null } } };
     for (const release of [{ ok: false, status: 404, code: "not_found" }, { ok: true, data: releaseConfig() }, { ok: true, data: releaseConfig({ enabled: true, set_by: "per_heir", updated_at: 1 }) }, { ok: false, status: 500, code: "error" }]) {
       state.release = release;
       expect(boundaryProblems(await page(), clients)).toEqual([]);

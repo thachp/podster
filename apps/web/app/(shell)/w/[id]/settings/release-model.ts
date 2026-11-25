@@ -30,12 +30,21 @@ export function releaseAvailability(result: GatewayResult<ReleaseConfig>): Avail
   return availability(result);
 }
 
+/**
+ * Where a hostname's setup stands, in core's fixed words (2026-11-25): from the request's state and Cloudflare's last
+ * read of the name. Display only. `active` means Cloudflare reads the name active, not that the app is served there.
+ */
+export type HostnameSetup = "proof_pending" | "provider_pending" | "active" | "ended" | "failed";
+
 export type HostnameRequest = {
   id: string;
   hostname: string;
   state: "pending" | "claimed" | "ending" | "refused" | "expired" | "ended";
+  setup_status: HostnameSetup;
   challenge_name: string;
   challenge_value: string;
+  /** Where the hostname's CNAME points: the content domain's fallback origin, as the server names it. Null while the deployment has none. */
+  cname_target: string | null;
   requested_by: string;
   requested_at: number;
   expires_at: number;
@@ -164,13 +173,19 @@ export function releaseView(read: Availability<ReleaseConfig>, prerequisites: Pr
   return { state: "not-configured", label: "Not configured", tone: "neutral", text: "Release is off, and publishes nothing.", missing, config };
 }
 
-/** A hostname request's state, in words. `claimed` isn't "live": whether the app is served there is the content side's, and isn't shown here. */
+/**
+ * A hostname request's state, in words. A claim reads as Active only once Cloudflare reads the name active
+ * (`setup_status`), and even then it isn't "live": whether the app is served there is the content side's, and isn't
+ * shown here.
+ */
 export function describeHostname(request: HostnameRequest): { label: string; tone: Tone; text: string } {
   switch (request.state) {
     case "pending":
-      return { label: "Waiting for proof", tone: "blue", text: "Publish the TXT record below at your DNS provider. Nothing is held until Podster reads it, and the request ends if it isn't read in time." };
+      return { label: "Waiting for proof", tone: "blue", text: "Publish both records below at your DNS provider. Nothing is held until Podster reads the TXT record, and the request ends if it isn't read in time." };
     case "claimed":
-      return { label: "Claimed", tone: "green", text: "Podster read your record, and this workroom holds the name. Podster checks the record again every day; keep it published." };
+      return request.setup_status === "active"
+        ? { label: "Active", tone: "green", text: "This workroom holds the name, and Cloudflare reports it active with HTTPS. The app is served here while a release is served. Keep both records published: Podster checks the TXT record every day." }
+        : { label: "Waiting for DNS", tone: "blue", text: "Podster read your TXT record, and this workroom holds the name. Cloudflare turns it on once the CNAME record below points at Podster. Keep both records published: Podster checks the TXT record every day." };
     case "ending":
       return { label: "Being removed", tone: "amber", text: "This workroom has stopped using the name, and Podster is removing it. It still counts as this workroom's one name until that's done." };
     case "refused":

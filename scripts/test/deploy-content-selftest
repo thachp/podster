@@ -312,7 +312,10 @@ fresh() {
   rm -rf "$origin" "$work" "$tmp/seed" "$home"
   healthy
   mkdir -p "$tmp/seed/scripts" "$tmp/seed/e2e" "$tmp/seed/apps/content/src" "$tmp/seed/apps/outbound/src" "$tmp/seed/apps/api"
-  cp "$scripts/deploy-content" "$scripts/content-probes" "$tmp/seed/scripts/"
+  cp "$scripts/deploy-content" "$tmp/seed/scripts/"
+  # A case may commit a stand-in for scripts/content-probes: PROBES_SEED is the file to commit in its place.
+  cp "${PROBES_SEED:-$scripts/content-probes}" "$tmp/seed/scripts/content-probes"
+  chmod +x "$tmp/seed/scripts/content-probes"
   cp "$scripts/../e2e/jsonc.mjs" "$tmp/seed/e2e/"
   cp "$scripts/../apps/content/wrangler.jsonc" "$tmp/seed/apps/content/"
   # A case may commit the content Worker's file changed: SEED_EDIT is one sed expression applied to it. The case
@@ -929,6 +932,10 @@ fresh; probe probe-apex 404 not_found; at_terminal 0 "$DOMAIN" -- "${files[@]}" 
 check "the content domain itself answering 404 passes" said "PASS    the content domain itself serves nothing: HTTP 404"
 fresh; own_headers 404 | grep -v -i nosniff > "$fix/probe-unknown.headers"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "the not-found without its nosniff header: exit 4, and the header named" bash -c "[ $LAST -eq 4 ] && grep -q 'missing or wrong: x-content-type-options' '$tmp/out'"
+# content-probes that fails with no FAIL line, as when it stops part-way: never a pass.
+printf '#!/usr/bin/env bash\necho "PASS    a stand-in probe"\nexit 1\n' > "$tmp/probes-standin"
+PROBES_SEED="$tmp/probes-standin" fresh; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "content-probes exiting 1 with only PASS lines: exit 4, deployed and NOT verified" bash -c "[ $LAST -eq 4 ] && grep -q '^PASS    a stand-in probe' '$tmp/out' && grep -q '^FAIL    scripts/content-probes stopped with exit 1 before judging every probe' '$tmp/out' && grep -q 'but 1 probe(s) failed and 0 check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified' '$tmp/out' && ! grep -q 'every probe passed' '$tmp/out'"
 
 # --- stops, as Ctrl-C and a kill would make them ---
 fresh; touch "$fix/gh-hangs"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/checking" -- "${files[@]}" --deploy || true

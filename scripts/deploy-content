@@ -719,7 +719,9 @@ not_shown_count=0
 not_shown() { echo "NOT SHOWN $*"; not_shown_count=$((not_shown_count + 1)); }
 probes_code=0
 "$root/scripts/content-probes" --wait-for-route "$domain" | tee "$work/probes.out" || probes_code=$?
-probe_failures=$(grep -c '^FAIL ' "$work/probes.out" || true)
+# Always a number: no file, or an answer that isn't a count, is 0 FAILs here, and the exit code below still counts.
+probe_failures=$(grep -c '^FAIL ' "$work/probes.out" 2> /dev/null || true)
+[[ "$probe_failures" =~ ^[0-9]+$ ]] || probe_failures=0
 if [ "$probes_code" -ne 0 ] && [ "$probe_failures" -eq 0 ]; then fail "scripts/content-probes stopped with exit $probes_code before judging every probe"; fi
 
 # --- the outbound Worker, by Cloudflare's API with the token ---

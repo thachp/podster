@@ -27,35 +27,75 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace --exclude podster-api
 
-  migrations:
+  # Five short checks in one job, one after another: each took 10 to 35 seconds in a job of its own, and a run of 19 jobs
+  # left pull requests waiting for runners. Every step runs even when an earlier one failed (`!cancelled()`), so one
+  # failure doesn't hide another, and the job fails if any did.
+  small:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
+      # The whole history, for the migrations check.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
+      # Migrations.
       - run: node .github/scripts/check-migrations.mjs --self-test
       # On a pull request this checks out the merge with the base, so its first parent is what was merged when it was made,
       # and re-running after another migration merges still compares like with like.
       - run: node .github/scripts/check-migrations.mjs "$BASE"
+        if: ${{ !cancelled() }}
         env:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
-
-  contracts:
-    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
+      # The outbound Worker (M6 stage 1), which refuses every request an app makes: typecheck and tests only. It is never
+      # deployed from here, and its tests fail if this job ever gains a deploy step. No package's install script runs: the
+      # tests only read the pinned wrangler's source, and never start it. It and the content Worker come before the two
+      # packages below, whose installs do run scripts, so no install script has run on this runner when their tests read
+      # their files. Their tests pin this job's whole list of steps, in this order.
+      - run: npm ci --ignore-scripts
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      - run: npm run typecheck
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      - run: npm test
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      # The content Worker (M6 step 4(b)): typecheck and tests only, with no install script either. It is never deployed
+      # from here, and its tests fail if this job ever gains a deploy step.
+      - run: npm ci --ignore-scripts
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
+      - run: npm run typecheck
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
+      - run: npm test
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
+      # The contracts.
       - run: npm ci
+        if: ${{ !cancelled() }}
         working-directory: packages/contracts
       - run: npm test
+        if: ${{ !cancelled() }}
         working-directory: packages/contracts
+      # The scanner Worker. The real image needs current signatures from the mirror, so test/local and
+      # container/tests/integration.py run by hand.
+      - run: npm ci
+        if: ${{ !cancelled() }}
+        working-directory: apps/scanner
+      - run: npm run typecheck
+        if: ${{ !cancelled() }}
+        working-directory: apps/scanner
+      - run: npm test
+        if: ${{ !cancelled() }}
+        working-directory: apps/scanner
+      - run: npm run test:container
+        if: ${{ !cancelled() }}
+        working-directory: apps/scanner
 
   # The API's specs, a third of the files in each of three jobs (vitest's --shard), since run together they took seven
   # minutes, the longest wait in this workflow after e2e. The three jobs are the same but for the shard's number. Each
@@ -404,60 +444,6 @@ jobs:
       # A download's own headers through the built web Worker, in front of a stub gateway, and a page's CSP.
       - run: node run-download-headers.mjs --skip-web-build
         working-directory: e2e
-
-  # The real image needs current signatures from the mirror, so test/local and container/tests/integration.py run by hand.
-  scanner:
-    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - run: npm ci
-        working-directory: apps/scanner
-      - run: npm run typecheck
-        working-directory: apps/scanner
-      - run: npm test
-        working-directory: apps/scanner
-      - run: npm run test:container
-        working-directory: apps/scanner
-
-  # The outbound Worker (M6 stage 1), which refuses every request an app makes: typecheck and tests only. It is never
-  # deployed from here, and its tests fail if this job ever gains a deploy step.
-  outbound:
-    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      # No package's install script runs: the tests only read the pinned wrangler's source, and never start it.
-      - run: npm ci --ignore-scripts
-        working-directory: apps/outbound
-      - run: npm run typecheck
-        working-directory: apps/outbound
-      - run: npm test
-        working-directory: apps/outbound
-
-  # The content Worker (M6 step 4(b)): typecheck and tests only. It is never deployed from here, and its tests fail
-  # if this job ever gains a deploy step.
-  content:
-    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      # No package's install script runs: the tests only read the pinned wrangler's source, and never start it.
-      - run: npm ci --ignore-scripts
-        working-directory: apps/content
-      - run: npm run typecheck
-        working-directory: apps/content
-      - run: npm test
-        working-directory: apps/content
 
   gateway:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}

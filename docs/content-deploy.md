@@ -2,7 +2,9 @@
 
 The content Worker, `apps/content`, serves rooms' apps on the content domain ([ADR 0010](adr/0010-release-and-the-content-domain.md), [M6 plan, step 4(b)](m6-plan.md#step-4b-the-content-worker-the-build-plan)). It deploys to **the second Cloudflare account** ([decision 217](spec/PRODUCT.md#decisions-needed)), never to the one that holds `podster.dev`. It deploys only through `scripts/deploy-content`. **First real deploy, 2026-11-22,** from `main` at `177043db`: one probe, the unknown host, failed with HTTP `522` while the route took effect, and passed when checked by hand moments later. That is why the script now [waits for the route](#after-a-deploy) before its probes.
 
-`scripts/deploy-staging` doesn't know this package, and `apps/content/wrangler.jsonc` can deploy nothing anywhere ([why](m6-plan.md#step-4b-the-content-worker-the-build-plan)).
+**The outbound Worker deploys with it, first** (added 2026-11-24). `apps/outbound`, the Worker that refuses every request an app's code makes ([ADR 0010's revision](adr/0010-revision-apps-are-workers.md), question 8 and section 6), deploys through the same script, to the same account, as `podster-outbound`: no route, no `workers.dev` address, no preview address and no binding. The content Worker's dispatch binding `APPS` then names it as the namespace's outbound Worker, which is what stops an app's code from opening sockets. **It always deploys:** no flag or configuration key leaves it out, since the revision says "an outbound Worker always". If its deploy fails, or Cloudflare's list of scripts doesn't show it afterwards, the content Worker isn't deployed. This replaces the revision's "the owner's setup, from a configuration outside this folder": that configuration is now the one this script builds and deletes, never committed, and the owner only reruns the same command.
+
+`scripts/deploy-staging` doesn't know either package, and neither `apps/content/wrangler.jsonc` nor `apps/outbound/wrangler.jsonc` can deploy anything anywhere ([why](m6-plan.md#step-4b-the-content-worker-the-build-plan)).
 
 ## What it defends against
 
@@ -17,8 +19,8 @@ The content Worker, `apps/content`, serves rooms' apps on the content domain ([A
 
 ## Who runs it
 
-- **Without `--deploy`,** it only reports. It runs every check below, reads Cloudflare's API with the token, prints what it would deploy, and changes nothing. **An agent runs it only like this, and only when the owner asks.**
-- **With `--deploy`,** it deploys and then probes the content domain. It needs a person at a terminal: stdin and stdout must be terminals, and the owner types the content domain to confirm. No flag or environment variable skips that.
+- **Without `--deploy`,** it only reports. It runs every check below, reads Cloudflare's API with the token, prints what it would deploy, both Workers, and changes nothing. **An agent runs it only like this, and only when the owner asks.**
+- **With `--deploy`,** it deploys the outbound Worker, then the content Worker, and then checks both and probes the content domain. It needs a person at a terminal: stdin and stdout must be terminals, and the owner types the content domain to confirm. No flag or environment variable skips that.
 
 ## Before the first deploy: the owner's open items
 
@@ -60,7 +62,9 @@ mkdir -p ~/.config/podster && chmod 700 ~/.config/podster
   }
   ```
 
-The script builds wrangler's configuration from that file and from `apps/content/wrangler.jsonc`. That configuration is written to a temporary folder, used, and deleted. Its route is `*.<content domain>/*` on that zone; both public addresses are off.
+The script builds wrangler's two configurations from that file, from `apps/content/wrangler.jsonc` and from `apps/outbound/wrangler.jsonc`. Both are written to a temporary folder, used, and deleted. The content Worker's route is `*.<content domain>/*` on that zone, and its dispatch binding is `{ "binding": "APPS", "namespace": <the namespace>, "outbound": { "service": "podster-outbound" } }`, the shape in Cloudflare's [outbound Workers](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/outbound-workers/) and [wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#dispatch-namespace-bindings-workers-for-platforms) pages, with no `parameters`. The outbound Worker's has no route and no binding. Both public addresses are off for both.
+
+**The outbound Worker's committed file supplies only** its name, `podster-outbound`, its entry point and its compatibility date. The file must hold exactly those, its placeholder account and both public addresses off; anything else in it, a route, a binding, a variable, another name or an address switched on, is refused before anything changes. Its package must pass the same checks as the content Worker's: no `.wrangler/deploy/config.json`, no `.env` file of any name, and its own pinned wrangler at 4.157.0, which is the one that deploys it.
 
 The committed file supplies only:
 
@@ -83,10 +87,12 @@ Each of these is taken only in exactly that shape: another binding, another clas
 
 | Scope | Permission | Why |
 | --- | --- | --- |
-| The second account only | Workers Scripts: Edit | Upload the Worker, and read the dispatch namespace. *Proposed:* also the write counter's migration, since a Durable Object class is made by the Worker's own upload; the report run can't show this, only the first deploy can |
+| The second account only | Workers Scripts: Edit | Upload both Workers, the content Worker and `podster-outbound`, and read the dispatch namespace, the account's list of scripts, `podster-outbound`'s `workers.dev` setting and `podster-content`'s settings. *Proposed:* also the write counter's migration, since a Durable Object class is made by the Worker's own upload; the report run can't show this, only the first deploy can |
 | The second account only | Workers KV Storage: Read | The script's check that the KV namespace exists. The deploy itself only binds it by ID |
 | The content domain's zone only | Workers Routes: Edit | The route `*.<content domain>/*` |
 | The content domain's zone only | Zone: Read | The script's check that the zone is active on the account |
+
+**The outbound Worker needs no new permission** (read 2026-11-24, not yet confirmed by a run). Workers Scripts is an account-scoped permission: Edit covers every Worker script on the account, so it uploads a second Worker as it does the first, and the reads of a script's settings and `workers.dev` setting take Workers Scripts Read, which Edit includes ([permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Naming it as outbound is part of the content Worker's own upload. Listing the routes on the content zone takes Workers Routes, already granted on that zone. **So the owner adds nothing to the token.** If the first run shows otherwise, a refused read or a failed upload names what was missing.
 
 **Nothing else:** no other account, no other zone, no API Tokens permission, no DNS, no billing. Give it an expiry date and, if the owner wants, an IP filter.
 
@@ -135,12 +141,15 @@ That only reports. To deploy, the owner adds `--deploy` at a terminal and types 
 scripts/deploy-content --token-file ~/.config/podster/content-token --config-file ~/.config/podster/content-deploy.json --deploy
 ```
 
-`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way; 4 deployed but a probe failed, so the Worker is deployed and **not verified**. An error the script doesn't handle, such as an unbound variable, never exits 0: it says it stopped, and in which phase.
+`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way, and the output says which Worker was deployed; 4 deployed but a probe or check failed, so the Workers are deployed and **not verified**.
+
+**What the report reads, besides what it read before** (added 2026-11-24): the account's list of Worker scripts, so it says whether `podster-outbound` exists yet, and the routes on the content domain's zone. **A route on that zone that runs `podster-outbound` is refused:** a deploy with no route leaves a script's existing routes alone, so one made by hand would outlive every deploy. The content domain's zone must come with its ID, which the routes are read by. An error the script doesn't handle, such as an unbound variable, never exits 0: it says it stopped, and in which phase.
 
 **Stopped by a signal** (129 SIGHUP, 130 SIGINT, 143 SIGTERM), it says where it was:
 - while checking, nothing changed;
-- during `wrangler deploy`, the Worker may or may not be deployed, so check the account before running it again;
-- during the probes, the Worker is deployed and not verified.
+- during the outbound Worker's deploy, `podster-outbound` may or may not be deployed and the content Worker wasn't;
+- during the content Worker's deploy, `podster-outbound` is deployed and the content Worker may or may not be, so check the account before running it again;
+- during the probes, the Workers are deployed and not verified.
 
 The temporary folder is deleted in every case.
 
@@ -156,6 +165,14 @@ Then the script probes one random host on the content domain, signed out:
 - **A request with a `Service-Worker` header** gets `403`.
 - **The content domain itself** serves nothing: no answer, or any answer that isn't a success. The route doesn't cover it.
 - **Not shown, and the script prints so:** a host two labels deep. The zone's certificate covers one level, so HTTPS there can't be probed.
+
+**Then it checks the outbound Worker by Cloudflare's API,** with the token, each a pass or a failure (exit 4):
+
+- **`podster-outbound` exists** on the account.
+- **It has no `workers.dev` address and no preview address,** from `GET /accounts/<account>/workers/scripts/podster-outbound/subdomain`. If that answer doesn't say whether previews are on, the script says that one is NOT SHOWN.
+- **No route on the content domain's zone runs it.** Routes on other zones aren't read: the token sees no other zone, and can make routes on none.
+- **`podster-content`'s deployed binding `APPS` names it as outbound,** from `GET /accounts/<account>/workers/scripts/podster-content/settings`, where wrangler 4.157.0 reads a dispatch binding's outbound Worker as `outbound.worker.service`. **If those settings can't be read in that shape, the script says NOT SHOWN, never a pass,** and the owner checks the binding in the dashboard.
+- **Not shown, and the script prints so:** an app's `fetch` refused by the outbound Worker. That needs an app with code, and none exists yet; it is [the revision's gate](adr/0010-revision-apps-are-workers.md) item, still owed, with the socket test.
 
 **What it can't check until the release job (step 5) exists:**
 
@@ -179,5 +196,6 @@ The domain-wide stop is one key in the serve entries' KV namespace. While it is 
 ## Owed
 
 - A read-only check that the account's Worker names are exactly the expected set, as for staging ([docs/staging.md](staging.md#setting-a-secret-one-form-only)).
-- Confirming the permission table above at the first report run.
+- Confirming the permission table above at the first report run, and that it holds for the outbound Worker at the first deploy.
+- The test at the deployment that an app's `fetch` and socket both fail through `podster-outbound`, once an app with code exists.
 - Reading wrangler's account-precedence again with every wrangler upgrade ([why](m6-plan.md#step-4b-the-content-worker-the-build-plan)). The script pins 4.157.0 and refuses another.

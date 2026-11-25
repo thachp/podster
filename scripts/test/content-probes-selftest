@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Checks scripts/content-probes on its own, as the content-probes workflow runs it: its default domain, its refusals,
+# its exit codes, and that each probe can fail. A stand-in curl answers; nothing reaches the network. The probes'
+# criteria and the wait for the route are also checked through scripts/deploy-content by deploy-content-selftest.
+#
+#   scripts/test/content-probes-selftest
+set -euo pipefail
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage: scripts/test/content-probes-selftest
+
+Checks scripts/content-probes on its own, with a stand-in curl and no network: its default domain,
+its refusals, its exit codes, and that each probe can fail.
+EOF
+  exit 0
+fi
+. "$(dirname "$0")/lib.sh"
+probes="$scripts/content-probes"
+
+# curl: answers a probe from $fix/<key>.{status,headers,body}, keyed by what it asks. It records each call, with the
+# host's place (the domain itself, or a random label below it), whether -q came first and whether the caller's
+# environment arrived.
+stub curl <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+first=no; [ "${1:-}" = -q ] && first=yes
+leaks=none; [ -n "${HTTPS_PROXY:-}${SELFTEST_CANARY:-}" ] && leaks=caller-env
+method=GET out=/dev/null headers=/dev/null url="" extra=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method=$2; shift ;;
+    -o) out=$2; shift ;;
+    -D) headers=$2; shift ;;
+    -H) extra=$2; shift ;;
+    -w | --proto | --max-time) shift ;;
+    http://* | https://*) url=$1 ;;
+  esac
+  shift
+done
+domain=$(cat "$fix/domain")
+scheme=${url%%://*} hostpath=${url#*://}
+host=${hostpath%%/*}
+if [ "$host" = "$domain" ]; then which=apex; key=apex
+elif [[ "$host" =~ ^[0-9a-f]{26}\.${domain//./\\.}$ ]]; then
+  which="<host>"
+  if [ -n "$extra" ]; then key=sw; elif [ "$method" = POST ]; then key=post; elif [ "$scheme" = http ]; then key=http; else key=unknown; fi
+else
+  echo "unexpected request: $method $url" >&2; exit 97
+fi
+echo "probe $method $scheme://$which/${hostpath#*/} header=${extra:-none} q_first=$first env=$leaks" >> "$fix/calls"
+# A queue in $fix/<key>.before: each line is answered once, in turn, with no headers or body, before the configured answer.
+if [ -s "$fix/$key.before" ]; then
+  status=$(head -n 1 "$fix/$key.before")
+  tail -n +2 "$fix/$key.before" > "$fix/$key.rest" && mv "$fix/$key.rest" "$fix/$key.before"
+  printf '%s' "$status"
+  exit 0
+fi
+status=$(cat "$fix/$key.status")
+if [ "$status" = unreachable ]; then printf 000; exit 6; fi
+sed "s|{HOST}|$host|g" "$fix/$key.headers" > "$headers"
+cat "$fix/$key.body" > "$out"
+printf '%s' "$status"
+EOF
+stub sleep <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
+EOF
+
+answer() { # answer KEY STATUS BODY [EXTRA-HEADER-LINE]: the content Worker's own answer, with its fixed headers
+  echo "$2" > "$fix/$1.status"
+  printf '%s\n' "$3" > "$fix/$1.body"
+  printf 'HTTP/2 %s\r\nreferrer-policy: no-referrer\r\nx-content-type-options: nosniff\r\nstrict-transport-security: max-age=31536000; includeSubDomains\r\ncache-control: no-store\r\ncontent-security-policy: sandbox allow-scripts; default-src https://{HOST}\r\n%s\r\n' "$2" "${4:+$4$'\r\n'}" > "$fix/$1.headers"
+}
+healthy() { # healthy [DOMAIN]
+  rm -f "$fix"/*
+  echo "${1:-podster.site}" > "$fix/domain"
+  answer unknown 404 not_found
+  answer http 301 moved "location: https://{HOST}/probe?x=1"
+  answer post 405 method_not_allowed "allow: GET, HEAD"
+  answer sw 403 no_service_workers
+  echo unreachable > "$fix/apex.status"
+}
+
+healthy
+check "a healthy content domain passes, exit 0" run 0 "$probes"
+check "  with no argument it probes podster.site, the committed content domain" said '^content probes of podster\.site passed$'
+check "  one PASS line for each of the five probes" test "$(grep -c '^PASS ' "$tmp/out")" -eq 5
+check "  it says what it can't show: a host two labels deep" said '^NOT SHOWN a host two labels deep, such as a\.[0-9a-f]{26}\.podster\.site'
+check "  five requests: four on one random host, one on the domain itself" bash -c "[ \$(wc -l < '$fix/calls') -eq 5 ] && [ \$(grep -c '^probe .* https\?://<host>/' '$fix/calls') -eq 4 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
+check "  every curl had -q first and nothing of the caller's" bash -c "[ \$(grep -c 'q_first=yes env=none$' '$fix/calls') -eq 5 ]"
+check "  without --wait-for-route there is no wait" never_called '^sleep '
+
+healthy
+SELFTEST_CANARY=1 HTTPS_PROXY=http://proxy.invalid run 0 "$probes" || true
+check "a proxy or other variable of the caller's reaches no curl" bash -c "[ $LAST -eq 0 ] && ! grep -q 'env=caller-env' '$fix/calls'"
+
+healthy content-selftest.example
+check "a domain given as the argument is probed instead" run 0 "$probes" content-selftest.example
+check "  and named in the last line" said '^content probes of content-selftest\.example passed$'
+
+healthy
+printf '522\n' > "$fix/unknown.before"
+run 0 "$probes" --wait-for-route || true
+check "--wait-for-route waits 2 s while the route answers 522, then probes: exit 0" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^sleep 2$' '$fix/calls') -eq 1 ] && grep -q '^ok      the route answers (HTTP 404, try 2)' '$tmp/out' && [ \$(grep -c '^probe ' '$fix/calls') -eq 7 ]"
+
+fails() { # fails TITLE KEY STATUS BODY [EXTRA-HEADER-LINE]
+  healthy
+  answer "$2" "$3" "$4" "${5:-}"
+  check "$1: exit 1" run 1 "$probes"
+  check "  one FAIL, and the last line says so" bash -c "[ \$(grep -c '^FAIL ' '$tmp/out') -eq 1 ] && grep -q '^content probes of podster.site: 1 probe(s) FAILED$' '$tmp/out'"
+}
+fails "an unknown host answered by something else" unknown 200 "<html>parked</html>"
+fails "an unknown host's 404 with another body" unknown 404 "<html>not here</html>"
+fails "plain HTTP not redirected" http 200 hello
+fails "plain HTTP redirected elsewhere" http 301 moved "location: https://elsewhere.example/"
+fails "a POST accepted" post 200 ok
+fails "a service worker's script served" sw 200 "self.addEventListener('fetch', () => {})"
+fails "the content domain itself serving a page" apex 200 "<html>hello</html>"
+healthy
+grep -v -i nosniff "$fix/unknown.headers" > "$fix/unknown.h" && mv "$fix/unknown.h" "$fix/unknown.headers"
+check "an unknown host's 404 without nosniff: exit 1" run 1 "$probes"
+check "  and it names the missing header" said 'an unknown host: missing or wrong: x-content-type-options'
+healthy
+answer apex 404 not_found
+check "the content domain itself answering 404 passes" run 0 "$probes"
+
+healthy
+for bad in podster.dev staging.podster.dev content-domain.invalid PODSTER.SITE "podster.site/x" "-x.example" "a"; do
+  check "the domain '$bad' is refused: exit 2" run 2 "$probes" "$bad"
+done
+check "two domains: exit 2" run 2 "$probes" podster.site other.example
+check "an unknown flag: exit 2" run 2 "$probes" --deploy
+check "  and none of those sent a request" test ! -e "$fix/calls"
+check "--help: exit 0, with usage" bash -c "PATH='$bin:$PATH' '$probes' --help | grep -q '^Usage: scripts/content-probes'"
+
+finish content-probes

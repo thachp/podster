@@ -1,0 +1,27 @@
+name: Content probes
+
+# The content domain's signed-out probes, scripts/content-probes, from GitHub's network. The owner's machine sits behind
+# a web filter that blocks the content domain, so scripts/deploy-content's probes fail there; the owner approved running
+# them here on 2026-11-25. Run by hand only: `gh workflow run content-probes.yml`, then `gh run watch`.
+# It holds no secret, no token and no environment, and reads nothing but this repository. It probes podster.site,
+# the domain committed in the script; there is no input to point it elsewhere.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time; a second waits for the first.
+concurrency:
+  group: content-probes
+  cancel-in-progress: false
+
+jobs:
+  probes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: scripts/content-probes

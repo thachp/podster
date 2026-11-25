@@ -165,7 +165,7 @@ The temporary folder is deleted in every case.
 
 **First it waits up to 30 s for the route** (added 2026-11-22). The first real deploy, on 2026-11-22, failed its first probe with HTTP `522`: the new route `*.<content domain>/*` hadn't taken effect, and the same check passed by hand seconds later. So the script now sends the unknown-host request on its own first, and again every 2 s while the answer is no answer, `520` to `529` or `530`. The clock bounds the wait, not a count of tries: each try gives curl 5 s, so one slow `522` can't use up the window, and a try starts only if it ends within 30 s of the first. Any other answer ends the wait at once, the Worker's own `404` and a wrong answer alike: a wrong answer is never asked again, and the probes below judge it. If the route never answers in time, the probes run anyway and fail as before. No probe's pass criteria changed.
 
-Then the script probes one random host on the content domain, signed out:
+Then the script probes one random host on the content domain, signed out, with `scripts/content-probes` (which also [runs on its own](#the-probes-from-ci)):
 
 - **An unknown host** gets the Worker's own `404`, `not_found`, with its fixed headers: `nosniff`, `no-referrer`, HSTS, `no-store`, and the sandbox policy.
 - **Plain HTTP** gets a `301` to the same host and path over HTTPS. That can be the zone's redirect or the Worker's own: both must send the same place.
@@ -191,6 +191,19 @@ Then the script probes one random host on the content domain, signed out:
 - how long a takedown takes.
 
 These are spike G's and the first release's to show. *(2026-11-23: spike G showed a dispatch to a real script, the stop's effect and a takedown's time at one location ([results](../spikes/m6-spike-g/RESULTS.md)). An app released through the job is still the first release's to show.)*
+
+## The probes from CI
+
+The probes above are `scripts/content-probes`, and they need no token. The owner's machine is on a network with a web filter that blocks the content domain, so after a deploy from there the probes fail, and a deploy ends with exit 4 though nothing may be wrong. So the owner approved, on 2026-11-25, running the probes from GitHub Actions instead, whose network reaches the content domain:
+
+```bash
+gh workflow run content-probes.yml
+gh run watch
+```
+
+`.github/workflows/content-probes.yml` only ever starts by hand, and carries no secret: `gh workflow run --ref <branch>` can run a branch's copy, and that copy gets no secret either. It checks out the repository with no stored credential and runs `scripts/content-probes` with no argument, so it probes `podster.site`, the domain committed in the script (`apps/content/wrangler.jsonc` holds only a placeholder). It has no input, no secret, no token and no environment, and one run waits for another. It doesn't wait for a route: run it once the deploy is done. A run that passes shows the probes passed; it doesn't show the API checks that `scripts/deploy-content` makes after them, which need the token, so a deploy's exit 4 still says which of those failed or were NOT SHOWN.
+
+`scripts/content-probes --help` lists the probes. Run by hand it takes the domain as an argument, and `--wait-for-route` waits for a new route as a deploy does. Exit codes: 0 every probe passed, 1 a probe failed, 2 wrong usage or a refused domain. The two-labels-deep line is NOT SHOWN and doesn't change the exit code.
 
 ## An open question for the owner: deploy with the stop set?
 

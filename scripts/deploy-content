@@ -184,10 +184,11 @@ After a deploy it waits up to 30 s, by the clock, for the route: until a new rou
 Cloudflare answers a host on it with a 52x or not at all, so it sends the first probe's request,
 each try allowed 5 s, every 2 s while that is the answer. Any other answer ends the wait, and if the
 route never answers the probes run anyway, with their own timeouts.
-Then it probes the content domain signed out: on a random host, an unknown host gets the Worker's
-own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
-a request with a Service-Worker header gets 403; and the content domain itself serves nothing. A
-host two labels deep is not shown: the zone's certificate covers one level.
+Then it probes the content domain signed out, with scripts/content-probes (which runs alone too):
+on a random host, an unknown host gets the Worker's own not-found with its fixed headers, plain
+HTTP gets a 301 to HTTPS, a POST gets 405, and a request with a Service-Worker header gets 403; and
+the content domain itself serves nothing. A host two labels deep is not shown: the zone's
+certificate covers one level.
 Then it checks by Cloudflare's API, with the token: podster-outbound exists, has no workers.dev or
 preview address, and no route on the content domain's zone names it (other zones the token can't
 see, and can't add routes on); and, from podster-content's deployed settings, that its APPS binding
@@ -705,89 +706,21 @@ version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-content.o
 echo "version podster-content ${version:-not printed by wrangler}"
 
 # --- signed-out probes of the content domain ---
+# scripts/content-probes holds them, so CI can run the same probes on their own. It waits for the route first, and
+# prints a PASS or FAIL line for each; every FAIL counts here as one probe failed. If it stops some other way, that
+# counts as one too: the probes didn't show the content domain is right.
 phase=probing
 step "probing $domain signed out"
-label=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n')
-host="$label.$domain"
 probe_failures=0
 pass() { echo "PASS    $*"; }
 fail() { echo "FAIL    $*"; probe_failures=$((probe_failures + 1)); }
 # not_shown WHAT: a check the deploy promises that couldn't be made. It is never a pass: the run ends with exit 4.
 not_shown_count=0
 not_shown() { echo "NOT SHOWN $*"; not_shown_count=$((not_shown_count + 1)); }
-# fetch METHOD URL [HEADER [MAX-TIME]]: leaves the headers in $work/h and the body in $work/b, and prints the status.
-# curl gives up after MAX-TIME seconds, 30 unless given.
-fetch() {
-  local extra=() max_time=${4:-30}
-  : > "$work/h"
-  : > "$work/b"
-  [ -n "${3:-}" ] && extra=(-H "$3")
-  local got
-  got=$(curl_clean --silent --proto =https,http --max-time "$max_time" -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null) || true
-  [[ "$got" =~ ^[0-9]{3}$ ]] || got=000
-  printf '%s' "$got"
-}
-header() { grep -i -E "^$1:" "$work/h" | head -n 1 | sed -E "s/^[^:]*:[[:space:]]*//" | tr -d '\r'; }
-fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own answer
-  local missing=()
-  [ "$(header x-content-type-options)" = nosniff ] || missing+=(x-content-type-options)
-  [ "$(header referrer-policy)" = no-referrer ] || missing+=(referrer-policy)
-  [ "$(header strict-transport-security)" = "max-age=31536000; includeSubDomains" ] || missing+=(strict-transport-security)
-  [ "$(header cache-control)" = no-store ] || missing+=(cache-control)
-  [[ "$(header content-security-policy)" == "sandbox allow-scripts; "* ]] || missing+=(content-security-policy)
-  if [ "${#missing[@]}" -eq 0 ]; then return 0; fi
-  echo "        $1: missing or wrong: ${missing[*]}"
-  return 1
-}
-
-# Waiting for the route. A new route can take some seconds to take effect: until it does, Cloudflare answers the random
-# host itself, with a 52x (522 when it reaches no origin, as on the first deploy, 2026-11-22) or not at all. So the
-# unknown host's request below is sent first on its own, again every 2 s while the answer is no answer, 520 to 529 or
-# 530. The clock bounds it: each try gives curl 5 s, so one slow 522 can't use up the window, and a try starts only if
-# it and the pause before it end within 30 s of the first. Any other answer ends the wait at once, the Worker's own and
-# a wrong one alike: a wrong answer is never asked again, and the probes judge it. If the route never answers, the
-# probes run anyway, with their own 30 s timeouts, and fail as they would have. No probe's criteria change.
-route_wait_limit=30
-route_wait_every=2
-route_wait_try_time=5
-route_wait_start=$SECONDS
-tries=0
-while :; do
-  status=$(fetch GET "https://$host/" "" "$route_wait_try_time")
-  tries=$((tries + 1))
-  case "$status" in
-    000 | 52[0-9] | 530) ;;
-    *)
-      echo "ok      the route answers (HTTP $status, try $tries)"
-      break
-      ;;
-  esac
-  waited=$((SECONDS - route_wait_start))
-  if [ $((waited + route_wait_every + route_wait_try_time)) -gt "$route_wait_limit" ]; then
-    echo "wait    the route still isn't answering after $tries tries and ${waited} s (HTTP $status): probing anyway"
-    break
-  fi
-  echo "wait    the route isn't answering yet (HTTP $status), trying again in ${route_wait_every} s"
-  sleep "$route_wait_every"
-done
-
-status=$(fetch GET "https://$host/")
-if [ "$status" = 404 ] && [ "$(cat "$work/b")" = not_found ] && fixed_headers "an unknown host"; then pass "an unknown host gets the Worker's own not-found, with its fixed headers"; else fail "an unknown host: HTTP $status"; fi
-status=$(fetch GET "http://$host/probe?x=1")
-if [ "$status" = 301 ] && [ "$(header location)" = "https://$host/probe?x=1" ]; then pass "plain HTTP gets a 301 to the same host and path over HTTPS"; else fail "plain HTTP: HTTP $status, Location '$(header location)'"; fi
-status=$(fetch POST "https://$host/")
-if [ "$status" = 405 ] && [ "$(header allow)" = "GET, HEAD" ]; then pass "a POST gets 405, allowing GET and HEAD"; else fail "a POST: HTTP $status"; fi
-status=$(fetch GET "https://$host/sw.js" "Service-Worker: script")
-if [ "$status" = 403 ] && [ "$(cat "$work/b")" = no_service_workers ]; then pass "a service worker's script gets 403"; else fail "a service worker's script: HTTP $status"; fi
-# The content domain itself is no app's host, and the route doesn't cover it: nothing may be served there. No
-# answer at all, as when it has no address, passes; so does any answer that isn't a success.
-status=$(fetch GET "https://$domain/")
-case "$status" in
-  000) pass "the content domain itself serves nothing: no answer" ;;
-  2??) fail "the content domain itself answered HTTP $status: something is served there" ;;
-  *) pass "the content domain itself serves nothing: HTTP $status" ;;
-esac
-echo "NOT SHOWN a host two labels deep, such as a.$host: the zone's certificate covers one level, so HTTPS there can't be probed"
+probes_code=0
+"$root/scripts/content-probes" --wait-for-route "$domain" | tee "$work/probes.out" || probes_code=$?
+probe_failures=$(grep -c '^FAIL ' "$work/probes.out" || true)
+if [ "$probes_code" -ne 0 ] && [ "$probe_failures" -eq 0 ]; then fail "scripts/content-probes stopped with exit $probes_code before judging every probe"; fi
 
 # --- the outbound Worker, by Cloudflare's API with the token ---
 step "checking $OUTBOUND and the dispatch binding by Cloudflare's API"

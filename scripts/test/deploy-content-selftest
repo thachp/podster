@@ -312,7 +312,7 @@ fresh() {
   rm -rf "$origin" "$work" "$tmp/seed" "$home"
   healthy
   mkdir -p "$tmp/seed/scripts" "$tmp/seed/e2e" "$tmp/seed/apps/content/src" "$tmp/seed/apps/outbound/src" "$tmp/seed/apps/api"
-  cp "$scripts/deploy-content" "$tmp/seed/scripts/"
+  cp "$scripts/deploy-content" "$scripts/content-probes" "$tmp/seed/scripts/"
   cp "$scripts/../e2e/jsonc.mjs" "$tmp/seed/e2e/"
   cp "$scripts/../apps/content/wrangler.jsonc" "$tmp/seed/apps/content/"
   # A case may commit the content Worker's file changed: SEED_EDIT is one sed expression applied to it. The case

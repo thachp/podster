@@ -118,9 +118,10 @@ describe("the package can't be deployed by accident", () => {
   it("aims at no account, has no route and no environment, and switches both public addresses off", () => {
     const config = JSON.parse(read("wrangler.jsonc").replace(/^\s*\/\/.*$/gm, ""));
     expect(Object.keys(config).sort()).toEqual(["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "vars", "workers_dev"]);
-    // Its variables: the content domain, a placeholder under `.invalid` that nobody can hold, and the write cap's two
-    // settings, the owner's figures of 2026-11-16, as decimal strings. The code holds no default for either.
-    expect(config.vars).toEqual({ CONTENT_DOMAIN: "content-domain.invalid", WRITE_BUDGET_WRITES: "300", WRITE_BUDGET_WINDOW_MS: "600000" });
+    // Its variables: the content domain, a placeholder under `.invalid` that nobody can hold; the write cap's two
+    // settings, the owner's figures of 2026-11-16; and the dispatch's two limits, the architect's figures of 2026-11-25.
+    // Each a decimal string. The code holds no default for any of them.
+    expect(config.vars).toEqual({ CONTENT_DOMAIN: "content-domain.invalid", WRITE_BUDGET_WRITES: "300", WRITE_BUDGET_WINDOW_MS: "600000", APP_LIMIT_CPU_MS: "50", APP_LIMIT_SUBREQUESTS: "50" });
     expect([config.workers_dev, config.preview_urls]).toEqual([false, false]);
     for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, key).not.toHaveProperty(key);
     // The write counter: one class, this Worker's own (no `script_name`, so it binds no other Worker's class), made
@@ -244,9 +245,8 @@ describe("the Worker reaches nothing but its three bindings", () => {
     expect(index).toContain("limits: limitsFromSettings(env.APP_LIMIT_CPU_MS, env.APP_LIMIT_SUBREQUESTS),");
     // The namespace is asked through the entry's one pass-through, which forwards exactly what the handler gives it.
     expect(index).toContain("apps: { get: (name, args, options) => env.APPS.get(name, args, options) },");
-    // The figures are a ruling's, and none is made yet: no setting in the committed configuration, so a deploy from it
-    // refuses every request that would run an app's code, until the figures are set.
-    expect(read("wrangler.jsonc")).not.toMatch(/APP_LIMIT/);
+    // The figures are the architect's of 2026-11-25, in the committed configuration only: none is in the code.
+    for (const [name, text] of sources) expect(text, name).not.toMatch(/cpuMs:\s*[0-9]|subRequests:\s*[0-9]/);
     // The handler asks the namespace in one place, and gives a host with code its limits there.
     const handle = read("src/handle.ts");
     expect(handle.match(/deps\.apps\.get\(/g)).toHaveLength(2);

@@ -2,7 +2,9 @@
 //! text, when the room looks again, a request a room withdraws before it ever committed a claim, what a room's removal
 //! does to each state, and what the room records from the claim object's answer.
 
-use podster_core::hostname_requests::{after_ask, unmap, AskOutcome, HostnameRequestState, Unmap};
+use podster_core::hostname_requests::{
+    after_ask, setup_status, unmap, AskOutcome, HostnameRequestState, HostnameSetup, Unmap,
+};
 use podster_core::hostnames::*;
 
 const MINUTE: i64 = 60 * 1000;
@@ -387,4 +389,47 @@ fn a_room_asks_for_at_most_five_new_hostnames_in_any_hour() {
     for made in [5, 6, 100] {
         assert!(!request_rate_allows(made), "{made}");
     }
+}
+
+/// What a room's owner is told of a request's setup (2026-11-25): one word for every state, and Cloudflare's `active`
+/// counts only for a claimed request.
+#[test]
+fn setup_status_is_fixed_by_the_state_and_cloudflares_active() {
+    use HostnameRequestState::*;
+    use HostnameSetup as S;
+    let cases = [
+        (Pending, false, S::ProofPending),
+        (Pending, true, S::ProofPending),
+        (Claimed, false, S::ProviderPending),
+        (Claimed, true, S::Active),
+        (Ending, false, S::Ended),
+        (Ending, true, S::Ended),
+        (Ended, false, S::Ended),
+        (Ended, true, S::Ended),
+        (Refused, false, S::Failed),
+        (Refused, true, S::Failed),
+        (Expired, false, S::Failed),
+        (Expired, true, S::Failed),
+    ];
+    for (state, active, expected) in cases {
+        assert_eq!(setup_status(state, active), expected, "{state:?} {active}");
+    }
+    let names: Vec<&str> = HostnameSetup::ALL.iter().map(|s| s.name()).collect();
+    assert_eq!(
+        names,
+        [
+            "proof_pending",
+            "provider_pending",
+            "active",
+            "ended",
+            "failed"
+        ]
+    );
+}
+
+/// The CNAME target is the content domain's fallback origin, and nothing else.
+#[test]
+fn cname_target_is_the_content_domains_fallback() {
+    assert_eq!(cname_target("podster.site"), "fallback.podster.site");
+    assert_eq!(CNAME_TARGET_LABEL, "fallback");
 }

@@ -78,6 +78,8 @@ export function coreSets(root) {
     unpublishCauses: enumNames(release, "UnpublishTrigger", "code"),
     approvalPolicies: enumNames(release, "ApprovalPolicy", "name"),
     hostnameRequestStates: requestStates,
+    // What a room's owner is told of a hostname's setup (2026-11-25): a fixed word, never a provider's own text.
+    hostnameSetupStatuses: enumNames(requests, "HostnameSetup", "name"),
     openHostnameRequestStates: subset(requests, "HostnameRequestState", "is_open", requestStates),
     environment: constant(release, "ENVIRONMENT"),
     releaseIdPrefix: constant(release, "RELEASE_ID_PREFIX"),

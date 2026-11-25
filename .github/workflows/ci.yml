@@ -704,7 +704,7 @@ jobs:
       # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
       - run: node child-env-selftest.mjs
         working-directory: e2e
-      # The browser job's install of its browser: when it retries, when it goes on without apt's packages, and when it stops.
+      # The install of the browser, in the browser, screens and uploads jobs: when it retries, when it goes on without apt's packages, and when it stops.
       - run: node install-browser-selftest.mjs
         working-directory: e2e
       # The accessibility run writes into the Workers' files once they've stopped, so "stopped" has to mean every process.

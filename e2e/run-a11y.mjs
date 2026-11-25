@@ -31,7 +31,7 @@ if (browserArgs.length > 1 || (browserArgs.length === 1 && !["chromium", "firefo
 }
 // Checked before anything builds too, and `--part screens` is refused rather than quietly running all of it.
 const partArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--part"));
-const partName = partArgs[0]?.slice("--part=".length);
+const partName = partArgs[0]?.startsWith("--part=") ? partArgs[0].slice("--part=".length) : undefined;
 if (partArgs.length > 1 || (partArgs.length === 1 && !["screens", "keyboard"].includes(partName))) {
   console.error(`Choose one part, as --part=screens or --part=keyboard, not: ${partArgs.join(" ")}`);
   process.exit(2);
@@ -87,8 +87,9 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
-// The checks take about six minutes on CI when both parts run in one go, and under four for the longer part alone. a11y.mjs bounds each of its own waits and says which one stalled; this is
-// the bound on all of it, for a stall it can't report itself, and it leaves the job's own limit time to show the logs.
+// The checks take about six minutes on CI when both parts run in one go, and under four for the longer part alone.
+// a11y.mjs bounds each of its own waits and says which one stalled; this is the bound on all of it, for a stall it can't
+// report itself, and it leaves the job's own limit time to show the logs.
 const CHECKS_MS = 15 * 60_000;
 
 let code = 1;

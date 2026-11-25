@@ -22,18 +22,21 @@ const Row = ({ term, children, mono = false }: { term: string; children: React.R
   </>
 );
 
+/** Which value was copied last, and how it went. One for all the records, so only the last copy says "Copied.". */
+type Copied = { what: string; ok: boolean } | null;
+
 /**
  * A value to publish at a DNS provider, in monospace, with a Copy button. The button copies exactly what the server
  * gave, which is what DNS needs; the text shown is the same value with nothing hidden in it. Copying changes nothing.
  */
-function CopyText({ value, what }: { value: string; what: string }) {
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+function CopyText({ value, what, copied, setCopied }: { value: string; what: string; copied: Copied; setCopied: (copied: Copied) => void }) {
+  const state = copied?.what !== what ? "idle" : copied.ok ? "copied" : "failed";
   async function copy() {
     try {
       await navigator.clipboard.writeText(value);
-      setState("copied");
+      setCopied({ what, ok: true });
     } catch {
-      setState("failed");
+      setCopied({ what, ok: false });
     }
   }
   return (
@@ -58,6 +61,8 @@ function CopyText({ value, what }: { value: string; what: string }) {
  * page's.
  */
 function DnsRecords({ request }: { request: HostnameRequest }) {
+  const [copied, setCopied] = useState<Copied>(null);
+  const shared = { copied, setCopied };
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">At the company that runs DNS for {visibleText(request.hostname)}, add these two records:</p>
@@ -67,10 +72,10 @@ function DnsRecords({ request }: { request: HostnameRequest }) {
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
             <Row term="Type">TXT</Row>
             <Row term="Name">
-              <CopyText value={request.challenge_name} what="TXT record name" />
+              <CopyText value={request.challenge_name} what="TXT record name" {...shared} />
             </Row>
             <Row term="Value">
-              <CopyText value={request.challenge_value} what="TXT record value" />
+              <CopyText value={request.challenge_value} what="TXT record value" {...shared} />
             </Row>
           </dl>
         </section>
@@ -80,10 +85,10 @@ function DnsRecords({ request }: { request: HostnameRequest }) {
             <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
               <Row term="Type">CNAME</Row>
               <Row term="Name">
-                <CopyText value={request.hostname} what="CNAME record name" />
+                <CopyText value={request.hostname} what="CNAME record name" {...shared} />
               </Row>
               <Row term="Points to">
-                <CopyText value={request.cname_target} what="CNAME record target" />
+                <CopyText value={request.cname_target} what="CNAME record target" {...shared} />
               </Row>
             </dl>
           ) : (

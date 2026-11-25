@@ -184,7 +184,7 @@ export function describeHostname(request: HostnameRequest): { label: string; ton
       return { label: "Waiting for proof", tone: "blue", text: "Publish both records below at your DNS provider. Nothing is held until Podster reads the TXT record, and the request ends if it isn't read in time." };
     case "claimed":
       return request.setup_status === "active"
-        ? { label: "Active", tone: "green", text: "This workroom holds the name, and Cloudflare reports it active with HTTPS. The app is served here while a release is served. Keep both records published: Podster checks the TXT record every day." }
+        ? { label: "Active", tone: "green", text: "This workroom holds the name, and Cloudflare reports it active. The app is served here while a release is served. Keep both records published: Podster checks the TXT record every day." }
         : { label: "Waiting for DNS", tone: "blue", text: "Podster read your TXT record, and this workroom holds the name. Cloudflare turns it on once the CNAME record below points at Podster. Keep both records published: Podster checks the TXT record every day." };
     case "ending":
       return { label: "Being removed", tone: "amber", text: "This workroom has stopped using the name, and Podster is removing it. It still counts as this workroom's one name until that's done." };

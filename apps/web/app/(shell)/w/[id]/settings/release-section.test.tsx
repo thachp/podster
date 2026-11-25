@@ -153,7 +153,7 @@ describe("switching release on and off", () => {
   it("someone who may not configure, or an archived room, sees the state and no control", () => {
     const first = show(releaseView({ kind: "on", data: config({ enabled: true }) }, ready), { mayConfigure: false, hostname: { request: request() } });
     // Copying a record changes nothing, so it is the only button shown.
-    expect(screen.queryAllByRole("button").filter((button) => button.textContent !== " Copy")).toEqual([]);
+    expect(screen.queryAllByRole("button").filter((button) => !/^Copy /.test(button.getAttribute("aria-label") ?? ""))).toEqual([]);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByText("Only this workroom's owner and admins can change release.")).toBeInTheDocument();
     first.unmount();
@@ -226,13 +226,17 @@ describe("the custom domain", () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
     show(on(), { hostname: { request: request() } });
-    for (const what of ["TXT record name", "TXT record value", "CNAME record name", "CNAME record target"]) await user.click(screen.getByRole("button", { name: `Copy ${what}` }));
+    // Only the last one copied says so: copying another clears the one before.
+    for (const what of ["TXT record name", "TXT record value", "CNAME record name", "CNAME record target"]) {
+      await user.click(screen.getByRole("button", { name: `Copy ${what}` }));
+      expect(await screen.findAllByText("Copied.")).toHaveLength(1);
+    }
     expect(writeText.mock.calls).toEqual([["_podster-challenge.app.example.com"], ["c2b1f0e9d8"], ["app.example.com"], ["fallback.apps.example"]]);
-    expect(await screen.findAllByText("Copied.")).toHaveLength(4);
     expect(sent).toEqual([]);
     writeText.mockRejectedValueOnce(new Error("denied"));
     await user.click(screen.getByRole("button", { name: "Copy TXT record value" }));
     expect(await screen.findByText("Couldn't copy. Select it and copy it yourself.")).toBeInTheDocument();
+    expect(screen.queryByText("Copied.")).toBeNull();
   });
 
   it("with no CNAME target from the server, says so and invents none", () => {

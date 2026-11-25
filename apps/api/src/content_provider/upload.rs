@@ -56,14 +56,14 @@ const MAX_TOKEN_BYTES: usize = 256 * 1024;
 const COMPATIBILITY_DATE: &str = podster_core::app_code::COMPATIBILITY_DATE;
 /// How every release's files are served, written out in every script: **explicit and fixed** (the architect's
 /// ruling of 2026-11-14, as amended that day), so that a change in the provider's defaults can't change how an app is
-/// served. Never an empty object, and never anything from a repository.
+/// served. Never an empty object, and never anything from a repository. Core's one constant
+/// (`podster_core::app_code::ASSETS_CONFIG`): `html_handling` `auto-trailing-slash`, so `/index.html` is served at `/`;
+/// `not_found_handling` `none`, so a path with no file is not-found.
 ///
-/// - `html_handling` is the provider's documented default today, by name: `/index.html` is served at `/`, and
-///   `page.html` at `/page`. It is what spike A saw and what `podster_core::release_tree` judges two paths at one
-///   address by. `none` would leave every app's `/` answering not-found.
-/// - `not_found_handling` is `none`: a path with no file is not-found. No single-page-app fallback.
-const ASSETS_CONFIG: &str =
-    r#"{"html_handling":"auto-trailing-slash","not_found_handling":"none"}"#;
+/// **Never `run_worker_first`, or anything else that runs an app's script before its files** (since 2026-11-25, from
+/// spike H): the release marker's static file is served before an app's script only while the upload never sends it.
+/// Core doesn't compile if its constant gains it, and nothing here adds a key to it.
+const ASSETS_CONFIG: &str = podster_core::app_code::ASSETS_CONFIG;
 /// What separates the parts of a body. Base64 holds no `-`, and no part's name or type holds a line break, so no
 /// part can hold it.
 const BOUNDARY: &str = "podster-release-upload";

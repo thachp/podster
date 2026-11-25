@@ -150,8 +150,10 @@ async function uploading(opts: { open?: boolean; driver?: boolean; code?: boolea
     sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
     sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
     if (opts.open !== false) sql.exec("CREATE TABLE test_app_store_create_open (x INTEGER)");
-    // The gate for apps with code, opened as the store's is: every release here but the gate's own test may carry code.
-    if (opts.code !== false) sql.exec("CREATE TABLE test_code_release_open (x INTEGER)");
+    // The gate for apps with code is open since 2026-11-25; only the gate's own test closes it again, for its room.
+    if (opts.code === false) sql.exec("CREATE TABLE test_code_release_closed (x INTEGER)");
+    // With both gates open the store's create is open too; a test that shows it closed closes the release path's.
+    if (opts.open === false) sql.exec("CREATE TABLE test_release_path_incomplete (x INTEGER)");
     if (opts.driver) {
       sql.exec("CREATE TABLE test_release_driver (from_alarm INTEGER)");
       sql.exec("INSERT INTO test_release_driver (from_alarm) VALUES (0)");
@@ -464,7 +466,7 @@ export function appStoreMakeCases() {
       const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
       const source = sources["workspace/release_store.rs"];
       const gate = source.slice(source.indexOf("fn store_create_open"), source.indexOf("fn store_provider"));
-      expect(gate).toContain("if self.release_path_complete() && podster_core::app_code::CODE_RELEASES_COMPLETE {\n            return true;\n        }");
+      expect(gate).toContain("if self.release_path_complete() && self.code_releases_open() {\n            return true;\n        }");
       expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\]\n\s+\{\n\s+rows\(\n[^]*test_app_store_create_open/);
       expect(gate).toMatch(/#\[cfg\(not\(feature = "failpoints"\)\)\]\n\s+\{\n\s+false\n\s+\}/);
       // The create is sent in one place, after the record's transaction.
@@ -548,6 +550,10 @@ export function appCodeUploadCases() {
       // The metadata, byte for byte: the one binding, its ID the record's, and nothing from the release's files.
       expect(written.metadataText).toBe(codeMetadata(written.metadata.assets.jwt, storeBinding(store.store_id)));
       expect(written.metadata.bindings).toEqual([{ type: "d1", name: "STORE", id: store.store_id }]);
+      // The assets configuration is the fixed one, so the marker's static file is served before the app's script
+      // (spike H, item 1): never `run_worker_first`, whatever the release holds.
+      expect(written.metadata.assets.config).toEqual({ html_handling: "auto-trailing-slash", not_found_handling: "none" });
+      expect(written.metadataText).not.toContain("run_worker_first");
       // The modules, each as its own part, by its name under `worker/`, typed as a module, with its own bytes.
       expect(written.modules).toEqual({
         "index.js": { filename: "index.js", type: MODULE_TYPE, text: files["worker/index.js"] },
@@ -679,13 +685,14 @@ export function appCodeUploadCases() {
       expect(brief(await upload(r.room))).toEqual([200, "uploading", true, null, null]);
     });
 
-    it("keeps the gate for apps with code in core, closed, and read in one place, with only a test build opening it", () => {
+    it("keeps the gate for apps with code in core, open since 2026-11-25, and read in one place, with only a test build closing it", () => {
       const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
       const source = sources["workspace/release_upload.rs"];
       const gate = source.slice(source.indexOf("fn code_releases_open"), source.indexOf("fn test_before_check"));
-      expect(gate).toContain("if podster_core::app_code::CODE_RELEASES_COMPLETE {\n            return true;\n        }");
-      expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\]\n\s+\{\n\s+rows\(\n[^]*test_code_release_open/);
-      expect(gate).toMatch(/#\[cfg\(not\(feature = "failpoints"\)\)\]\n\s+\{\n\s+false\n\s+\}/);
+      // Test builds alone may close it, for a room a test names; every other build reads core's constant and nothing else.
+      expect(gate).toMatch(/#\[cfg\(feature = "failpoints"\)\]\n\s+if rows\(\n[^]*test_code_release_closed'[^]*\{\n\s+return false;\n\s+\}\n\s+podster_core::app_code::CODE_RELEASES_COMPLETE\n\s+\}\n/);
+      expect(gate).not.toContain("test_code_release_open");
+      expect(Object.values(sources).join("\n")).not.toContain("test_code_release_open");
       // The upload asks the gate on the form, before its store and before anything is sent.
       expect(source).toContain("admit(first.form(), self.code_releases_open())");
       expect(source.indexOf("admit(first.form()")).toBeLessThan(source.indexOf(".store_before_upload("));

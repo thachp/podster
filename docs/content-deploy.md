@@ -155,7 +155,7 @@ An error the script doesn't handle, such as an unbound variable, never exits 0: 
 - during the content Worker's deploy, `podster-outbound` is deployed and the content Worker may or may not be, so check the account before running it again;
 - **between the two deploys** (the check that `podster-outbound` is on the account, or a leak in that answer), the content Worker was **not** deployed, and the output says so.
 
-**If `podster-outbound` deploys and the content Worker's deploy then fails (exit 3),** the content Worker deployed before, if there is one, keeps serving without the outbound binding. That's acceptable only while `CODE_APPS_ENABLED` (`apps/content/src/handle.ts`) is false, since no app's code runs then. The script says so; fix the cause and run it again.
+**If `podster-outbound` deploys and the content Worker's deploy then fails (exit 3),** the content Worker deployed before, if there is one, keeps serving as it was deployed. Every deploy by this script names `podster-outbound` on the dispatch binding; a content Worker deployed before that (before 2026-11-24) had no outbound binding, and was acceptable only because its `CODE_APPS_ENABLED` (`apps/content/src/handle.ts`) was false, so no app's code ran. *Since 2026-11-25 the switch is on in the source, so a content Worker deployed from it serves apps with code; it is deployed only through this script, so always with the outbound binding.* The script says so; fix the cause and run it again.
 - during the probes, the Workers are deployed and not verified.
 
 The temporary folder is deleted in every case.

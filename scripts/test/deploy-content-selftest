@@ -815,7 +815,7 @@ check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 
 fresh; touch "$fix/deploy-fails-podster-content"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false' '$tmp/out'"
+check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving as it was deployed: every deploy by this script names podster-outbound' '$tmp/out'"
 check "  no probe ran" never_called "^probe "
 fresh; touch "$fix/wrangler-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "wrangler output holding the token: exit 3, redacted, not printed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler.s output or its log held the token' '$tmp/out' && grep -q 'redacted token' '$tmp/out'"

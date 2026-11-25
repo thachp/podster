@@ -687,7 +687,7 @@ echo "ok      $OUTBOUND is on the account"
 step "wrangler deploy: podster-content"
 phase=deploying
 wrangler_deploy content content "$work/wrangler.json"
-deployed_output content "$OUTBOUND is deployed. The content Worker deployed before, if there is one, keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false, since no app's code runs, so fix the cause and run this again."
+deployed_output content "$OUTBOUND is deployed. The content Worker deployed before, if there is one, keeps serving as it was deployed: every deploy by this script names $OUTBOUND as its dispatch's outbound Worker, and one deployed without it had the code-apps switch off, so no app's code runs past it. Fix the cause and run this again."
 version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-content.out" | head -n 1 | sed 's/.*: //' || true)
 echo "version podster-content ${version:-not printed by wrangler}"
 

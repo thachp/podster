@@ -169,6 +169,8 @@ export default {
       stop,
       domain: DOMAIN,
       codeApps: false,
+      // No limits: with the switch off here no app with code is asked.
+      limits: null,
       // No counter: with the switch off no write reaches one, and this run has no Durable Object.
       writes: { admit: async () => ({ ok: false, refusal: { code: "write_budget_unknown" } }) },
       log: () => {},

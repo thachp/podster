@@ -188,9 +188,9 @@ describe("the Worker reaches nothing but its three bindings", () => {
   const sources = readdirSync(new URL("src/", root)).map((name) => [name, read(`src/${name}`)] as const);
 
   it("reads one namespace, asks one dispatch namespace and its own write counter, and names no other binding, host or secret", () => {
-    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "index.ts", "names.ts", "requests.ts"]);
+    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "index.ts", "limits.ts", "names.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
-    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
+    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "APP_LIMIT_CPU_MS", "APP_LIMIT_SUBREQUESTS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
     // Nothing is logged for a request but a failed dispatch's line (ADR 0010's "Logs"): one console call, in the entry,
     // with the line's two fields and nothing else. The counter logs nothing.
     expect([...all.matchAll(/\bconsole\b/g)]).toHaveLength(1);
@@ -222,22 +222,35 @@ describe("the Worker reaches nothing but its three bindings", () => {
     expect(read("src/index.ts").match(/env\.WRITE_COUNTER/g)).toHaveLength(1);
   });
 
-  it("keeps the code-apps switch off, as a constant that nothing configures, and every script static", () => {
+  it("keeps the code-apps switch a constant that nothing configures, on since 2026-11-25, and flipped back in one line", () => {
     const handle = read("src/handle.ts");
-    // Exactly one definition, of type `false`: turning it on changes this line, and the pin in `codeHost` then fails
-    // to compile until serving an app with code is built.
-    expect(handle.match(/CODE_APPS_ENABLED/g)?.length).toBe(3);
-    expect(handle).toContain("export const CODE_APPS_ENABLED: false = false;");
-    expect(handle).toContain("const off: false = CODE_APPS_ENABLED;");
+    // Exactly one definition: turning it off is a change to this one line, and nothing else reads a setting for it.
+    expect(handle.match(/export const CODE_APPS_ENABLED/g)?.length).toBe(1);
+    expect(handle).toContain("export const CODE_APPS_ENABLED: boolean = true;");
     // The Worker's entry reads no binding or variable for it. A host's kind comes from the mark on its serve entry
     // alone (`podster_core::serve_entry`), read in the handler, and nothing the entry passes can say otherwise.
     const index = read("src/index.ts");
     expect(index.replaceAll("CODE_APPS_ENABLED", "")).not.toMatch(/CODE_APPS/i);
     for (const [name, text] of [["index", index], ["handle", handle]]) expect(text, name).not.toMatch(/hostKind/);
-    // And it passes the switch itself, the constant of type `false`, as the request's: never anything else.
+    // And it passes the switch itself, the constant, as the request's: never anything else.
     expect(index.match(/codeApps:/g)).toHaveLength(1);
-    expect(index).toContain("codeApps: CODE_APPS_ENABLED satisfies false,");
+    expect(index).toContain("codeApps: CODE_APPS_ENABLED,");
     expect(read("wrangler.jsonc")).not.toMatch(/CODE_APPS|code_apps/i);
+  });
+
+  it("gives every dispatch to a host with code its limits, from two settings with no figure in the code", () => {
+    const index = read("src/index.ts");
+    expect(index.match(/limits:/g)).toHaveLength(1);
+    expect(index).toContain("limits: limitsFromSettings(env.APP_LIMIT_CPU_MS, env.APP_LIMIT_SUBREQUESTS),");
+    // The namespace is asked through the entry's one pass-through, which forwards exactly what the handler gives it.
+    expect(index).toContain("apps: { get: (name, args, options) => env.APPS.get(name, args, options) },");
+    // The figures are a ruling's, and none is made yet: no setting in the committed configuration, so a deploy from it
+    // refuses every request that would run an app's code, until the figures are set.
+    expect(read("wrangler.jsonc")).not.toMatch(/APP_LIMIT/);
+    // The handler asks the namespace in one place, and gives a host with code its limits there.
+    const handle = read("src/handle.ts");
+    expect(handle.match(/deps\.apps\.get\(/g)).toHaveLength(2);
+    expect(handle).toContain("deps.apps.get(script, {}, { limits: { cpuMs: limits.cpuMs, subRequests: limits.subRequests } })");
   });
 
   it("never holds the word that would give a sandboxed page its real origin back", () => {

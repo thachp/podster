@@ -33,10 +33,15 @@ type World = {
   order: ("count" | "dispatch")[];
   /** Every line logged. */
   logged: unknown[];
+  /** Every script asked of the namespace, with the options it was asked with: none, or a dispatch's limits. */
+  asked: { script: string; options: unknown }[];
 };
 
+/** The limits this file's worlds give a dispatch to a host with code: figures of the test's, not a ruling's. */
+const LIMITS = { cpuMs: 50, subRequests: 5 } as const;
+
 function world(): World {
-  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, counted: [], budget: { ok: true }, order: [], logged: [], deps: undefined as unknown as Deps };
+  const w: World = { kv: new Map([[HOST, SCRIPT]]), reads: [], sent: [], apps: new Map(), clock: { now: 1_000_000 }, failReads: { all: false, keys: new Set() }, counted: [], budget: { ok: true }, order: [], logged: [], asked: [], deps: undefined as unknown as Deps };
   w.apps.set(SCRIPT, () => new Response("<h1>app</h1>", { headers: { "content-type": "text/html" } }));
   w.deps = {
     entries: {
@@ -47,7 +52,8 @@ function world(): World {
       },
     },
     apps: {
-      get(script) {
+      get(script, args, options) {
+        w.asked.push({ script, options: args === undefined && options === undefined ? "none" : { args, options } });
         return {
           async fetch(request) {
             w.order.push("dispatch");
@@ -63,6 +69,7 @@ function world(): World {
     stop: { read: null },
     domain: DOMAIN,
     codeApps: false,
+    limits: LIMITS,
     writes: {
       async admit(label) {
         w.order.push("count");
@@ -750,8 +757,8 @@ const answerOf = async (response: Response) => [response.status, headersOf(respo
 const bodyOf = (bytes: number) => "x".repeat(bytes);
 
 describe("the code-apps switch", () => {
-  it("is off, and is a constant no binding or variable reaches", () => {
-    expect(CODE_APPS_ENABLED).toBe(false);
+  it("is on since 2026-11-25, and is a constant no binding or variable reaches", () => {
+    expect(CODE_APPS_ENABLED).toBe(true);
   });
 
   it("while off, refuses every method but GET and HEAD with today's answer before anything is read, even on a host with code", async () => {
@@ -785,18 +792,97 @@ describe("the code-apps switch", () => {
 describe("a host whose release carries code", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("serves nothing for a read, with the switch off or on: its own refusal, readable by the origin null, and no app asked", async () => {
-    for (const codeApps of [false, true]) {
-    const w = codeWorld(codeApps);
+  it("serves nothing for a read with the switch off: its own refusal, readable by the origin null, and no app asked", async () => {
+    const w = codeWorld(false);
     for (const method of ["GET", "HEAD"]) {
       const answer = await get(w, "/", { method });
       expect(await answerOf(answer), method).toEqual([503, CODE_OWN, method === "HEAD" ? "" : "code_apps_off\n"]);
     }
-    expect(w.sent).toEqual([]);
+    expect([w.sent, w.asked]).toEqual([[], []]);
     // The same request to a static host is served, as it always was.
     w.kv.set(HOST, SCRIPT);
     expect((await get(w)).status).toBe(200);
+  });
+
+  it("serves a read with the switch on: sent with the dispatch's limits, never kept, readable by the origin null", async () => {
+    const w = codeWorld();
+    w.apps.set(SCRIPT, () => new Response("<h1>todo</h1>", { headers: { "content-type": "text/html", etag: '"e"', "set-cookie": "a=b", "cache-control": "max-age=999", "access-control-allow-origin": "*", "x-app": "1" } }));
+    for (const method of ["GET", "HEAD"]) {
+      const answer = await get(w, "/?x=1", { method, headers: { accept: "text/html", cookie: "a=b", authorization: "Bearer x", "if-none-match": '"d"' } });
+      expect(await answerOf(answer), method).toEqual([200, { ...CODE_APP, "content-type": "text/html", etag: '"e"' }, method === "HEAD" ? "" : "<h1>todo</h1>"]);
+      const sent = w.sent.at(-1)!.request;
+      // The read's three headers and nothing else of the visitor's, at the visitor's exact path and query.
+      expect([sent.method, sent.url, Object.fromEntries(sent.headers.entries())], method).toEqual([method, `${ORIGIN}/?x=1`, { accept: "text/html", "if-none-match": '"d"' }]);
     }
+    // Every ask of the namespace for this host gave the script the dispatch's limits, and nothing more.
+    expect(w.asked).toEqual([
+      { script: SCRIPT, options: { args: {}, options: { limits: { cpuMs: 50, subRequests: 5 } } } },
+      { script: SCRIPT, options: { args: {}, options: { limits: { cpuMs: 50, subRequests: 5 } } } },
+    ]);
+    // Nothing is counted for a read.
+    expect(w.counted).toEqual([]);
+    // A static host is still asked with no options at all.
+    w.kv.set(HOST, SCRIPT);
+    expect((await get(w)).status).toBe(200);
+    expect(w.asked.at(-1)).toEqual({ script: SCRIPT, options: "none" });
+  });
+
+  it("sends the release marker's own request to the script at exactly the marker's path, and passes its answer (spike H, item 1)", async () => {
+    // The marker job's request: the exact path, `accept: application/json` and `cache-control: no-cache`, no redirect
+    // followed. The platform serves the marker's static file before the app's script, for exactly this path.
+    const MARKER = "/.well-known/podster-release.json";
+    const body = '{"release_id":"rel_0123456789abcdef0123456789abcdef","commit":"ce013625030ba8dba906f756967f9e9ca394464a"}\n';
+    const w = codeWorld();
+    w.apps.set(SCRIPT, (request) => (new URL(request.url).pathname === MARKER ? new Response(body, { headers: { "content-type": "application/json", etag: '"m"' } }) : new Response("module", { status: 500 })));
+    const answer = await get(w, MARKER, { headers: { accept: "application/json", "cache-control": "no-cache" }, redirect: "manual" });
+    expect(await answerOf(answer)).toEqual([200, { ...CODE_APP, "content-type": "application/json", etag: '"m"' }, body]);
+    const sent = w.sent[0].request;
+    expect([w.sent.length, w.sent[0].script, sent.method, sent.url, Object.fromEntries(sent.headers.entries())]).toEqual([1, SCRIPT, "GET", `${ORIGIN}${MARKER}`, { accept: "application/json" }]);
+    // The same on an app's custom hostname, whose entry names the same script.
+    const custom = "app.example.org";
+    w.kv.set(custom, `${CODE_MARK}${SCRIPT}@${custom}`);
+    const onCustom = await get(w, MARKER, { headers: { accept: "application/json" } }, custom);
+    expect([onCustom.status, await onCustom.text(), w.sent.at(-1)!.request.url]).toEqual([200, body, `https://${custom}${MARKER}`]);
+  });
+
+  it("refuses everything that would reach the app when no limits are configured, before a write is counted", async () => {
+    const w = codeWorld();
+    w.deps.limits = null;
+    for (const [method, init] of [["GET", {}], ["HEAD", {}], ...WRITE_METHODS.map((method) => [method, { body: "{}", headers: JSON_HEADERS }])] as [string, RequestInit][]) {
+      expect(await answerOf(await get(w, "/api/items", { method, ...init })), method).toEqual([503, CODE_OWN, method === "HEAD" ? "" : "app_limits_unknown\n"]);
+    }
+    expect([w.sent, w.asked, w.counted]).toEqual([[], [], []]);
+    // A preflight reaches no app, so it is still answered; a static host is asked as always, with no limits.
+    expect((await get(w, "/api/items", { method: "OPTIONS", headers: { "access-control-request-method": "POST" } })).status).toBe(204);
+    w.kv.set(HOST, SCRIPT);
+    expect((await get(w)).status).toBe(200);
+    expect(w.asked).toEqual([{ script: SCRIPT, options: "none" }]);
+  });
+
+  it("answers a read's failures as its own, readable by the origin null and never kept", async () => {
+    const cases: [string, ((request: Request) => Response | Promise<Response>) | null, number, string, Record<string, string>][] = [
+      ["missing", null, 404, "not_found\n", { "clear-site-data": '"cache"' }],
+      // An app that throws, or passes a limit, which the platform answers by throwing: this Worker's own error.
+      ["throws", () => { throw new Error("Worker exceeded CPU time limit."); }, 502, "app_error\n", {}],
+      ["partial", () => new Response("x", { status: 206 }), 502, "app_answer_unservable\n", {}],
+      ["encoded", () => new Response("x", { headers: { "content-encoding": "gzip" } }), 502, "app_answer_unservable\n", {}],
+      ["interim", () => rawAnswer(103, null), 502, "app_answer_unservable\n", {}],
+      ["elsewhere", () => new Response(null, { status: 302, headers: { location: "https://evil.example/" } }), 404, "not_found\n", { "clear-site-data": '"cache"' }],
+      ["protocol-relative", () => new Response(null, { status: 307, headers: { location: "//evil.example/" } }), 404, "not_found\n", { "clear-site-data": '"cache"' }],
+    ];
+    for (const [name, app, status, body, extra] of cases) {
+      const w = codeWorld();
+      if (app === null) w.apps.delete(SCRIPT);
+      else w.apps.set(SCRIPT, app);
+      expect(await answerOf(await get(w, "/page")), name).toEqual([status, { ...CODE_OWN, ...extra }, body]);
+    }
+    // A redirect to a path on this host passes, as a static host's does (the platform's own, `/index.html` to `/`).
+    const w = codeWorld();
+    w.apps.set(SCRIPT, () => new Response(null, { status: 307, headers: { location: `${ORIGIN}/` } }));
+    expect(await answerOf(await get(w, "/index.html"))).toEqual([307, { ...CODE_APP, location: "/" }, ""]);
+    // A conditional answer passes, with no body.
+    w.apps.set(SCRIPT, () => rawAnswer(304, "dropped", { etag: '"e"' }));
+    expect(await answerOf(await get(w, "/", { headers: { "if-none-match": '"e"' } }))).toEqual([304, { ...CODE_APP, etag: '"e"' }, ""]);
   });
 
   it("answers an error after its kind is known as its own, readable by the origin null: a body that fails as it is counted", async () => {
@@ -882,8 +968,10 @@ describe("a host whose release carries code", () => {
     ];
     const statuses = [];
     for (const [path, init] of requests) statuses.push((await get(w, path, init)).status);
-    expect(statuses).toEqual([503, 503, 503, 403, 413, 413, 413, 400, 415, 405, 403, 403]);
-    expect([w.counted, w.sent]).toEqual([[], []]);
+    expect(statuses).toEqual([200, 200, 204, 403, 413, 413, 413, 400, 415, 405, 403, 403]);
+    // Only the two reads reached the app, and nothing was counted.
+    expect([w.counted, w.sent.map((sent) => sent.request.method)]).toEqual([[], ["GET", "HEAD"]]);
+    w.sent.length = 0;
     // Nor on a host that isn't confirmed to have code: no entry, a static host, plain HTTP, and the stop.
     w.kv.delete(HOST);
     expect((await get(w, "/", { method: "POST", body: "{}", headers: JSON_HEADERS })).status).toBe(405);
@@ -1015,7 +1103,7 @@ describe("a host whose release carries code", () => {
     expect(w.sent).toEqual([]);
   });
 
-  it("answers a preflight itself, readable by nobody: refused by its code, and an allowed one refused as switched off", async () => {
+  it("answers a preflight itself: refused by its code, readable by nobody; allowed, 204 with the fixed allowance for the origin null", async () => {
     const w = codeWorld();
     const preflight = (method: string | null, headers: string | null) => {
       const sent: Record<string, string> = { origin: "null" };
@@ -1025,13 +1113,19 @@ describe("a host whose release carries code", () => {
     };
     for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]) {
       for (const headers of [null, "content-type", "Content-Type"]) {
-        expect(await answerOf(await preflight(method, headers)), `${method} ${headers}`).toEqual([503, PREFLIGHT_OWN, "code_apps_off\n"]);
+        const allowed = { ...CODE_APP, "access-control-allow-methods": "GET, HEAD, POST, PUT, PATCH, DELETE", "access-control-allow-headers": "content-type" };
+        expect(await answerOf(await preflight(method, headers)), `${method} ${headers}`).toEqual([204, allowed, ""]);
       }
     }
     expect(await answerOf(await preflight(null, "content-type"))).toEqual([403, PREFLIGHT_OWN, "preflight_no_method\n"]);
     for (const method of ["OPTIONS", "TRACE", "patch", ""]) expect(await answerOf(await preflight(method, null)), JSON.stringify(method)).toEqual([403, PREFLIGHT_OWN, "preflight_method\n"]);
     for (const headers of ["authorization", "content-type, x-custom", "content-length"]) expect(await answerOf(await preflight("POST", headers)), headers).toEqual([403, PREFLIGHT_OWN, "preflight_header\n"]);
-    expect(w.sent).toEqual([]);
+    expect([w.sent, w.asked, w.counted]).toEqual([[], [], []]);
+    // With the switch off, an allowed preflight is refused as switched off, as before 2026-11-25.
+    w.deps.codeApps = false;
+    w.deps.stop.read = null;
+    // (The switch off answers any method but GET and HEAD before anything is read, so this is the static `405`.)
+    expect((await preflight("POST", "content-type")).status).toBe(405);
   });
 
   it("is refused as any host is before its kind is known, with the switch on: over plain HTTP, while stopped, and with no confirmed entry", async () => {

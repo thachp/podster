@@ -75,9 +75,9 @@ fi
 
 # ci.yml's jobs. A pull request must have every one as a check. The gate also reads ci.yml on main and refuses if this
 # list isn't its jobs, so a renamed or added job can't pass unnoticed, and the self-test pins it to the workflow file.
-CI_JOBS="rust migrations contracts api web scanner outbound content gateway runner e2e"
+CI_JOBS="rust migrations contracts api-1 api-2 api-3 api web browser uploads scanner outbound content gateway runner e2e rehearsal selftests"
 # There is no flake allowance. There were two: an alarm test of apps/api/test/kernel.spec.ts, whose cause was the test
-# runtime running a room's alarm beside the test's own run of it, and "database is locked" in the web job's
+# runtime running a room's alarm beside the test's own run of it, and "database is locked" in the browser job's (then web's)
 # accessibility run, which #254 fixed. The API specs now run alarms through apps/api/test/alarm.ts. Either failing
 # again means its fix didn't hold, and is looked into, never rerun.
 
@@ -362,7 +362,7 @@ done
 if [ -z "$merged" ]; then echo "merge-gate: merged, but the merge commit could not be read. Check main's CI yourself."; exit 4; fi
 echo "merged as $merged. Waiting for ci.yml on main."
 
-# The web job alone may take 25 minutes. This asks every 30 seconds for 45.
+# The browser job alone may take 25 minutes. This asks every 30 seconds for 45.
 tries=0
 while [ "$tries" -lt 90 ]; do
   run=$(gh run list --workflow ci.yml --branch main --event push --commit "$merged" --limit 1 \

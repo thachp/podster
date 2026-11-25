@@ -147,7 +147,7 @@ A rule applied to notices gives the same result whatever order they arrive in, a
 
 ## Enforced by a tool
 
-- **Rule 1:** `e2e/test-timing-check.mjs` (#346, #348 and #349, all 2026-11-13) runs in CI's `e2e` job after its own self-test. It reads every file under `apps/api/test` and `apps/gateway/test` and fails on a sleep, on a wall-clock margin in an assertion, on an API spec that makes a room and has no `alarmQuiet` in `afterEach`, `afterAll` or `finally`, on an API spec that makes a room and never calls `manualAlarms` (`runtime-alarms`), on an alarm handler called directly in the API's tests outside `apps/api/test/alarm.ts` (`direct-alarm`), and on each `runtimeAlarms` call (`runtime-opt-out`).
+- **Rule 1:** `e2e/test-timing-check.mjs` (#346, #348 and #349, all 2026-11-13) runs in CI's `selftests` job after its own self-test. It reads every file under `apps/api/test` and `apps/gateway/test` and fails on a sleep, on a wall-clock margin in an assertion, on an API spec that makes a room and has no `alarmQuiet` in `afterEach`, `afterAll` or `finally`, on an API spec that makes a room and never calls `manualAlarms` (`runtime-alarms`), on an alarm handler called directly in the API's tests outside `apps/api/test/alarm.ts` (`direct-alarm`), and on each `runtimeAlarms` call (`runtime-opt-out`).
 - **What it already found is owed.** `e2e/test-timing-allow.json` lists every existing finding with a reason: as of #406, 101 entries covering 315 findings, of which 79 entries, covering 83 findings, are owed fixes (each run of the check prints the current numbers). Most of the rest are calls to helpers that only poll for the state itself. A new finding, or an edit to a listed line, fails until it is fixed or listed.
 
 ## Not yet enforced by a tool

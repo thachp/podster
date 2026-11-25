@@ -11,10 +11,11 @@
 //! the transaction of step 5, which also records the script's kind before it is written (`write_check`). A static
 //! release is uploaded exactly as before.
 //!
-//! *Since 2026-11-23:* **the gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`, false) is
-//! apart from the release path's. While it is closed, a release that carries code, or whose tree tries to, fails
+//! *Since 2026-11-23:* **the gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`) is apart
+//! from the release path's. While it is closed, a release that carries code, or whose tree tries to, fails
 //! `release_code_not_available` at the same point, before its store or anything else is asked for, so the release
-//! path can open for static sites alone (`code_releases_open`).
+//! path could open for static sites alone (`code_releases_open`). *Open since 2026-11-25,* on spike H's evidence; only
+//! a test build closes it again, for a room a test names.
 //!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
@@ -474,28 +475,23 @@ impl Workspace {
         takedown::provider(&self.env, &sql)
     }
 
-    /// **The gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`), alone: closed everywhere while
-    /// it is false, whatever the providers, `RELEASES` and the release path's own gate say, so a release that carries
-    /// code fails `release_code_not_available` before any store is made or anything is sent. Test builds only: a room a
-    /// test gave the table `test_code_release_open` has it open. A build without the `failpoints` feature never reads
-    /// that table.
-    fn code_releases_open(&self) -> bool {
-        if podster_core::app_code::CODE_RELEASES_COMPLETE {
-            return true;
-        }
+    /// **The gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`), alone: open everywhere while
+    /// it is true, as it is since 2026-11-25; closed while it is false, whatever the providers, `RELEASES` and the
+    /// release path's own gate say, so a release that carries code fails `release_code_not_available` before any store
+    /// is made or anything is sent. Test builds only: a room a test gave the table `test_code_release_closed` has it
+    /// closed, so the closed path can still be shown. A build without the `failpoints` feature never reads that table.
+    pub(super) fn code_releases_open(&self) -> bool {
         #[cfg(feature = "failpoints")]
+        if rows(
+            &self.state.storage().sql(),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_code_release_closed'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
         {
-            rows(
-                &self.state.storage().sql(),
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_code_release_open'",
-                vec![],
-            )
-            .is_ok_and(|found| !found.is_empty())
+            return false;
         }
-        #[cfg(not(feature = "failpoints"))]
-        {
-            false
-        }
+        podster_core::app_code::CODE_RELEASES_COMPLETE
     }
 
     /// Test builds only: a test changes the room after the files are sent and before the room is asked again, by

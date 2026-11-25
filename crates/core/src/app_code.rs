@@ -31,15 +31,83 @@ pub const MANIFEST_PATH: &str = "podster-app.json";
 /// files are modules is core's to rule and doesn't say how; a directory of their own keeps a page's own scripts, which
 /// are static files, apart from the Worker's.
 pub const MODULES_DIRECTORY: &str = "worker";
-/// **The gate for apps with code** (stage 1), false. While it is false a release that carries code, or whose tree
-/// tries to (a manifest or anything under the modules directory, well-formed or not), fails by
+/// **The gate for apps with code** (stage 1), **open since 2026-11-25.** While it is false a release that carries code,
+/// or whose tree tries to (a manifest or anything under the modules directory, well-formed or not), fails by
 /// `release_code_not_available` before anything is sent and before any store is made ([`admit`]); a static release is
-/// uploaded as before. It is apart from the release path's own gate (`RELEASE_PATH_COMPLETE` in the API), so that one
-/// can open static sites alone. **Flipped only by the PR that shows what the M6 plan's gate on the release path owes
-/// "before code is turned on":** spike H's static marker served before an app's script can answer that path, a read
-/// of a real script's bindings, an app's `connect()` through the outbound Worker, and the script write's query with
-/// modules (the architect's ruling of 2026-11-23).
-pub const CODE_RELEASES_COMPLETE: bool = false;
+/// uploaded either way. It is apart from the release path's own gate (`RELEASE_PATH_COMPLETE` in the API), so that one
+/// could open static sites alone. **Setting it back to `false` closes code again, in this one line.**
+///
+/// It was to be flipped only by a PR that shows the four items the M6 plan's gate on the release path owes "before
+/// code is turned on" (the architect's ruling of 2026-11-23). Each, from spike H (runs `0d096b` and `295346`) and its
+/// control (run `d6421e`), on the second account, 2026-11-24 (`docs/m6-plan.md`, "Spike H results" and "Spike H
+/// control"):
+///
+/// 1. **The marker served before an app's script can answer its path:** the marker job's exact request got the static
+///    file 10 times of 10 in each run, never the module, for a script written with [`ASSETS_CONFIG`] and the upload's
+///    query; with `run_worker_first` added, the module answered it. So the order holds only while the upload never sends
+///    `run_worker_first`, which [`ASSETS_CONFIG`] can't hold (checked when this crate compiles) and the manifest can't
+///    give (`assets` and `run_worker_first` are [`CONFIG_KEYS`], and the manifest is a flat object).
+/// 2. **A real script's bindings with its store:** the reconcile's read listed exactly one entry, `d1`, `STORE`, the
+///    database's ID in `id` (and again in an extra `database_id`, which `crate::app_bindings` doesn't read).
+/// 3. **An app's `fetch` and `connect()` through the outbound Worker:** through the content Worker and
+///    `podster-outbound`, every fetch got its `403` and no socket opened; the control showed the same script's sockets
+///    and fetches reach the network with no outbound Worker and are refused with `podster-outbound`.
+/// 4. **The script write's query with modules:** taken with and without either parameter, the module kept each time.
+///
+/// Open, it still serves nothing by itself: the content Worker's own switch decides whether a host with code is served.
+pub const CODE_RELEASES_COMPLETE: bool = true;
+/// **How every release's static files are served, the assets configuration written in every script Podster uploads,**
+/// static or with code: **one constant, fixed, never anything from a repository** (the architect's ruling of
+/// 2026-11-14, as amended that day). `html_handling` is the provider's documented default, by name, so `/index.html`
+/// is served at `/`; `not_found_handling` is `none`, so a path with no file is not-found, with no single-page-app
+/// fallback.
+///
+/// **It never holds `run_worker_first`, or any other setting that runs an app's script before its static files** (a
+/// hard rule since 2026-11-25, from spike H's item 1). The release marker is a static file, and the marker job trusts
+/// an app with code's answer for that path only because the platform serves a matching static file before the script
+/// runs. Spike H's control saw a script with `run_worker_first: true` answer the marker's path itself, which would let
+/// an app's code confirm a release the job never uploaded. This crate doesn't compile if the constant gains it.
+pub const ASSETS_CONFIG: &str =
+    r#"{"html_handling":"auto-trailing-slash","not_found_handling":"none"}"#;
+/// The assets configuration's keys, and the only ones: [`ASSETS_CONFIG`] holds exactly these, in this order.
+pub const ASSETS_CONFIG_KEYS: [&str; 2] = ["html_handling", "not_found_handling"];
+
+/// Whether `text` begins with `word`.
+const fn begins(mut text: &[u8], mut word: &[u8]) -> bool {
+    loop {
+        match (word.split_first(), text.split_first()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some((w, word_rest)), Some((t, text_rest))) => {
+                if *w != *t {
+                    return false;
+                }
+                word = word_rest;
+                text = text_rest;
+            }
+        }
+    }
+}
+
+/// Whether `text` holds `word` anywhere: for the checks below, made when this crate compiles.
+const fn holds(text: &str, word: &str) -> bool {
+    let mut rest = text.as_bytes();
+    loop {
+        if begins(rest, word.as_bytes()) {
+            return true;
+        }
+        match rest.split_first() {
+            Some((_, after)) => rest = after,
+            None => return false,
+        }
+    }
+}
+
+// The hard rule on the assets configuration: nothing that runs an app's script first. `run_worker_first` is the
+// platform's setting for it; `worker` catches any other spelling of one, and neither of the two keys holds it.
+const _: () = assert!(!holds(ASSETS_CONFIG, "run_worker_first"));
+const _: () = assert!(!holds(ASSETS_CONFIG, "worker"));
+const _: () = assert!(!holds(ASSETS_CONFIG, "first"));
 /// The manifest's size, in bytes. It holds two short fields. **Proposed.**
 pub const MAX_MANIFEST_BYTES: u64 = 1_024;
 /// Modules in one release. **Proposed.**
@@ -69,7 +137,7 @@ pub const CONFIG_FILE_NAMES: [&str; 3] = ["wrangler.toml", "wrangler.json", "wra
 /// Manifest keys that are a Worker's configuration under Wrangler's or the upload's own names. Any key but
 /// [`MANIFEST_FIELDS`] is refused; these are refused under their own code, so an author is told plainly that
 /// configuration isn't theirs to give.
-pub const CONFIG_KEYS: [&str; 24] = [
+pub const CONFIG_KEYS: [&str; 25] = [
     "account_id",
     "assets",
     "bindings",
@@ -89,6 +157,7 @@ pub const CONFIG_KEYS: [&str; 24] = [
     "r2_buckets",
     "route",
     "routes",
+    "run_worker_first",
     "secrets",
     "services",
     "tail_consumers",

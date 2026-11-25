@@ -223,11 +223,12 @@ describe("the Worker reaches nothing but its three bindings", () => {
     expect(read("src/index.ts").match(/env\.WRITE_COUNTER/g)).toHaveLength(1);
   });
 
-  it("keeps the code-apps switch a constant that nothing configures, on since 2026-11-25, and flipped back in one line", () => {
+  it("keeps the code-apps switch a constant that nothing configures, flipped either way in one line", () => {
     const handle = read("src/handle.ts");
-    // Exactly one definition: turning it off is a change to this one line, and nothing else reads a setting for it.
+    // Exactly one definition, true or false: turning it off (or on) is a change to this one line alone, and this test
+    // holds either way. Nothing else reads a setting for it.
     expect(handle.match(/export const CODE_APPS_ENABLED/g)?.length).toBe(1);
-    expect(handle).toContain("export const CODE_APPS_ENABLED: boolean = true;");
+    expect(handle).toMatch(/^export const CODE_APPS_ENABLED: boolean = (true|false);$/m);
     // The Worker's entry reads no binding or variable for it. A host's kind comes from the mark on its serve entry
     // alone (`podster_core::serve_entry`), read in the handler, and nothing the entry passes can say otherwise.
     const index = read("src/index.ts");

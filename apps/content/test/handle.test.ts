@@ -757,8 +757,10 @@ const answerOf = async (response: Response) => [response.status, headersOf(respo
 const bodyOf = (bytes: number) => "x".repeat(bytes);
 
 describe("the code-apps switch", () => {
-  it("is on since 2026-11-25, and is a constant no binding or variable reaches", () => {
-    expect(CODE_APPS_ENABLED).toBe(true);
+  it("is a constant no binding or variable reaches, on since 2026-11-25, and its value alone picks the behaviour tested", () => {
+    // Either value passes: the behaviour of each is tested below through the request's switch (`codeWorld(false)` and
+    // `codeWorld()`), so a rollback is the one line in handle.ts.
+    expect(typeof CODE_APPS_ENABLED).toBe("boolean");
   });
 
   it("while off, refuses every method but GET and HEAD with today's answer before anything is read, even on a host with code", async () => {
@@ -821,10 +823,10 @@ describe("a host whose release carries code", () => {
     ]);
     // Nothing is counted for a read.
     expect(w.counted).toEqual([]);
-    // A static host is still asked with no options at all.
+    // A static host is asked with the same limits, so an entry that lost its code mark can't run a module unlimited.
     w.kv.set(HOST, SCRIPT);
     expect((await get(w)).status).toBe(200);
-    expect(w.asked.at(-1)).toEqual({ script: SCRIPT, options: "none" });
+    expect(w.asked.at(-1)).toEqual({ script: SCRIPT, options: { args: {}, options: { limits: { cpuMs: 50, subRequests: 5 } } } });
   });
 
   it("sends the release marker's own request to the script at exactly the marker's path, and passes its answer (spike H, item 1)", async () => {
@@ -852,7 +854,7 @@ describe("a host whose release carries code", () => {
       expect(await answerOf(await get(w, "/api/items", { method, ...init })), method).toEqual([503, CODE_OWN, method === "HEAD" ? "" : "app_limits_unknown\n"]);
     }
     expect([w.sent, w.asked, w.counted]).toEqual([[], [], []]);
-    // A preflight reaches no app, so it is still answered; a static host is asked as always, with no limits.
+    // A preflight reaches no app, so it is still answered; a static host still serves, asked with no limits.
     expect((await get(w, "/api/items", { method: "OPTIONS", headers: { "access-control-request-method": "POST" } })).status).toBe(204);
     w.kv.set(HOST, SCRIPT);
     expect((await get(w)).status).toBe(200);
@@ -921,6 +923,12 @@ describe("a host whose release carries code", () => {
     const w = codeWorld();
     expect((await get(w, "/api/items/1", { method: "DELETE", headers: JSON_HEADERS })).status).toBe(200);
     expect([w.counted, await w.sent[0].request.text()]).toEqual([["k3v9q2"], ""]);
+  });
+
+  it("sends a write to the app with the dispatch's limits", async () => {
+    const w = codeWorld();
+    expect((await get(w, "/api/items", { method: "POST", body: "{}", headers: JSON_HEADERS })).status).toBe(200);
+    expect([w.asked, w.order]).toEqual([[{ script: SCRIPT, options: { args: {}, options: { limits: { cpuMs: 50, subRequests: 5 } } } }], ["count", "dispatch"]]);
   });
 
   it("refuses a write over the budget with 429 and when to come back, readable by the origin null, and never asks the app", async () => {

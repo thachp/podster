@@ -95,9 +95,9 @@ export interface Deps {
    */
   codeApps: boolean;
   /**
-   * The limits every dispatch to a host with code is given, from two settings (`limits.ts`), or null when they aren't
-   * configured: then every request to a host with code that would reach its app is refused `503 app_limits_unknown`
-   * before the app is asked, or a write counted.
+   * The limits every dispatch is given, from two settings (`limits.ts`), or null when they aren't configured: then
+   * every request to a host with code that would reach its app is refused `503 app_limits_unknown` before the app is
+   * asked, or a write counted, and a static host is asked with no limits, as before.
    */
   limits: DispatchLimits | null;
   /**
@@ -252,7 +252,9 @@ function requestForApp(request: Request, url: URL, cls: RequestClass, body: Uint
  */
 async function dispatch(deps: Deps, script: string, request: Request, limits: DispatchLimits | null = null): Promise<Response | "missing" | "error"> {
   try {
-    // A static host's script runs no code of an app's and is asked with no options, as it always was.
+    // Every dispatch is given the limits when they are configured, a static host's too: its script should run no code
+    // of an app's, but a host whose entry lost its code mark must not run a module unlimited. Only with no limits
+    // configured is a static host asked with no options, so a missing setting never stops static sites serving.
     const app = limits === null ? deps.apps.get(script) : deps.apps.get(script, {}, { limits: { cpuMs: limits.cpuMs, subRequests: limits.subRequests } });
     return await app.fetch(request);
   } catch (error) {
@@ -465,7 +467,7 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
 
-    const answer = await dispatch(deps, script, requestForApp(request, url, "read"));
+    const answer = await dispatch(deps, script, requestForApp(request, url, "read"), deps.limits);
     // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
     // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
     if (answer === "missing" || answer === "error") return notFound(request, site);

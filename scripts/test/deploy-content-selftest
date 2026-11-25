@@ -729,6 +729,11 @@ limits_refused "a CPU limit of 0" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS"
 limits_refused "a CPU limit that is a number, not a string" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": 50/' '"APP_LIMIT_CPU_MS": 50'
 limits_refused "a subrequest limit with a leading zero" 's/"APP_LIMIT_SUBREQUESTS": "50"/"APP_LIMIT_SUBREQUESTS": "050"/' '"050"'
 limits_refused "a CPU limit of ten digits" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "1000000000"/' '"1000000000"'
+limits_refused "a CPU limit one past the platform's 300000 ms" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "300001"/' '"300001"'
+limits_refused "a CPU limit of seven digits" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "1000000"/' '"1000000"'
+SEED_EDIT='s/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "300000"/' fresh
+dc 0 "${files[@]}" || true
+check "a CPU limit at the platform's 300000 ms is taken" bash -c "[ $LAST -eq 0 ] && grep -q -F 'limited to 300000 CPU ms and 50 subrequests.' '$tmp/out'"
 SEED_EDIT='s/"APP_LIMIT_SUBREQUESTS": "50"/"APP_LIMIT_SUBREQUESTS": "0"/' fresh
 dc 0 "${files[@]}" || true
 check "a subrequest limit of 0 is taken, as the content Worker takes it" bash -c "[ $LAST -eq 0 ] && grep -q -F 'limited to 50 CPU ms and 0 subrequests.' '$tmp/out'"

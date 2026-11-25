@@ -162,8 +162,8 @@ It refuses, before changing anything, unless:
     the one migration v1 making it a SQLite-backed class, and WRITE_BUDGET_WRITES and
     WRITE_BUDGET_WINDOW_MS as decimal strings the content Worker takes as a cap (writes 0 to
     4294967295, the window 1 to 9223372036854775807), and APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS
-    as decimal strings the content Worker takes as a dispatch's limits (CPU 1 to 999999999 ms,
-    subrequests 0 to 999999999). The deploy carries those six and nothing else from that file
+    as decimal strings the content Worker takes as a dispatch's limits (CPU 1 to 300000 ms, the
+    platform's maximum, and subrequests 0 to 999999999). The deploy carries those six and nothing else from that file
     beyond the name, entry point and compatibility date.
   - Cloudflare's API says, read with the token, each answer in exactly the shape expected:
       the token is active
@@ -566,11 +566,11 @@ jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,9})$") and (length
   and (.window_ms | type == "string" and test("^[1-9][0-9]{0,18}$") and (length < 19 or . <= "9223372036854775807"))' <<< "$committed" > /dev/null \
   || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings the content Worker takes as a cap: writes 0 to 4294967295, the window 1 to 9223372036854775807"
 # Exactly what the content Worker's `limitsFromSettings` (apps/content/src/limits.ts) takes as a dispatch's limits, and
-# nothing it would read as none: decimal strings of at most nine digits with no sign and no leading zero; the CPU time
-# at least 1 ms, the subrequests 0 or more. Without them every request to an app with code would be refused.
-jq -e '(.cpu_ms | type == "string" and test("^[1-9][0-9]{0,8}$"))
+# nothing it would read as none: decimal strings with no sign and no leading zero; the CPU time 1 to 300000 ms (the
+# platform's maximum, compared as a string by length and then digit by digit), the subrequests 0 to 999999999. Without them every request to an app with code would be refused.
+jq -e '(.cpu_ms | type == "string" and test("^[1-9][0-9]{0,5}$") and (length < 6 or . <= "300000"))
   and (.subrequests | type == "string" and test("^(0|[1-9][0-9]{0,8})$"))' <<< "$committed" > /dev/null \
-  || refuse "apps/content/wrangler.jsonc's APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS must be decimal strings the content Worker takes as a dispatch's limits: CPU 1 to 999999999 ms, subrequests 0 to 999999999"
+  || refuse "apps/content/wrangler.jsonc's APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS must be decimal strings the content Worker takes as a dispatch's limits: CPU 1 to 300000 ms, subrequests 0 to 999999999"
 # The outbound Worker's committed file: exactly its six keys, its name, both public addresses off. Its placeholder
 # account is never used: the deploy's configuration carries the owner's. Nothing else is taken from it.
 outbound_committed=$(node --input-type=module -e '

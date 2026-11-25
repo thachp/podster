@@ -523,10 +523,15 @@ describe("Runner's own source", () => {
       'node scripts/install-check.mjs "$RUNNER_TEMP/pack/podster-$(node -p "require(\'./package.json\').version").tgz"',
       // S-47's Linux Docker proof: on this runner's Docker, gated on all three of its tests having run and passed.
       "docker version --format '{{.Server.Version}}'",
+      // Maven's tarball from CI's cache, keyed by its pinned SHA-512, fetched from Maven Central only on a miss.
+      'node scripts/toolchain-files.mjs fetch "$RUNNER_TEMP/runner-toolchain-files"',
       'npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"',
       "|",
     ]);
     expect(job).toContain('RUNNER_LINUX_DOCKER: "1"');
+    expect(job).toContain("run: node scripts/toolchain-files.mjs key >> \"$GITHUB_OUTPUT\"");
+    expect(job).toContain("key: runner-toolchain-files-${{ steps.toolchain-files-key.outputs.key }}");
+    expect(job).toContain("RUNNER_TOOLCHAIN_FILES: ${{ runner.temp }}/runner-toolchain-files");
     expect(job).toMatch(/r\.numPassedTests === 16 && r\.numFailedTests === 0 && r\.numPendingTests === 0/);
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|publish|secrets\./);
     // merge-gate requires every job ci.yml has, this one included.

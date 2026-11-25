@@ -29,6 +29,11 @@
  *   last `BUILD_OUTPUT_TAIL_BYTES` of Docker's error output in its detail, which goes only to the local diagnostics file,
  *   redacted there (`diagnostics.ts`), as a failed `docker run` does: never a log line, Podster or the network.
  *
+ * - **A local copy, for Runner's own test only.** The Java Dockerfile's Maven address is `ARG MAVEN_URL`, defaulting to
+ *   Maven Central. Runner never passes it: `toolchainImages`, what Runner runs, takes no `fetchFrom`. Only the
+ *   real-Docker test does, with a loopback address serving the same tarball from CI's cache, because Maven Central answers
+ *   429 to hosted CI's shared egress (CI run 45600622961). The Dockerfile checks the pinned SHA-512 either way.
+ *
  * The `docker` program goes through Runner's own `DockerCli`. Nothing from the task or Podster reaches a build: the names
  * are the policy's known toolchains, and every argument is fixed or an image ID.
  */
@@ -58,6 +63,10 @@ export const BASE_TAG = "podster-runner-base";
 const RECIPE_VERSION = "podster-runner-toolchain-v1";
 /** A build's bound: Rust's tarballs and Debian's packages take minutes on a slow link. */
 const BUILD_TIMEOUT_MS = 30 * 60_000;
+/** The build arguments `fetchFrom` may set, each a download's address in one toolchain's Dockerfile. */
+export const FETCH_ARGS: Readonly<Record<string, Toolchain>> = Object.freeze({ MAVEN_URL: "java" });
+/** A `fetchFrom` address: plain HTTP on this machine's loopback, a path of plain characters with no `.` or `..` segment. */
+const LOOPBACK_URL = /^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}(\/(?!\.{1,2}(\/|$))[A-Za-z0-9._-]+)+$/;
 /** The waits before a failed build's second and third tries. */
 export const BUILD_RETRY_DELAYS_MS: readonly number[] = Object.freeze([15_000, 45_000]);
 /** How much of a failed build's error output its detail keeps: the end, where Docker names the step and the cause. */
@@ -171,6 +180,8 @@ type Opts = {
   readSource?: (name: Toolchain) => Promise<Buffer>;
   /** The wait between a failed build's tries; tests pass one that doesn't wait. */
   wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Tests only: a loopback address for a download, by its `FETCH_ARGS` name. Runner never passes it. */
+  fetchFrom?: Readonly<Record<string, string>>;
 };
 /** How a step runs: `run` with the signal its build should end on. The default runs it at once, on the caller's signal. */
 export type StepGate = (pin: string, run: (signal: AbortSignal | undefined) => Promise<string>) => Promise<string>;
@@ -194,7 +205,8 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
   const tag = `${BASE_TAG}:${parent.slice("sha256:".length)}`;
   const tagged = await opts.docker(["tag", parent, tag], { signal: opts.signal, timeoutMs: 60_000, maxOutputBytes: 4096 });
   if (tagged.code !== 0) throw new Error(TOOLCHAIN_BUILD_FAILED);
-  const args = ["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${TOOLCHAIN_ARCH[name][arch]}`, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]];
+  const fetchArgs = Object.entries(opts.fetchFrom ?? {}).filter(([arg]) => FETCH_ARGS[arg] === name).flatMap(([arg, url]) => ["--build-arg", `${arg}=${url}`]);
+  const args = ["build", "--quiet", "--pull=false", "--build-arg", `BASE=${tag}`, "--build-arg", `ARCH=${TOOLCHAIN_ARCH[name][arch]}`, ...fetchArgs, "--label", `${LABEL_RECIPE}=${recipe}`, TOOLCHAIN_SOURCES[name]];
   const build = () => opts.docker(args, { signal: opts.signal, timeoutMs: BUILD_TIMEOUT_MS, maxOutputBytes: 64 * 1024 });
   let built = await build();
   // A build Docker ran and that failed, most often a download site refusing or dropping a fetch, is tried again; one
@@ -221,6 +233,9 @@ async function ensureStep(set: Toolchain[], parent: string, opts: Opts): Promise
  */
 export async function ensureToolchainImage(set: readonly Toolchain[], opts: Opts & { gate?: StepGate }): Promise<string> {
   if (!isToolchainList(set) || set.length === 0 || !IMAGE_ID.test(opts.base)) throw new Error(TOOLCHAIN_BUILD_FAILED);
+  for (const [arg, url] of Object.entries(opts.fetchFrom ?? {})) {
+    if (!Object.hasOwn(FETCH_ARGS, arg) || typeof url !== "string" || !LOOPBACK_URL.test(url)) throw new Error(TOOLCHAIN_BUILD_FAILED);
+  }
   const gate: StepGate = opts.gate ?? ((_pin, run) => run(opts.signal));
   let parent = opts.base;
   for (let i = 1; i <= set.length; i++) {
@@ -291,7 +306,9 @@ export class SharedBuilds {
  * Runner's source of toolchain images for its sandbox: each step built once at a time through `SharedBuilds`, on the
  * pinned base task image.
  */
-export function toolchainImages(opts: Omit<Opts, "signal">): (set: readonly Toolchain[], signal: AbortSignal) => Promise<string> {
+export function toolchainImages(opts: Omit<Opts, "signal" | "fetchFrom">): (set: readonly Toolchain[], signal: AbortSignal) => Promise<string> {
   const builds = new SharedBuilds();
-  return (set, signal) => ensureToolchainImage(set, { ...opts, signal, gate: (pin, run) => builds.join(pin, run, signal) });
+  // Never a test's local copy, whatever the object holds.
+  const { fetchFrom: _never, ...fixed } = opts as Omit<Opts, "signal">;
+  return (set, signal) => ensureToolchainImage(set, { ...fixed, signal, gate: (pin, run) => builds.join(pin, run, signal) });
 }

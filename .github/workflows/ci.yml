@@ -527,10 +527,24 @@ jobs:
       # And the toolchain images' proof (test/toolchains-docker.test.ts): Runner builds the Rust, Python, .NET and Java
       # images FROM its task image, and cargo, uv, dotnet, javac and mvn build and run offline in them under Runner's own run flags.
       - run: docker version --format '{{.Server.Version}}'
+      # Maven Central answers 429 to hosted CI's shared egress (run 45600622961), and Sonatype asks tools to cache rather
+      # than fetch on every run. So Maven's tarball is kept here, keyed by the SHA-512 the Java Dockerfile pins, fetched
+      # from Maven Central only on a miss, and served to the Java builds on 127.0.0.1 (RUNNER_TOOLCHAIN_FILES). The
+      # Dockerfile still checks that SHA-512; Runner itself always fetches from Maven Central.
+      - id: toolchain-files-key
+        run: node scripts/toolchain-files.mjs key >> "$GITHUB_OUTPUT"
+        working-directory: apps/runner
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/runner-toolchain-files
+          key: runner-toolchain-files-${{ steps.toolchain-files-key.outputs.key }}
+      - run: node scripts/toolchain-files.mjs fetch "$RUNNER_TEMP/runner-toolchain-files"
+        working-directory: apps/runner
       - run: npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"
         working-directory: apps/runner
         env:
           RUNNER_LINUX_DOCKER: "1"
+          RUNNER_TOOLCHAIN_FILES: ${{ runner.temp }}/runner-toolchain-files
       # And Runner on a real Git 2.25 (test/old-git.test.ts): setup, checkout, commit and push in Ubuntu 20.04's own Git (`buildpack-deps:focal-scm`, pinned by digest).
       # A run whose tests were all skipped would exit 0: this passes only when all sixteen ran and passed.
       - run: |

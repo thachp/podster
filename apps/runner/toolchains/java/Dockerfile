@@ -27,6 +27,10 @@
 #   Maven is fetched from Maven Central, Apache's own repository for Maven's artifacts, which serves the same tarball
 #   (org/apache/maven/apache-maven/3.10.1, -bin.tar.gz): its SHA-512 there, read 2026-11-24, is the one above, and so is
 #   its .sha512. It was archive.apache.org until 2026-11-24, which is slow and rate-limits, and failed a CI build.
+#   MAVEN_URL defaults to that Maven Central address, and Runner never passes another. Only Runner's real-Docker test
+#   does, with a loopback address serving the same tarball from CI's cache: Maven Central answers 429 to the shared
+#   egress of hosted CI (CI run 45600622961), and Sonatype asks tools to cache rather than fetch from it on every run.
+#   The SHA-512 below is checked whichever address served it.
 #
 # Java and Maven don't read HTTPS_PROXY, which Runner sets for a room whose network lists hosts, so the image points
 # both at Runner's egress proxy (`egress`, port 3128) itself: the JDK's conf/net.properties sets http(s).proxyHost and
@@ -47,8 +51,9 @@ ARG ARCH
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS fetch
 ARG ARCH
+ARG MAVEN_URL=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz
 ADD https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_${ARCH}_linux_hotspot_25.0.5.1_2.tar.gz /fetch/jdk.tar.gz
-ADD https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz
+ADD ${MAVEN_URL} /fetch/maven.tar.gz
 RUN cd /fetch \
  && case "$ARCH/$(dpkg --print-architecture)" in \
       aarch64/arm64) printf '%s  %s\n' \

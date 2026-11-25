@@ -2,9 +2,10 @@
 // ADR 0010's "Custom domains"). It runs in the test runner, as the Workers' outbound service, so no test or CI run
 // ever asks a real resolver.
 //
-// **Its answers are the documented JSON form, not a record.** No spike has asked a real resolver: `Status` is the DNS
-// response code, and `Answer` holds the records, each `{ name, type, data }`, a TXT record's `data` in its quoted
-// presentation form. A name nobody set answers `Status: 3`, no such name.
+// **Its answers are the documented JSON form.** Spike G asked the real resolver, `https://cloudflare-dns.com/dns-query`,
+// from inside a Worker on 2026-11-23 (spikes/m6-spike-g, docs/m6-plan.md), and it answered in this form: `Status` is
+// the DNS response code, and `Answer` holds the records, each `{ name, type, data }`, a TXT record's `data` in its
+// quoted presentation form. A name nobody set answers `Status: 3`, no such name.
 //
 // A test sets what a name answers through `resolver-fake.example.com`, and reads back which names were asked for.
 

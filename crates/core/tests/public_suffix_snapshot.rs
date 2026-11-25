@@ -1,17 +1,16 @@
 #![allow(clippy::expect_used, clippy::panic)]
 //! The Public Suffix List snapshot the API is built with (docs/m6-plan.md, step 8a, open question 1): its recorded
-//! SHA-256, its age, every ICANN rule readable, and what the real list's ICANN section decides: plain, wildcard and
-//! exception rules, international names in either form, and the private section left out.
+//! SHA-256 and licence header, its two sections, every rule readable, and what the whole list decides: plain, wildcard
+//! and exception rules, international names in either form, and the private section's shared apexes. Its age isn't
+//! checked here, so `cargo test` never starts failing by the calendar: `scripts/public-suffix-list check` does that,
+//! weekly in CI and before each staging deploy (the architect, 2026-11-25).
 
 use podster_core::hostnames::*;
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const LIST: &str = include_str!("../../../third_party/public-suffix-list/public_suffix_list.dat");
 const SNAPSHOT: &str = include_str!("../../../third_party/public-suffix-list/SNAPSHOT");
 const CONTENT: &str = "podster.site";
-/// The plan's rule: a CI check that fails once the snapshot is more than 90 days old.
-const MAX_AGE_DAYS: i64 = 90;
 
 fn recorded(key: &str) -> &'static str {
     SNAPSHOT
@@ -20,18 +19,13 @@ fn recorded(key: &str) -> &'static str {
         .unwrap_or_else(|| panic!("SNAPSHOT records no {key}"))
 }
 
-/// Days since 1970-01-01 of a proleptic Gregorian date (Howard Hinnant's `days_from_civil`).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+fn rules() -> PublicSuffixRules {
+    PublicSuffixRules::parse(&public_suffix_rules(LIST))
+        .expect("every rule in the snapshot is readable")
 }
 
 fn map(name: &str) -> Result<String, HostnameRefusal> {
-    mappable(name, CONTENT, &icann_public_suffix_rules(LIST), false, 0)
+    mappable_by(name, CONTENT, Some(&rules()), false, 0)
 }
 
 #[test]
@@ -49,47 +43,56 @@ fn the_snapshot_is_the_one_recorded_unmodified_with_its_licence() {
         recorded("source"),
         "https://publicsuffix.org/list/public_suffix_list.dat"
     );
+    let retrieved = recorded("retrieved");
+    assert!(
+        retrieved.len() == 10
+            && retrieved
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }),
+        "{retrieved}"
+    );
     assert!(LIST.starts_with(
         "// This Source Code Form is subject to the terms of the Mozilla Public\n// License, v. 2.0."
     ));
 }
 
 #[test]
-fn the_snapshot_is_at_most_ninety_days_old() {
-    let retrieved = recorded("retrieved");
-    let parts: Vec<i64> = retrieved
-        .split('-')
-        .map(|p| p.parse().expect("retrieved is YYYY-MM-DD"))
-        .collect();
-    let [y, m, d] = parts[..] else {
-        panic!("retrieved is YYYY-MM-DD: {retrieved}")
+fn the_snapshot_has_its_icann_and_private_sections_once_each_in_order() {
+    let at = |marker: &str| {
+        let found: Vec<usize> = LIST
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| *l == marker)
+            .map(|(i, _)| i)
+            .collect();
+        match found[..] {
+            [line] => line,
+            _ => panic!("{marker} appears {} times", found.len()),
+        }
     };
-    let today = i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after 1970")
-            .as_secs()
-            / 86_400,
-    )
-    .expect("days fit");
-    let age = today - days_from_civil(y, m, d);
-    assert!(age >= 0, "retrieved {retrieved} is in the future");
-    assert!(
-        age <= MAX_AGE_DAYS,
-        "the Public Suffix List snapshot is {age} days old, more than {MAX_AGE_DAYS}. Run: scripts/public-suffix-list refresh"
-    );
+    let lines = [
+        at("// ===BEGIN ICANN DOMAINS==="),
+        at("// ===END ICANN DOMAINS==="),
+        at("// ===BEGIN PRIVATE DOMAINS==="),
+        at("// ===END PRIVATE DOMAINS==="),
+    ];
+    assert!(lines.is_sorted_by(|a, b| a < b), "{lines:?}");
 }
 
 #[test]
-fn every_icann_rule_in_the_snapshot_is_readable() {
-    let rules = icann_public_suffix_rules(LIST);
-    // About seven thousand today; a much smaller number means the section was cut short.
-    assert!(rules.len() > 5_000, "{}", rules.len());
-    // `mappable` fails closed on a single unreadable rule, so one ordinary name passing reads every rule.
+fn every_rule_in_the_snapshot_is_readable_from_both_sections() {
+    let written = public_suffix_rules(LIST);
+    // About fourteen thousand today; far fewer means the file was cut short.
+    assert!(written.len() > 10_000, "{}", written.len());
+    // One unreadable rule fails the whole list closed, so parsing at all reads every rule.
+    assert_eq!(rules().len(), written.len());
+    assert!(written.contains(&"co.uk") && written.contains(&"github.io"));
     assert_eq!(map("example.com"), Ok("example.com".into()));
-    // Only the ICANN section: nothing from before it or after it.
-    assert!(rules.contains(&"com") && rules.contains(&"co.uk"));
-    assert!(!rules.contains(&"github.io") && !rules.contains(&"blogspot.com"));
 }
 
 #[test]
@@ -137,41 +140,41 @@ fn an_international_rule_holds_in_unicode_and_in_punycode() {
 }
 
 #[test]
-fn the_private_section_is_left_out() {
-    // Listed only in the private section, so under the ICANN rules alone each is an ordinary registrable name: a claim
-    // on it still needs the challenge in its own DNS, which only its owner can publish.
-    for name in ["github.io", "me.github.io", "blogspot.com"] {
-        assert!(map(name).is_ok(), "{name}");
+fn a_private_sections_shared_apex_is_refused_and_a_name_under_it_is_not() {
+    // The whole list is read (the architect, 2026-11-25): a shared apex someone else runs can't be claimed, as
+    // browsers treat it. A name under it can, by whoever publishes the challenge in its DNS.
+    for apex in ["github.io", "blogspot.com", "GitHub.IO."] {
+        assert_eq!(map(apex), Err(HostnameRefusal::PublicSuffix), "{apex}");
     }
-    // Read with the whole list, `github.io` would be a public suffix: the ICANN reading is the narrower one.
-    assert_eq!(
-        mappable("github.io", CONTENT, &public_suffix_rules(LIST), false, 0),
-        Err(HostnameRefusal::PublicSuffix)
-    );
+    assert_eq!(map("me.github.io"), Ok("me.github.io".into()));
+    assert!(map("app.me.github.io").is_ok());
 }
 
 #[test]
-fn a_list_without_one_whole_icann_section_gives_no_rules() {
-    let ok = format!("// header\n{ICANN_BEGIN}\ncom\n// c\nco.uk extra\n{ICANN_END}\n// ===BEGIN PRIVATE DOMAINS===\ngithub.io\n");
-    assert_eq!(icann_public_suffix_rules(&ok), ["com", "co.uk"]);
-    assert_eq!(
-        icann_public_suffix_rules(&format!("\u{FEFF}{ok}")),
-        ["com", "co.uk"]
-    );
-    for bad in [
-        String::new(),
-        "com\nco.uk\n".to_string(),
-        format!("{ICANN_BEGIN}\ncom\n"),
-        format!("com\n{ICANN_END}\n"),
-        format!("{ICANN_END}\ncom\n{ICANN_BEGIN}\n"),
-        format!("{ICANN_BEGIN}\ncom\n{ICANN_BEGIN}\nnet\n{ICANN_END}\n"),
-        format!("{ICANN_BEGIN}\ncom\n{ICANN_END}\nnet\n{ICANN_END}\n"),
+fn rules_read_once_decide_as_rules_read_on_each_call() {
+    let written = public_suffix_rules(LIST);
+    let parsed = rules();
+    for name in [
+        "github.io",
+        "me.github.io",
+        "co.uk",
+        "app.example.zz",
+        "anything.ck",
+        "www.ck",
+        "podster.site",
+        "example.com",
     ] {
-        let rules = icann_public_suffix_rules(&bad);
-        assert!(rules.is_empty(), "{bad:?}");
         assert_eq!(
-            mappable("example.com", CONTENT, &rules, false, 0),
-            Err(HostnameRefusal::Unclassified)
+            mappable_by(name, CONTENT, Some(&parsed), false, 0),
+            mappable(name, CONTENT, &written, false, 0),
+            "{name}"
         );
     }
+    // Rules missing or unreadable fail closed either way.
+    assert_eq!(PublicSuffixRules::parse(&[]), None);
+    assert_eq!(PublicSuffixRules::parse(&["com", "a..b"]), None);
+    assert_eq!(
+        mappable_by("example.com", CONTENT, None, false, 0),
+        Err(HostnameRefusal::Unclassified)
+    );
 }

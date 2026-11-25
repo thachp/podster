@@ -55,8 +55,9 @@ use podster_core::hostname_requests::{
     after_ask, claimed_read_wait_ms, request_rate_allows, unmap, HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
-    challenge_record_name, challenge_value, icann_public_suffix_rules, mappable, next_proof_check,
-    normalize, request_expired, ClaimDecision, HostnameRefusal, RecheckOutcome, PENDING_TTL_MS,
+    challenge_record_name, challenge_value, mappable_by, next_proof_check, normalize,
+    public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, PublicSuffixRules,
+    RecheckOutcome, PENDING_TTL_MS,
 };
 use podster_policy::release::{
     authorize_custom_hostname, hostname_proof_room, HostnameChange, HostnameProofRoom,
@@ -68,10 +69,22 @@ use release_config::ConfigReads;
 pub(crate) const HOSTNAME_REQUEST_PREFIX: &str = "hnr_";
 /// The Public Suffix List, compiled in from the dated snapshot under `third_party/public-suffix-list` (MPL-2.0, kept
 /// unmodified; `SNAPSHOT` there records its source, date and SHA-256, and `scripts/public-suffix-list` refreshes it).
-/// Only its ICANN section is read (docs/m6-plan.md, step 8a, open question 1). Every build and environment has it, so
-/// it is no setting: crates/core's tests fail once it is more than 90 days old.
+/// The whole list is read, ICANN and private sections alike, so a shared apex such as `github.io` is refused as browsers
+/// treat it (docs/m6-plan.md, step 8a, open question 1; the architect, 2026-11-25). Every build and environment has
+/// it, so it is no setting; `scripts/public-suffix-list check` warns at 60 days and fails at 90, weekly in CI and
+/// before each staging deploy.
 const PUBLIC_SUFFIX_LIST: &str =
     include_str!("../../../../third_party/public-suffix-list/public_suffix_list.dat");
+
+/// The list's rules, read once per isolate on the first ask. `None` if any rule couldn't be read, which refuses every
+/// name `hostname_unavailable`.
+fn suffix_rules() -> Option<&'static PublicSuffixRules> {
+    static RULES: std::sync::OnceLock<Option<PublicSuffixRules>> = std::sync::OnceLock::new();
+    RULES
+        .get_or_init(|| PublicSuffixRules::parse(&public_suffix_rules(PUBLIC_SUFFIX_LIST)))
+        .as_ref()
+}
+
 /// **Whether custom hostname claims are complete.** True since 2026-11-18, once 8b (a committed claim's long end, #403)
 /// and 8d (the daily recheck, #444) had both merged, and this is the only place it is set. While it was false, every
 /// build and environment refused every ask for a hostname and its proof job neither looked nor asked
@@ -304,10 +317,10 @@ pub(super) fn handle_request(
     let (suspended, generation) = reads
         .object
         .ok_or_else(super::release_recheck::standing_unknown)?;
-    let name = mappable(
+    let name = mappable_by(
         &asked.input,
         reads.domain.as_deref().unwrap_or(""),
-        &icann_public_suffix_rules(PUBLIC_SUFFIX_LIST),
+        suffix_rules(),
         suspended,
         usize::try_from(open).unwrap_or(usize::MAX),
     )

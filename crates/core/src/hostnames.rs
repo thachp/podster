@@ -219,35 +219,30 @@ pub fn public_suffix_rules(list: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The line that opens the list's ICANN section, as the list writes it.
-pub const ICANN_BEGIN: &str = "// ===BEGIN ICANN DOMAINS===";
-/// The line that closes the list's ICANN section.
-pub const ICANN_END: &str = "// ===END ICANN DOMAINS===";
+/// The Public Suffix List's rules, each read once (docs/m6-plan.md, step 8a: the snapshot the API is built with). The
+/// API builds this once per isolate from the whole list, ICANN and private sections alike, and passes it to
+/// [`mappable_by`] for each ask, so the rules aren't read again on every ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicSuffixRules(Vec<SuffixRule>);
 
-/// The rules of the Public Suffix List's ICANN section only, read as [`public_suffix_rules`] reads them (docs/m6-plan.md,
-/// 8a's open question 1: the snapshot the API is built with). The private section, names such as `github.io` that their
-/// owners listed themselves, is left out: a claim still needs the challenge published in the name's own DNS, which only
-/// whoever runs that zone can do. Empty, which [`mappable`] refuses as `hostname_unavailable`, unless the text has
-/// exactly one opening line and one closing line after it, each alone on its line.
-pub fn icann_public_suffix_rules(list: &str) -> Vec<&str> {
-    let list = list.strip_prefix('\u{FEFF}').unwrap_or(list);
-    let lines: Vec<&str> = list.lines().map(str::trim).collect();
-    let at = |marker: &str| -> Option<usize> {
-        let mut found = lines.iter().enumerate().filter(|(_, l)| **l == marker);
-        let first = found.next()?.0;
-        found.next().is_none().then_some(first)
-    };
-    let (Some(begin), Some(end)) = (at(ICANN_BEGIN), at(ICANN_END)) else {
-        return Vec::new();
-    };
-    let Some(section) = lines.get(begin + 1..end) else {
-        return Vec::new();
-    };
-    section
-        .iter()
-        .filter(|line| !line.is_empty() && !line.starts_with("//"))
-        .filter_map(|line| line.split_whitespace().next())
-        .collect()
+impl PublicSuffixRules {
+    /// The rules, as the list writes them (pass [`public_suffix_rules`]'s answer). `None`, which [`mappable_by`]
+    /// refuses as `hostname_unavailable`, when there are none or any one can't be read: one unreadable rule fails the
+    /// whole list closed.
+    pub fn parse(rules: &[&str]) -> Option<Self> {
+        let rules: Option<Vec<SuffixRule>> = rules.iter().map(|r| suffix_rule(r)).collect();
+        rules.filter(|r| !r.is_empty()).map(Self)
+    }
+
+    /// How many rules were read.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are none. Never true of a value [`PublicSuffixRules::parse`] gave.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// One rule of the Public Suffix List, as the deployment holds it: a plain rule (`co.uk`), a wildcard (`*.ck`), or an
@@ -349,6 +344,24 @@ pub fn mappable(
     suspended: bool,
     room_hostnames: usize,
 ) -> Result<String, HostnameRefusal> {
+    mappable_by(
+        input,
+        content_domain,
+        PublicSuffixRules::parse(public_suffix_rules).as_ref(),
+        suspended,
+        room_hostnames,
+    )
+}
+
+/// [`mappable`], with the rules already read: `None` stands for rules that are missing or couldn't be read, and is
+/// refused as `hostname_unavailable` at the same point [`mappable`] refuses them.
+pub fn mappable_by(
+    input: &str,
+    content_domain: &str,
+    rules: Option<&PublicSuffixRules>,
+    suspended: bool,
+    room_hostnames: usize,
+) -> Result<String, HostnameRefusal> {
     let name = normalize(input)?;
     if !name.contains('.') {
         return Err(HostnameRefusal::SingleLabel);
@@ -364,13 +377,11 @@ pub fn mappable(
     {
         return Err(HostnameRefusal::Reserved);
     }
-    let rules: Option<Vec<SuffixRule>> =
-        public_suffix_rules.iter().map(|r| suffix_rule(r)).collect();
     let rules = rules
         .filter(|r| !r.is_empty())
         .ok_or(HostnameRefusal::Unclassified)?;
     let labels: Vec<&str> = name.split('.').collect();
-    let suffix = public_suffix_len(&labels, &rules).ok_or(HostnameRefusal::Unclassified)?;
+    let suffix = public_suffix_len(&labels, &rules.0).ok_or(HostnameRefusal::Unclassified)?;
     if suffix >= labels.len() {
         return Err(HostnameRefusal::PublicSuffix);
     }

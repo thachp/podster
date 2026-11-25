@@ -664,6 +664,34 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 `node m6-release-staging-selftest.mjs` checks its pure parts, its dry run, and each refusal against a stand-in that answers on this machine, and CI runs it. Nothing has shown the run past the owner's first sign-up. *(2026-11-24: superseded; the full run passed on staging, [above](#m6s-release-on-staging-run).)*
 
+## M6's staging run with an app with code
+
+*Added 2026-11-25.* `e2e/m6-code-app-staging.mjs` is the staging run with a real app with code that [the M6 plan owes](m6-plan.md#the-content-worker-serves-apps-with-code-built-2026-11-25). **It runs from GitHub Actions, not from a laptop:** the owner's machine sits behind a web filter that blocks `*.podster.site`, so the run can't reach the app's host there. The owner approved running it from Actions on 2026-11-25. **It hasn't run yet:** it needs this workflow on `main` and the environment's secret set.
+
+It releases one tiny app through the real flow, as the static run does (it shares that run's steps, `e2e/m6-release-run.mjs`): a managed public repository in `podsterdev`, the coding agent's pull request holding `site/index.html`, `site/podster-app.json` (`{"main":"index.js","store":true}`) and `site/worker/index.js`, the room's admin's review and merge, the agent's request with a `deploy` grant, and the admin's approval. Then, from outside, M6-C01 to M6-C11:
+
+- the release served at the app's default host (M6-C01);
+- the release marker is the static file, byte for byte, and not the module's answer, while a path with no file reaches the module (M6-C02);
+- a read reaches the module, with the fixed headers (`no-store`, `Access-Control-Allow-Origin: null`, the sandbox), and the app's `Set-Cookie`, CORS, `Cache-Control` and own headers dropped (M6-C03); the module sees exactly `STORE` and reads a row from it (M6-C04);
+- writes: the content Worker's own preflight answer, a JSON `POST` reaching the module, a non-JSON one refused `415` (M6-C05); and the write budget at its deployed figure, 300 a 10-minute window: about 300 small writes, one at a time, all reaching the app, then `429 write_budget_spent` with a `Retry-After` to the window's end (M6-C06). It waits for a fresh window, at most about 2 minutes, when too little of the current one is left;
+- the app's `fetch` gets `podster-outbound`'s `403` and its `connect()` is refused (M6-C07);
+- an app that spins is stopped by the 50 ms CPU limit, `502 app_error` within 10 s, while the same module's light work answers `200` (M6-C08);
+- **recorded, not judged:** what a visitor gets when the app passes the limit after its answer's headers were sent (M6-C09);
+- unpublish, by switching release off: the host and its marker answer not found within the wait, a write gets `405`, and the task's status says no release exists (M6-C10); the room made private again (M6-C11).
+
+**Out of scope:** the store's deletion once the unpublish retires the app's label (M6-CX1): nothing a test person can read shows it. Each result prints as `PASS`, `FAIL`, `OUT OF SCOPE` or `RECORDED`; exit 0 needs every judged check to pass. People: **2 takes of the test sign-up** (the owner and the room's admin); the agent takes none. One release, one of the room's 2 uploads an hour. Person IDs print as `[owner]` and `[admin]`, and the app's host as `[app host]`. Clean-up and exit codes are the static run's; the repository stays for the owner to archive or delete.
+
+**The workflow** is `.github/workflows/m6-code-app-staging.yml`, started by hand only. Its job uses the GitHub environment **`staging-e2e`**, which holds **one secret, `PODSTER_E2E_SIGNUP_SECRET`, set by the owner**. The secret reaches only the test step, as an environment variable. The job reads this repository and nothing else, and runs the run's self-test first.
+
+```bash
+gh workflow run m6-code-app-staging.yml
+gh run watch "$(gh run list --workflow m6-code-app-staging.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+Before a run, check with the owner that the deployed content Worker serves apps with code (`CODE_APPS_ENABLED`, with `APP_LIMIT_CPU_MS` and `APP_LIMIT_SUBREQUESTS` set) and that the API's gate for code is open (`CODE_RELEASES_COMPLETE`). No signed-out read shows either; if one is missing, M6-C01 fails naming `release_marker_missing` or `release_code_not_available`, and clean-up runs.
+
+`node m6-code-app-staging-selftest.mjs` checks the run without a network: its plan and exit code, the figures it expects against `apps/content` and `apps/outbound`, the app's module run with stand-ins, how it judges answers, and each refusal before anything is sent. CI runs it.
+
 ## Explore's cursor key
 
 `EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. It has been set on staging since 2026-11-09. Changing it later only ends cursors already handed out.

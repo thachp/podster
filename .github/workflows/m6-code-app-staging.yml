@@ -1,0 +1,46 @@
+name: M6 code app staging
+
+# M6's staging run with a real app with code, e2e/m6-code-app-staging.mjs, from GitHub's network. The owner's machine
+# sits behind a web filter that blocks the content domain, podster.site; the owner approved running this test here on
+# 2026-11-25. Run by hand only: `gh workflow run m6-code-app-staging.yml`, then `gh run watch`.
+#
+# It runs against staging, the one host the script accepts, and podster.site, the content domain committed in it. Its
+# one secret, PODSTER_E2E_SIGNUP_SECRET, is held by the `staging-e2e` environment and set by the owner; it reaches the
+# test step alone, as an environment variable, and is never written into a command. The job's GITHUB_TOKEN can read
+# this repository and nothing else, and checkout doesn't keep it. The test pushes to the repository it has Podster make
+# in podsterdev with the coding agent's own short-lived token, and leaves that repository for the owner to delete.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time: two would share the test sign-up's limits and the same content domain.
+concurrency:
+  group: m6-code-app-staging
+  cancel-in-progress: false
+
+jobs:
+  code-app:
+    runs-on: ubuntu-latest
+    environment: staging-e2e
+    # The run's own waits come to at most about 25 minutes: repository, merge and release 5 each, the takedown 3, the
+    # write burst's wait for a fresh window 2, and the checks themselves.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # No package's install script runs: the test needs the packages' code only, and no browser.
+      - run: npm ci --ignore-scripts
+        working-directory: e2e
+      # Checks itself before it sends anything: its plan, its judges and its refusals, against a stand-in.
+      - run: node m6-code-app-staging-selftest.mjs
+        working-directory: e2e
+      - run: node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev
+        working-directory: e2e
+        env:
+          PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}

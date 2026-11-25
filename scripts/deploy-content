@@ -172,6 +172,7 @@ It refuses, before changing anything, unless:
       the dispatch namespace and the KV namespace exist on that account
       the account's Worker scripts can be listed (it says whether podster-outbound exists yet)
       no route on the content domain's zone names podster-outbound
+      no custom domain on the account runs podster-outbound (if they can't be read: NOT SHOWN)
     Any error, or an answer of any other shape, refuses.
 
 The deploy runs wrangler twice, outbound first. If the outbound Worker's deploy fails, or Cloudflare's
@@ -188,12 +189,14 @@ host two labels deep is not shown: the zone's certificate covers one level.
 Then it checks by Cloudflare's API, with the token: podster-outbound exists, has no workers.dev or
 preview address, and no route on the content domain's zone names it (other zones the token can't
 see, and can't add routes on); and, from podster-content's deployed settings, that its APPS binding
-names podster-outbound as outbound. If those settings can't be read, it says NOT SHOWN, not passed.
+names podster-outbound as outbound; and that no custom domain on the account runs podster-outbound.
+If those settings or the custom domains can't be read, it says NOT SHOWN, never passed, and exits 4.
 An app's fetch being refused is NOT SHOWN: it needs an app with code, and none exists yet.
 
 Exit codes: 0 reported (no --deploy), or deployed and every probe passed; 1 refused, nothing changed;
 2 wrong usage; 3 the deploy failed part-way (the output says what wrangler said, redacted, and which
-Worker was deployed); 4 deployed, but a probe or check failed: the Workers are deployed and not
+Worker was deployed); 4 deployed, but a probe or check failed or was NOT SHOWN: the Workers are
+deployed and not
 verified; 129, 130 or 143 stopped by
 SIGHUP, SIGINT or SIGTERM, and the output says whether anything had been deployed.
 EOF
@@ -403,7 +406,11 @@ cf() {
     redact "$work/body"
     if [ "$phase" = checking ]; then refuse "Cloudflare's answer to GET $1 held the token. It wasn't printed."; fi
     echo "STOPPED Cloudflare's answer to GET $1 held the token. It wasn't printed."
-    echo "deploy-content: stopped after deploying, while $phase. What was deployed is NOT verified. Make a new token."
+    if [ "$phase" = deploying-outbound ]; then
+      echo "deploy-content: stopped after deploying $OUTBOUND and before the content Worker: the content Worker was NOT deployed. $OUTBOUND is NOT verified. Make a new token."
+    else
+      echo "deploy-content: stopped after deploying, while $phase. What was deployed is NOT verified. Make a new token."
+    fi
     dc_meant=1
     exit 3
   fi
@@ -429,6 +436,8 @@ ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "s
 SCRIPTS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string")'
 # A route's script may be absent or null: a route that runs no Worker.
 ROUTES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.pattern | type) == "string" and ((.script // "") | type) == "string")'
+# A Worker's custom domains on the account: each names the Worker it runs as its service.
+DOMAINS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.hostname | type) == "string" and (.service | type) == "string")'
 OUTBOUND=podster-outbound
 
 step "reading Cloudflare's API with the token"
@@ -514,6 +523,19 @@ if jq -e --arg o "$OUTBOUND" 'any(.result[]; (.script // "") == $o)' "$work/body
   refuse "a route on the content domain's zone runs $OUTBOUND. The outbound Worker has no route: remove it."
 fi
 echo "ok   no route on the content domain's zone runs $OUTBOUND"
+# Nor any custom domain on the account: a custom domain is a way in that no route list shows, and a deploy with none
+# leaves an existing one alone. If the token can't read them, that is said, and a deploy's check of them exits 4.
+report_not_shown=0
+cf "/accounts/$account/workers/domains"
+if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then
+  if jq -e --arg o "$OUTBOUND" 'any(.result[]; .service == $o)' "$work/body" > /dev/null; then
+    refuse "a custom domain on the account runs $OUTBOUND. The outbound Worker has no custom domain: remove it."
+  fi
+  echo "ok   no custom domain on the account runs $OUTBOUND"
+else
+  report_not_shown=$((report_not_shown + 1))
+  echo "NOT SHOWN whether a custom domain runs $OUTBOUND: the account's custom domains couldn't be read in the shape expected (HTTP $status). A deploy would end with exit 4, not verified, until the token can read them."
+fi
 
 # --- what would be deployed ---
 # The committed file gives the Worker's name, entry point and compatibility date, the write counter (its binding and its
@@ -583,7 +605,11 @@ echo "No other route, no workers.dev address and no preview address."
 
 if [ "$deploy" != true ]; then
   echo
-  echo "deploy-content: every check passed. Nothing was deployed: this run had no --deploy."
+  if [ "$report_not_shown" -ne 0 ]; then
+    echo "deploy-content: every check that could be read passed, and $report_not_shown was NOT SHOWN (above). Nothing was deployed: this run had no --deploy."
+  else
+    echo "deploy-content: every check passed. Nothing was deployed: this run had no --deploy."
+  fi
   dc_meant=1
   exit 0
 fi
@@ -661,7 +687,7 @@ echo "ok      $OUTBOUND is on the account"
 step "wrangler deploy: podster-content"
 phase=deploying
 wrangler_deploy content content "$work/wrangler.json"
-deployed_output content "$OUTBOUND is deployed."
+deployed_output content "$OUTBOUND is deployed. The content Worker deployed before, if there is one, keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false, since no app's code runs, so fix the cause and run this again."
 version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-content.out" | head -n 1 | sed 's/.*: //' || true)
 echo "version podster-content ${version:-not printed by wrangler}"
 
@@ -673,6 +699,9 @@ host="$label.$domain"
 probe_failures=0
 pass() { echo "PASS    $*"; }
 fail() { echo "FAIL    $*"; probe_failures=$((probe_failures + 1)); }
+# not_shown WHAT: a check the deploy promises that couldn't be made. It is never a pass: the run ends with exit 4.
+not_shown_count=0
+not_shown() { echo "NOT SHOWN $*"; not_shown_count=$((not_shown_count + 1)); }
 # fetch METHOD URL [HEADER [MAX-TIME]]: leaves the headers in $work/h and the body in $work/b, and prints the status.
 # curl gives up after MAX-TIME seconds, 30 unless given.
 fetch() {
@@ -761,7 +790,7 @@ if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.enab
   case "$(jq -r '.result.previews_enabled | if type == "boolean" then tostring else "unread" end' "$work/body")" in
     false) pass "$OUTBOUND has no preview address" ;;
     true) fail "$OUTBOUND has preview addresses on" ;;
-    *) echo "NOT SHOWN whether $OUTBOUND has preview addresses: Cloudflare's answer didn't say" ;;
+    *) not_shown "whether $OUTBOUND has preview addresses: Cloudflare's answer didn't say" ;;
   esac
 else
   fail "$OUTBOUND's workers.dev setting couldn't be read (HTTP $status): not verified"
@@ -788,13 +817,23 @@ if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.bind
     fail "podster-content's deployed settings have no binding APPS to the namespace naming $OUTBOUND as outbound"
   fi
 else
-  echo "NOT SHOWN whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
+  not_shown "whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
+fi
+cf "/accounts/$account/workers/domains"
+if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then
+  if jq -e --arg o "$OUTBOUND" 'any(.result[]; .service == $o)' "$work/body" > /dev/null; then
+    fail "a custom domain on the account runs $OUTBOUND"
+  else
+    pass "no custom domain on the account runs $OUTBOUND"
+  fi
+else
+  not_shown "whether a custom domain runs $OUTBOUND: the account's custom domains couldn't be read in the shape expected (HTTP $status)"
 fi
 echo "NOT SHOWN an app's fetch refused by $OUTBOUND: that needs an app with code, and none exists yet"
 
 echo
-if [ "$probe_failures" -ne 0 ]; then
-  echo "deploy-content: deployed $OUTBOUND (version ${outbound_version:-unknown}) and podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed: the Workers are deployed and NOT verified."
+if [ "$probe_failures" -ne 0 ] || [ "$not_shown_count" -ne 0 ]; then
+  echo "deploy-content: deployed $OUTBOUND (version ${outbound_version:-unknown}) and podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed and $not_shown_count check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified."
   dc_meant=1
   exit 4
 fi

@@ -195,6 +195,7 @@ case "$url" in
       "/zones?name=podster.dev&per_page=50") key=zone-podster ;;
       "/zones?name="*) key=zone-content ;;
       /accounts/*/workers/scripts) key=scripts ;;
+      /accounts/*/workers/domains) key=domains ;;
       /accounts/*/workers/scripts/podster-outbound/subdomain) key=outbound-subdomain ;;
       /accounts/*/workers/scripts/podster-content/settings) key=content-settings ;;
       /zones/*/workers/routes) key=routes ;;
@@ -289,6 +290,7 @@ healthy() {
   api zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
   api scripts 200 '{"success":true,"result":[{"id":"podster-content"},{"id":"podster-outbound"}]}'
   api routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r2","pattern":"content-selftest.example/x"}]}'
+  api domains 200 '{"success":true,"result":[{"id":"d1","hostname":"other.content-selftest.example","service":"podster-content","zone_id":"99887766554433221100ffeeddccbbaa","zone_name":"content-selftest.example","environment":"production"}]}'
   api outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":false}}'
   api content-settings 200 "$CONTENT_SETTINGS_OK"
   api namespace 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'
@@ -703,7 +705,8 @@ fresh; dc 0 "${files[@]}" || true
 check "without --deploy: exit 0, every check passed, nothing deployed" bash -c "[ $LAST -eq 0 ] && grep -q 'Nothing was deployed: this run had no --deploy' '$tmp/out'"
 check "  it says what it would deploy, and where" bash -c "grep -q -E \"would deploy podster-content at [0-9a-f]{40}, origin/main's tip with ci.yml green\" '$tmp/out' && grep -q -F 'on the route *.content-selftest.example/*, with the content domain content-selftest.example' '$tmp/out'"
 check "  every API call was a GET, -q first, the token on stdin, nothing of the caller's environment" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
-check "  it read all nine things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 9 ]"
+check "  it read all ten things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 10 ]"
+check "  it read the account's custom domains, and says none runs podster-outbound" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/domains auth=ok' '$fix/calls' && grep -q '^ok   no custom domain on the account runs podster-outbound$' '$tmp/out' && grep -q 'deploy-content: every check passed. Nothing was deployed' '$tmp/out'"
 check "  it listed the account's scripts and the content zone's routes, by the zone's ID" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/scripts auth=ok' '$fix/calls' && grep -q '^curl GET /zones/$ZONE/workers/routes auth=ok' '$fix/calls'"
 check "  it says podster-outbound exists, and the deploy replaces it" said "^ok   the account's scripts can be listed: podster-outbound exists, and the deploy replaces it$"
 check "  it says what it would deploy first: the outbound Worker, with no route, no address and no binding" said "^would deploy, first, podster-outbound at [0-9a-f]{40} to the configuration's account, with no route, no workers.dev$"
@@ -798,7 +801,7 @@ check "  exactly two deploys: the outbound Worker first, from its own package, t
 check "  the outbound Worker's configuration: the owner's account, both public addresses off, and nothing else: no route, no binding" \
   quiet jq -e --arg a "$ACCOUNT" '(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"]) and .name == "podster-outbound" and .account_id == $a and .workers_dev == false and .preview_urls == false and .compatibility_date == "2026-08-01" and (.main | endswith("/apps/outbound/src/index.ts"))' "$fix/deployed-podster-outbound.json"
 check "  between the two, it saw podster-outbound on the account" said "^ok      podster-outbound is on the account"
-check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out'"
+check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out' && grep -q '^PASS    no custom domain on the account runs podster-outbound' '$tmp/out' && ! grep -q '^NOT SHOWN whether' '$tmp/out'"
 check "  it says an app's fetch being refused is NOT SHOWN" said "^NOT SHOWN an app's fetch refused by podster-outbound: that needs an app with code"
 check "  every API call, before and after the deploy, was a GET with the token on stdin" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
@@ -812,7 +815,7 @@ check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 
 fresh; touch "$fix/deploy-fails-podster-content"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out'"
+check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false' '$tmp/out'"
 check "  no probe ran" never_called "^probe "
 fresh; touch "$fix/wrangler-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "wrangler output holding the token: exit 3, redacted, not printed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler.s output or its log held the token' '$tmp/out' && grep -q 'redacted token' '$tmp/out'"
@@ -845,13 +848,22 @@ outbound_check "the outbound Worker on workers.dev after the deploy: exit 4" 4 "
 outbound_check "the outbound Worker with previews on: exit 4" 4 "^FAIL    podster-outbound has preview addresses on" outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":true}}'
 outbound_check "its workers.dev setting unreadable: exit 4, not verified" 4 "^FAIL    podster-outbound's workers.dev setting couldn't be read \\(HTTP 403\\): not verified" outbound-subdomain 403 '{"success":false,"errors":[]}'
 outbound_check "  a setting of another shape is unreadable too" 4 "^FAIL    podster-outbound's workers.dev setting couldn't be read" outbound-subdomain 200 '{"success":true,"result":{"enabled":"no"}}'
-outbound_check "a workers.dev setting that doesn't say previews: passes, and says that one is NOT SHOWN" 0 "^NOT SHOWN whether podster-outbound has preview addresses" outbound-subdomain 200 '{"success":true,"result":{"enabled":false}}'
+outbound_check "a workers.dev setting that doesn't say previews: NOT SHOWN, and exit 4" 4 "^NOT SHOWN whether podster-outbound has preview addresses" outbound-subdomain 200 '{"success":true,"result":{"enabled":false}}'
 outbound_check "a binding that names no outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS to the namespace naming podster-outbound" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps"}]}}'
 outbound_check "a binding naming another outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"elsewhere"}}}]}}'
 outbound_check "a binding to another namespace: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"other","outbound":{"worker":{"service":"podster-outbound"}}}]}}'
-outbound_check "settings that can't be read: NOT SHOWN, never a pass, and exit 0" 0 "^NOT SHOWN whether podster-content's deployed binding names podster-outbound as outbound: its settings couldn't be read in the shape expected \\(HTTP 403\\)" content-settings 403 '{"success":false,"errors":[]}'
-check "  and no PASS for the binding" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out'"
-outbound_check "settings in another shape: NOT SHOWN, never a pass" 0 "^NOT SHOWN whether podster-content's deployed binding" content-settings 200 '{"success":true,"result":{"bindings":{}}}'
+outbound_check "settings that can't be read: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding names podster-outbound as outbound: its settings couldn't be read in the shape expected \\(HTTP 403\\)" content-settings 403 '{"success":false,"errors":[]}'
+check "  and no PASS for the binding, and never the success line" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out' && ! grep -q 'every probe passed' '$tmp/out' && grep -q 'but 0 probe(s) failed and 1 check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified' '$tmp/out'"
+outbound_check "settings in another shape: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding" content-settings 200 '{"success":true,"result":{"bindings":{}}}'
+
+# --- custom domains ---
+bad_api "a custom domain on the account that runs the outbound Worker is refused" "a custom domain on the account runs podster-outbound" domains 200 '{"success":true,"result":[{"id":"d","hostname":"x.content-selftest.example","service":"podster-outbound","zone_id":"z","zone_name":"content-selftest.example"}]}'
+fresh; api domains 403 '{"success":false,"errors":[{"code":10000}]}'; dc 0 "${files[@]}" || true
+check "custom domains the token can't read, in a report: NOT SHOWN, never 'every check passed', nothing deployed" bash -c "[ $LAST -eq 0 ] && grep -q '^NOT SHOWN whether a custom domain runs podster-outbound: the account.s custom domains couldn.t be read in the shape expected (HTTP 403)' '$tmp/out' && ! grep -q 'every check passed' '$tmp/out' && grep -q 'and 1 was NOT SHOWN (above). Nothing was deployed' '$tmp/out'"
+check "  no deploy, no probe, the token nowhere" unchanged
+outbound_check "custom domains the token can't read, after a deploy: NOT SHOWN, and exit 4" 4 "^NOT SHOWN whether a custom domain runs podster-outbound: the account's custom domains couldn't be read in the shape expected \\(HTTP 403\\)" domains 403 '{"success":false,"errors":[]}'
+check "  never the success line" bash -c "! grep -q 'every probe passed' '$tmp/out' && grep -q 'the Workers are deployed and NOT verified' '$tmp/out'"
+outbound_check "custom domains in another shape, after a deploy: NOT SHOWN, and exit 4" 4 "^NOT SHOWN whether a custom domain runs podster-outbound" domains 200 '{"success":true,"result":[{"id":"d"}]}'
 
 probe_fails() { # probe_fails TITLE KEY STATUS BODY [EXTRA]
   fresh

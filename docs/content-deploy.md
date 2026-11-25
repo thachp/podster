@@ -94,6 +94,8 @@ Each of these is taken only in exactly that shape: another binding, another clas
 
 **The outbound Worker needs no new permission** (read 2026-11-24, not yet confirmed by a run). Workers Scripts is an account-scoped permission: Edit covers every Worker script on the account, so it uploads a second Worker as it does the first, and the reads of a script's settings and `workers.dev` setting take Workers Scripts Read, which Edit includes ([permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Naming it as outbound is part of the content Worker's own upload. Listing the routes on the content zone takes Workers Routes, already granted on that zone. **So the owner adds nothing to the token.** If the first run shows otherwise, a refused read or a failed upload names what was missing.
 
+**Reading the account's custom domains** (`GET /accounts/<account>/workers/domains`, added 2026-11-24 after PR 589's review): Cloudflare's pages read for this don't name the permission that reads that list. They say that adding or removing a custom domain takes Zone → Workers Routes → Write on the affected zone ([Workers authorization](https://developers.cloudflare.com/workers/authorization/workers/#routes-and-custom-domains)). The token already holds Workers Scripts Edit on the account and Workers Routes Edit on the content zone. **Whether those are enough to read the list is unconfirmed.** If they aren't, the script says NOT SHOWN for that check: a report still exits 0 but never says "every check passed", and a deploy ends with exit 4, not verified. The error Cloudflare returns then names what's missing. Widening the token is the owner's call, and nothing here recommends it before that run.
+
 **Nothing else:** no other account, no other zone, no API Tokens permission, no DNS, no billing. Give it an expiry date and, if the owner wants, an IP filter.
 
 **How the script keeps the token:**
@@ -141,14 +143,19 @@ That only reports. To deploy, the owner adds `--deploy` at a terminal and types 
 scripts/deploy-content --token-file ~/.config/podster/content-token --config-file ~/.config/podster/content-deploy.json --deploy
 ```
 
-`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way, and the output says which Worker was deployed; 4 deployed but a probe or check failed, so the Workers are deployed and **not verified**.
+`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way, and the output says which Worker was deployed; 4 deployed but a probe or check failed or was NOT SHOWN, so the Workers are deployed and **not verified**. A check that couldn't be made is never a pass: the last line then counts the NOT SHOWN checks and never says "every probe passed".
 
-**What the report reads, besides what it read before** (added 2026-11-24): the account's list of Worker scripts, so it says whether `podster-outbound` exists yet, and the routes on the content domain's zone. **A route on that zone that runs `podster-outbound` is refused:** a deploy with no route leaves a script's existing routes alone, so one made by hand would outlive every deploy. The content domain's zone must come with its ID, which the routes are read by. An error the script doesn't handle, such as an unbound variable, never exits 0: it says it stopped, and in which phase.
+**What the report reads, besides what it read before** (added 2026-11-24): the account's list of Worker scripts, so it says whether `podster-outbound` exists yet, and the routes on the content domain's zone. **A route on that zone that runs `podster-outbound` is refused:** a deploy with no route leaves a script's existing routes alone, so one made by hand would outlive every deploy. The content domain's zone must come with its ID, which the routes are read by. **It also reads the account's custom domains, and a custom domain that runs `podster-outbound` is refused** for the same reason: a deploy with none leaves an existing one alone. If they can't be read, the report says NOT SHOWN (above).
+
+An error the script doesn't handle, such as an unbound variable, never exits 0: it says it stopped, and in which phase.
 
 **Stopped by a signal** (129 SIGHUP, 130 SIGINT, 143 SIGTERM), it says where it was:
 - while checking, nothing changed;
 - during the outbound Worker's deploy, `podster-outbound` may or may not be deployed and the content Worker wasn't;
 - during the content Worker's deploy, `podster-outbound` is deployed and the content Worker may or may not be, so check the account before running it again;
+- **between the two deploys** (the check that `podster-outbound` is on the account, or a leak in that answer), the content Worker was **not** deployed, and the output says so.
+
+**If `podster-outbound` deploys and the content Worker's deploy then fails (exit 3),** the content Worker deployed before, if there is one, keeps serving without the outbound binding. That's acceptable only while `CODE_APPS_ENABLED` (`apps/content/src/handle.ts`) is false, since no app's code runs then. The script says so; fix the cause and run it again.
 - during the probes, the Workers are deployed and not verified.
 
 The temporary folder is deleted in every case.
@@ -166,12 +173,13 @@ Then the script probes one random host on the content domain, signed out:
 - **The content domain itself** serves nothing: no answer, or any answer that isn't a success. The route doesn't cover it.
 - **Not shown, and the script prints so:** a host two labels deep. The zone's certificate covers one level, so HTTPS there can't be probed.
 
-**Then it checks the outbound Worker by Cloudflare's API,** with the token, each a pass or a failure (exit 4):
+**Then it checks the outbound Worker by Cloudflare's API,** with the token, each a pass, a failure or NOT SHOWN; either of the last two ends with exit 4:
 
 - **`podster-outbound` exists** on the account.
-- **It has no `workers.dev` address and no preview address,** from `GET /accounts/<account>/workers/scripts/podster-outbound/subdomain`. If that answer doesn't say whether previews are on, the script says that one is NOT SHOWN.
+- **It has no `workers.dev` address and no preview address,** from `GET /accounts/<account>/workers/scripts/podster-outbound/subdomain`. If that answer doesn't say whether previews are on, the script says that one is NOT SHOWN, and exits 4.
 - **No route on the content domain's zone runs it.** Routes on other zones aren't read: the token sees no other zone, and can make routes on none.
-- **`podster-content`'s deployed binding `APPS` names it as outbound,** from `GET /accounts/<account>/workers/scripts/podster-content/settings`, where wrangler 4.157.0 reads a dispatch binding's outbound Worker as `outbound.worker.service`. **If those settings can't be read in that shape, the script says NOT SHOWN, never a pass,** and the owner checks the binding in the dashboard.
+- **`podster-content`'s deployed binding `APPS` names it as outbound,** from `GET /accounts/<account>/workers/scripts/podster-content/settings`, where wrangler 4.157.0 reads a dispatch binding's outbound Worker as `outbound.worker.service`. **If those settings can't be read in that shape, the script says NOT SHOWN, never a pass, and exits 4,** and the owner checks the binding in the dashboard.
+- **No custom domain on the account runs it,** from `GET /accounts/<account>/workers/domains`, where each entry names its Worker as `service` (the list endpoint wrangler 4.157.0's Cloudflare client calls). If the list can't be read, that's NOT SHOWN, with exit 4.
 - **Not shown, and the script prints so:** an app's `fetch` refused by the outbound Worker. That needs an app with code, and none exists yet; it is [the revision's gate](adr/0010-revision-apps-are-workers.md) item, still owed, with the socket test.
 
 **What it can't check until the release job (step 5) exists:**

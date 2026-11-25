@@ -12,7 +12,7 @@ import { TOOLCHAIN_ENV, TOOLCHAINS, type Toolchain } from "../src/core/toolchain
 import { IMAGE_ID, type DockerCli } from "../src/node/docker-sandbox.js";
 import { EGRESS_ALIAS, EGRESS_PORT } from "../src/core/run-interface.js";
 import { DetailedError } from "../src/core/errors.js";
-import { ARCHES, BASE_TAG, BUILD_OUTPUT_TAIL_BYTES, BUILD_RETRY_DELAYS_MS, buildingLine, builtOn, ensureToolchainImage, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_ARCH, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES, tailOf } from "../src/node/toolchain-images.js";
+import { ARCHES, BASE_TAG, BUILD_OUTPUT_TAIL_BYTES, BUILD_RETRY_DELAYS_MS, buildingLine, builtOn, ensureToolchainImage, FETCH_ARGS, SharedBuilds, toolchainImages, LABEL_RECIPE, pinName, recipeOf, TOOLCHAIN_ARCH, TOOLCHAIN_BUILD_FAILED, TOOLCHAIN_INSPECT_FAILED, TOOLCHAIN_PIN_INVALID, TOOLCHAIN_SOURCES, tailOf } from "../src/node/toolchain-images.js";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const id = (c: string) => `sha256:${c.repeat(64)}`;
@@ -71,7 +71,9 @@ describe("the toolchain Dockerfiles", () => {
     const lines = code(text).split("\n");
     expect(lines.filter((l) => /^ARG /.test(l)).slice(0, 2)).toEqual(["ARG BASE", "ARG ARCH"]);
     expect(lines.filter((l) => /^FROM /.test(l))).toEqual(["FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS fetch", "FROM ${BASE}"]);
-    for (const line of lines.filter((l) => /^(COPY|ADD)\b/.test(l))) expect(line).toMatch(/^COPY --from=fetch |^ADD https:\/\//);
+    for (const line of lines.filter((l) => /^(COPY|ADD)\b/.test(l))) expect(line).toMatch(/^COPY --from=fetch |^ADD https:\/\/|^ADD \$\{MAVEN_URL\} /);
+    // An address held by an ARG defaults to https, and only Java's Maven has one.
+    for (const line of lines.filter((l) => /^ARG \w+_URL\b/.test(l))) expect(line).toMatch(/^ARG MAVEN_URL=https:\/\//);
     // Never a checksum file fetched during the build, a BuildKit-only feature or a floating source.
     expect(code(text)).not.toMatch(/SHASUMS|SHA256SUMS|\.sha256\b|--checksum|TARGETARCH|rustup|curl |wget |latest/);
     expect(text).not.toMatch(/# syntax=/);
@@ -157,7 +159,10 @@ describe("the toolchain Dockerfiles", () => {
   it("java: Temurin JDK 25.0.5.1+2 from Adoptium's GitHub release and Maven 3.10.1 from Maven Central, with their checked sums", async () => {
     const text = await dockerfile("java");
     expect(text).toContain("ADD https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_${ARCH}_linux_hotspot_25.0.5.1_2.tar.gz /fetch/jdk.tar.gz");
-    expect(text).toContain("ADD https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz /fetch/maven.tar.gz");
+    // Maven's address is an ARG whose default is Maven Central, so Runner's real-Docker test can serve CI's cached copy.
+    expect(code(text)).toContain("ARG MAVEN_URL=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.10.1/apache-maven-3.10.1-bin.tar.gz\nADD https://github.com/");
+    expect(code(text)).toContain("ADD ${MAVEN_URL} /fetch/maven.tar.gz");
+    expect(Object.keys(FETCH_ARGS)).toEqual(["MAVEN_URL"]);
     // Never archive.apache.org, which is slow and rate-limits (CI run 45376832243).
     expect(code(text)).not.toContain("archive.apache.org");
     expect(text).toMatch(/aarch64\/arm64\) printf '%s  %s\\n' \\\n +c37879e0d08eeb1baa69fcbb7758cd455b7b1c0ceab1e2a136ccb1713c530984 jdk\.tar\.gz > sums ;;/);
@@ -339,6 +344,36 @@ describe("ensureToolchainImage", () => {
     // Every try is the same build, so every pin and checksum is checked each time.
     const builds = calls.filter((c) => c[0] === "build").map((c) => c.join(" "));
     expect(new Set(builds).size).toBe(1);
+  });
+
+  it("passes a test's loopback address for Maven to Java's build only, and refuses any other address or name", async () => {
+    const url = "http://127.0.0.1:40123/apache-maven-3.10.1-bin.tar.gz";
+    const { calls, docker } = fakeDocker(baseImages());
+    await ensureToolchainImage(["java", "rust"], { home: await temp(), docker, notify: () => undefined, base: BASE, fetchFrom: { MAVEN_URL: url } });
+    const builds = calls.filter((c) => c[0] === "build");
+    expect(builds[0]).toContain(`MAVEN_URL=${url}`);
+    expect(builds[0].slice(-5, -3)).toEqual(["--build-arg", `MAVEN_URL=${url}`]);
+    expect(builds[1].some((a) => a.startsWith("MAVEN_URL="))).toBe(false);
+    const refused: Record<string, string>[] = [
+      { MAVEN_URL: "https://repo.maven.apache.org/maven2/x.tar.gz" },
+      { MAVEN_URL: "http://example.com:80/x.tar.gz" },
+      { MAVEN_URL: "http://127.0.0.1:80/x tar" },
+      { MAVEN_URL: "http://127.0.0.1:80/../x" },
+      { BASE: "http://127.0.0.1:80/x" },
+      { ARCH: "http://127.0.0.1:80/x" },
+    ];
+    for (const fetchFrom of refused) {
+      const bad = fakeDocker(baseImages());
+      await expect(ensureToolchainImage(["java"], { home: await temp(), docker: bad.docker, notify: () => undefined, base: BASE, fetchFrom }), JSON.stringify(fetchFrom)).rejects.toThrow(TOOLCHAIN_BUILD_FAILED);
+      expect(bad.calls).toEqual([]);
+    }
+  });
+
+  it("never passes a local copy from what Runner runs, whatever its options hold", async () => {
+    const { calls, docker } = fakeDocker(baseImages());
+    const opts = { home: await temp(), docker, notify: () => undefined, base: BASE, fetchFrom: { MAVEN_URL: "http://127.0.0.1:40123/m.tar.gz" } };
+    await toolchainImages(opts)(["java"], new AbortController().signal);
+    expect(calls.filter((c) => c[0] === "build")[0].some((a) => a.startsWith("MAVEN_URL="))).toBe(false);
   });
 
   it("doesn't try again a build that was killed (its time limit), stopped by the caller, or made an image Runner refuses", async () => {

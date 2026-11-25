@@ -19,7 +19,14 @@
 //   offline with its local repository in /work/.cache, and the JDK and Maven name Runner's egress proxy;
 // - .NET and Java together: one image layered on .NET's pinned image, with both;
 // - a room with no toolchains runs the base image itself, with the base bounds, and has no toolchain.
+//
+// With RUNNER_TOOLCHAIN_FILES set to a folder (CI's Linux job: scripts/toolchain-files.mjs fills it, from actions/cache
+// or once from Maven Central), the Java builds take Maven's tarball from that folder, served on 127.0.0.1 here, instead
+// of from Maven Central, which answers 429 to hosted CI's shared egress (CI run 45600622961). The Dockerfile still checks
+// the pinned SHA-512. Linux only: a Docker Desktop engine can't reach this machine's 127.0.0.1.
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -44,6 +51,10 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
   const uid = process.getuid?.() ?? -1;
   const gid = process.getgid?.() ?? -1;
   const signal = new AbortController().signal;
+  const files = process.env.RUNNER_TOOLCHAIN_FILES ?? "";
+  let server: Server | undefined;
+  let fetchFrom: Record<string, string> | undefined;
+  let served = 0;
 
   const facts = (ref: string, toolchains: Toolchain[]): Pick<RunFacts, "task_folder" | "network" | "caps" | "toolchains"> => ({
     task_folder: join(work, "ws_tc", ref),
@@ -72,13 +83,30 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
     expect(built.code).toBe(0);
     base = built.stdout.trim();
     expect(base).toMatch(IMAGE_ID);
+    if (files !== "") {
+      expect(process.platform).toBe("linux");
+      // The file the Dockerfile's MAVEN_URL names, by the same name; its SHA-512 is checked by the build.
+      const dockerfile = await readFile(join(apps, "toolchains", "java", "Dockerfile"), "utf8");
+      const name = /^ARG MAVEN_URL=https:\/\/\S+\/([A-Za-z0-9._-]+)$/m.exec(dockerfile)?.[1] ?? "";
+      expect(name).not.toBe("");
+      const tarball = await readFile(join(files, name));
+      const local = createServer((req, res) => {
+        if (req.url !== `/${name}` || (req.method !== "GET" && req.method !== "HEAD")) return void res.writeHead(404).end();
+        served += 1;
+        res.writeHead(200, { "content-type": "application/octet-stream", "content-length": tarball.byteLength });
+        res.end(req.method === "HEAD" ? undefined : tarball);
+      });
+      server = local;
+      await new Promise<void>((resolve) => local.listen(0, "127.0.0.1", resolve));
+      fetchFrom = { MAVEN_URL: `http://127.0.0.1:${(local.address() as AddressInfo).port}/${name}` };
+    }
     sandbox = new DockerSandbox({
       docker,
       image: base,
       uid,
       gid,
       home,
-      toolchainImage: (set, s) => ensureToolchainImage(set, { home, docker, notify: (line) => void said.push(line), base, signal: s }),
+      toolchainImage: (set, s) => ensureToolchainImage(set, { home, docker, notify: (line) => void said.push(line), base, signal: s, fetchFrom }),
     });
   });
 
@@ -86,6 +114,7 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
     if (sandbox) await sandbox.reapAll().catch(() => undefined);
     if (home) await rm(home, { recursive: true, force: true });
     if (work) await rm(work, { recursive: true, force: true }).catch(() => undefined);
+    if (server) await new Promise((resolve) => server?.close(resolve));
   });
 
   it("Rust: the pinned versions, and an offline cargo build of a tiny crate whose build script runs in /work", async () => {
@@ -207,6 +236,8 @@ describe.runIf(ON)("the toolchain images on a real Docker Engine", () => {
     const ref = "tc-java";
     await open(ref, ["java"]);
     try {
+      // With CI's cached copy, the build took Maven from it.
+      expect(served > 0).toBe(fetchFrom !== undefined);
       expect(await inspect(ref, "{{.Image}}")).toBe((await readFile(join(home, pinName(["java"])), "utf8")).trim());
       const versions = await shell(ref, "java -version 2>&1 && javac -version 2>&1 && mvn -v && echo home=$JAVA_HOME gradle=$GRADLE_USER_HOME opts=$MAVEN_OPTS");
       expect(versions.ok).toBe(true);

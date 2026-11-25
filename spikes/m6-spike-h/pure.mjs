@@ -201,9 +201,39 @@ export function judgeMarker({ reads, head, other, control }) {
 export function judgeOutbound(probe) {
   const failed = [];
   if (!probe || probe.source !== "worker" || !Array.isArray(probe.fetches) || !Array.isArray(probe.sockets)) return { holds: false, failed: ["no probe report"] };
-  for (const f of probe.fetches) if (!(f.status === OUTBOUND_STATUS && f.body === OUTBOUND_BODY)) failed.push(`fetch ${f.url} wasn't the outbound Worker's refusal`);
-  for (const s of probe.sockets) if (s.opened || s.bytes_read > 0) failed.push(`socket ${s.hostname}:${s.port} opened or read`);
+  for (const f of probe.fetches) if (!outboundRefusal(f)) failed.push(`fetch ${f.url} wasn't the outbound Worker's refusal`);
+  for (const s of probe.sockets) {
+    if (s.opened || s.bytes_read > 0) failed.push(`socket ${s.hostname}:${s.port} opened or read`);
+    // A socket that only timed out never answered either way: that isn't a refusal (fixed 2026-11-24, the control).
+    else if (!socketRefused(s)) failed.push(`socket ${s.hostname}:${s.port} wasn't refused (${s.error?.name ?? "no error"})`);
+  }
   if (probe.fetches.length === 0 || probe.sockets.length === 0) failed.push("no fetch or no socket tried");
+  return { holds: failed.length === 0, failed };
+}
+
+/** A socket refused by the platform: it failed at `connect` or `opened` with an error that isn't the module's timeout. */
+export function socketRefused(s) {
+  return !s.opened && (s.at === "connect" || s.at === "opened") && !!s.error && s.error.name !== "SpikeTimeout";
+}
+
+/** A fetch that got exactly the outbound Worker's refusal. */
+const outboundRefusal = (f) => f.status === OUTBOUND_STATUS && f.body === OUTBOUND_BODY;
+
+/**
+ * The control (2026-11-24): the same probe through two dispatch bindings of one throwaway Worker, `a` with
+ * `podster-outbound` as outbound and `b` with none. Holds only if `a` is refused as item 3 requires, and through `b`
+ * at least one socket opened and read a byte and at least one fetch got an answer that isn't the outbound Worker's:
+ * so the outbound Worker is what makes the difference.
+ */
+export function judgeControl({ a, b }) {
+  const failed = [];
+  const withOutbound = judgeOutbound(a);
+  if (!withOutbound.holds) failed.push(...withOutbound.failed.map((f) => `with outbound: ${f}`));
+  if (!b || b.source !== "worker" || !Array.isArray(b.fetches) || !Array.isArray(b.sockets)) failed.push("without outbound: no probe report");
+  else {
+    if (!b.sockets.some((s) => s.opened && s.bytes_read > 0)) failed.push("without outbound: no socket opened and read a byte");
+    if (!b.fetches.some((f) => typeof f.status === "number" && !outboundRefusal(f))) failed.push("without outbound: no fetch got an answer of its own");
+  }
   return { holds: failed.length === 0, failed };
 }
 
@@ -268,4 +298,7 @@ export function shapeOf(value, depth = 3) {
 }
 
 /** The run's limits. The runner stops and cleans up at either. */
+/** The control Worker's name: one per run, outside the dispatch namespace. */
+export const CONTROL_WORKER = /^spikeh-ctl-[0-9a-f]{6}$/;
+
 export const BOUNDS = { ms: 15 * 60_000, api: 300, edge: 800, cleanupApi: 120, cleanupMs: 5 * 60_000 };

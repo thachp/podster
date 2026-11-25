@@ -1,0 +1,19 @@
+{
+  "run": "d6421e",
+  "at": "2026-11-25T07:04:49.884Z",
+  "verdicts": {
+    "control": {
+      "holds": true,
+      "failed": []
+    },
+    "control_again": {
+      "holds": true,
+      "failed": []
+    }
+  },
+  "clean": true,
+  "calls": {
+    "api": 7,
+    "edge": 6
+  }
+}

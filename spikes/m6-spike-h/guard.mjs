@@ -9,7 +9,7 @@
 // - writes: a spike key (never the stop key); a spike script, by one of the four queries item 4 tries, its upload
 //   session and the assets upload; a delete of a spike script by `?force=true`; the run's database, made with exactly
 //   its name and deleted only by an ID the run made or listed under a spike name.
-import { QUERIES, SPIKE_DATABASE, SPIKE_SCRIPT, STOP_KEY, spikeKey } from "./pure.mjs";
+import { CONTROL_WORKER, QUERIES, SPIKE_DATABASE, SPIKE_SCRIPT, STOP_KEY, spikeKey } from "./pure.mjs";
 
 const ORIGIN = "https://api.cloudflare.com";
 const ROOT = "/client/v4";
@@ -62,11 +62,19 @@ export function allow(method, url, body, ctx) {
 
   if (path === `${acc}/workers/assets/upload` && method === "POST" && search === "?base64=true") return;
 
-  // The two deployed Workers: their deployments, read only.
+  // The account's workers.dev subdomain and its list of Workers: read only (the control, 2026-11-24).
+  if (method === "GET" && (path === `${acc}/workers/subdomain` || path === `${acc}/workers/scripts`) && search === "") return;
+  // The two deployed Workers: their deployments, read only. The control's own Worker, `spikeh-ctl-<run>` for this run
+  // only: written, read, its workers.dev switch, deleted.
   const scripts = `${acc}/workers/scripts/`;
   if (path.startsWith(scripts)) {
     const [name, sub, more] = path.slice(scripts.length).split("/");
     if (method === "GET" && DEPLOYED.has(name) && sub === "deployments" && more === undefined && search === "") return;
+    if (CONTROL_WORKER.test(name ?? "") && more === undefined && search === "") {
+      if (sub === undefined && (method === "GET" || method === "DELETE")) return;
+      if (sub === undefined && method === "PUT" && name === `spikeh-ctl-${ctx.run}`) return;
+      if (sub === "subdomain" && (method === "POST" || method === "GET") && name === `spikeh-ctl-${ctx.run}`) return;
+    }
     throw new Error("refusing: a Worker call the spike doesn't make");
   }
 

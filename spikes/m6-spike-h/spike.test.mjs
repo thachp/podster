@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { allow } from "./guard.mjs";
-import { API_QUERY, OUTBOUND_BODY, QUERIES, assetMarker, judgeBindings, judgeMarker, judgeOutbound, judgeQuery, moduleSource, names, redact, source, spikeKey } from "./pure.mjs";
+import { API_QUERY, OUTBOUND_BODY, QUERIES, assetMarker, judgeBindings, judgeControl, judgeMarker, judgeOutbound, judgeQuery, moduleSource, names, redact, source, spikeKey } from "./pure.mjs";
 
 const account = "a".repeat(32);
 const kv = "b".repeat(32);
@@ -83,7 +83,7 @@ test("item 1's judge", () => {
 
 test("item 3's judge", () => {
   const refused = { status: 403, body: OUTBOUND_BODY };
-  const good = { source: "worker", fetches: [{ url: "x", ...refused }], sockets: [{ hostname: "h", port: 80, opened: false, bytes_read: 0 }] };
+  const good = { source: "worker", fetches: [{ url: "x", ...refused }], sockets: [{ hostname: "h", port: 80, opened: false, bytes_read: 0, at: "opened", error: { name: "Error", message: "proxy request failed" } }] };
   assert.equal(judgeOutbound(good).holds, true);
   assert.equal(judgeOutbound({ ...good, fetches: [{ url: "x", status: 200, body: "hi" }] }).holds, false);
   assert.equal(judgeOutbound({ ...good, fetches: [{ url: "x", status: 403, body: "other" }] }).holds, false);
@@ -91,6 +91,35 @@ test("item 3's judge", () => {
   assert.equal(judgeOutbound({ ...good, sockets: [{ hostname: "h", port: 80, opened: false, bytes_read: 3 }] }).holds, false);
   assert.equal(judgeOutbound({ ...good, sockets: [] }).holds, false);
   assert.equal(judgeOutbound(null).holds, false);
+  // A socket that only timed out isn't a refusal.
+  assert.equal(judgeOutbound({ ...good, sockets: [{ hostname: "h", port: 80, opened: false, bytes_read: 0, at: "opened", error: { name: "SpikeTimeout" } }] }).holds, false);
+  assert.equal(judgeOutbound({ ...good, sockets: [{ hostname: "h", port: 80, opened: false, bytes_read: 0 }] }).holds, false);
+});
+
+test("the control's judge", () => {
+  const refusedSocket = { hostname: "h", port: 80, opened: false, bytes_read: 0, at: "opened", error: { name: "Error", message: "proxy request failed" } };
+  const a = { source: "worker", fetches: [{ url: "x", status: 403, body: OUTBOUND_BODY }], sockets: [refusedSocket] };
+  const b = { source: "worker", fetches: [{ url: "x", status: 200, body: "hi" }], sockets: [{ hostname: "h", port: 80, opened: true, bytes_read: 12 }] };
+  assert.equal(judgeControl({ a, b }).holds, true);
+  assert.equal(judgeControl({ a, b: a }).holds, false);
+  assert.equal(judgeControl({ a: b, b }).holds, false);
+  assert.equal(judgeControl({ a, b: { ...b, sockets: [{ hostname: "h", port: 80, opened: true, bytes_read: 0 }] } }).holds, false);
+  assert.equal(judgeControl({ a, b: { ...b, fetches: [{ url: "x", status: 403, body: OUTBOUND_BODY }] } }).holds, false);
+  assert.equal(judgeControl({ a, b: null }).holds, false);
+});
+
+test("the guard lets the control write only this run's Worker", () => {
+  ok("PUT", `${acc}/workers/scripts/spikeh-ctl-abc123`);
+  ok("POST", `${acc}/workers/scripts/spikeh-ctl-abc123/subdomain`);
+  ok("DELETE", `${acc}/workers/scripts/spikeh-ctl-def456`);
+  ok("GET", `${acc}/workers/subdomain`);
+  ok("GET", `${acc}/workers/scripts`);
+  no("PUT", `${acc}/workers/scripts/spikeh-ctl-def456`);
+  no("POST", `${acc}/workers/scripts/spikeh-ctl-def456/subdomain`);
+  no("POST", `${acc}/workers/subdomain`);
+  no("DELETE", `${acc}/workers/scripts/podster-outbound`);
+  no("POST", `${acc}/workers/scripts/podster-content/subdomain`);
+  no("PUT", `${acc}/workers/scripts/spikeh-ctl-abc123?x=1`);
 });
 
 test("item 2's judge", () => {

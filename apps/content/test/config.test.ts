@@ -185,9 +185,28 @@ describe("the package can't be deployed by accident", () => {
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|secrets\./);
     // It installs without running any package's install script: the tests only read wrangler's source. These three are
     // every step in the workflow that runs in the package.
-    expect([...job.matchAll(/- run: (.+)\n(?: +if: .+\n)? +working-directory: apps\/content\n/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
+    expect([...job.matchAll(/- run: (.+)\n +if: \$\{\{ !cancelled\(\) \}\}\n +working-directory: apps\/content\n/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
     expect(ci.split("apps/content").length - 1).toBe(job.split("working-directory: apps/content\n").length - 1);
     expect(job.split("working-directory: apps/content\n").length - 1).toBe(3);
+    // Every step of the job, in order, so a step added with no folder, or another's, is seen here too. The two packages
+    // installed with --ignore-scripts come before the two installed with scripts (contracts, then the scanner), so no
+    // install script has run on the runner when this package's tests read its files.
+    expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual([
+      "node .github/scripts/check-migrations.mjs --self-test",
+      'node .github/scripts/check-migrations.mjs "$BASE"',
+      "npm ci --ignore-scripts",
+      "npm run typecheck",
+      "npm test",
+      "npm ci --ignore-scripts",
+      "npm run typecheck",
+      "npm test",
+      "npm ci",
+      "npm test",
+      "npm ci",
+      "npm run typecheck",
+      "npm test",
+      "npm run test:container",
+    ]);
   });
 });
 

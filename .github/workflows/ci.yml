@@ -50,6 +50,31 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
+      # The outbound Worker (M6 stage 1), which refuses every request an app makes: typecheck and tests only. It is never
+      # deployed from here, and its tests fail if this job ever gains a deploy step. No package's install script runs: the
+      # tests only read the pinned wrangler's source, and never start it. It and the content Worker come before the two
+      # packages below, whose installs do run scripts, so no install script has run on this runner when their tests read
+      # their files. Their tests pin this job's whole list of steps, in this order.
+      - run: npm ci --ignore-scripts
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      - run: npm run typecheck
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      - run: npm test
+        if: ${{ !cancelled() }}
+        working-directory: apps/outbound
+      # The content Worker (M6 step 4(b)): typecheck and tests only, with no install script either. It is never deployed
+      # from here, and its tests fail if this job ever gains a deploy step.
+      - run: npm ci --ignore-scripts
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
+      - run: npm run typecheck
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
+      - run: npm test
+        if: ${{ !cancelled() }}
+        working-directory: apps/content
       # The contracts.
       - run: npm ci
         if: ${{ !cancelled() }}
@@ -71,29 +96,6 @@ jobs:
       - run: npm run test:container
         if: ${{ !cancelled() }}
         working-directory: apps/scanner
-      # The outbound Worker (M6 stage 1), which refuses every request an app makes: typecheck and tests only. It is never
-      # deployed from here, and its tests fail if this job ever gains a deploy step. No package's install script runs: the
-      # tests only read the pinned wrangler's source, and never start it.
-      - run: npm ci --ignore-scripts
-        if: ${{ !cancelled() }}
-        working-directory: apps/outbound
-      - run: npm run typecheck
-        if: ${{ !cancelled() }}
-        working-directory: apps/outbound
-      - run: npm test
-        if: ${{ !cancelled() }}
-        working-directory: apps/outbound
-      # The content Worker (M6 step 4(b)): typecheck and tests only, with no install script either. It is never deployed
-      # from here, and its tests fail if this job ever gains a deploy step.
-      - run: npm ci --ignore-scripts
-        if: ${{ !cancelled() }}
-        working-directory: apps/content
-      - run: npm run typecheck
-        if: ${{ !cancelled() }}
-        working-directory: apps/content
-      - run: npm test
-        if: ${{ !cancelled() }}
-        working-directory: apps/content
 
   # The API's specs, a third of the files in each of three jobs (vitest's --shard), since run together they took seven
   # minutes, the longest wait in this workflow after e2e. The three jobs are the same but for the shard's number. Each

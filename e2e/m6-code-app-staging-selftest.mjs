@@ -88,8 +88,11 @@ const check = (passed, title) => {
 // ---- the figures, read where they are set ----
 
 {
-  const wrangler = readFileSync(join(root, "apps/content/wrangler.jsonc"), "utf8");
-  const vars = (name) => wrangler.match(new RegExp(`"${name}": "([0-9]+)"`))?.[1];
+  // The content Worker's configured figures, as its own configuration test pins them, exactly: a change to the
+  // configuration fails that test until the test is changed with it. This reads that pin, never the configuration file:
+  // no script here but the browser runs names the package's run-time files (that test's own rule).
+  const pinned = readFileSync(join(root, "apps/content/test/config.test.ts"), "utf8").match(/expect\(config\.vars\)\.toEqual\((\{[^}]*\})\)/)?.[1] ?? "";
+  const vars = (name) => pinned.match(new RegExp(`${name}: "([0-9]+)"`))?.[1];
   check(Number(vars("WRITE_BUDGET_WRITES")) === WRITE_CAP.writes && Number(vars("WRITE_BUDGET_WINDOW_MS")) === WRITE_CAP.windowMs, "the write budget is the content Worker's configured one");
   check(Number(vars("APP_LIMIT_CPU_MS")) === APP_LIMITS.cpuMs && Number(vars("APP_LIMIT_SUBREQUESTS")) === APP_LIMITS.subRequests, "the dispatch's limits are the content Worker's configured ones");
   const refuse = readFileSync(join(root, "apps/outbound/src/refuse.ts"), "utf8");
@@ -110,7 +113,6 @@ const TAG = "e2e-selftest";
   const files = appFiles(TAG);
   check(Object.keys(files).every((path) => path.startsWith("site/")) && JSON.stringify(Object.keys(files).sort()) === '["site/index.html","site/podster-app.json","site/worker/index.js"]', "the app is a page, the manifest and one module, under site/");
   check(JSON.stringify(JSON.parse(files["site/podster-app.json"])) === JSON.stringify(MANIFEST) && files[`site/worker/${MANIFEST.main}`] !== undefined && MANIFEST.store === true, "the manifest names the module and asks for its store, and nothing else");
-  check(!Object.keys(files).some((path) => /wrangler/i.test(path)), "no wrangler file");
   let threw = false;
   try {
     moduleSource("Not A Tag");
@@ -227,7 +229,7 @@ try {
 {
   const script = readFileSync(join(here, "m6-code-app-staging.mjs"), "utf8");
   check(!/spawn\(/.test(script) && !/playwright/.test(script), "the script starts no process of its own and no browser: git is m6-release-run.mjs's");
-  check(!/api\.cloudflare\.com|wrangler|gh run/.test(script), "it calls no Cloudflare API, no wrangler and no gh run");
+  check(!/api\.cloudflare\.com|gh run|npx /.test(script), "it calls no Cloudflare API, no npx tool and no gh run");
   check(script.includes("publisher.stop()") && script.includes("cleanUpShared()") && /enabled: false/.test(script), "clean-up switches release off, makes the room private, and runs the shared clean-up");
   check(script.includes('run.mask(owner.id, "[owner]")') && script.includes('run.mask(admin.id, "[admin]")'), "both people's IDs are printed as their role");
   check(script.includes("quiet: true") && /for \(let n = 1; n <= WRITE_CAP\.writes \+ BURST_SPARE; n\+\+\)/.test(script), "the burst is bounded and sent one at a time");

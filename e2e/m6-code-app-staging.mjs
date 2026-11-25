@@ -240,7 +240,8 @@ async function main() {
     const problems = codeHeaderProblems(read.headers);
     ok(problems.length === 0, `the marker: ${problems.join("; ")}`);
     const head = await hostAsk(app(MARKER_PATH), { method: "HEAD" });
-    eq([head.status, head.body], [200, ""], "HEAD of the marker");
+    // fetch never hands over a body for HEAD, so only the status says anything here.
+    eq(head.status, 200, "HEAD of the marker");
     const nothing = `/e2e-${randomBytes(4).toString("hex")}`;
     const other = await hostAsk(app(nothing));
     const answered = moduleAnswer(other.body, TAG);
@@ -258,7 +259,7 @@ async function main() {
     ok(problems.length === 0, `the module's answer: ${problems.join("; ")}`);
     eq(read.setCookies, [], "cookies set by the host");
     const head = await hostAsk(app("/api/hello"), { method: "HEAD" });
-    eq([head.status, head.body], [200, ""], "HEAD of the same path");
+    eq(head.status, 200, "HEAD of the same path");
     const index = await hostAsk(app("/"));
     eq([index.status, index.body], [200, appFiles(TAG)["site/index.html"]], "the static index");
     const indexProblems = codeHeaderProblems(index.headers);
@@ -273,6 +274,7 @@ async function main() {
     ok(read.status === 200 && answered, `the store's read answered ${read.status}, not the module's 200`);
     eq(answered.env, ["STORE"], "the bindings the module sees");
     eq(answered.store, { seven: 7 }, "the row the module read from its store");
+    return "the module's bindings are exactly STORE, and it read { seven: 7 } from it";
   });
 
   say("\n## writes");

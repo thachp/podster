@@ -9,9 +9,9 @@ export { CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, deployGrant
 import { CONTENT_DOMAIN, FIXED_HEADERS, RELEASE_DIRECTORY, STAGING } from "./m6-release-staging-lib.mjs";
 
 /**
- * The write budget the content Worker is deployed with: `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS` in
- * apps/content/wrangler.jsonc (the owner's figure of 2026-11-16), which the self-test reads there. Windows are aligned
- * to the epoch, so every counter, and this run, agrees on where one starts.
+ * The write budget the content Worker is deployed with: `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS` in its
+ * configuration (the owner's figure of 2026-11-16), which the self-test reads from that package's configuration test,
+ * which pins them. Windows are aligned to the epoch, so every counter, and this run, agrees on where one starts.
  */
 export const WRITE_CAP = { writes: 300, windowMs: 600_000 };
 /** The dispatch's limits the content Worker is deployed with: `APP_LIMIT_CPU_MS` and `APP_LIMIT_SUBREQUESTS` there. */
@@ -51,8 +51,8 @@ export const SIGN_UPS = [
  */
 export const PLAN = [
   ["M6-C01", "An app with code (a worker/ module and podster-app.json asking for its store) is released through the real path: merged, asked for by an agent holding a deploy grant, approved by the room's admin who doesn't control it, and served; the result URL is its default host on the content domain"],
-  ["M6-C02", "The release marker on the app's host is the static file, byte for byte, not the module's answer, while a path with no file reaches the module; HEAD of the marker is 200 with no body"],
-  ["M6-C03", "A read reaches the module, with the fixed headers: no-store, Access-Control-Allow-Origin null, the sandbox CSP, HSTS, nosniff, no-referrer; the app's Set-Cookie, CORS, Cache-Control and own headers are dropped; HEAD has no body; the static index on the same host gets the same fixed headers"],
+  ["M6-C02", "The release marker on the app's host is the static file, byte for byte, not the module's answer, while a path with no file reaches the module; HEAD of the marker is 200"],
+  ["M6-C03", "A read reaches the module, with the fixed headers: no-store, Access-Control-Allow-Origin null, the sandbox CSP, HSTS, nosniff, no-referrer; the app's Set-Cookie, CORS, Cache-Control and own headers are dropped; HEAD of the same path is 200; the static index on the same host gets the same fixed headers"],
   ["M6-C04", "The module's environment holds exactly one binding, STORE, and it reads a row from that store"],
   ["M6-C05", "Writes: the content Worker answers the preflight itself (204, origin null, the fixed methods and content-type); a JSON POST reaches the module with its body, with the fixed headers and without the app's Set-Cookie; a POST that isn't JSON is refused 415 write_not_json"],
   ["M6-C06", `The write budget, at the deployed ${WRITE_CAP.writes} writes a ${WRITE_CAP.windowMs / 60_000}-minute window: every write within it reaches the app, and the first over it is refused 429 write_budget_spent, with a Retry-After to the window's end that the page may read`],

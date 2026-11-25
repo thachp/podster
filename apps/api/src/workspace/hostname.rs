@@ -52,10 +52,11 @@
 use super::*;
 use crate::hostname_proof::Resolver;
 use podster_core::hostname_requests::{
-    after_ask, claimed_read_wait_ms, request_rate_allows, unmap, HostnameRequestState, Unmap,
+    after_ask, claimed_read_wait_ms, request_rate_allows, setup_status, unmap,
+    HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
-    challenge_record_name, challenge_value, mappable_by, next_proof_check, normalize,
+    challenge_record_name, challenge_value, cname_target, mappable_by, next_proof_check, normalize,
     public_suffix_rules, request_expired, ClaimDecision, HostnameRefusal, PublicSuffixRules,
     RecheckOutcome, PENDING_TTL_MS,
 };
@@ -181,7 +182,12 @@ fn job_now(sql: &SqlStorage) -> i64 {
 
 /// One request as the contract's `AppHostnameRequest` gives it. A pending request past its 72 hours whose proof was
 /// never taken to the object reads as `expired`, as the job will record it.
-fn request_view(row: &Value, now: i64) -> Value {
+///
+/// **What the room's owner publishes (2026-11-25):** the TXT challenge, and the `CNAME` target, which is the content
+/// domain's fallback origin (`podster_core::hostnames::cname_target`), from the deployment's configuration alone and
+/// null while none is configured. `setup_status` is core's word for where the setup stands, from the state as read here
+/// and whether Cloudflare's last read of the custom hostname was exactly `active`. Display only: none of it decides.
+fn request_view(sql: &SqlStorage, row: &Value, now: i64, domain: Option<&str>) -> R<Value> {
     let hostname = text(&row["hostname"]).unwrap_or_default();
     let stored = row["state"].as_str().and_then(HostnameRequestState::parse);
     let expired = stored.is_some_and(|state| {
@@ -203,17 +209,29 @@ fn request_view(row: &Value, now: i64) -> Value {
             row["end_reason"].clone(),
         )
     };
-    json!({
+    let read_state = HostnameRequestState::parse(&state)
+        .ok_or_else(|| ApiError::internal("a request in no known state"))?;
+    let id = text(&row["id"]).unwrap_or_default();
+    let provider_active = read_state == HostnameRequestState::Claimed
+        && !rows(
+            sql,
+            "SELECT 1 AS active FROM hostname_provider WHERE request_id = ? AND provider_status = 'active' AND gone_at IS NULL",
+            vec![id.as_str().into()],
+        )?
+        .is_empty();
+    Ok(json!({
         "id": row["id"],
         "hostname": hostname,
         "state": state,
+        "setup_status": setup_status(read_state, provider_active).name(),
         "challenge_name": challenge_record_name(&hostname),
         "challenge_value": row["challenge"],
+        "cname_target": domain.map(cname_target),
         "requested_by": row["requested_by"],
         "requested_at": row["requested_at"],
         "expires_at": row["expires_at"],
         "end_reason": end_reason,
-    })
+    }))
 }
 
 const COLUMNS: &str = "id, hostname, state, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, checked_at, definite_no_since, end_reason, updated_at";
@@ -230,7 +248,7 @@ fn open_request(sql: &SqlStorage) -> R<Option<Value>> {
 }
 
 /// `GET app-hostname`'s answer: the open request, or else the latest, or null.
-fn view(sql: &SqlStorage, now: i64) -> R<Value> {
+fn view(sql: &SqlStorage, now: i64, domain: Option<&str>) -> R<Value> {
     let latest = match open_request(sql)? {
         Some(row) => Some(row),
         None => rows(
@@ -243,21 +261,33 @@ fn view(sql: &SqlStorage, now: i64) -> R<Value> {
         .into_iter()
         .next(),
     };
-    Ok(json!({ "request": latest.map(|row| request_view(&row, now)) }))
+    let request = latest
+        .map(|row| request_view(sql, &row, now, domain))
+        .transpose()?;
+    Ok(json!({ "request": request }))
 }
 
 /// A command's answer: the open request, ending or not, or null.
-fn open_view(sql: &SqlStorage, now: i64) -> R<Value> {
-    Ok(json!({ "request": open_request(sql)?.map(|row| request_view(&row, now)) }))
+fn open_view(sql: &SqlStorage, now: i64, domain: Option<&str>) -> R<Value> {
+    let request = open_request(sql)?
+        .map(|row| request_view(sql, &row, now, domain))
+        .transpose()?;
+    Ok(json!({ "request": request }))
 }
 
 /// `GET app-hostname`: for the room's owner or an admin, as a person, by the room's rows. A read grants nothing.
-pub(super) fn read(sql: &SqlStorage, who: &Participant, now: i64) -> R<Value> {
+/// `domain` is the deployment's content domain, which names the `CNAME` target.
+pub(super) fn read(
+    sql: &SqlStorage,
+    who: &Participant,
+    now: i64,
+    domain: Option<&str>,
+) -> R<Value> {
     use podster_policy::release::{release_view, ReleaseView};
     if release_view(&who.caller, true, false, false) != ReleaseView::Full {
         return Err(ApiError::not_allowed());
     }
-    view(sql, now)
+    view(sql, now, domain)
 }
 
 /// Ends every pending request whose 72 hours are over and whose proof was never taken to the object, in the caller's
@@ -377,7 +407,7 @@ pub(super) fn handle_request(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    open_view(sql, now)
+    open_view(sql, now, reads.domain.as_deref())
 }
 
 /// `DELETE app-hostname`, in the room's transaction (`podster_core::hostname_requests::unmap`). A pending request
@@ -388,6 +418,7 @@ pub(super) fn handle_remove(
     sql: &SqlStorage,
     who: &Participant,
     reads: &ConfigReads,
+    domain: Option<&str>,
     now: i64,
 ) -> R<Value> {
     may_change(who)?;
@@ -401,7 +432,7 @@ pub(super) fn handle_remove(
     .map_err(release_config::denial)?;
     sweep_expired(sql, now)?;
     let Some(row) = open_request(sql)? else {
-        return open_view(sql, now);
+        return open_view(sql, now, domain);
     };
     let id = text(&row["id"]).unwrap_or_default();
     let state = row["state"]
@@ -414,7 +445,7 @@ pub(super) fn handle_remove(
         !row["claimed_at"].is_null(),
     );
     match plan {
-        Unmap::Nothing => return open_view(sql, now),
+        Unmap::Nothing => return open_view(sql, now, domain),
         Unmap::Drop => exec(
             sql,
             "UPDATE hostname_request SET state = 'ended', open = NULL, end_reason = 'hostname_unmapped', ended_at = ?, updated_at = ? WHERE id = ?",
@@ -450,7 +481,7 @@ pub(super) fn handle_remove(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    open_view(sql, now)
+    open_view(sql, now, domain)
 }
 
 /// The deployment's resolver, if one is configured. Only staging has one. Test builds can also take it away from one

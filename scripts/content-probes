@@ -149,7 +149,8 @@ status=$(fetch POST "https://$host/")
 if [ "$status" = 405 ] && [ "$(header allow)" = "GET, HEAD" ]; then pass "a POST gets 405, allowing GET and HEAD"; else fail "a POST: HTTP $status"; fi
 status=$(fetch GET "https://$host/sw.js" "Service-Worker: script")
 if [ "$status" = 403 ] && [ "$(cat "$work/b")" = no_service_workers ]; then pass "a service worker's script gets 403"; else fail "a service worker's script: HTTP $status"; fi
-# The content domain itself is no app's host, and the route doesn't cover it: nothing may be served there. No
+# The content domain itself is no app's host: nothing may be served there. Since 2026-11-25 the zone's `*/*` route
+# brings it to the content Worker, which answers its own not-found; before, no route covered it. No
 # answer at all, as when it has no address, passes; so does any answer that isn't a success.
 status=$(fetch GET "https://$domain/")
 case "$status" in

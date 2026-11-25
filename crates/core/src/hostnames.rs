@@ -29,6 +29,10 @@ pub const PODSTER_DOMAIN: &str = "podster.dev";
 pub const RESERVED_DOMAINS: [&str; 3] = [PODSTER_DOMAIN, "opster.dev", "podster.site"];
 /// The name the challenge's TXT record goes at, before the hostname.
 pub const CHALLENGE_PREFIX: &str = "_podster-challenge";
+/// The label of the content domain's fallback origin, the name a room's owner points their hostname's `CNAME` at.
+/// Spike D (2026-11-18) showed Cloudflare reads a custom hostname `active` only once the customer's record points at the
+/// content zone, through this name.
+pub const CNAME_TARGET_LABEL: &str = "fallback";
 /// How long a pending request lives. Pending holds nothing.
 pub const PENDING_TTL_MS: i64 = 72 * 60 * 60 * 1000;
 /// How often a live claim's challenge is checked again.
@@ -401,6 +405,12 @@ pub fn mappable_by(
 /// Where the room's owner publishes the challenge: `_podster-challenge.<hostname>`.
 pub fn challenge_record_name(hostname: &str) -> String {
     format!("{CHALLENGE_PREFIX}.{hostname}")
+}
+
+/// Where a room's owner points their hostname's `CNAME`: the content domain's fallback origin,
+/// `fallback.<content domain>`. Fixed by the deployment's own content domain, and never by anything a caller sends.
+pub fn cname_target(content_domain: &str) -> String {
+    format!("{CNAME_TARGET_LABEL}.{content_domain}")
 }
 
 /// The challenge's value, made for one request alone from 32 random bytes the caller supplies: lower-case hexadecimal,

@@ -4684,7 +4684,12 @@ impl Workspace {
                     &who,
                     crate::content_provider::content_domain(&self.env).as_deref(),
                 ),
-                ["app-hostname"] if release_route_on => hostname::read(&sql, &who, now_ms()),
+                ["app-hostname"] if release_route_on => hostname::read(
+                    &sql,
+                    &who,
+                    now_ms(),
+                    crate::content_provider::content_domain(&self.env).as_deref(),
+                ),
                 ["release-approvals"] if release_route_on => release_approvals::read(&sql, &who),
                 _ => Err(ApiError::not_found()),
             };
@@ -5459,6 +5464,7 @@ impl Workspace {
             (Method::Delete, ["app-hostname"]) if release_route_on => {
                 hostname::may_change(&who)?;
                 let reads = self.config_reads(&identity.id, false).await?;
+                let domain = crate::content_provider::content_domain(&self.env);
                 self.command_checked(
                     &identity,
                     key,
@@ -5466,7 +5472,9 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     |_: &SqlStorage, who: &Participant| hostname::may_change(who),
-                    move |sql, who, now| hostname::handle_remove(sql, who, &reads, now),
+                    move |sql, who, now| {
+                        hostname::handle_remove(sql, who, &reads, domain.as_deref(), now)
+                    },
                 )
             }
             // Asking for a release of a task's merged commit (M6 step 6): who first, by the room's rows, then the

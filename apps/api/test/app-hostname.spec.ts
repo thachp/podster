@@ -171,6 +171,9 @@ describe("a room's custom hostname: the request and its challenge (M6 step 8)", 
       expect(first.status).toBe(200);
       const request = first.body.request;
       expect(request).toMatchObject({ hostname: name, state: "pending", challenge_name: `_podster-challenge.${name}`, requested_by: a.owner.id, end_reason: null });
+      // What the owner publishes (2026-11-25): the CNAME target is the content domain's fallback origin, from the
+      // deployment's own configuration, and the setup waits on the proof.
+      expect(request).toMatchObject({ setup_status: "proof_pending", cname_target: `fallback.${FAKE.domain}` });
       expect(request.id).toMatch(/^hnr_[0-9a-f]{32}$/);
       expect(request.challenge_value).toMatch(/^[0-9a-f]{64}$/);
       expect(request.expires_at - request.requested_at).toBe(72 * 60 * 60 * 1000);
@@ -311,6 +314,12 @@ describe("the proof job and the claim (M6 step 8)", () => {
     await jobClock(r, claimed.checked_at);
     await pass(r);
     expect(await requestRow(r)).toEqual(claimed);
+    // Claimed, the setup waits on Cloudflare until its last read is exactly `active`, and a read of gone undoes that.
+    await switchedOn(async () => expect((await get(r)).body.request).toMatchObject({ setup_status: "provider_pending", cname_target: `fallback.${FAKE.domain}` }));
+    for (const [status, gone, shown] of [["pending", null, "provider_pending"], ["active", null, "active"], ["active", 1, "provider_pending"]] as const) {
+      await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_provider SET create_sent_at = 1, provider_status = ?, gone_at = ? WHERE request_id = ?", status, gone, request.id));
+      await switchedOn(async () => expect((await get(r)).body.request.setup_status, `${status} ${gone}`).toBe(shown));
+    }
   });
 
   it("gives one hostname to one room: a second room's proof is refused while the claim lives", async () => {
@@ -325,6 +334,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
     await pass(b);
     expect(await requestRow(a)).toMatchObject({ state: "claimed" });
     expect(await requestRow(b)).toMatchObject({ state: "refused", open: null, end_reason: "hostname_claimed" });
+    await switchedOn(async () => expect((await get(b)).body.request).toMatchObject({ state: "refused", setup_status: "failed" }));
     expect((await claimState(name)).claim).toMatchObject({ workspace_id: a.room, request_id: ra.id });
     expect(await events(b)).toEqual([
       { type: "app_hostname.requested", actor_id: b.owner.id },
@@ -350,7 +360,7 @@ describe("the proof job and the claim (M6 step 8)", () => {
     await expectNoAlarmSooner(stub(r.room), 60 * 60 * 1000);
     // Past its 72 hours it reads as expired before the job records it, and the job records it.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?, expires_at = expires_at - ?", 72 * 3600_000, 72 * 3600_000));
-    await switchedOn(async () => expect((await get(r)).body.request).toMatchObject({ state: "expired", end_reason: "hostname_request_expired" }));
+    await switchedOn(async () => expect((await get(r)).body.request).toMatchObject({ state: "expired", setup_status: "failed", end_reason: "hostname_request_expired" }));
     await pass(r);
     expect(await requestRow(r)).toMatchObject({ state: "expired", open: null, end_reason: "hostname_request_expired" });
     expect(await claimState(name)).toEqual({ claim: null, suspended: false, generation: 0 });
@@ -448,7 +458,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     await switchedOn(async () => {
       await ask(r, name);
       expect((await remove(r)).body).toEqual({ request: null });
-      expect((await get(r)).body.request).toMatchObject({ hostname: name, state: "ended", end_reason: "hostname_unmapped" });
+      expect((await get(r)).body.request).toMatchObject({ hostname: name, state: "ended", setup_status: "ended", end_reason: "hostname_unmapped" });
       // Asking again changes nothing.
       expect((await remove(r)).body).toEqual({ request: null });
     });
@@ -464,7 +474,7 @@ describe("removing a custom hostname, and withdrawing a request never committed 
     const request = await askFor(r, name);
     // The proof was recorded, and the ask is out.
     await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET proved_at = ?, checked_at = ?", Date.now(), Date.now()));
-    expect((await removed(r)).body.request).toMatchObject({ id: request.id, state: "ending", end_reason: "hostname_unmapped" });
+    expect((await removed(r)).body.request).toMatchObject({ id: request.id, state: "ending", setup_status: "ended", end_reason: "hostname_unmapped" });
     // The withdrawal reaches the object first, the next time the job runs: it is recorded, with nothing to free.
     await rewindLook(r);
     await alarmPass(stub(r.room));

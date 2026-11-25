@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
-import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS } from "../src/handle";
+import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, isValidationPath, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS, VALIDATION_PATHS } from "../src/handle";
 import { CODE_MARK, customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
 import type { Admission } from "../src/counter";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
@@ -480,6 +480,8 @@ describe("every host the zone's catch-all route brings (*/*, step 8c)", () => {
   // hostname whose entry names it, and everything else gets this Worker's own not-found, with no app asked.
   const FALLBACK = `fallback.${DOMAIN}`;
   const PATHS = ["/", "/index.html", "/.well-known/podster-release.json", "/.well-known/acme-challenge/token", "/.well-known/pki-validation/file.txt"];
+  /** The paths of `PATHS` that aren't a certificate authority's: only these ever lead to a read. */
+  const READ_PATHS = PATHS.filter((path) => !isValidationPath(path));
 
   it("answers the content domain itself and names on it that are no app's with its own not-found, and reads nothing", async () => {
     const w = world();
@@ -506,7 +508,8 @@ describe("every host the zone's catch-all route brings (*/*, step 8c)", () => {
       const answer = await get(w, path, {}, FALLBACK);
       expect([path, answer.status, answer.headers.get("clear-site-data")]).toEqual([path, 404, '"cache"']);
     }
-    expect(w.reads.filter((read) => read.key !== STOP_KEY).map((read) => read.key)).toEqual(PATHS.map(() => FALLBACK));
+    // Its entry is looked up for an ordinary path only: a validation path is refused before anything is read.
+    expect(w.reads.filter((read) => read.key !== STOP_KEY).map((read) => read.key)).toEqual(READ_PATHS.map(() => FALLBACK));
     // An entry for another app's script, or a custom hostname's form, written under the name: still nothing.
     for (const value of [SCRIPT, `${CODE_MARK}${SCRIPT}`, `${SCRIPT}@${FALLBACK}`, `${SCRIPT}@app.example.com`]) {
       w.kv.set(FALLBACK, value);
@@ -531,8 +534,10 @@ describe("every host the zone's catch-all route brings (*/*, step 8c)", () => {
     // Its own entry, then removed: served once, and not after.
     w.kv.set(CUSTOM, `${SCRIPT}@${CUSTOM}`);
     expect((await get(w, "/", {}, CUSTOM)).status).toBe(200);
-    w.kv.delete(CUSTOM);
+    // While the entry is live, a validation path is still never the app's.
     expect((await get(w, "/.well-known/acme-challenge/token", {}, CUSTOM)).status).toBe(404);
+    w.kv.delete(CUSTOM);
+    expect((await get(w, "/index.html", {}, CUSTOM)).status).toBe(404);
     // An entry it can't read.
     w.kv.set(CUSTOM, `${SCRIPT}@${CUSTOM}`);
     w.failReads.keys.add(CUSTOM);
@@ -543,6 +548,103 @@ describe("every host the zone's catch-all route brings (*/*, step 8c)", () => {
       expect([host, (await handle(new Request(`https://${host}/`), w.deps)).status]).toEqual([host, 404]);
     }
     expect(w.sent.length).toBe(1);
+  });
+});
+
+describe("a certificate authority's validation paths (step 8c, the content zone's catch-all route)", () => {
+  // Under `*/*` a custom hostname's HTTP validation (ACME HTTP-01, or the PKI file method) would reach this Worker. An
+  // app that answered it could have a certificate issued for a customer's name, so no such request is ever an app's:
+  // this Worker's own not-found, on every host, over HTTP and HTTPS, for every method, before the redirect to HTTPS,
+  // with nothing read and no app asked, even with a live entry whose app would answer.
+  const CUSTOM = "app.example.com";
+  const VALIDATION = [
+    "/.well-known/acme-challenge/token",
+    "/.well-known/acme-challenge/",
+    "/.well-known/acme-challenge",
+    "/.well-known/pki-validation/fileauth.txt",
+    "/.well-known/pki-validation",
+    "/.WELL-KNOWN/ACME-CHALLENGE/token",
+    "/.well-known/acme-challenge/token?x=1",
+  ];
+  const live = () => {
+    const w = world();
+    w.kv.set(CUSTOM, `${SCRIPT}@${CUSTOM}`);
+    // Every app would answer anything, the token included.
+    w.apps.set(SCRIPT, () => new Response("token.thumbprint", { headers: { "content-type": "text/plain" } }));
+    return w;
+  };
+
+  it("are the two folders, at or under them, in any case", () => {
+    expect(VALIDATION_PATHS).toEqual(["/.well-known/acme-challenge", "/.well-known/pki-validation"]);
+    for (const path of ["/.well-known/acme-challenge", "/.well-known/acme-challenge/x", "/.well-known/pki-validation/", "/.Well-Known/Pki-Validation/a.txt"]) expect([path, isValidationPath(path)]).toEqual([path, true]);
+    for (const path of ["/", "/.well-known/acme-challengex", "/.well-known/acme-challenge.html", "/.well-known/podster-release.json", "/x/.well-known/acme-challenge/t", "/.well-known/security.txt"]) expect([path, isValidationPath(path)]).toEqual([path, false]);
+  });
+
+  it("are never sent to an app, on a default host or a custom hostname with a live entry, static or with code", async () => {
+    for (const codeApps of [false, true]) {
+      for (const mark of ["", CODE_MARK]) {
+        const w = live();
+        w.deps.codeApps = codeApps;
+        w.kv.set(HOST, `${mark}${SCRIPT}`);
+        w.kv.set(CUSTOM, `${mark}${SCRIPT}@${CUSTOM}`);
+        for (const host of [HOST, CUSTOM]) {
+          for (const scheme of ["https", "http"]) {
+            for (const path of VALIDATION) {
+              for (const method of ["GET", "HEAD", "POST", "OPTIONS"]) {
+                const answer = await handle(new Request(`${scheme}://${host}${path}`, { method }), w.deps);
+                const site = host === CUSTOM ? { "content-security-policy": sandboxPolicy(`https://${CUSTOM}`), "strict-transport-security": "max-age=31536000" } : {};
+                expect([host, scheme, path, method, answer.status, headersOf(answer)]).toEqual([host, scheme, path, method, 404, { ...NOT_FOUND, ...site }]);
+                if (method !== "HEAD") expect(await answer.text()).toBe("not_found\n");
+              }
+            }
+          }
+        }
+        expect([w.reads, w.sent, w.asked, w.counted]).toEqual([[], [], [], []]);
+        // An ordinary path on the same hosts is still served, so the refusal is by path alone.
+        if (!mark) expect([(await get(w, "/", {}, CUSTOM)).status, (await get(w)).status]).toEqual([200, 200]);
+      }
+    }
+  });
+
+  it("are refused on every other host the route brings, and while the domain is stopped, with nothing read", async () => {
+    const w = live();
+    w.kv.set(STOP_KEY, fixture.stop_value);
+    for (const host of [DOMAIN, `fallback.${DOMAIN}`, "unclaimed.example.org", "192.0.2.7"]) {
+      for (const scheme of ["https", "http"]) {
+        const answer = await handle(new Request(`${scheme}://${host}/.well-known/acme-challenge/token`), w.deps);
+        expect([host, scheme, answer.status, answer.headers.get("location")]).toEqual([host, scheme, 404, null]);
+      }
+    }
+    expect([w.reads, w.sent]).toEqual([[], []]);
+  });
+
+  it("leave a custom hostname's plain HTTP alone for any other path: a 301 to HTTPS, with nothing read", async () => {
+    const w = live();
+    for (const path of ["/", "/index.html?x=1", "/.well-known/podster-release.json", "/.well-known/acme-challengex"]) {
+      const answer = await handle(new Request(`http://${CUSTOM}${path}`), w.deps);
+      expect([path, answer.status, answer.headers.get("location")]).toEqual([path, 301, `https://${CUSTOM}${path}`]);
+    }
+    expect([w.reads, w.sent]).toEqual([[], []]);
+  });
+
+  it("read a request's host as the URL parser does: capitals are the same host, a trailing dot is no host of anyone's", async () => {
+    const w = live();
+    // Capitals: the parser lower-cases the host, so it is the same name, served for an ordinary path, never for a
+    // validation path.
+    for (const host of ["APP.Example.COM", "K3V9Q2.APPS-TEST.EXAMPLE"]) {
+      expect([host, (await handle(new Request(`https://${host}/`), w.deps)).status]).toEqual([host, 200]);
+      expect([host, (await handle(new Request(`https://${host}/.well-known/acme-challenge/token`), w.deps)).status]).toEqual([host, 404]);
+    }
+    const reads = w.reads.length;
+    const sent = w.sent.length;
+    // A trailing dot: a name the API never writes, so no entry is read and nothing is served, on any path.
+    for (const host of [`${CUSTOM}.`, `${HOST}.`, `${DOMAIN}.`]) {
+      for (const path of ["/", "/.well-known/acme-challenge/token"]) {
+        const answer = await handle(new Request(`https://${host}${path}`), w.deps);
+        expect([host, path, answer.status]).toEqual([host, path, 404]);
+      }
+    }
+    expect([w.reads.length, w.sent.length]).toEqual([reads, sent]);
   });
 });
 

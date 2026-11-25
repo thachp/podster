@@ -32,6 +32,11 @@ pub const MAX_PATH_BYTES: usize = 1_024;
 pub const MAX_SEGMENT_BYTES: usize = 255;
 /// Names refused anywhere in the directory: the platform treats them specially.
 pub const REFUSED_NAMES: [&str; 4] = ["_headers", "_redirects", "_worker.js", "_routes.json"];
+/// The two folders a certificate authority reads to validate a hostname over HTTP (HTTP-01 and the PKI file method).
+/// A release may hold nothing at or under them, so no room's content can answer a validation for a name, a custom
+/// hostname's included (M6 step 8c, the content zone's `*/*` route). The content Worker refuses these paths too.
+pub const VALIDATION_DIRECTORIES: [&str; 2] =
+    [".well-known/acme-challenge", ".well-known/pki-validation"];
 
 /// A tree entry's kind, from its `type`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,7 +93,8 @@ pub enum ContentProblem {
     Submodule(String),
     /// `release_entry_kind`: any other mode or type.
     UnknownEntry(String),
-    /// `release_refused_name`: `_headers`, `_redirects`, `_worker.js`, `_routes.json`, or the marker's path.
+    /// `release_refused_name`: `_headers`, `_redirects`, `_worker.js`, `_routes.json`, the marker's path, or a path at
+    /// or under a certificate authority's validation folder ([`VALIDATION_DIRECTORIES`]).
     RefusedName(String),
     /// `release_bad_path`: a path that breaks the path rule.
     BadPath(String, PathProblem),
@@ -238,13 +244,22 @@ pub fn served_address(path: &str) -> String {
     path.to_owned()
 }
 
-/// Whether a path is refused by name: one of [`REFUSED_NAMES`] as any segment, or the marker's path or anything under
-/// it. Compared case-folded, so a case twin of a refused name is refused too.
+/// Whether a path is refused by name: one of [`REFUSED_NAMES`] as any segment, the marker's path or anything under
+/// it, or one of [`VALIDATION_DIRECTORIES`] or anything under them, by its path or by the address it is served at
+/// ([`served_address`]). Compared case-folded, so a case twin of a refused
+/// name is refused too.
 pub fn refused_name(path: &str) -> bool {
     let folded = fold(path);
-    let marker = fold(MARKER_PATH);
-    folded == marker
-        || folded.starts_with(&format!("{marker}/"))
+    let address = served_address(&folded);
+    let at_or_under = |name: &str, refused: &str| {
+        let refused = fold(refused);
+        name == refused || name.starts_with(&format!("{refused}/"))
+    };
+    at_or_under(&folded, MARKER_PATH)
+        // A validation folder by its path, or by the address it is served at (`.html` stripped, an index at its folder).
+        || VALIDATION_DIRECTORIES
+            .iter()
+            .any(|dir| at_or_under(&folded, dir) || at_or_under(&address, dir))
         || folded
             .split('/')
             .any(|segment| REFUSED_NAMES.contains(&segment))

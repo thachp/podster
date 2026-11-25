@@ -30,7 +30,7 @@ It refuses, before changing anything, unless:
   - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
     run is looked into, not deployed
   - the API Worker on staging holds no secret named as a setting the API reads as plain configuration,
-    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_SUFFIX_RULES, PUBLIC_ROOMS or MANAGED_REPOSITORIES.
+    such as RELEASES, HOSTNAME_RESOLVER_URL, PUBLIC_ROOMS or MANAGED_REPOSITORIES.
     The API reads those through env.var and crate::setting, which take a secret too, so one would switch
     a feature on and survive every deploy. The names come from apps/api/src (scripts/setting-names.mjs),
     and the secrets from a read-only list of staging's API Worker secrets after npm ci, which gives

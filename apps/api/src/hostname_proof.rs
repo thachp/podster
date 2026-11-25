@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::time::Duration;
 use worker::*;
 
-/// The setting that names the resolver. Bound in no environment.
+/// The setting that names the resolver. Bound only in `env.staging`, to the resolver ruled on 2026-11-23.
 const RESOLVER: &str = "HOSTNAME_RESOLVER_URL";
 /// How long one lookup may take. The room's alarm waits on it.
 const LOOKUP_TIMEOUT_MS: u64 = 5_000;
@@ -37,7 +37,7 @@ pub(crate) struct Resolver {
 
 impl Resolver {
     /// The deployment's resolver, if one is configured and its address is an `https` URL on a public name, with no
-    /// query of its own. `None` otherwise, which is every environment.
+    /// query of its own. `None` otherwise, which is every environment but staging.
     pub(crate) fn from_env(env: &Env) -> Option<Resolver> {
         let Setting::Text(raw) = setting(env, RESOLVER) else {
             return None;

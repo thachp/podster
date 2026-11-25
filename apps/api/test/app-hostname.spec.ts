@@ -254,9 +254,17 @@ describe("a room's custom hostname: the request and its challenge (M6 step 8)", 
     expect(await requestRow(r)).toBeNull();
   });
 
-  it("is bound to no resolver and no list of public suffixes in any environment", () => {
+  it("binds the resolver on staging alone, to the one ruled, and the list of public suffixes nowhere", () => {
     const wrangler: string = BINDINGS.TEST_API_WRANGLER;
-    for (const name of ["HOSTNAME_RESOLVER_URL", "PUBLIC_SUFFIX_RULES"]) expect(wrangler.includes(name), name).toBe(false);
+    const config = JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, ""));
+    // The resolver the architect ruled on 2026-11-23 (#565), as a variable on staging. The top level, which is what
+    // production would deploy, and every other environment bind none, and it is named once.
+    expect(config.env.staging.vars.HOSTNAME_RESOLVER_URL).toBe("https://cloudflare-dns.com/dns-query");
+    expect(Object.keys(config.vars ?? {})).not.toContain("HOSTNAME_RESOLVER_URL");
+    for (const [name, environment] of Object.entries(config.env) as [string, any][]) if (name !== "staging") expect(Object.keys(environment.vars ?? {}), name).not.toContain("HOSTNAME_RESOLVER_URL");
+    expect(wrangler.match(/"HOSTNAME_RESOLVER_URL"\s*:/g)).toHaveLength(1);
+    // The Public Suffix List is compiled in from its dated snapshot, never a setting: no environment binds the old name.
+    expect(wrangler.includes("PUBLIC_SUFFIX_RULES")).toBe(false);
   });
 });
 
@@ -591,7 +599,7 @@ describe("the reviews' rulings on the claim (M6 step 8)", () => {
     await answerWith(name, request.challenge_value);
     await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_hostname_claims_closed (x INTEGER)"));
     const before = (await asked()).filter((line) => line.includes(name)).length;
-    // Closed: no provider, release switched on, a resolver and a Public Suffix List bound, and still refused.
+    // Closed: no provider, release switched on, a resolver bound and the Public Suffix List compiled in, and still refused.
     expect(refusedBy(await switchedOn(() => ask(r, newName())))).toEqual([409, "release_not_available"]);
     await rewindLook(r);
     await pass(r);

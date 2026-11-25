@@ -1,0 +1,7 @@
+# The Public Suffix List snapshot compiled into the API (docs/m6-plan.md, step 8a, open question 1). Written by
+# `scripts/public-suffix-list refresh`; don't edit it or public_suffix_list.dat by hand.
+source=https://publicsuffix.org/list/public_suffix_list.dat
+retrieved=2026-11-25
+version=2026-11-24_18-53-27_UTC
+commit=cb13e39ae72a79e17022b313f510c585751b5334
+sha256=cd1866797f7e9707269cabaf71e46f522299efadd504cdcd429af486bb620de2

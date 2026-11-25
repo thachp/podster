@@ -262,10 +262,9 @@ const pool = (partition: ContentPartition) =>
           TEST_STORE_RECONCILE_ACCOUNT: FAKE_STORES.reconcileAccount,
           // The stand-in's values as this project sees them, with its own partition's namespaces and control host.
           TEST_FAKE_CONTENT: JSON.stringify({ ...FAKE_CONTENT, ...CONTENT_PARTITIONS[partition], partition }),
-          // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in, and a few of the Public
-          // Suffix List's rules, in the list's own format. Test values: no environment binds either name.
+          // A custom hostname's proof (M6 step 8): the resolver, pointing at its stand-in. A test value: only staging
+          // binds this name, to the real resolver. The Public Suffix List is the compiled-in snapshot, as deployed.
           HOSTNAME_RESOLVER_URL: FAKE_RESOLVER.url,
-          PUBLIC_SUFFIX_RULES: "// A test list, in the Public Suffix List's format.\ncom\nnet\norg\nexample\nuk\nco.uk\nck\n*.ck\n!www.ck\n",
           // Custom hostnames at Cloudflare (M6 step 8b), pointing at their stand-in. Test values: no environment binds
           // either name, and the real ones are the owner's to set.
           CUSTOM_HOSTNAME_ZONE_ID: FAKE_HOSTNAMES.zone,

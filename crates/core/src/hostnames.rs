@@ -219,6 +219,37 @@ pub fn public_suffix_rules(list: &str) -> Vec<&str> {
         .collect()
 }
 
+/// The line that opens the list's ICANN section, as the list writes it.
+pub const ICANN_BEGIN: &str = "// ===BEGIN ICANN DOMAINS===";
+/// The line that closes the list's ICANN section.
+pub const ICANN_END: &str = "// ===END ICANN DOMAINS===";
+
+/// The rules of the Public Suffix List's ICANN section only, read as [`public_suffix_rules`] reads them (docs/m6-plan.md,
+/// 8a's open question 1: the snapshot the API is built with). The private section, names such as `github.io` that their
+/// owners listed themselves, is left out: a claim still needs the challenge published in the name's own DNS, which only
+/// whoever runs that zone can do. Empty, which [`mappable`] refuses as `hostname_unavailable`, unless the text has
+/// exactly one opening line and one closing line after it, each alone on its line.
+pub fn icann_public_suffix_rules(list: &str) -> Vec<&str> {
+    let list = list.strip_prefix('\u{FEFF}').unwrap_or(list);
+    let lines: Vec<&str> = list.lines().map(str::trim).collect();
+    let at = |marker: &str| -> Option<usize> {
+        let mut found = lines.iter().enumerate().filter(|(_, l)| **l == marker);
+        let first = found.next()?.0;
+        found.next().is_none().then_some(first)
+    };
+    let (Some(begin), Some(end)) = (at(ICANN_BEGIN), at(ICANN_END)) else {
+        return Vec::new();
+    };
+    let Some(section) = lines.get(begin + 1..end) else {
+        return Vec::new();
+    };
+    section
+        .iter()
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
 /// One rule of the Public Suffix List, as the deployment holds it: a plain rule (`co.uk`), a wildcard (`*.ck`), or an
 /// exception (`!www.ck`).
 #[derive(Clone, Debug, PartialEq, Eq)]

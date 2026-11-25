@@ -816,7 +816,7 @@ check "the secret check never prints a value: the script prints only what settin
 
 # The names from the API's real source: the switches, and none the code reads as a secret or staging sets as one.
 real=$(node "$scripts/setting-names.mjs" names "$scripts/../apps/api/src")
-for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_SUFFIX_RULES PUBLIC_ROOMS MANAGED_REPOSITORIES REPOSITORY_REQUESTERS \
+for name in RELEASES HOSTNAME_RESOLVER_URL PUBLIC_ROOMS MANAGED_REPOSITORIES REPOSITORY_REQUESTERS \
   GITHUB_AGENT_APP_READS_CHECKS GATEWAY_URL APP_URL GITHUB_ORG_LOGIN; do
   check "the real source gives $name" grep -q -x "$name" <<< "$real"
 done

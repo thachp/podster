@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Checks and refreshes the Public Suffix List snapshot compiled into the API (docs/m6-plan.md, step 8a, open question
+# 1): third_party/public-suffix-list/public_suffix_list.dat, kept unmodified with its MPL-2.0 header, and SNAPSHOT
+# beside it, which records where it came from, when, and its SHA-256.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/public-suffix-list check
+       scripts/public-suffix-list refresh
+
+check    Reads the vendored snapshot and refuses, exit 1, unless:
+           - its SHA-256 is the one SNAPSHOT records;
+           - it begins with the MPL-2.0 header;
+           - it has one ICANN section, opened and then closed;
+           - SNAPSHOT's retrieved date is at most 90 days old (the same rule
+             crates/core's tests apply in CI).
+         Reaches nothing on the network.
+
+refresh  Downloads https://publicsuffix.org/list/public_suffix_list.dat with
+         curl into a new empty temporary folder, the list's only supported
+         source. The download is data: it is never run. It replaces the
+         snapshot only if it begins with the MPL-2.0 header and has one ICANN
+         section; then it rewrites SNAPSHOT with today's date (UTC), the list's
+         VERSION and COMMIT lines and the new SHA-256, and runs check. It
+         commits nothing: review the diff, and run cargo test -p podster-core,
+         which fails if any ICANN rule can't be read.
+
+Exit 2 for anything else.
+EOF
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  check | refresh) ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+dir="$root/third_party/public-suffix-list"
+list="$dir/public_suffix_list.dat"
+meta="$dir/SNAPSHOT"
+source_url="https://publicsuffix.org/list/public_suffix_list.dat"
+max_age_days=90
+refuse() { echo "public-suffix-list: $*" >&2; exit 1; }
+
+sha256_of() {
+  if command -v sha256sum > /dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+# The value of KEY in SNAPSHOT, or nothing.
+recorded() { sed -n "s/^$1=//p" "$meta"; }
+# The days since 1970-01-01 of a YYYY-MM-DD date, in UTC, on GNU or BSD date.
+days_of() {
+  local seconds
+  seconds=$(date -u -d "$1" +%s 2> /dev/null || date -u -j -f '%Y-%m-%d %H:%M:%S' "$1 00:00:00" +%s 2> /dev/null) \
+    || refuse "can't read the date '$1'"
+  echo $((seconds / 86400))
+}
+# Whether FILE has the list's shape: the MPL-2.0 header first, and the ICANN section opened once, then closed once.
+well_formed() {
+  local file=$1 begin end
+  head -n 1 "$file" | grep -q -x '// This Source Code Form is subject to the terms of the Mozilla Public' || return 1
+  [ "$(grep -c -x '// ===BEGIN ICANN DOMAINS===' "$file")" -eq 1 ] || return 1
+  [ "$(grep -c -x '// ===END ICANN DOMAINS===' "$file")" -eq 1 ] || return 1
+  begin=$(grep -n -x '// ===BEGIN ICANN DOMAINS===' "$file" | cut -d: -f1)
+  end=$(grep -n -x '// ===END ICANN DOMAINS===' "$file" | cut -d: -f1)
+  [ "$end" -gt "$begin" ]
+}
+
+check() {
+  [ -f "$list" ] || refuse "no snapshot at third_party/public-suffix-list/public_suffix_list.dat"
+  [ -f "$meta" ] || refuse "no third_party/public-suffix-list/SNAPSHOT"
+  local want got retrieved age
+  want=$(recorded sha256)
+  got=$(sha256_of "$list")
+  [ -n "$want" ] || refuse "SNAPSHOT records no sha256"
+  [ "$got" = "$want" ] || refuse "the snapshot's SHA-256 is $got, but SNAPSHOT records $want"
+  well_formed "$list" || refuse "the snapshot lacks the MPL-2.0 header or one ICANN section"
+  [ "$(recorded source)" = "$source_url" ] || refuse "SNAPSHOT's source isn't $source_url"
+  retrieved=$(recorded retrieved)
+  [[ "$retrieved" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || refuse "SNAPSHOT's retrieved date isn't YYYY-MM-DD"
+  age=$(($(days_of "$(date -u +%Y-%m-%d)") - $(days_of "$retrieved")))
+  [ "$age" -ge 0 ] || refuse "SNAPSHOT's retrieved date $retrieved is in the future"
+  [ "$age" -le "$max_age_days" ] \
+    || refuse "the snapshot is $age days old, more than $max_age_days. Run: scripts/public-suffix-list refresh"
+  echo "public-suffix-list: ok, retrieved $retrieved ($age days ago), sha256 $got"
+}
+
+if [ "$1" = "check" ]; then
+  check
+  exit 0
+fi
+
+download=$(mktemp -d)
+trap 'rm -rf "$download"' EXIT
+curl --fail --silent --show-error --location --proto '=https' --max-time 60 --max-filesize 5000000 \
+  --output "$download/public_suffix_list.dat" "$source_url" || refuse "the download failed"
+fresh="$download/public_suffix_list.dat"
+well_formed "$fresh" || refuse "the download lacks the MPL-2.0 header or one ICANN section; nothing was changed"
+version=$(sed -n 's|^// VERSION: \([0-9A-Za-z_:-]*\)$|\1|p' "$fresh" | head -n 1)
+commit=$(sed -n 's|^// COMMIT: \([0-9a-f]*\)$|\1|p' "$fresh" | head -n 1)
+sum=$(sha256_of "$fresh")
+cp "$fresh" "$list"
+{
+  echo "# The Public Suffix List snapshot compiled into the API (docs/m6-plan.md, step 8a, open question 1). Written by"
+  echo "# \`scripts/public-suffix-list refresh\`; don't edit it or public_suffix_list.dat by hand."
+  echo "source=$source_url"
+  echo "retrieved=$(date -u +%Y-%m-%d)"
+  echo "version=$version"
+  echo "commit=$commit"
+  echo "sha256=$sum"
+} > "$meta"
+check
+echo "public-suffix-list: refreshed. Update THIRD_PARTY_NOTICES.md's date and SHA-256, then run cargo test -p podster-core."

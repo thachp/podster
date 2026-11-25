@@ -8,7 +8,7 @@
 //
 // A test sets what a name answers through `resolver-fake.example.com`, and reads back which names were asked for.
 
-/** Test values only. No environment binds `HOSTNAME_RESOLVER_URL`. */
+/** Test values only. Only staging binds `HOSTNAME_RESOLVER_URL`, to the real resolver. */
 export const FAKE_RESOLVER = { url: "https://doh-test.example.com/dns-query" };
 
 /** What a name answers: a JSON body as it is, or an HTTP status with no body. */

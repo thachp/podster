@@ -64,7 +64,7 @@ TOKEN=selftestFAKEtoken_0123456789abcdefghijklmnopqrstuv
 DOMAIN=content-selftest.example
 ZONE=99887766554433221100ffeeddccbbaa
 # podster-content's deployed settings as Cloudflare answers them: APPS naming podster-outbound as outbound.
-CONTENT_SETTINGS_OK='{"success":true,"result":{"bindings":[{"type":"kv_namespace","name":"SERVE","namespace_id":"00112233445566778899aabbccddeeff"},{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound","environment":"production"},"params":[]}}]}}'
+CONTENT_SETTINGS_OK='{"success":true,"result":{"bindings":[{"type":"kv_namespace","name":"SERVE","namespace_id":"00112233445566778899aabbccddeeff"},{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound","environment":"production"},"params":[]}},{"type":"plain_text","name":"APP_LIMIT_CPU_MS","text":"50"},{"type":"plain_text","name":"APP_LIMIT_SUBREQUESTS","text":"50"}]}}'
 echo "$TOKEN" > "$fix/token-expected"
 
 # A stand-in that hangs (gh-hangs, deploy-hangs, probe-hangs) becomes one perl process that writes its marker and then
@@ -714,6 +714,29 @@ check "  and that the content Worker's dispatch binding names it as outbound" sa
 check "  no deploy, no probe, the token nowhere" unchanged
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
 check "  it says it would deploy the write counter, with the cap from the committed file" said "^and its write counter \\(migration v1, the class WriteCounter\\) with a cap of 300 writes per 600000 ms for each app\\.$"
+check "  it says it would deploy the dispatch's limits from the committed file" said "^Each dispatch to an app with code is limited to 50 CPU ms and 50 subrequests\\.$"
+
+# --- the dispatch's limits for apps with code, from the committed file, as the content Worker takes them ---
+limits_refused() { # limits_refused TITLE SED-EXPRESSION PATTERN-THE-EDIT-LEAVES
+  SEED_EDIT=$2 fresh
+  check "$1: the edit was committed" quiet grep -q -F -- "$3" "$work/apps/content/wrangler.jsonc"
+  dc 1 "${files[@]}" || true
+  check "  refused, nothing deployed" refused ".*APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS must be decimal strings"
+}
+limits_refused "a CPU limit missing" 's/, "APP_LIMIT_CPU_MS": "50"//' '"WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_SUBREQUESTS"'
+limits_refused "a subrequest limit missing" 's/, "APP_LIMIT_SUBREQUESTS": "50"//' '"APP_LIMIT_CPU_MS": "50" }'
+limits_refused "a CPU limit of 0" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "0"/' '"APP_LIMIT_CPU_MS": "0"'
+limits_refused "a CPU limit that is a number, not a string" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": 50/' '"APP_LIMIT_CPU_MS": 50'
+limits_refused "a subrequest limit with a leading zero" 's/"APP_LIMIT_SUBREQUESTS": "50"/"APP_LIMIT_SUBREQUESTS": "050"/' '"050"'
+limits_refused "a CPU limit of ten digits" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "1000000000"/' '"1000000000"'
+limits_refused "a CPU limit one past the platform's 300000 ms" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "300001"/' '"300001"'
+limits_refused "a CPU limit of seven digits" 's/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "1000000"/' '"1000000"'
+SEED_EDIT='s/"APP_LIMIT_CPU_MS": "50"/"APP_LIMIT_CPU_MS": "300000"/' fresh
+dc 0 "${files[@]}" || true
+check "a CPU limit at the platform's 300000 ms is taken" bash -c "[ $LAST -eq 0 ] && grep -q -F 'limited to 300000 CPU ms and 50 subrequests.' '$tmp/out'"
+SEED_EDIT='s/"APP_LIMIT_SUBREQUESTS": "50"/"APP_LIMIT_SUBREQUESTS": "0"/' fresh
+dc 0 "${files[@]}" || true
+check "a subrequest limit of 0 is taken, as the content Worker takes it" bash -c "[ $LAST -eq 0 ] && grep -q -F 'limited to 50 CPU ms and 0 subrequests.' '$tmp/out'"
 
 # --- the write counter and its cap, from the committed file in S6's exact shape only ---
 committed_refused() { # committed_refused TITLE SED-EXPRESSION PATTERN-THE-EDIT-LEAVES REASON
@@ -801,11 +824,11 @@ check "  exactly two deploys: the outbound Worker first, from its own package, t
 check "  the outbound Worker's configuration: the owner's account, both public addresses off, and nothing else: no route, no binding" \
   quiet jq -e --arg a "$ACCOUNT" '(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"]) and .name == "podster-outbound" and .account_id == $a and .workers_dev == false and .preview_urls == false and .compatibility_date == "2026-08-01" and (.main | endswith("/apps/outbound/src/index.ts"))' "$fix/deployed-podster-outbound.json"
 check "  between the two, it saw podster-outbound on the account" said "^ok      podster-outbound is on the account"
-check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out' && grep -q '^PASS    no custom domain on the account runs podster-outbound' '$tmp/out' && ! grep -q '^NOT SHOWN whether' '$tmp/out'"
+check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out' && grep -q '^PASS    podster-content.s deployed limits for each dispatch to an app with code are 50 CPU ms and 50 subrequests' '$tmp/out' && grep -q '^PASS    no custom domain on the account runs podster-outbound' '$tmp/out' && ! grep -q '^NOT SHOWN whether' '$tmp/out'"
 check "  it says an app's fetch being refused is NOT SHOWN" said "^NOT SHOWN an app's fetch refused by podster-outbound: that needs an app with code"
 check "  every API call, before and after the deploy, was a GET with the token on stdin" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
-  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-podster-content.json"
+  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-podster-content.json"
 check "  one request waiting for the route, then four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
   bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
 check "  the route answered at once: no wait" bash -c "grep -q '^ok      the route answers (HTTP 404, try 1)' '$tmp/out' && ! grep -q '^sleep ' '$fix/calls'"
@@ -815,7 +838,7 @@ check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
 
 fresh; touch "$fix/deploy-fails-podster-content"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
-check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false' '$tmp/out'"
+check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving as it was deployed: every deploy by this script names podster-outbound' '$tmp/out'"
 check "  no probe ran" never_called "^probe "
 fresh; touch "$fix/wrangler-leaks"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "wrangler output holding the token: exit 3, redacted, not printed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler.s output or its log held the token' '$tmp/out' && grep -q 'redacted token' '$tmp/out'"
@@ -851,9 +874,11 @@ outbound_check "  a setting of another shape is unreadable too" 4 "^FAIL    pods
 outbound_check "a workers.dev setting that doesn't say previews: NOT SHOWN, and exit 4" 4 "^NOT SHOWN whether podster-outbound has preview addresses" outbound-subdomain 200 '{"success":true,"result":{"enabled":false}}'
 outbound_check "a binding that names no outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS to the namespace naming podster-outbound" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps"}]}}'
 outbound_check "a binding naming another outbound Worker: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"elsewhere"}}}]}}'
+outbound_check "deployed limits missing: exit 4" 4 "^FAIL    podster-content's deployed settings don't hold APP_LIMIT_CPU_MS 50 and APP_LIMIT_SUBREQUESTS 50" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound"}}}]}}'
+outbound_check "deployed limits other than the committed: exit 4" 4 "^FAIL    podster-content's deployed settings don't hold APP_LIMIT_CPU_MS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound"}}},{"type":"plain_text","name":"APP_LIMIT_CPU_MS","text":"5000"},{"type":"plain_text","name":"APP_LIMIT_SUBREQUESTS","text":"50"}]}}'
 outbound_check "a binding to another namespace: exit 4" 4 "^FAIL    podster-content's deployed settings have no binding APPS" content-settings 200 '{"success":true,"result":{"bindings":[{"type":"dispatch_namespace","name":"APPS","namespace":"other","outbound":{"worker":{"service":"podster-outbound"}}}]}}'
 outbound_check "settings that can't be read: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding names podster-outbound as outbound: its settings couldn't be read in the shape expected \\(HTTP 403\\)" content-settings 403 '{"success":false,"errors":[]}'
-check "  and no PASS for the binding, and never the success line" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out' && ! grep -q 'every probe passed' '$tmp/out' && grep -q 'but 0 probe(s) failed and 1 check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified' '$tmp/out'"
+check "  and no PASS for the binding, and never the success line" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out' && ! grep -q 'every probe passed' '$tmp/out' && grep -q 'but 0 probe(s) failed and 2 check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified' '$tmp/out'"
 outbound_check "settings in another shape: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding" content-settings 200 '{"success":true,"result":{"bindings":{}}}'
 
 # --- custom domains ---

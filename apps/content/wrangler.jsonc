@@ -26,7 +26,12 @@
   // The write cap's two settings (stage 1, S6): at most this many writes for each app in each window of this many
   // milliseconds, the owner's figures of 2026-11-16, 300 writes per 10 minutes. Decimal strings. The code holds no
   // default for either: missing or malformed, every write to an app with code is refused.
-  "vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000" },
+  //
+  // The limits every dispatch to an app with code is given (`src/limits.ts`): 50 CPU milliseconds and 50 subrequests,
+  // the architect's figures of 2026-11-25 for pilots, for the owner to review; not measured by any spike. Decimal
+  // strings. The code holds no default for either: missing or malformed, every request that would reach an app with
+  // code is refused `503 app_limits_unknown`.
+  "vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50" },
   // Its bindings: the serve entries, to read, the namespace that holds each release's script, and its own write
   // counter. Nothing to the gateway, the API, D1 or R2, and no secret.
   "kv_namespaces": [{ "binding": "SERVE", "id": "00000000000000000000000000000000" }],

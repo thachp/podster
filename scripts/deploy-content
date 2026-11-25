@@ -161,8 +161,10 @@ It refuses, before changing anything, unless:
     exactly the committed shape: the binding WRITE_COUNTER to this Worker's own class WriteCounter,
     the one migration v1 making it a SQLite-backed class, and WRITE_BUDGET_WRITES and
     WRITE_BUDGET_WINDOW_MS as decimal strings the content Worker takes as a cap (writes 0 to
-    4294967295, the window 1 to 9223372036854775807). The deploy carries those four
-    and nothing else from that file beyond the name, entry point and compatibility date.
+    4294967295, the window 1 to 9223372036854775807), and APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS
+    as decimal strings the content Worker takes as a dispatch's limits (CPU 1 to 300000 ms, the
+    platform's maximum, and subrequests 0 to 999999999). The deploy carries those six and nothing else from that file
+    beyond the name, entry point and compatibility date.
   - Cloudflare's API says, read with the token, each answer in exactly the shape expected:
       the token is active
       the token can't read API tokens, its own included (a token that can is more than a deploy needs)
@@ -548,7 +550,8 @@ import { parseJsonc } from "./e2e/jsonc.mjs";
 const c = parseJsonc(readFileSync("apps/content/wrangler.jsonc", "utf8"));
 process.stdout.write(JSON.stringify({ name: c.name, main: c.main, compatibility_date: c.compatibility_date,
   durable_objects: c.durable_objects ?? null, migrations: c.migrations ?? null,
-  writes: c.vars?.WRITE_BUDGET_WRITES ?? null, window_ms: c.vars?.WRITE_BUDGET_WINDOW_MS ?? null }));
+  writes: c.vars?.WRITE_BUDGET_WRITES ?? null, window_ms: c.vars?.WRITE_BUDGET_WINDOW_MS ?? null,
+  cpu_ms: c.vars?.APP_LIMIT_CPU_MS ?? null, subrequests: c.vars?.APP_LIMIT_SUBREQUESTS ?? null }));
 ') || refuse "couldn't read apps/content/wrangler.jsonc"
 [ "$(jq -r .name <<< "$committed")" = podster-content ] || refuse "apps/content/wrangler.jsonc doesn't name the Worker podster-content"
 jq -e '.durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]}' <<< "$committed" > /dev/null \
@@ -562,6 +565,12 @@ jq -e '.migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}]' <
 jq -e '(.writes | type == "string" and test("^(0|[1-9][0-9]{0,9})$") and (length < 10 or . <= "4294967295"))
   and (.window_ms | type == "string" and test("^[1-9][0-9]{0,18}$") and (length < 19 or . <= "9223372036854775807"))' <<< "$committed" > /dev/null \
   || refuse "apps/content/wrangler.jsonc's WRITE_BUDGET_WRITES and WRITE_BUDGET_WINDOW_MS must be decimal strings the content Worker takes as a cap: writes 0 to 4294967295, the window 1 to 9223372036854775807"
+# Exactly what the content Worker's `limitsFromSettings` (apps/content/src/limits.ts) takes as a dispatch's limits, and
+# nothing it would read as none: decimal strings with no sign and no leading zero; the CPU time 1 to 300000 ms (the
+# platform's maximum, compared as a string by length and then digit by digit), the subrequests 0 to 999999999. Without them every request to an app with code would be refused.
+jq -e '(.cpu_ms | type == "string" and test("^[1-9][0-9]{0,5}$") and (length < 6 or . <= "300000"))
+  and (.subrequests | type == "string" and test("^(0|[1-9][0-9]{0,8})$"))' <<< "$committed" > /dev/null \
+  || refuse "apps/content/wrangler.jsonc's APP_LIMIT_CPU_MS and APP_LIMIT_SUBREQUESTS must be decimal strings the content Worker takes as a dispatch's limits: CPU 1 to 300000 ms, subrequests 0 to 999999999"
 # The outbound Worker's committed file: exactly its six keys, its name, both public addresses off. Its placeholder
 # account is never used: the deploy's configuration carries the owner's. Nothing else is taken from it.
 outbound_committed=$(node --input-type=module -e '
@@ -575,13 +584,16 @@ jq -e --arg o "$OUTBOUND" '(keys == ["account_id", "compatibility_date", "main",
   || refuse "apps/outbound/wrangler.jsonc must hold exactly its name $OUTBOUND, entry point src/index.ts, compatibility date, placeholder account and both public addresses off, and nothing else: no route and no binding"
 writes=$(jq -r .writes <<< "$committed")
 window_ms=$(jq -r .window_ms <<< "$committed")
+cpu_ms=$(jq -r .cpu_ms <<< "$committed")
+subrequests=$(jq -r .subrequests <<< "$committed")
 route="*.$domain/*"
 jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< "$committed")" --arg account "$account" \
   --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" --arg outbound "$OUTBOUND" '{
     name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
     workers_dev: false, preview_urls: false,
     routes: [{ pattern: $route, zone_name: $domain }],
-    vars: { CONTENT_DOMAIN: $domain, WRITE_BUDGET_WRITES: $c.writes, WRITE_BUDGET_WINDOW_MS: $c.window_ms },
+    vars: { CONTENT_DOMAIN: $domain, WRITE_BUDGET_WRITES: $c.writes, WRITE_BUDGET_WINDOW_MS: $c.window_ms,
+            APP_LIMIT_CPU_MS: $c.cpu_ms, APP_LIMIT_SUBREQUESTS: $c.subrequests },
     kv_namespaces: [{ binding: "SERVE", id: $kv }],
     dispatch_namespaces: [{ binding: "APPS", namespace: $namespace, outbound: { service: $outbound } }],
     durable_objects: $c.durable_objects,
@@ -601,6 +613,7 @@ echo "then it would deploy podster-content at $here, origin/main's tip with ci.y
 echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace,"
 echo "the dispatch binding APPS naming $OUTBOUND as the namespace's outbound Worker,"
 echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
+echo "Each dispatch to an app with code is limited to $cpu_ms CPU ms and $subrequests subrequests."
 echo "No other route, no workers.dev address and no preview address."
 
 if [ "$deploy" != true ]; then
@@ -687,7 +700,7 @@ echo "ok      $OUTBOUND is on the account"
 step "wrangler deploy: podster-content"
 phase=deploying
 wrangler_deploy content content "$work/wrangler.json"
-deployed_output content "$OUTBOUND is deployed. The content Worker deployed before, if there is one, keeps serving without the outbound binding: acceptable only while CODE_APPS_ENABLED is false, since no app's code runs, so fix the cause and run this again."
+deployed_output content "$OUTBOUND is deployed. The content Worker deployed before, if there is one, keeps serving as it was deployed: every deploy by this script names $OUTBOUND as its dispatch's outbound Worker, and one deployed without it had the code-apps switch off, so no app's code runs past it. Fix the cause and run this again."
 version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy-content.out" | head -n 1 | sed 's/.*: //' || true)
 echo "version podster-content ${version:-not printed by wrangler}"
 
@@ -816,8 +829,18 @@ if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.bind
   else
     fail "podster-content's deployed settings have no binding APPS to the namespace naming $OUTBOUND as outbound"
   fi
+  # The dispatch's limits, as the deployed Worker holds them: both plain-text variables, exactly the committed figures.
+  # Without them every request to an app with code is refused, so a deploy that lost them is a failure.
+  if jq -e --arg c "$cpu_ms" --arg s "$subrequests" '[.result.bindings[] | select(type == "object")] as $b
+      | ([$b[] | select(.name == "APP_LIMIT_CPU_MS")] == [{"type": "plain_text", "name": "APP_LIMIT_CPU_MS", "text": $c}])
+      and ([$b[] | select(.name == "APP_LIMIT_SUBREQUESTS")] == [{"type": "plain_text", "name": "APP_LIMIT_SUBREQUESTS", "text": $s}])' "$work/body" > /dev/null; then
+    pass "podster-content's deployed limits for each dispatch to an app with code are $cpu_ms CPU ms and $subrequests subrequests"
+  else
+    fail "podster-content's deployed settings don't hold APP_LIMIT_CPU_MS $cpu_ms and APP_LIMIT_SUBREQUESTS $subrequests as plain text"
+  fi
 else
   not_shown "whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
+  not_shown "whether podster-content's deployed limits are $cpu_ms CPU ms and $subrequests subrequests: its settings couldn't be read"
 fi
 cf "/accounts/$account/workers/domains"
 if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then

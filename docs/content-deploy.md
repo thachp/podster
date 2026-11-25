@@ -70,7 +70,8 @@ The committed file supplies only:
 
 - the Worker's name, entry point and compatibility date;
 - **the write counter** (M6 stage 1, S6): the binding `WRITE_COUNTER` to this Worker's own class `WriteCounter`, and the one migration, `v1`, which makes it a SQLite-backed class;
-- **the write cap's two settings,** `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS`, the owner's 300 writes per 600,000 ms.
+- **the write cap's two settings,** `WRITE_BUDGET_WRITES` and `WRITE_BUDGET_WINDOW_MS`, the owner's 300 writes per 600,000 ms;
+- **the dispatch's two limits** for an app with code, `APP_LIMIT_CPU_MS` and `APP_LIMIT_SUBREQUESTS`, 50 and 50: the architect's figures of 2026-11-25 for pilots, for the owner to review, not measured by any spike. Each must be a decimal string the content Worker's `limitsFromSettings` takes (CPU 1 to 300,000 ms, the platform's maximum, and subrequests 0 to 999,999,999), or the script refuses before anything changes. After a deploy it checks, from `podster-content`'s deployed settings, that both are there as plain text with exactly those figures; missing or different is a failure (exit 4).
 
 Each of these is taken only in exactly that shape: another binding, another class, a binding to another Worker's class, another migration, or a setting the content Worker wouldn't take as a cap (a decimal string, writes 0 to 4,294,967,295 and the window 1 to 9,223,372,036,854,775,807 ms, as `capFromSettings` reads them) is refused before anything changes. So the first deploy makes the counter's class on the second account, and the report run prints the cap it would deploy. Without the counter and its cap, every write to an app with code would be refused `503 write_budget_unknown`; while the code-apps switch is off, nothing writes at all.
 
@@ -155,7 +156,7 @@ An error the script doesn't handle, such as an unbound variable, never exits 0: 
 - during the content Worker's deploy, `podster-outbound` is deployed and the content Worker may or may not be, so check the account before running it again;
 - **between the two deploys** (the check that `podster-outbound` is on the account, or a leak in that answer), the content Worker was **not** deployed, and the output says so.
 
-**If `podster-outbound` deploys and the content Worker's deploy then fails (exit 3),** the content Worker deployed before, if there is one, keeps serving without the outbound binding. That's acceptable only while `CODE_APPS_ENABLED` (`apps/content/src/handle.ts`) is false, since no app's code runs then. The script says so; fix the cause and run it again.
+**If `podster-outbound` deploys and the content Worker's deploy then fails (exit 3),** the content Worker deployed before, if there is one, keeps serving as it was deployed. Every deploy by this script names `podster-outbound` on the dispatch binding; a content Worker deployed before that (before 2026-11-24) had no outbound binding, and was acceptable only because its `CODE_APPS_ENABLED` (`apps/content/src/handle.ts`) was false, so no app's code ran. *Since 2026-11-25 the switch is on in the source, so a content Worker deployed from it serves apps with code; it is deployed only through this script, so always with the outbound binding.* The script says so; fix the cause and run it again.
 - during the probes, the Workers are deployed and not verified.
 
 The temporary folder is deleted in every case.

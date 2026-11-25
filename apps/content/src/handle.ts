@@ -20,36 +20,39 @@
 //      `names.ts`): an entry with code begins with the mark, and a static entry carries none and is read exactly as
 //      before. The rules for each kind are `requests.ts`, the mirror of `podster_core::app_requests`. A static
 //      host takes GET and HEAD only, as it always has. A host with code meets the rules for its kind, and then the
-//      code-apps switch, which is off: nothing of an app with code is served. With it on, which only a test can do, a
-//      read is still refused, and a write that passes every rule is counted against its app's write budget
-//      (`counter.ts`, by the app's label) and then sent to the app with its body; over the budget, or with a budget
-//      that can't be read, it is refused and the app never sees it.
+//      code-apps switch, **on since 2026-11-25**: an allowed preflight is answered here and never sent on; every
+//      request sent on is sent with the dispatch's limits (`limits.ts`), and with none configured it is refused and
+//      nothing of the app runs; a read is sent to the app as a static host's is; a write that passes every rule is
+//      counted against its app's write budget (`counter.ts`, by the app's label) and then sent to the app with its
+//      body, and over the budget, or with a budget that can't be read, it is refused and the app never sees it. Every
+//      answer for a host with code is never kept and is readable by the origin `null` only. With the switch off, a
+//      host with code serves nothing, as before 2026-11-25.
 //   7. The script that entry names, asked of the namespace, with a request built from nothing: three of the
 //      visitor's headers and nothing else of the visitor's. For a static host, a script that isn't there and any other
 //      rejection of the dispatch are both not-found: a cached entry can name a script a takedown just deleted.
 //   8. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
 //      then this Worker's own fixed set, the sandbox among them.
 //
-// For any method but GET and HEAD, with the code-apps switch off, as it is: today's `405` right after step 3, before
-// anything is read. (With it on, which only a test can do, every step before 6 that would refuse answers that `405`
-// instead, and so does a static host.) A static host's answers are exactly what they were before.
+// For any method but GET and HEAD with the code-apps switch off: the `405` right after step 3, before anything is read.
+// With it on, every step before 6 that would refuse answers that `405` instead, and so does a static host. A static
+// host's answers are exactly what they were before.
 //
 // One thing is logged, and only for a dispatch that failed: its fixed class and the release's ID (`DispatchLog`).
 // Nothing else of a request is ever logged: no message, host, label, path, header or body (ADR 0010's "Logs").
 import { BUDGET_REFUSAL_STATUS, retryAfterSeconds } from "./budget";
 import type { WriteGate } from "./counter";
+import type { DispatchLimits } from "./limits";
 import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, scriptRelease, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
- * **The code-apps switch, off.** While it is off, nothing of an app whose release carries code is served: a host with
- * code meets the request rules for its kind, and then this Worker's own refusal. It is a constant of type `false`,
- * read from no binding, variable or setting, so no configuration can turn it on; the package's configuration test
- * holds it so.
- * Turning it on is a change to this file's type, and the line in `codeHost` that pins it to `false` fails to compile
- * until serving an app with code is built there.
+ * **The code-apps switch, on since 2026-11-25** (the M6 plan's gate for apps with code, on spike H's evidence). On, a
+ * host whose release carries code is served by the rules for its kind (step 6 above). **Setting it to `false` turns
+ * it off again, in this one line:** a read and an allowed preflight are then refused `503 code_apps_off`, every other
+ * method gets the `405` before anything is read, and no app's code is asked. It is a constant, read from no binding,
+ * variable or setting, so no configuration can turn it either way; the package's configuration test holds it so.
  */
-export const CODE_APPS_ENABLED: false = false;
+export const CODE_APPS_ENABLED: boolean = true;
 
 /** How long a read of a serve entry or of the stop may be cached where it was read: the shortest a read may ask for. */
 export const KV_CACHE_SECONDS = 30;
@@ -62,7 +65,8 @@ export interface Entries {
 }
 /** The dispatch namespace, as much of it as is used. */
 export interface Apps {
-  get(name: string): { fetch(request: Request): Promise<Response> };
+  /** The script by its name; for a host with code, with the limits its run is given (`limits.ts`). */
+  get(name: string, args?: Record<string, never>, options?: { limits: DispatchLimits }): { fetch(request: Request): Promise<Response> };
 }
 /**
  * The one line this Worker logs: a dispatch that failed. Its fixed class, and the release's ID from the script's name
@@ -85,11 +89,17 @@ export interface Deps {
   /** The content domain, from configuration. Not a host, and every request is not-found. */
   domain: string;
   /**
-   * The code-apps switch, as this request sees it. The Worker's entry passes `CODE_APPS_ENABLED`, which is of type
-   * `false`; only a test passes anything else. While it is off, any method but GET and HEAD gets today's `405` before
-   * anything is read, so no host's kind is learned for it, and no rule for hosts with code applies to it.
+   * The code-apps switch, as this request sees it. The Worker's entry passes `CODE_APPS_ENABLED` and nothing else.
+   * While it is off, any method but GET and HEAD gets the `405` before anything is read, so no host's kind is learned
+   * for it, and no rule for hosts with code applies to it.
    */
   codeApps: boolean;
+  /**
+   * The limits every dispatch is given, from two settings (`limits.ts`), or null when they aren't configured: then
+   * every request to a host with code that would reach its app is refused `503 app_limits_unknown` before the app is
+   * asked, or a write counted, and a static host is asked with no limits, as before.
+   */
+  limits: DispatchLimits | null;
   /**
    * The write counter: asked once for each write to a host with code that passes every rule here, right before the
    * write is sent to the app, and never for anything else. With the switch off it is never asked.
@@ -240,9 +250,13 @@ function requestForApp(request: Request, url: URL, cls: RequestClass, body: Uint
  * static host now answers as not-found, still shows. The line carries the class and the release's ID and nothing else;
  * the rejection's message is never logged, since it may hold anything. A log that fails changes no answer.
  */
-async function dispatch(deps: Deps, script: string, request: Request): Promise<Response | "missing" | "error"> {
+async function dispatch(deps: Deps, script: string, request: Request, limits: DispatchLimits | null = null): Promise<Response | "missing" | "error"> {
   try {
-    return await deps.apps.get(script).fetch(request);
+    // Every dispatch is given the limits when they are configured, a static host's too: its script should run no code
+    // of an app's, but a host whose entry lost its code mark must not run a module unlimited. Only with no limits
+    // configured is a static host asked with no options, so a missing setting never stops static sites serving.
+    const app = limits === null ? deps.apps.get(script) : deps.apps.get(script, {}, { limits: { cpuMs: limits.cpuMs, subRequests: limits.subRequests } });
+    return await app.fetch(request);
   } catch (error) {
     const missing = error instanceof Error && error.message === "Worker not found.";
     try {
@@ -289,17 +303,26 @@ async function bodyWithin(request: Request): Promise<Uint8Array<ArrayBuffer> | n
 
 /**
  * A request to a host whose release carries code. The rules for its kind come first, each refusal with its own code
- * and status, so a page can tell what it got wrong. A read or a preflight that passes them is still refused, because
- * the switch is off and serving an app with code isn't built.
+ * and status, so a page can tell what it got wrong. Then, with the switch off, a read or an allowed preflight is
+ * refused `503 code_apps_off` and nothing of the app runs. With it on:
  *
- * A write that passes them, which only a test can send here while the switch is off, is counted against its app's
- * write budget and then sent to the app, in that order: **the counter is asked before the app is**, so a write over
- * the budget never reaches the app, and a write the app then fails still counts (the plan's S6). A write this Worker
- * refuses itself, before the count, isn't counted. The count is the app's, by its label, the same across its releases
- * and its hosts. Over the budget, `429` with when to come back; a budget that can't be read, `503`.
+ * - **An allowed preflight** is answered here, `204` with the fixed allowance (`checkPreflight`), and never sent on.
+ * - **Every request sent on** is sent with the dispatch's limits; with none configured it is refused
+ *   `503 app_limits_unknown`, before a write is counted, and the app is never asked.
+ * - **A read** is sent to the app with the read's three headers, at the visitor's exact path and query, as a static
+ *   host's is. So the release marker's own request reaches the script at exactly the marker's path, where the
+ *   platform serves the marker's static file before the app's code can answer it (spike H, item 1). The answer passes
+ *   as a static host's does, the same four headers and a redirect only to a path on this host, but never kept.
+ * - **A write** is counted against its app's write budget and then sent to the app, in that order: **the counter is
+ *   asked before the app is**, so a write over the budget never reaches the app, and a write the app then fails still
+ *   counts (the plan's S6). A write this Worker refuses itself, before the count, isn't counted. The count is the
+ *   app's, by its label, the same across its releases and its hosts. Over the budget, `429` with when to come back; a
+ *   budget that can't be read, `503`.
  *
- * Every answer here is never kept and is readable by the origin `null` only, an app's answer to a write included,
- * except a preflight's, which is readable by nobody, so the browser sends nothing further.
+ * A script that isn't there is not-found; any other failure of the dispatch, an app that throws or passes a limit
+ * among them, is `502 app_error`, with nothing of the app's message in it. Every answer here is never kept and is
+ * readable by the origin `null` only, an app's included, except a refused preflight's, which is readable by nobody,
+ * so the browser sends nothing further.
  */
 async function codeHost(request: Request, url: URL, site: Site, script: string, deps: Deps): Promise<Response> {
   const asCode = (status: number, code: string, extra: Record<string, string> = {}) => own(request, site, status, code, extra, CODE_ALLOW_ORIGIN);
@@ -317,8 +340,20 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
   if (checked.value === "preflight") {
     const preflight = checkPreflight("code", request.headers.get("access-control-request-method"), request.headers.get("access-control-request-headers"));
     if (!preflight.ok) return own(request, site, 403, preflight.refusal, {}, null);
-    return own(request, site, 503, "code_apps_off", {}, null);
+    if (!deps.codeApps) return own(request, site, 503, "code_apps_off", {}, null);
+    // The allowance is fixed, whatever was asked, and readable by the origin `null`, so the browser sends the write.
+    const headers = new Headers({
+      "access-control-allow-methods": preflight.value.allowMethods,
+      "access-control-allow-headers": preflight.value.allowHeaders,
+    });
+    fixedHeaders(headers, site, true, preflight.value.allowOrigin);
+    return new Response(null, { status: 204, headers });
   }
+  // A read with the switch off: nothing of the app runs.
+  if (checked.value === "read" && !deps.codeApps) return asCode(503, "code_apps_off");
+  // Everything from here reaches the app, so it runs only within the dispatch's limits.
+  const limits = deps.limits;
+  if (limits === null) return asCode(503, "app_limits_unknown");
   if (checked.value === "write") {
     const body = await bodyWithin(request);
     if (body === null) return asCode(REFUSAL_STATUS.write_too_large, "write_too_large");
@@ -332,7 +367,7 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
       return asCode(BUDGET_REFUSAL_STATUS[refusal.code], refusal.code, wait);
     }
     // Then sent on.
-    const answer = await dispatch(deps, script, requestForApp(request, url, "write", body));
+    const answer = await dispatch(deps, script, requestForApp(request, url, "write", body), limits);
     if (answer === "missing") return asCode(404, "not_found", { "clear-site-data": '"cache"' });
     if (answer === "error") return asCode(502, "app_error");
     // A write's answer is the app's, but never a redirect, a part, or a body that isn't the plain bytes.
@@ -347,11 +382,38 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
     fixedHeaders(headers, site, true, CODE_ALLOW_ORIGIN);
     return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   }
-  // A read. Serving one is not built: the switch is pinned to `false` by type here, so turning it on fails to compile
-  // until this line is replaced by the code that serves an app with code.
-  const off: false = CODE_APPS_ENABLED;
-  void off;
-  return asCode(503, "code_apps_off");
+  // A read, sent on exactly as a static host's is: the visitor's URL, so its exact path and query, and three headers.
+  const answer = await dispatch(deps, script, requestForApp(request, url, "read"), limits);
+  if (answer === "missing") return asCode(404, "not_found", { "clear-site-data": '"cache"' });
+  if (answer === "error") return asCode(502, "app_error");
+  return passRead(request, answer, site, CODE_ALLOW_ORIGIN, () => asCode(404, "not_found", { "clear-site-data": '"cache"' }), () => asCode(502, "app_answer_unservable"));
+}
+
+/**
+ * An app's answer to a read, as the visitor gets it: refused if it is an interim answer, a part or a body that isn't
+ * the plain file; a redirect only to a path on this host, and otherwise `offHost`; then four of the app's headers and
+ * this Worker's own. A static host's answer may be kept for a minute and read by any page; a host with code's
+ * (`readableBy` the origin `null`) is never kept.
+ */
+function passRead(request: Request, answer: Response, site: Site, readableBy: ReadableBy, offHost: () => Response, unservable: () => Response): Response {
+  const headers = new Headers();
+  if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return unservable();
+  if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {
+    const path = REDIRECTS.includes(answer.status) ? sameHostPath(answer.headers.get("location") ?? "", site.origin) : null;
+    // A redirect anywhere but a path on this host is never passed on.
+    if (path === null) return offHost();
+    headers.set("location", path);
+  }
+  for (const name of PASSED_RESPONSE_HEADERS) {
+    const value = answer.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  // A host with code's answers are never kept (`CODE_CACHE_CONTROL`): this Worker can't tell its static files' from
+  // its script's.
+  fixedHeaders(headers, site, readableBy === CODE_ALLOW_ORIGIN, readableBy);
+  // A status that can't carry a body gets none, whatever the app sent.
+  const bodiless = request.method === "HEAD" || [204, 205, 304].includes(answer.status);
+  return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
 }
 
 export async function handle(request: Request, deps: Deps): Promise<Response> {
@@ -405,26 +467,11 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
 
-    const answer = await dispatch(deps, script, requestForApp(request, url, "read"));
+    const answer = await dispatch(deps, script, requestForApp(request, url, "read"), deps.limits);
     // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
     // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
     if (answer === "missing" || answer === "error") return notFound(request, site);
-    const headers = new Headers();
-    if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, site, 502, "app_answer_unservable");
-    if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {
-      const path = REDIRECTS.includes(answer.status) ? sameHostPath(answer.headers.get("location") ?? "", origin) : null;
-      // A redirect anywhere but a path on this host is never passed on.
-      if (path === null) return notFound(request, site);
-      headers.set("location", path);
-    }
-    for (const name of PASSED_RESPONSE_HEADERS) {
-      const value = answer.headers.get(name);
-      if (value !== null) headers.set(name, value);
-    }
-    fixedHeaders(headers, site, false);
-    // A status that can't carry a body gets none, whatever the app sent.
-    const bodiless = request.method === "HEAD" || [204, 205, 304].includes(answer.status);
-    return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
+    return passRead(request, answer, site, "*", () => notFound(request, site), () => own(request, site, 502, "app_answer_unservable"));
   } catch {
     // Nothing above is expected to throw. If it does, the visitor still gets this Worker's own answer and headers.
     return own(request, site, 502, "error", {}, kind === "code" ? CODE_ALLOW_ORIGIN : "*");

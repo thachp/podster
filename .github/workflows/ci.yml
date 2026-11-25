@@ -245,9 +245,10 @@ jobs:
       - run: npm run build
         working-directory: apps/web
 
-  # UI-10 and UI-11, against the real Workers in a real browser. Its own job, beside web's typecheck and tests instead of
-  # after them: the accessibility run alone takes five to eight minutes, the longest step in this workflow. It builds
-  # the web app itself, which the run then reuses (--skip-web-build).
+  # UI-10 and UI-11, against the real Workers in a real browser, in two jobs side by side: the accessibility run in one
+  # go took eight minutes of a nine-minute job, the longest in this workflow. This one walks the keyboard paths, with
+  # the axe runs they make on the way; screens, below, runs axe on each screen. Each seeds its own rooms and builds the
+  # web app itself, which the run then reuses (--skip-web-build). The two jobs are the same but for the part.
   browser:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
@@ -295,7 +296,57 @@ jobs:
       # Why, in e2e/install-browser.mjs and docs/m0-gate.md.
       - run: node install-browser.mjs
         working-directory: e2e
-      - run: node run-a11y.mjs --skip-web-build
+      - run: node run-a11y.mjs --skip-web-build --part=keyboard
+        working-directory: e2e
+
+  screens:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/web
+      - run: npm run build
+        working-directory: apps/web
+      - run: rustup show
+      # The worker-build binary itself, which takes about two minutes to compile. The key names its version, the runner's
+      # image and the pinned toolchain, so a change to any of them builds it again.
+      - id: worker-build-bin
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cargo/bin/worker-codegen
+          key: worker-build-bin-0.8.7-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('rust-toolchain.toml') }}
+      - if: steps.worker-build-bin.outputs.cache-hit != 'true'
+        run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
+      - run: npm ci
+        working-directory: apps/gateway
+      # npm can skip workerd's platform package without failing; this fails here, naming it, after one more npm ci.
+      - run: scripts/ci-workerd-installed apps/gateway
+      - run: npm ci
+        working-directory: e2e
+      # The browser from Playwright's own host, then its system packages from apt with bounded retries. If the runner's
+      # package mirror is down, the job goes on only when the browser starts and has a font for each script the
+      # accessibility run times, using the Thai font pinned in e2e/package-lock.json, which the image lacks. The log
+      # then has a line starting "WARNING browser-system-packages-not-installed".
+      # Why, in e2e/install-browser.mjs and docs/m0-gate.md.
+      - run: node install-browser.mjs
+        working-directory: e2e
+      - run: node run-a11y.mjs --skip-web-build --part=screens
         working-directory: e2e
 
   # The two other browser-side runs, which were behind the accessibility run in the browser job and now run beside it.
@@ -653,7 +704,7 @@ jobs:
       # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
       - run: node child-env-selftest.mjs
         working-directory: e2e
-      # The browser job's install of its browser: when it retries, when it goes on without apt's packages, and when it stops.
+      # The install of the browser, in the browser, screens and uploads jobs: when it retries, when it goes on without apt's packages, and when it stops.
       - run: node install-browser-selftest.mjs
         working-directory: e2e
       # The accessibility run writes into the Workers' files once they've stopped, so "stopped" has to mean every process.

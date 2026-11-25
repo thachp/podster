@@ -11,9 +11,12 @@ import { freePort, local, prepareStack, repo, run, startGateway, startWrangler }
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(`Usage: node run-a11y.mjs [--skip-build] [--skip-web-build] [--browser=chromium|firefox|webkit]
+       [--part=screens|keyboard]
 
 Builds the API and the dashboard, starts the gateway, the API and the dashboard's production build locally, then
-runs a11y.mjs against them. --skip-build reuses the last API build, and --skip-web-build the last dashboard build.`);
+runs a11y.mjs against them. --skip-build reuses the last API build, and --skip-web-build the last dashboard build.
+--part runs one part: screens is the theme's colors and axe on each screen, and keyboard is the keyboard paths.
+Without it, both run. CI runs each part in its own job.`);
   process.exit(0);
 }
 
@@ -24,6 +27,13 @@ const browserArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--brow
 const browserName = browserArgs[0]?.slice("--browser=".length);
 if (browserArgs.length > 1 || (browserArgs.length === 1 && !["chromium", "firefox", "webkit"].includes(browserName))) {
   console.error(`Choose one browser, as --browser=chromium, --browser=firefox or --browser=webkit, not: ${browserArgs.join(" ")}`);
+  process.exit(2);
+}
+// Checked before anything builds too, and `--part screens` is refused rather than quietly running all of it.
+const partArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--part"));
+const partName = partArgs[0]?.startsWith("--part=") ? partArgs[0].slice("--part=".length) : undefined;
+if (partArgs.length > 1 || (partArgs.length === 1 && !["screens", "keyboard"].includes(partName))) {
+  console.error(`Choose one part, as --part=screens or --part=keyboard, not: ${partArgs.join(" ")}`);
   process.exit(2);
 }
 const web = join(repo, "apps/web");
@@ -77,8 +87,9 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
-// The checks take about six minutes on CI. a11y.mjs bounds each of its own waits and says which one stalled; this is
-// the bound on all of it, for a stall it can't report itself, and it leaves the job's own limit time to show the logs.
+// The checks take about six minutes on CI when both parts run in one go, and under four for the longer part alone.
+// a11y.mjs bounds each of its own waits and says which one stalled; this is the bound on all of it, for a stall it can't
+// report itself, and it leaves the job's own limit time to show the logs.
 const CHECKS_MS = 15 * 60_000;
 
 let code = 1;
@@ -91,7 +102,7 @@ try {
   const checks = startBounded({
     command: process.execPath,
     args: [join(here, "a11y.mjs")],
-    options: { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: childEnv({ ...passedOn, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase }) },
+    options: { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: childEnv({ ...passedOn, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), ...(partName ? { PODSTER_A11Y_PART: partName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase }) },
     ms: CHECKS_MS,
     // Its whole process group is stopped, and its browser's, so neither outlives this.
     onLate: () => console.error(`\nFAIL stalled: a11y.mjs hadn't finished ${CHECKS_MS / 60_000} minutes after it started. Its last line above is the last thing that finished.`),

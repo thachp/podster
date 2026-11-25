@@ -2,12 +2,17 @@
 // creating a room, reviewing a task and revoking access. It uses the real Workers in a real browser, because jsdom can't
 // compute contrast. A screen reader isn't run, so UI-10's announcements are checked only as live regions in the page.
 //
-//   node run-a11y.mjs [--skip-build] [--browser=firefox|webkit]
+//   node run-a11y.mjs [--skip-build] [--browser=firefox|webkit] [--part=screens|keyboard]
+//
+// CI runs it as two jobs side by side, one for each part: `screens` is the theme's colors and axe on each screen, and
+// `keyboard` is the keyboard paths, with the axe runs they make on the way. Both seed the same rooms and run the controls
+// that show axe can fail. With no --part, all of it runs in one go, as it did before.
 //
 // CI runs Chromium. Playwright's Firefox and WebKit are engines it builds itself, so a pass there isn't a pass in Safari or a released Firefox.
 //
 // A violation fails the run unless a11y-known.json lists it, with the file to fix. A listed one that's gone fails too, so
-// the list can't go stale. Results go to results/a11y-<time>.json.
+// the list can't go stale. A run of one part can only say "gone" of an entry whose screen or path it ran, so an entry
+// naming a screen or path that no longer exists fails only a run of all of it. Results go to results/a11y-<time>.json.
 import AxeBuilder from "@axe-core/playwright";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -26,6 +31,10 @@ const app = process.env.PODSTER_A11Y_APP;
 const gatewayBase = process.env.PODSTER_A11Y_GATEWAY;
 ok(app && gatewayBase, "Run this through run-a11y.mjs, which starts the Workers.");
 const known = JSON.parse(readFileSync(join(here, "a11y-known.json"), "utf8"));
+// Which part to run, from run-a11y.mjs's --part: "screens", "keyboard" or, by default, all of it.
+const part = process.env.PODSTER_A11Y_PART ?? "all";
+ok(["all", "screens", "keyboard"].includes(part), `PODSTER_A11Y_PART is "${part}", not screens or keyboard`);
+const runs = (name) => part === "all" || part === name;
 const ORG_COOKIE = "podster-org";
 const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 
@@ -534,8 +543,8 @@ async function stall(error) {
   }
   try {
     mkdirSync(join(here, "results"), { recursive: true });
-    const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}-stalled.json`);
-    writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, results, failures }, null, 2)}\n`);
+    const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${part === "all" ? "" : `${part}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}-stalled.json`);
+    writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, part, results, failures }, null, 2)}\n`);
     console.log(`\nThe run stalled and was stopped. What it had: ${file}`);
   } catch {
     // The lines above already say what happened.
@@ -2776,9 +2785,10 @@ async function keyboardPaths(s) {
 
 async function run() {
   const seeded = await mustFinish("seeding the rooms, tasks and threads", SEED_MS, seed());
-  checkTokens();
+  if (runs("screens")) checkTokens();
+  // Both parts run axe, so both show it can fail.
   await mustFinish("the controls that show axe can fail", SCREEN_MS, controls());
-  for (const [name, path, expected, who = "owner", sheet = false, org] of screens(seeded)) {
+  for (const [name, path, expected, who = "owner", sheet = false, org] of runs("screens") ? screens(seeded) : []) {
     const person = who === null ? null : who === "partner" ? seeded.partner : seeded.owner;
     const context = contextFor(person);
     const screen = async () => {
@@ -2804,7 +2814,7 @@ async function run() {
     };
     await mustFinish(`the screen "${name}"`, SCREEN_MS, screen());
   }
-  await keyboardPaths(seeded);
+  if (runs("keyboard")) await keyboardPaths(seeded);
 }
 
 await run().catch((error) => fail("run", error.message));
@@ -2817,18 +2827,21 @@ const found = results.flatMap((r) => (r.violations ?? []).map((v) => `${r.screen
 const uniqueFound = new Set(found);
 const knownKeys = new Set(known.axe.map((k) => `${k.screen}|${k.rule}|${k.target}`));
 for (const key of uniqueFound) if (!knownKeys.has(key)) failures.push(`new axe violation: ${key}`);
-for (const key of knownKeys) if (!uniqueFound.has(key)) failures.push(`a11y-known.json lists something that's gone, so remove it: ${key}`);
+// One part can't call an entry gone unless it ran that entry's screen: the other part may be where it's found.
+const ranScreen = new Set(results.filter((r) => r.screen).map((r) => r.screen));
+for (const key of knownKeys) if (!uniqueFound.has(key) && (part === "all" || ranScreen.has(key.split("|")[0]))) failures.push(`a11y-known.json lists something that's gone, so remove it: ${key}`);
 // A known keyboard failure is exempt only with its exact message, so any other break on that path still fails the run.
 const knownKeyboard = new Set(known.keyboard.map((k) => `keyboard: ${k.path}: ${k.failure}`));
 const unexpected = failures.filter((f) => !knownKeyboard.has(f));
-for (const entry of knownKeyboard) if (!failures.includes(entry)) unexpected.push(`a11y-known.json lists a keyboard failure that's gone, so remove it: ${entry}`);
+// The keyboard paths all run in one part, so only a run that made them can say one of these is gone.
+for (const entry of knownKeyboard) if (!failures.includes(entry) && runs("keyboard")) unexpected.push(`a11y-known.json lists a keyboard failure that's gone, so remove it: ${entry}`);
 
 mkdirSync(join(here, "results"), { recursive: true });
-const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
-writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, results, failures }, null, 2)}\n`);
+const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${part === "all" ? "" : `${part}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
+writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, part, results, failures }, null, 2)}\n`);
 // Skipped checks and measurements are counted on their own, so a skipped one is never read as a pass.
 const skipped = results.filter((r) => r.status === "skipped");
-console.log(`\n${results.filter((r) => r.screen).length} axe runs, ${uniqueFound.size} distinct violations, ${unexpected.length} unexpected, ${skipped.length} skipped (not passed). Results: ${file}`);
+console.log(`\n${part === "all" ? "" : `part ${part}: `}${results.filter((r) => r.screen).length} axe runs, ${results.filter((r) => r.keyboard && r.status !== "skipped").length} keyboard paths, ${uniqueFound.size} distinct violations, ${unexpected.length} unexpected, ${skipped.length} skipped (not passed). Results: ${file}`);
 for (const skip of skipped) console.log(`  SKIP ${skip.keyboard ?? skip.measurement}: ${skip.detail}`);
 for (const failure of unexpected) console.log(`  ${failure}`);
 process.exit(unexpected.length ? 1 : 0);

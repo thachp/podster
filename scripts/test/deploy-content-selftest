@@ -203,6 +203,8 @@ case "$url" in
       /accounts/*/storage/kv/namespaces/*) key=kv ;;
       *) echo "stand-in curl: unexpected API path $path" >&2; exit 97 ;;
     esac
+    # The zone's routes once the content Worker is deployed, if a case gives them apart: api-routes-after.
+    if [ "$key" = routes ] && [ -f "$fix/deployed-podster-content.json" ] && [ -f "$fix/api-routes-after.status" ]; then key=routes-after; fi
     status=$(cat "$fix/api-$key.status")
     if [ "$status" = unreachable ]; then echo "curl: (7) could not connect" >&2; printf 000; exit 7; fi
     if [ "$(cat "$fix/api-$key.body")" = LEAK ]; then printf '{"success":true,"echo":"%s"}' "$expected" > "$out"; else cat "$fix/api-$key.body" > "$out"; fi
@@ -289,7 +291,7 @@ healthy() {
   api zone-podster 200 '{"success":true,"result":[]}'
   api zone-content 200 "{\"success\":true,\"result\":[{\"id\":\"$ZONE\",\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
   api scripts 200 '{"success":true,"result":[{"id":"podster-content"},{"id":"podster-outbound"}]}'
-  api routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r2","pattern":"content-selftest.example/x"}]}'
+  api routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r3","pattern":"*/*","script":"podster-content"},{"id":"r2","pattern":"content-selftest.example/x"}]}'
   api domains 200 '{"success":true,"result":[{"id":"d1","hostname":"other.content-selftest.example","service":"podster-content","zone_id":"99887766554433221100ffeeddccbbaa","zone_name":"content-selftest.example","environment":"production"}]}'
   api outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":false}}'
   api content-settings 200 "$CONTENT_SETTINGS_OK"
@@ -706,7 +708,7 @@ check "a zone name in capitals still matches the content domain" bash -c "[ $LAS
 # --- a report: every check, nothing changed ---
 fresh; dc 0 "${files[@]}" || true
 check "without --deploy: exit 0, every check passed, nothing deployed" bash -c "[ $LAST -eq 0 ] && grep -q 'Nothing was deployed: this run had no --deploy' '$tmp/out'"
-check "  it says what it would deploy, and where" bash -c "grep -q -E \"would deploy podster-content at [0-9a-f]{40}, origin/main's tip with ci.yml green\" '$tmp/out' && grep -q -F 'on the route *.content-selftest.example/*, with the content domain content-selftest.example' '$tmp/out'"
+check "  it says what it would deploy, and where" bash -c "grep -q -E \"would deploy podster-content at [0-9a-f]{40}, origin/main's tip with ci.yml green\" '$tmp/out' && grep -q -F 'on the routes *.content-selftest.example/* and */*, both on the content domain' '$tmp/out' && grep -q -F 'zone only, with the content domain content-selftest.example' '$tmp/out'"
 check "  every API call was a GET, -q first, the token on stdin, nothing of the caller's environment" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
 check "  it read all ten things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 10 ]"
 check "  it read the account's custom domains, and says none runs podster-outbound" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/domains auth=ok' '$fix/calls' && grep -q '^ok   no custom domain on the account runs podster-outbound$' '$tmp/out' && grep -q 'deploy-content: every check passed. Nothing was deployed' '$tmp/out'"
@@ -803,6 +805,11 @@ bad_api "an error listing the account's scripts is refused" "listing the account
 bad_api "a list of scripts that isn't a list is refused" "the list of the account's Worker scripts isn't in the shape expected" scripts 200 '{"success":true,"result":{"id":"podster-outbound"}}'
 bad_api "a list of scripts of two documents is refused" "the list of the account's Worker scripts isn't in the shape expected" scripts 200 '{"success":false}{"success":true,"result":[]}'
 bad_api "a route on the content zone that runs the outbound Worker is refused" "a route on the content domain's zone runs podster-outbound" routes 200 '{"success":true,"result":[{"id":"r","pattern":"x.content-selftest.example/*","script":"podster-outbound"}]}'
+bad_api "a route on the content zone that runs another Worker is refused" "a route on the content domain's zone runs a Worker other than podster-content" routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r","pattern":"*/*","script":"someone-else"}]}'
+bad_api "  even one that names a single host" "a route on the content domain's zone runs a Worker other than podster-content" routes 200 '{"success":true,"result":[{"id":"r","pattern":"app.example.com/*","script":"someone-else"}]}'
+bad_api "a route of the content Worker's under a pattern this script doesn't deploy is refused" "a route on the content domain's zone runs podster-content under a pattern other than \\*.content-selftest.example/\\* and \\*/\\*" routes 200 '{"success":true,"result":[{"id":"r","pattern":"content-selftest.example/*","script":"podster-content"}]}'
+fresh; api routes 200 '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r2","pattern":"*/.well-known/acme-challenge/*"},{"id":"r4","pattern":"x.content-selftest.example/*","script":null}]}'; dc 0 "${files[@]}" || true
+check "the zone as it was before */*, with routes that run no Worker: a report passes" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   no route on the content domain.s zone runs another Worker$' '$tmp/out' && grep -q '^ok   podster-content has no route on the content domain.s zone beyond the two this script deploys$' '$tmp/out'"
 bad_api "an error listing the content zone's routes is refused" "listing the routes on the content domain's zone failed \\(HTTP 403\\)" routes 403 '{"success":false,"errors":[]}'
 bad_api "a list of routes in another shape is refused" "the list of routes on the content domain's zone isn't in the shape expected" routes 200 '{"success":true,"result":[{"id":"r"}]}'
 fresh; api scripts 200 '{"success":true,"result":[{"id":"podster-content"}]}'; dc 0 "${files[@]}" || true
@@ -828,10 +835,12 @@ check "  the outbound Worker's configuration: the owner's account, both public a
   quiet jq -e --arg a "$ACCOUNT" '(keys == ["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"]) and .name == "podster-outbound" and .account_id == $a and .workers_dev == false and .preview_urls == false and .compatibility_date == "2026-08-01" and (.main | endswith("/apps/outbound/src/index.ts"))' "$fix/deployed-podster-outbound.json"
 check "  between the two, it saw podster-outbound on the account" said "^ok      podster-outbound is on the account"
 check "  after the probes, it checked by the API: the outbound Worker exists, no workers.dev or preview address, no route, and the deployed binding" bash -c "grep -q '^PASS    podster-outbound exists on the account' '$tmp/out' && grep -q '^PASS    podster-outbound has no workers.dev address' '$tmp/out' && grep -q '^PASS    podster-outbound has no preview address' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs podster-outbound' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding APPS names podster-outbound as the namespace.s outbound Worker' '$tmp/out' && grep -q '^PASS    podster-content.s deployed limits for each dispatch to an app with code are 50 CPU ms and 50 subrequests' '$tmp/out' && grep -q '^PASS    no custom domain on the account runs podster-outbound' '$tmp/out' && ! grep -q '^NOT SHOWN whether' '$tmp/out'"
+check "  it checked the content Worker's routes by the API: exactly the two, and no other Worker's" bash -c "grep -q '^PASS    podster-content.s routes on the content domain.s zone are exactly \\*.content-selftest.example/\\* and \\*/\\*' '$tmp/out' && grep -q '^PASS    no route on the content domain.s zone runs a Worker other than podster-content' '$tmp/out'"
+check "  it says a custom hostname through */* is NOT SHOWN" said "^NOT SHOWN a custom hostname reaching podster-content through \\*/\\*: that needs an active custom hostname"
 check "  it says an app's fetch being refused is NOT SHOWN" said "^NOT SHOWN an app's fetch refused by podster-outbound: that needs an app with code"
 check "  every API call, before and after the deploy, was a GET with the token on stdin" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces, the write counter and its cap, and nothing else" \
-  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-podster-content.json"
+  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '(keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"]) and .name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}, {"pattern": "*/*", "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50"} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}] and .durable_objects == {"bindings": [{"name": "WRITE_COUNTER", "class_name": "WriteCounter"}]} and .migrations == [{"tag": "v1", "new_sqlite_classes": ["WriteCounter"]}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-podster-content.json"
 check "  one request waiting for the route, then four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
   bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 6 ] && [ \$(grep -c '^probe GET https://<host>/ ' '$fix/calls') -eq 2 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
 check "  the route answered at once: no wait" bash -c "grep -q '^ok      the route answers (HTTP 404, try 1)' '$tmp/out' && ! grep -q '^sleep ' '$fix/calls'"
@@ -862,6 +871,18 @@ check "the outbound Worker's wrangler output holding the token: exit 3, the cont
 check "  the token is in no output" no_token
 fresh; touch "$fix/deploy-hangs-podster-outbound"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/deploying" -- "${files[@]}" --deploy || true
 check "SIGINT during the outbound Worker's deploy: exit 130, the content Worker not deployed, and it says so" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT while deploying the outbound Worker. podster-outbound may or may not be deployed, and the content Worker wasn.t' '$tmp/out' && ! grep -q '^wrangler deploy podster-content' '$fix/calls'"
+
+# --- the content Worker's routes after the deploy ---
+routes_check() { # routes_check TITLE PATTERN BODY: the zone's routes, once the content Worker is deployed
+  fresh
+  api routes-after 200 "$3"
+  at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+  check "$1" bash -c "[ $LAST -eq 4 ] && grep -q -E \"\$1\" '$tmp/out' && grep -q 'the Workers are deployed and NOT verified' '$tmp/out'" _ "$2"
+}
+routes_check "*/* missing after the deploy: exit 4" "^FAIL    podster-content's routes on the content domain's zone aren't exactly" '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"}]}'
+routes_check "a third route of the content Worker's after the deploy: exit 4" "^FAIL    podster-content's routes on the content domain's zone aren't exactly" '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r3","pattern":"*/*","script":"podster-content"},{"id":"r5","pattern":"content-selftest.example/*","script":"podster-content"}]}'
+routes_check "another Worker's route on the zone after the deploy: exit 4" "^FAIL    a route on the content domain's zone runs a Worker other than podster-content" '{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r3","pattern":"*/*","script":"podster-content"},{"id":"r6","pattern":"app.example.com/*","script":"someone-else"}]}'
+routes_check "the routes in another shape after the deploy: exit 4, not verified" "^FAIL    the routes on the content domain's zone couldn't be read \\(HTTP 200\\): not verified" '{"success":true,"result":[{"id":"r"}]}'
 
 # --- the checks of the outbound Worker after the deploy ---
 outbound_check() { # outbound_check TITLE EXPECTED-EXIT PATTERN KEY STATUS BODY

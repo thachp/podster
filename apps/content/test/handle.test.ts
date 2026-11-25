@@ -472,6 +472,80 @@ describe("a custom hostname (M6 step 8c)", () => {
   });
 });
 
+describe("every host the zone's catch-all route brings (*/*, step 8c)", () => {
+  // `scripts/deploy-content` routes `*/*` on the content zone as well as `*.<domain>/*`, so that a custom hostname of
+  // Cloudflare for SaaS reaches this Worker. That route brings it every host that enters the zone: the content domain
+  // itself, the fallback origin's name, any other name on the zone, and any custom hostname, live or not. The route
+  // must not widen what is served: a host is served only as an app's default host with its entry, or as a custom
+  // hostname whose entry names it, and everything else gets this Worker's own not-found, with no app asked.
+  const FALLBACK = `fallback.${DOMAIN}`;
+  const PATHS = ["/", "/index.html", "/.well-known/podster-release.json", "/.well-known/acme-challenge/token", "/.well-known/pki-validation/file.txt"];
+
+  it("answers the content domain itself and names on it that are no app's with its own not-found, and reads nothing", async () => {
+    const w = world();
+    for (const host of [DOMAIN, `deep.${HOST}`, `_x.${DOMAIN}`, `www-1.${DOMAIN}`]) {
+      // Even with an entry written under the name, as only a fault or another writer could.
+      w.kv.set(host, SCRIPT);
+      for (const path of PATHS) {
+        for (const method of ["GET", "HEAD"]) {
+          const answer = await handle(new Request(`https://${host}${path}`, { method }), w.deps);
+          expect([host, path, method, answer.status, headersOf(answer)]).toEqual([host, path, method, 404, { ...NOT_FOUND, "content-security-policy": sandboxPolicy("'none'") }]);
+        }
+      }
+      // Over plain HTTP too: no redirect, since it is no app's host, and nothing read.
+      expect([host, (await handle(new Request(`http://${host}/`), w.deps)).status]).toEqual([host, 404]);
+    }
+    expect([w.reads, w.sent, w.asked]).toEqual([[], [], []]);
+  });
+
+  it("serves nothing on the fallback origin's name: no entry is ever written for it, and none of another app's is read for it", async () => {
+    // `fallback` reads as a label, so its entry is looked up, and there is none: the API issues only 26-character
+    // random labels (`podster_core::release::label_from_random`), so no room's host is ever `fallback.<domain>`.
+    const w = world();
+    for (const path of PATHS) {
+      const answer = await get(w, path, {}, FALLBACK);
+      expect([path, answer.status, answer.headers.get("clear-site-data")]).toEqual([path, 404, '"cache"']);
+    }
+    expect(w.reads.filter((read) => read.key !== STOP_KEY).map((read) => read.key)).toEqual(PATHS.map(() => FALLBACK));
+    // An entry for another app's script, or a custom hostname's form, written under the name: still nothing.
+    for (const value of [SCRIPT, `${CODE_MARK}${SCRIPT}`, `${SCRIPT}@${FALLBACK}`, `${SCRIPT}@app.example.com`]) {
+      w.kv.set(FALLBACK, value);
+      expect([value, (await get(w, "/", {}, FALLBACK)).status]).toEqual([value, 404]);
+    }
+    // Plain HTTP and other methods get the answers any host on the content domain gets, and no app is asked.
+    expect((await handle(new Request(`http://${FALLBACK}/x`), w.deps)).status).toBe(301);
+    expect((await get(w, "/", { method: "POST" }, FALLBACK)).status).toBe(405);
+    expect([w.sent, w.asked]).toEqual([[], []]);
+  });
+
+  it("serves nothing on a custom hostname with no live entry: none, another host's, one being removed, or one it can't read", async () => {
+    const CUSTOM = "app.example.com";
+    const w = world();
+    // No entry at all, as for any name a stranger points at the zone.
+    for (const path of PATHS) expect([path, (await get(w, path, {}, CUSTOM)).status]).toEqual([path, 404]);
+    // Another custom hostname's entry, or a default host's form, under this name.
+    for (const value of [`${SCRIPT}@www.example.com`, SCRIPT, `${CODE_MARK}${SCRIPT}`, `${SCRIPT}@${CUSTOM}.`, `${SCRIPT}@APP.example.com`]) {
+      w.kv.set(CUSTOM, value);
+      expect([value, (await get(w, "/", {}, CUSTOM)).status]).toEqual([value, 404]);
+    }
+    // Its own entry, then removed: served once, and not after.
+    w.kv.set(CUSTOM, `${SCRIPT}@${CUSTOM}`);
+    expect((await get(w, "/", {}, CUSTOM)).status).toBe(200);
+    w.kv.delete(CUSTOM);
+    expect((await get(w, "/.well-known/acme-challenge/token", {}, CUSTOM)).status).toBe(404);
+    // An entry it can't read.
+    w.kv.set(CUSTOM, `${SCRIPT}@${CUSTOM}`);
+    w.failReads.keys.add(CUSTOM);
+    expect((await get(w, "/", {}, CUSTOM)).status).toBe(404);
+    expect(w.sent.length).toBe(1);
+    // A host that isn't one the API writes: an address, as a client may send it.
+    for (const host of ["192.0.2.7", "[2001:db8::1]"]) {
+      expect([host, (await handle(new Request(`https://${host}/`), w.deps)).status]).toEqual([host, 404]);
+    }
+    expect(w.sent.length).toBe(1);
+  });
+});
+
 describe("asking the app", () => {
   it("sends three of the visitor's headers and nothing else of the visitor's", async () => {
     const w = world();

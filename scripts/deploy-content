@@ -111,8 +111,12 @@ Usage: scripts/deploy-content --token-file <absolute path> --config-file <absolu
 Deploys two Workers to the account that holds the content domain, and nowhere else: first the
 outbound Worker, apps/outbound, as podster-outbound, with no route, no workers.dev address, no preview
 address and no binding; then the content Worker, apps/content, whose dispatch binding APPS names
-podster-outbound as the namespace's outbound Worker. The outbound Worker always deploys: no flag or
-key leaves it out. Without --deploy it only reports: it runs every check below, reads Cloudflare's
+podster-outbound as the namespace's outbound Worker, on two routes on the content domain's zone:
+*.<domain>/* for the apps' default hosts, and */* for every host that enters the zone, which is how
+a custom hostname of Cloudflare for SaaS reaches it. That one is security-sensitive: it hands the
+content Worker every host on the zone, and it answers its own not-found for any host with no live
+serve entry, the content domain itself and the fallback origin's name included. The outbound Worker
+always deploys: no flag or key leaves it out. Without --deploy it only reports: it runs every check below, reads Cloudflare's
 API, and prints what it would deploy, both Workers, changing nothing. With --deploy it also deploys
 both, checks the outbound Worker by Cloudflare's API, and probes the content domain signed out.
 
@@ -173,7 +177,9 @@ It refuses, before changing anything, unless:
       the content domain is one active zone, on that account
       the dispatch namespace and the KV namespace exist on that account
       the account's Worker scripts can be listed (it says whether podster-outbound exists yet)
-      no route on the content domain's zone names podster-outbound
+      no route on the content domain's zone names podster-outbound, or any Worker but podster-content
+      podster-content has no route on that zone but the two it deploys (a route that runs no
+      Worker is left alone)
       no custom domain on the account runs podster-outbound (if they can't be read: NOT SHOWN)
     Any error, or an answer of any other shape, refuses.
 
@@ -191,8 +197,9 @@ the content domain itself serves nothing. A host two labels deep is not shown: t
 certificate covers one level.
 Then it checks by Cloudflare's API, with the token: podster-outbound exists, has no workers.dev or
 preview address, and no route on the content domain's zone names it (other zones the token can't
-see, and can't add routes on); and, from podster-content's deployed settings, that its APPS binding
-names podster-outbound as outbound; and that no custom domain on the account runs podster-outbound.
+see, and can't add routes on); that podster-content's routes on that zone are exactly the two
+deployed and no route there runs another Worker; and, from podster-content's deployed settings,
+that its APPS binding names podster-outbound as outbound; and that no custom domain on the account runs podster-outbound.
 If those settings or the custom domains can't be read, it says NOT SHOWN, never passed, and exits 4.
 An app's fetch being refused is NOT SHOWN: it needs an app with code, and none exists yet.
 
@@ -526,6 +533,24 @@ if jq -e --arg o "$OUTBOUND" 'any(.result[]; (.script // "") == $o)' "$work/body
   refuse "a route on the content domain's zone runs $OUTBOUND. The outbound Worker has no route: remove it."
 fi
 echo "ok   no route on the content domain's zone runs $OUTBOUND"
+# The content Worker's two routes, both on the content domain's zone and nowhere else: `*.<domain>/*`, an app's default
+# hosts, and `*/*`, every host that enters the zone, which is how a custom hostname of Cloudflare for SaaS reaches a
+# Worker (M6 step 8c; ADR 0010; Cloudflare's "Workers as your fallback origin"). `*/*` takes the whole zone, so the
+# content Worker decides every host there, and its own not-found is the answer for any host with no live serve entry.
+# Any route on the zone that runs another Worker would take hosts from it, so it refuses here; a route of
+# podster-content's with another pattern was made outside this script, which wouldn't track it, so it refuses too. A
+# route that runs no Worker only hands its hosts back to the zone, which has no origin of its own, and is left alone.
+CONTENT=podster-content
+route_default="*.$domain/*"
+route_all="*/*"
+if jq -e --arg c "$CONTENT" --arg o "$OUTBOUND" 'any(.result[]; (.script // "") as $s | $s != "" and $s != $c and $s != $o)' "$work/body" > /dev/null; then
+  refuse "a route on the content domain's zone runs a Worker other than $CONTENT. Every host on that zone is the content Worker's to answer: remove that route."
+fi
+echo "ok   no route on the content domain's zone runs another Worker"
+if jq -e --arg c "$CONTENT" --arg a "$route_default" --arg b "$route_all" 'any(.result[]; (.script // "") == $c and .pattern != $a and .pattern != $b)' "$work/body" > /dev/null; then
+  refuse "a route on the content domain's zone runs $CONTENT under a pattern other than $route_default and $route_all. It was made outside this script: remove it."
+fi
+echo "ok   $CONTENT has no route on the content domain's zone beyond the two this script deploys"
 # Nor any custom domain on the account: a custom domain is a way in that no route list shows, and a deploy with none
 # leaves an existing one alone. If the token can't read them, that is said, and a deploy's check of them exits 4.
 report_not_shown=0
@@ -587,12 +612,11 @@ writes=$(jq -r .writes <<< "$committed")
 window_ms=$(jq -r .window_ms <<< "$committed")
 cpu_ms=$(jq -r .cpu_ms <<< "$committed")
 subrequests=$(jq -r .subrequests <<< "$committed")
-route="*.$domain/*"
 jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< "$committed")" --arg account "$account" \
-  --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" --arg outbound "$OUTBOUND" '{
+  --arg domain "$domain" --arg route "$route_default" --arg all "$route_all" --arg kv "$kv" --arg namespace "$namespace" --arg outbound "$OUTBOUND" '{
     name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
     workers_dev: false, preview_urls: false,
-    routes: [{ pattern: $route, zone_name: $domain }],
+    routes: [{ pattern: $route, zone_name: $domain }, { pattern: $all, zone_name: $domain }],
     vars: { CONTENT_DOMAIN: $domain, WRITE_BUDGET_WRITES: $c.writes, WRITE_BUDGET_WINDOW_MS: $c.window_ms,
             APP_LIMIT_CPU_MS: $c.cpu_ms, APP_LIMIT_SUBREQUESTS: $c.subrequests },
     kv_namespaces: [{ binding: "SERVE", id: $kv }],
@@ -611,7 +635,7 @@ echo
 echo "would deploy, first, $OUTBOUND at $here to the configuration's account, with no route, no workers.dev"
 echo "address, no preview address and no binding: the dispatch namespace's outbound Worker, which refuses every request."
 echo "then it would deploy podster-content at $here, origin/main's tip with ci.yml green, to the configuration's account,"
-echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace,"
+echo "on the routes $route_default and $route_all, both on the content domain's zone only, with the content domain $domain, its KV namespace and its dispatch namespace,"
 echo "the dispatch binding APPS naming $OUTBOUND as the namespace's outbound Worker,"
 echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
 echo "Each dispatch to an app with code is limited to $cpu_ms CPU ms and $subrequests subrequests."
@@ -750,6 +774,18 @@ if [ "$status" = 200 ] && shaped "$ROUTES_SHAPE"; then
   else
     pass "no route on the content domain's zone runs $OUTBOUND (the token sees no other zone, and can make routes on none)"
   fi
+  # The content Worker's routes, as the zone holds them: exactly the two deployed, and no route of another Worker's.
+  if jq -e --arg c "$CONTENT" --arg a "$route_default" --arg b "$route_all" \
+      '[.result[] | select((.script // "") == $c) | .pattern] | sort == ([$a, $b] | sort)' "$work/body" > /dev/null; then
+    pass "$CONTENT's routes on the content domain's zone are exactly $route_default and $route_all"
+  else
+    fail "$CONTENT's routes on the content domain's zone aren't exactly $route_default and $route_all"
+  fi
+  if jq -e --arg c "$CONTENT" --arg o "$OUTBOUND" 'any(.result[]; (.script // "") as $s | $s != "" and $s != $c and $s != $o)' "$work/body" > /dev/null; then
+    fail "a route on the content domain's zone runs a Worker other than $CONTENT"
+  else
+    pass "no route on the content domain's zone runs a Worker other than $CONTENT"
+  fi
 else
   fail "the routes on the content domain's zone couldn't be read (HTTP $status): not verified"
 fi
@@ -788,6 +824,7 @@ else
   not_shown "whether a custom domain runs $OUTBOUND: the account's custom domains couldn't be read in the shape expected (HTTP $status)"
 fi
 echo "NOT SHOWN an app's fetch refused by $OUTBOUND: that needs an app with code, and none exists yet"
+echo "NOT SHOWN a custom hostname reaching podster-content through $route_all: that needs an active custom hostname, which this script never makes"
 
 echo
 if [ "$probe_failures" -ne 0 ] || [ "$not_shown_count" -ne 0 ]; then

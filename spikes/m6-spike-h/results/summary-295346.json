@@ -1,0 +1,54 @@
+{
+  "run": "295346",
+  "at": "2026-11-25T05:37:54.717Z",
+  "verdicts": {
+    "marker": {
+      "holds": true,
+      "failed": []
+    },
+    "outbound": {
+      "holds": true,
+      "failed": []
+    },
+    "bindings": {
+      "holds": true,
+      "failed": []
+    },
+    "query": {
+      "holds": true,
+      "failed": []
+    }
+  },
+  "evidence": {
+    "podster-content_version": [
+      {
+        "version": "6c6fb4fa",
+        "percentage": 100
+      }
+    ],
+    "podster-outbound_version": [
+      {
+        "version": "60d2bb18",
+        "percentage": 100
+      }
+    ],
+    "d1_create": {
+      "status": 200,
+      "success": true,
+      "store_token_made_it": true
+    },
+    "inherit": {
+      "strict_ok": true,
+      "strict_errors": [],
+      "none_ok": true,
+      "none_errors": [],
+      "bindings_after": []
+    }
+  },
+  "clean": true,
+  "calls": {
+    "api": 89,
+    "edge": 38,
+    "cleanup": 34
+  }
+}

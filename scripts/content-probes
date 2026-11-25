@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# The signed-out probes of the content domain: what anyone on the internet gets from it with no credential. One line
+# per probe. scripts/deploy-content runs this after a deploy, with --wait-for-route; the workflow
+# .github/workflows/content-probes.yml runs it on its own, from a network that can reach the content domain.
+set -euo pipefail
+
+# The content domain these probes check unless one is given. apps/content/wrangler.jsonc holds only a placeholder, by
+# design (it must deploy nowhere), so the committed name is here. It is the one crates/core/src/hostnames.rs reserves.
+DEFAULT_DOMAIN=podster.site
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/content-probes [--wait-for-route] [DOMAIN]
+
+Probes the content domain signed out, on one random host one label below it, and prints PASS or
+FAIL for each probe:
+
+  - an unknown host gets the content Worker's own 404 not_found, with its fixed headers (nosniff,
+    no-referrer, HSTS, no-store and the sandbox policy)
+  - plain HTTP gets a 301 to the same host and path over HTTPS
+  - a POST gets 405, allowing GET and HEAD
+  - a request with a Service-Worker header gets 403 no_service_workers
+  - the content domain itself serves nothing: no answer, or any answer that isn't a success
+
+and prints NOT SHOWN for a host two labels deep, which the zone's certificate doesn't cover, so
+HTTPS there can't be probed. That line is information: it doesn't change the exit code.
+
+DOMAIN is the content domain, podster.site unless given. It must be a domain name in lower case,
+and is refused if it is podster.dev or under it, or the committed placeholder.
+
+--wait-for-route  first sends the unknown host's request on its own, every 2 s while the answer is
+                  no answer or 520 to 529 or 530, for at most 30 s by the clock, each try allowed
+                  5 s; any other answer ends the wait. A new route answers so until it takes
+                  effect. scripts/deploy-content passes it after a deploy.
+
+It needs no token and sends no cookie or credential. Every curl runs with -q first, so no .curlrc
+is read, under env -i with only PATH and an empty home, so no proxy or other setting of the
+caller's applies. It follows no redirect, and reaches only the content domain and hosts under it.
+
+Exit codes: 0 every probe passed, 1 a probe failed, 2 wrong usage or a refused domain.
+EOF
+}
+
+wait_for_route=false
+domain=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --wait-for-route) wait_for_route=true ;;
+    -*) echo "content-probes: unexpected argument $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -n "$domain" ]; then echo "content-probes: takes one domain, got '$domain' and '$1'" >&2; exit 2; fi
+      domain=$1
+      ;;
+  esac
+  shift
+done
+domain=${domain:-$DEFAULT_DOMAIN}
+if ! [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || [ "${#domain}" -gt 253 ]; then
+  echo "content-probes: '$domain' isn't a domain name in lower case" >&2
+  exit 2
+fi
+case "$domain" in
+  podster.dev | *.podster.dev) echo "content-probes: $domain is podster.dev's. The content domain is never Podster's own." >&2; exit 2 ;;
+  content-domain.invalid) echo "content-probes: $domain is the committed placeholder, not the content domain" >&2; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+chmod 700 "$work"
+mkdir -m 700 "$work/curl-home"
+trap 'rm -rf "$work"' EXIT
+
+label=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n')
+host="$label.$domain"
+failures=0
+pass() { echo "PASS    $*"; }
+fail() { echo "FAIL    $*"; failures=$((failures + 1)); }
+
+# curl_clean ARG...: curl with -q first, so no .curlrc is read, and an environment of PATH and an empty home alone, so
+# no proxy, no CURL_HOME and nothing else of the caller's reaches it.
+curl_clean() { /usr/bin/env -i PATH="$PATH" HOME="$work/curl-home" curl -q "$@"; }
+# fetch METHOD URL [HEADER [MAX-TIME]]: leaves the headers in $work/h and the body in $work/b, and prints the status.
+# curl gives up after MAX-TIME seconds, 30 unless given.
+fetch() {
+  case "$2" in
+    "https://$domain/" | "https://$host/"* | "http://$host/"*) ;;
+    *) echo "content-probes: refusing to request $2" >&2; exit 1 ;;
+  esac
+  local extra=() max_time=${4:-30}
+  : > "$work/h"
+  : > "$work/b"
+  [ -n "${3:-}" ] && extra=(-H "$3")
+  local got
+  got=$(curl_clean --silent --proto =https,http --max-time "$max_time" -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null) || true
+  [[ "$got" =~ ^[0-9]{3}$ ]] || got=000
+  printf '%s' "$got"
+}
+header() { grep -i -E "^$1:" "$work/h" | head -n 1 | sed -E "s/^[^:]*:[[:space:]]*//" | tr -d '\r'; }
+fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own answer
+  local missing=()
+  [ "$(header x-content-type-options)" = nosniff ] || missing+=(x-content-type-options)
+  [ "$(header referrer-policy)" = no-referrer ] || missing+=(referrer-policy)
+  [ "$(header strict-transport-security)" = "max-age=31536000; includeSubDomains" ] || missing+=(strict-transport-security)
+  [ "$(header cache-control)" = no-store ] || missing+=(cache-control)
+  [[ "$(header content-security-policy)" == "sandbox allow-scripts; "* ]] || missing+=(content-security-policy)
+  if [ "${#missing[@]}" -eq 0 ]; then return 0; fi
+  echo "        $1: missing or wrong: ${missing[*]}"
+  return 1
+}
+
+# Waiting for the route. A new route can take some seconds to take effect: until it does, Cloudflare answers the random
+# host itself, with a 52x (522 when it reaches no origin, as on the first deploy, 2026-11-22) or not at all. So the
+# unknown host's request below is sent first on its own, again every 2 s while the answer is no answer, 520 to 529 or
+# 530. The clock bounds it: each try gives curl 5 s, so one slow 522 can't use up the window, and a try starts only if
+# it and the pause before it end within 30 s of the first. Any other answer ends the wait at once, the Worker's own and
+# a wrong one alike: a wrong answer is never asked again, and the probes judge it. If the route never answers, the
+# probes run anyway, with their own 30 s timeouts, and fail as they would have. No probe's criteria change.
+if [ "$wait_for_route" = true ]; then
+  route_wait_limit=30
+  route_wait_every=2
+  route_wait_try_time=5
+  route_wait_start=$SECONDS
+  tries=0
+  while :; do
+    status=$(fetch GET "https://$host/" "" "$route_wait_try_time")
+    tries=$((tries + 1))
+    case "$status" in
+      000 | 52[0-9] | 530) ;;
+      *)
+        echo "ok      the route answers (HTTP $status, try $tries)"
+        break
+        ;;
+    esac
+    waited=$((SECONDS - route_wait_start))
+    if [ $((waited + route_wait_every + route_wait_try_time)) -gt "$route_wait_limit" ]; then
+      echo "wait    the route still isn't answering after $tries tries and ${waited} s (HTTP $status): probing anyway"
+      break
+    fi
+    echo "wait    the route isn't answering yet (HTTP $status), trying again in ${route_wait_every} s"
+    sleep "$route_wait_every"
+  done
+fi
+
+status=$(fetch GET "https://$host/")
+if [ "$status" = 404 ] && [ "$(cat "$work/b")" = not_found ] && fixed_headers "an unknown host"; then pass "an unknown host gets the Worker's own not-found, with its fixed headers"; else fail "an unknown host: HTTP $status"; fi
+status=$(fetch GET "http://$host/probe?x=1")
+if [ "$status" = 301 ] && [ "$(header location)" = "https://$host/probe?x=1" ]; then pass "plain HTTP gets a 301 to the same host and path over HTTPS"; else fail "plain HTTP: HTTP $status, Location '$(header location)'"; fi
+status=$(fetch POST "https://$host/")
+if [ "$status" = 405 ] && [ "$(header allow)" = "GET, HEAD" ]; then pass "a POST gets 405, allowing GET and HEAD"; else fail "a POST: HTTP $status"; fi
+status=$(fetch GET "https://$host/sw.js" "Service-Worker: script")
+if [ "$status" = 403 ] && [ "$(cat "$work/b")" = no_service_workers ]; then pass "a service worker's script gets 403"; else fail "a service worker's script: HTTP $status"; fi
+# The content domain itself is no app's host, and the route doesn't cover it: nothing may be served there. No
+# answer at all, as when it has no address, passes; so does any answer that isn't a success.
+status=$(fetch GET "https://$domain/")
+case "$status" in
+  000) pass "the content domain itself serves nothing: no answer" ;;
+  2??) fail "the content domain itself answered HTTP $status: something is served there" ;;
+  *) pass "the content domain itself serves nothing: HTTP $status" ;;
+esac
+echo "NOT SHOWN a host two labels deep, such as a.$host: the zone's certificate covers one level, so HTTPS there can't be probed"
+
+if [ "$failures" -ne 0 ]; then echo "content probes of $domain: $failures probe(s) FAILED"; exit 1; fi
+echo "content probes of $domain passed"

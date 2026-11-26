@@ -30,10 +30,24 @@ export const STOP_WITHIN_MS = 10_000;
 /** The spin's loop, as rounds: seconds of CPU unstopped. Bounded, so an app the limit doesn't stop still ends. */
 export const SPIN_ROUNDS = 4_000_000_000;
 /**
- * How long the module's second after-headers route waits after its first bytes before it spins: past the content
- * Worker's 1-second hold (`apps/content/src/hold.ts`), so its stop lands after the headers were sent (C09).
+ * How long the module's second after-headers route waits after its first bytes before its body fails: past the
+ * content Worker's 1-second hold (`apps/content/src/hold.ts`), so the failure lands after the headers were sent (C09).
+ * The route that spins past the hold waits as long.
  */
 export const AFTER_HOLD_MS = 2_500;
+/**
+ * How long the module's first after-headers route waits after its first bytes before its body fails: well within the
+ * content Worker's hold, so the content Worker answers before any header is sent (C09).
+ *
+ * C09's routes fail their own body rather than spin (2026-11-26). Staging's runs showed the CPU limit stops a spin
+ * about 2.1 to 2.7 s of wall time after it begins, not 50 ms in: M6-C08's `/api/spin` answered `502` in 2607 ms
+ * (run 45598024983) and 2741 ms (run 45874919600). So a spin begun 300 ms in was stopped past the hold, and could
+ * never test it. And a CPU stop mid-stream reached the visitor as a body that ended normally, which no Worker in
+ * front can tell from a whole one; that is recorded alongside C09 from `/api/spin-after-hold`, not judged.
+ */
+export const WITHIN_HOLD_MS = 300;
+/** The fixed message the module's after-headers routes fail their body with. */
+export const APP_BODY_FAILURE = "app body failed";
 /** The light work the same module does, to show it computes when it isn't stopped. */
 export const LIGHT_ROUNDS = 100_000;
 /** Writes past the budget the run sends at most before it calls the budget not enforced: the burst is bounded. */
@@ -76,7 +90,7 @@ export const PLAN = [
   ["M6-C06", `The write budget, at the deployed ${WRITE_CAP.writes} writes a ${WRITE_CAP.windowMs / 60_000}-minute window: every write within it reaches the app, and the first over it is refused 429 write_budget_spent, with a Retry-After to the window's end that the page may read`],
   ["M6-C07", "The app's fetch gets podster-outbound's 403 and fixed body, and its connect() is refused before a socket opens"],
   ["M6-C08", `An app that spins is stopped by the ${APP_LIMITS.cpuMs} ms CPU limit: 502 app_error within ${STOP_WITHIN_MS / 1000} s, with nothing of the app's in it; the same module's light work answers 200`],
-  ["M6-C09", `An app that passes a limit after its answer's headers were sent never reaches a visitor as a clean 200: stopped within the content Worker's hold, it is 502 app_error; stopped ${AFTER_HOLD_MS / 1000} s in, past the hold, it is a 200 whose body was aborted; with the fixed headers either way`],
+  ["M6-C09", `An app whose body fails after its answer's headers were sent never reaches a visitor as a clean 200: failing ${WITHIN_HOLD_MS} ms in, within the content Worker's hold, it is 502 app_error; failing ${AFTER_HOLD_MS / 1000} s in, past the hold, it is a 200 whose body was aborted; with the fixed headers either way. What a CPU stop ${AFTER_HOLD_MS / 1000} s in reaches a visitor as is recorded with it, not judged: the platform most likely ends that body normally, which no Worker in front could tell from a whole one; unconfirmed until /api/after-hold passes on staging`],
   ["M6-C10", "Unpublish: release switched off in the room; the host and its marker answer the content Worker's not found within the wait; a write gets 405 method_not_allowed and never reaches the app; while release is off the task's status says no release exists"],
   ["M6-CX1", "From the operator's side: the app's store, the one D1 database the release made in the content account, is gone from that account's list once the unpublish retired its label", { needs: STORE_LIST_SECRETS }],
   ["M6-C11", "The room made private again, and the host still answers not found"],
@@ -145,7 +159,7 @@ export const USAGE = `Usage: node m6-code-app-staging.mjs --base-url ${STAGING} 
 
 M6's staging run with a real app with code: one tiny app (a worker/ module and podster-app.json asking for its store)
 is merged and released through the real path, then its host is asked for its marker, a read, writes within and over
-the budget, an outbound fetch and socket, a spin past the CPU limit, and a limit passed after the headers. Then the
+the budget, an outbound fetch and socket, a spin past the CPU limit, and a body that fails after the headers. Then the
 app is unpublished. Run from GitHub Actions (.github/workflows/m6-code-app-staging.yml): the owner's machine can't
 reach the content domain.
 
@@ -255,20 +269,19 @@ export default {
     }
     if (url.pathname === "/api/spin") return json({ ...base, spun: spin(${SPIN_ROUNDS}) });
     if (url.pathname === "/api/spin-light") return json({ ...base, spun: spin(${LIGHT_ROUNDS}) });
-    if (url.pathname === "/api/after-headers") {
+    if (url.pathname === "/api/after-headers" || url.pathname === "/api/after-hold") {
       const encoder = new TextEncoder();
+      const wait = url.pathname === "/api/after-headers" ? ${WITHIN_HOLD_MS} : ${AFTER_HOLD_MS};
       const body = new ReadableStream({
         async start(controller) {
           controller.enqueue(encoder.encode("start\n"));
-          await new Promise((done) => setTimeout(done, 300));
-          controller.enqueue(encoder.encode("spun " + spin(${SPIN_ROUNDS}) + "\n"));
-          controller.enqueue(encoder.encode("end\n"));
-          controller.close();
+          await new Promise((done) => setTimeout(done, wait));
+          controller.error(new Error(${JSON.stringify(APP_BODY_FAILURE)}));
         },
       });
       return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
-    if (url.pathname === "/api/after-hold") {
+    if (url.pathname === "/api/spin-after-hold") {
       const encoder = new TextEncoder();
       const body = new ReadableStream({
         async start(controller) {
@@ -398,7 +411,7 @@ export function budgetRefusalProblem({ status, body, headers }, nowMs, cap = WRI
 }
 
 /**
- * Why what a visitor got from an app that passed a limit after its headers isn't what `expected` says, or null (C09,
+ * Why what a visitor got from an app whose body failed after its headers isn't what `expected` says, or null (C09,
  * 2026-11-26). `held`: the body failed within the content Worker's hold, before the headers, so the answer is its own
  * 502 app_error. `aborted`: the body failed past the hold, so the answer is a 200 whose body failed and didn't end. A
  * 200 whose body ended normally always fails, cut short or whole, and so does a body that only hung until the run gave
@@ -407,7 +420,7 @@ export function budgetRefusalProblem({ status, body, headers }, nowMs, cap = WRI
 export function afterHeadersProblem({ status, text, bytes, ended, error, headers }, expected) {
   const body = String(text ?? "");
   if (status === undefined || status === null) return `no answer: ${error ?? "nothing"}`;
-  if (body.includes("end\n")) return `the module finished and answered ${status}: the CPU limit didn't stop it`;
+  if (body.includes("end\n")) return `the module finished and answered ${status}: its body didn't fail`;
   if (status === 200 && ended) return `a truncated 200: ${bytes} byte(s) and a body that ended normally, which a visitor can't tell from a whole answer`;
   if (expected === "held") {
     if (status !== 502 || body.trim() !== "app_error" || !ended) return `answered ${status} ${JSON.stringify(body.trim().slice(0, 40))}${ended ? "" : ", whose body failed"}, not the content Worker's 502 app_error from its hold`;

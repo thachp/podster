@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  AFTER_HOLD_MS, afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
+  AFTER_HOLD_MS, APP_BODY_FAILURE, WITHIN_HOLD_MS, afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
   appStoreOf, CLOUDFLARE_API, listStores, Results, runOutcome, SIGN_UPS, storeGone, storeListConfig, STORE_LIST_PAGE, STORE_LIST_PAGES, STORE_LIST_SECRETS, STORE_LIST_WIZARD, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 
@@ -114,7 +114,7 @@ const check = (passed, title) => {
   const handle = readFileSync(join(root, "apps/content/src/handle.ts"), "utf8");
   check(handle.includes("export const CODE_APPS_ENABLED: boolean = true;"), "this checkout's content Worker serves apps with code");
   const holdMs = Number(readFileSync(join(root, "apps/content/src/hold.ts"), "utf8").match(/export const HOLD_MS = ([0-9_]+);/)?.[1]?.replaceAll("_", ""));
-  check(holdMs > 0 && AFTER_HOLD_MS >= holdMs + 1_000 && 300 < holdMs, "C09's second route stops at least a second past the content Worker's hold, and its first well within it");
+  check(holdMs > 0 && AFTER_HOLD_MS >= holdMs + 1_000 && WITHIN_HOLD_MS * 3 <= holdMs, "C09's second route fails at least a second past the content Worker's hold, and its first well within it");
 }
 
 // ---- the store's deletion, from the operator's side (M6-CX1) ----
@@ -205,7 +205,7 @@ try {
   };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(OUTBOUND_REFUSAL.body, { status: OUTBOUND_REFUSAL.status });
-  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replaceAll(String(SPIN_ROUNDS), String(LIGHT_ROUNDS)).replace(`setTimeout(done, ${AFTER_HOLD_MS})`, "setTimeout(done, 1)");
+  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replaceAll(String(SPIN_ROUNDS), String(LIGHT_ROUNDS)).replace(`setTimeout(done, ${AFTER_HOLD_MS})`, "setTimeout(done, 1)").replace(`? ${WITHIN_HOLD_MS} : ${AFTER_HOLD_MS};`, "? 1 : 2;");
   const loaded = join(scratch, "runnable.mjs");
   writeFileSync(loaded, runnable);
   const { default: worker } = await import(loaded);
@@ -231,10 +231,19 @@ try {
   check(outboundProblems(open).length === 4, "with the network reachable, every fetch and socket fails the check");
   globalThis.fetch = realFetch;
   check(typeof moduleAnswer((await ask("/api/spin-light")).body, TAG)?.spun === "number", "the light work answers with its result");
-  const streamed = await ask("/api/after-headers");
-  check(streamed.status === 200 && streamed.body.startsWith("start\n") && streamed.body.endsWith("end\n"), "unstopped, the streamed answer begins, does its work and ends");
-  const late = await ask("/api/after-hold");
-  check(late.status === 200 && late.body.startsWith("start\n") && late.body.endsWith("end\n"), "unstopped, the answer that waits past the hold begins, waits, does its work and ends");
+  // C09's two judged routes begin, then fail their own body with the fixed message; the recorded one spins and ends.
+  const failsAfter = async (path) => {
+    const res = await worker.fetch(new Request(`https://app.${CONTENT_DOMAIN}${path}`), {});
+    const reader = res.body.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    const bodyError = await reader.read().then(() => null, (e) => String(e?.message));
+    return res.status === 200 && first === "start\n" && bodyError === APP_BODY_FAILURE;
+  };
+  check(await failsAfter("/api/after-headers"), "the answer whose body fails within the hold begins, then fails with the fixed message");
+  check(await failsAfter("/api/after-hold"), "the answer whose body fails past the hold begins, waits, then fails with the fixed message");
+  const spun = await ask("/api/spin-after-hold");
+  check(spun.status === 200 && spun.body.startsWith("start\n") && spun.body.endsWith("end\n"), "unstopped, the answer that spins past the hold begins, waits, does its work and ends");
+  check(source.includes(`setTimeout(done, wait)`) && source.includes(`? ${WITHIN_HOLD_MS} : ${AFTER_HOLD_MS};`), "the routes wait their figures in the module itself");
 } catch (error) {
   check(false, `the module ran here: ${error?.message ?? error}`);
 }
@@ -300,7 +309,7 @@ try {
   check(afterHeadersProblem(held, "aborted") !== null, "stopped past the hold: a 502 fails, as it can't have been held");
   for (const expected of ["held", "aborted"]) {
     check(afterHeadersProblem(seenAs({ ended: true, error: undefined }), expected)?.includes("truncated 200"), `${expected}: a truncated 200 whose body ended normally fails, staging's 2026-11-25 answer`);
-    check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }), expected)?.includes("didn't stop"), `${expected}: a whole answer fails, as the limit didn't stop the module`);
+    check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }), expected)?.includes("didn't fail"), `${expected}: a whole answer fails, as the module's body didn't fail`);
     check(afterHeadersProblem({ status: undefined, error: "TypeError (ECONNRESET)" }, expected) !== null && afterHeadersProblem(seenAs({ status: 500, ended: true }), expected) !== null, `${expected}: no answer, or any other status, fails`);
   }
   check(afterHeadersProblem(seenAs({ error: "TimeoutError" }), "aborted")?.includes("hung"), "a body that only hung until the run gave up isn't an abort");

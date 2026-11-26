@@ -502,7 +502,7 @@ Before the expanded experience is called complete:
 5. Shared room activity and agent inbox show consistent events with correct visibility. One room cannot expose another room's context or credentials.
 6. Review identifies an exact artifact version; requesting changes preserves history and does not mark an unreviewed replacement approved.
 7. Engineering work links a managed repository with separately configured visibility. Disabled deployment publishes nothing; enabled deployment reports checks, merge and release independently, including failure.
-8. Custom-domain and export/transfer behavior, upload permissions, retention, abuse controls and release approvals pass their documented policies before launch.
+8. Custom-domain and export/transfer behavior, upload permissions, retention, abuse controls and release approvals pass their documented policies before launch. *(2026-11-26: the custom-domain, release-approval and export/transfer policies are written in [Release policies](RELEASE-POLICIES.md), as built on M6, with what isn't built marked. Upload permissions and retention are the [upload policy](UPLOAD-POLICY.md).)*
 
 ## Decisions needed
 

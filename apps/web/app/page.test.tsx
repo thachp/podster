@@ -6,8 +6,13 @@ import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RedirectSignal } from "@/test/next-navigation";
 
-const state = vi.hoisted(() => ({ session: null as unknown }));
-vi.mock("@/lib/gateway/server", () => ({ getSession: async () => state.session }));
+const state = vi.hoisted(() => ({ session: null as unknown, fails: null as Error | null }));
+vi.mock("@/lib/gateway/server", () => ({
+  getSession: async () => {
+    if (state.fails) throw state.fails;
+    return state.session;
+  },
+}));
 
 const { default: Home } = await import("./page");
 const show = async () => render((await Home()) as ReactElement);
@@ -15,6 +20,24 @@ const show = async () => render((await Home()) as ReactElement);
 describe("/", () => {
   beforeEach(() => {
     state.session = null;
+    state.fails = null;
+  });
+
+  it("shows a signed-out person the landing page", async () => {
+    await show();
+    expect(screen.getByRole("heading", { level: 1 })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["the gateway is down", new Error("gateway_unavailable")],
+    ["the session read is rate limited", new RedirectSignal("/too-many-requests?after=30")],
+  ])("still shows the landing page when %s, and logs no ID", async (_why, error) => {
+    state.fails = error;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await show();
+    expect(screen.getByRole("heading", { level: 1 })).toBeInTheDocument();
+    expect(logged.mock.calls).toEqual([["landing session read failed"]]);
+    logged.mockRestore();
   });
 
   it("sends a signed-in person to Needs attention, as before", async () => {

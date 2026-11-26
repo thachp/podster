@@ -40,7 +40,7 @@ jobs:
       # Checks itself before it sends anything: its plan, its judges and its refusals, against a stand-in.
       - run: node m6-code-app-staging-selftest.mjs
         working-directory: e2e
-      - run: node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev
+      - run: exec node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev
         working-directory: e2e
         env:
           PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}

@@ -68,9 +68,9 @@ export const PLAN = [
   ["M6-R15", "M6-19: after the lift, only a new request and a new approval serve the app again, under a new release"],
   ["M6-R16", "M6-16, M6-28: switching release off in the room unpublishes: the host answers not found within the wait, and the release records are kept"],
   ["M6-R17", "M6-23, and the run's clean-up: the room is made private again; a request is then refused release_needs_public_room; the host still answers not found"],
-  ["M6-X14", "M6-14: a custom hostname routes only after its proof of control", { outOfScope: "custom domains" }],
-  ["M6-X15", "M6-15: refused custom hostnames, and two rooms racing for one", { outOfScope: "custom domains" }],
-  ["M6-X26", "M6-26: a custom hostname is claimed only by a room that published its own challenge", { outOfScope: "custom domains" }],
+  ["M6-X14", "M6-14: a custom hostname routes only after its proof of control", { outOfScope: "custom domains (their own run, m6-custom-domain-staging.mjs)" }],
+  ["M6-X15", "M6-15: refused custom hostnames, and two rooms racing for one", { outOfScope: "custom domains (their own run, m6-custom-domain-staging.mjs)" }],
+  ["M6-X26", "M6-26: a custom hostname is claimed only by a room that published its own challenge", { outOfScope: "custom domains (their own run, m6-custom-domain-staging.mjs)" }],
   ["M6-X13", "M6-13 as revised for apps with code: an app's Worker, its writes, its store and its outbound refusal", { outOfScope: "apps with code (Workers)" }],
 ].map(([id, title, flags = {}]) => ({ id, title, outOfScope: flags.outOfScope ?? null }));
 

@@ -303,6 +303,8 @@ async function main() {
   // unread 9 minutes after it was published. A placeholder is cached for DNS_TTL alone, as the decoy is for the main
   // name. It is no room's value, so it proves nothing.
   await dns.txt(NAMES.race, randomBytes(32).toString("hex"));
+  // Cloudflare can take a moment to serve a new record; a room's first look before then would cache the miss.
+  await run.pause(5000);
   const [raceB, raceC] = [await askFor(rooms.b, NAMES.race), await askFor(rooms.c, NAMES.race)];
   await dns.txt(NAMES.race, raceB.challenge_value);
   await dns.txt(NAMES.race, raceC.challenge_value);

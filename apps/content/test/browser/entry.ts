@@ -60,6 +60,7 @@ export default {
         }),
       },
       now: () => Date.now(),
+      wait: (ms) => new Promise((done) => setTimeout(done, ms)),
       stop,
       domain: DOMAIN,
       codeApps: false,

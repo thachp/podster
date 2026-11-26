@@ -29,6 +29,11 @@ export const PREFLIGHT_ALLOWANCE = { methods: "GET, HEAD, POST, PUT, PATCH, DELE
 export const STOP_WITHIN_MS = 10_000;
 /** The spin's loop, as rounds: seconds of CPU unstopped. Bounded, so an app the limit doesn't stop still ends. */
 export const SPIN_ROUNDS = 4_000_000_000;
+/**
+ * How long the module's second after-headers route waits after its first bytes before it spins: past the content
+ * Worker's 1-second hold (`apps/content/src/hold.ts`), so its stop lands after the headers were sent (C09).
+ */
+export const AFTER_HOLD_MS = 2_500;
 /** The light work the same module does, to show it computes when it isn't stopped. */
 export const LIGHT_ROUNDS = 100_000;
 /** Writes past the budget the run sends at most before it calls the budget not enforced: the burst is bounded. */
@@ -71,7 +76,7 @@ export const PLAN = [
   ["M6-C06", `The write budget, at the deployed ${WRITE_CAP.writes} writes a ${WRITE_CAP.windowMs / 60_000}-minute window: every write within it reaches the app, and the first over it is refused 429 write_budget_spent, with a Retry-After to the window's end that the page may read`],
   ["M6-C07", "The app's fetch gets podster-outbound's 403 and fixed body, and its connect() is refused before a socket opens"],
   ["M6-C08", `An app that spins is stopped by the ${APP_LIMITS.cpuMs} ms CPU limit: 502 app_error within ${STOP_WITHIN_MS / 1000} s, with nothing of the app's in it; the same module's light work answers 200`],
-  ["M6-C09", "What a visitor gets when an app passes a limit after its answer's headers were sent", { recordOnly: "the M6 plan says this is to be seen on staging, and doesn't say what it must be" }],
+  ["M6-C09", `An app that passes a limit after its answer's headers were sent never reaches a visitor as a clean 200: stopped within the content Worker's hold, it is 502 app_error; stopped ${AFTER_HOLD_MS / 1000} s in, past the hold, it is a 200 whose body was aborted; with the fixed headers either way`],
   ["M6-C10", "Unpublish: release switched off in the room; the host and its marker answer the content Worker's not found within the wait; a write gets 405 method_not_allowed and never reaches the app; while release is off the task's status says no release exists"],
   ["M6-CX1", "From the operator's side: the app's store, the one D1 database the release made in the content account, is gone from that account's list once the unpublish retired its label", { needs: STORE_LIST_SECRETS }],
   ["M6-C11", "The room made private again, and the host still answers not found"],
@@ -263,6 +268,19 @@ export default {
       });
       return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
+    if (url.pathname === "/api/after-hold") {
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode("start\n"));
+          await new Promise((done) => setTimeout(done, ${AFTER_HOLD_MS}));
+          controller.enqueue(encoder.encode("spun " + spin(${SPIN_ROUNDS}) + "\n"));
+          controller.enqueue(encoder.encode("end\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
     return json(base);
   },
 };
@@ -379,7 +397,30 @@ export function budgetRefusalProblem({ status, body, headers }, nowMs, cap = WRI
   return problems.length ? problems.join("; ") : null;
 }
 
-/** What a visitor got from an app that passed a limit after its headers: one line, for the record. */
+/**
+ * Why what a visitor got from an app that passed a limit after its headers isn't what `expected` says, or null (C09,
+ * 2026-11-26). `held`: the body failed within the content Worker's hold, before the headers, so the answer is its own
+ * 502 app_error. `aborted`: the body failed past the hold, so the answer is a 200 whose body failed and didn't end. A
+ * 200 whose body ended normally always fails, cut short or whole, and so does a body that only hung until the run gave
+ * up, which is no abort.
+ */
+export function afterHeadersProblem({ status, text, bytes, ended, error, headers }, expected) {
+  const body = String(text ?? "");
+  if (status === undefined || status === null) return `no answer: ${error ?? "nothing"}`;
+  if (body.includes("end\n")) return `the module finished and answered ${status}: the CPU limit didn't stop it`;
+  if (status === 200 && ended) return `a truncated 200: ${bytes} byte(s) and a body that ended normally, which a visitor can't tell from a whole answer`;
+  if (expected === "held") {
+    if (status !== 502 || body.trim() !== "app_error" || !ended) return `answered ${status} ${JSON.stringify(body.trim().slice(0, 40))}${ended ? "" : ", whose body failed"}, not the content Worker's 502 app_error from its hold`;
+  } else if (expected === "aborted") {
+    if (status !== 200) return `answered ${status} ${JSON.stringify(body.trim().slice(0, 40))}, not a 200 whose body was aborted past the hold`;
+    if (/^(TimeoutError|AbortError)\b/.test(String(error ?? ""))) return `the body hung until the run gave up (${error}), which isn't an abort`;
+    if (!body.startsWith("start\n")) return `a 200 whose body failed, but began ${JSON.stringify(body.slice(0, 20))}, not the module's start`;
+  } else throw new Error(`afterHeadersProblem: expected is "held" or "aborted", not ${JSON.stringify(expected)}`);
+  const problems = codeHeaderProblems(headers ?? []);
+  return problems.length ? problems.join("; ") : null;
+}
+
+/** What a visitor got from an app that passed a limit after its headers: one line, for the run's output. */
 export function afterHeadersLine({ status, contentType, cacheControl, allowOrigin, text, bytes, ended, error, ms }) {
   const seen = JSON.stringify(String(text ?? "").slice(0, 60));
   return `status ${status ?? "none"}, content-type ${contentType ?? "none"}, cache-control ${cacheControl ?? "none"}, allow-origin ${allowOrigin ?? "none"}; body ${bytes} byte(s) ${seen}; ${ended ? "the body ended normally" : `the body ended with ${error ?? "nothing"}`}; ${ms} ms`;

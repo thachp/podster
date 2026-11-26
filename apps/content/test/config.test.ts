@@ -214,15 +214,18 @@ describe("the Worker reaches nothing but its three bindings", () => {
   const sources = readdirSync(new URL("src/", root)).map((name) => [name, read(`src/${name}`)] as const);
 
   it("reads one namespace, asks one dispatch namespace and its own write counter, and names no other binding, host or secret", () => {
-    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "index.ts", "limits.ts", "names.ts", "requests.ts"]);
+    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "hold.ts", "index.ts", "limits.ts", "names.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
     expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "APP_LIMIT_CPU_MS", "APP_LIMIT_SUBREQUESTS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
     // Nothing is logged for a request but a failed dispatch's line (ADR 0010's "Logs"): one console call, in the entry,
     // with the line's two fields and nothing else. The counter logs nothing.
     expect([...all.matchAll(/\bconsole\b/g)]).toHaveLength(1);
     expect(sources.find(([name]) => name === "index.ts")?.[1]).toContain("log: (line) => console.log(JSON.stringify({ event: line.event, release: line.release })),");
-    // No write to the namespace, no outbound request of its own, and no cache or timer.
-    for (const word of [".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "setTimeout", "setInterval", "setAlarm", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
+    // No write to the namespace, no outbound request of its own, and no cache or timer but one: the entry's `wait`, how
+    // long an app's body is held before its headers are sent (`hold.ts`, C09), which only ends a wait.
+    for (const word of [".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "setInterval", "setAlarm", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
+    expect([...all.matchAll(/\bsetTimeout\b/g)]).toHaveLength(1);
+    expect(sources.find(([name]) => name === "index.ts")?.[1]).toContain("wait: (ms) => new Promise((done) => setTimeout(done, ms)),");
     // The only storage written is the counter's own object's, in the counter, and only by its one key.
     for (const [name, text] of sources) {
       if (name === "counter.ts") continue;

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
+  AFTER_HOLD_MS, afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
   appStoreOf, CLOUDFLARE_API, listStores, Results, runOutcome, SIGN_UPS, storeGone, storeListConfig, STORE_LIST_PAGE, STORE_LIST_PAGES, STORE_LIST_SECRETS, STORE_LIST_WIZARD, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 
@@ -51,7 +51,7 @@ const check = (passed, title) => {
 {
   const ids = PLAN.map((entry) => entry.id);
   check(new Set(ids).size === ids.length, "every check's ID is its own");
-  check(PLAN.every((e) => !e.outOfScope) && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === '["M6-C09"]', "no check is out of scope, and one is only recorded (a limit after the headers)");
+  check(PLAN.every((e) => !e.outOfScope) && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === "[]", "no check is out of scope, and none is only recorded: C09 is judged since 2026-11-26");
   check(JSON.stringify(PLAN.filter((e) => e.needs).map((e) => [e.id, e.needs])) === JSON.stringify([["M6-CX1", STORE_LIST_SECRETS]]) && STORE_LIST_SECRETS.join() === "PODSTER_E2E_STORE_LIST_TOKEN,PODSTER_E2E_CONTENT_ACCOUNT_ID", "only the store's deletion (M6-CX1) needs secrets: the store-list token and the content account's ID");
   const ids2 = PLAN.map((e) => e.id);
   check(ids2.indexOf("M6-CX1") === ids2.indexOf("M6-C10") + 1, "the store's deletion is checked straight after the unpublish");
@@ -69,12 +69,14 @@ const check = (passed, title) => {
   partial.add("M6-C01", "pass");
   check(runOutcome(partial, PLAN).code === 1, "a judged check with no result fails the run");
   const lines = [];
-  const printed = new Results(PLAN, (line) => lines.push(line));
+  // A plan with one recorded-only entry, to show how one prints: the run's own plan has none.
+  const TOY = [...PLAN, { id: "T-R01", title: "a toy record", outOfScope: null, recordOnly: "a toy", needs: null }];
+  const printed = new Results(TOY, (line) => lines.push(line));
   printed.add("M6-C01", "pass");
   printed.add("M6-C02", "fail", "why");
   printed.add("M6-CX1", "skipped", "needs");
-  printed.add("M6-C09", "recorded", "seen");
-  check(["PASS M6-C01", "FAIL M6-C02", "SKIP M6-CX1", "RECORDED M6-C09"].every((start, at) => lines[at].startsWith(start)) && printed.summary().endsWith(", 1 skipped"), "results print as PASS, FAIL, SKIP and RECORDED, and the summary counts the skipped");
+  printed.add("T-R01", "recorded", "seen");
+  check(["PASS M6-C01", "FAIL M6-C02", "SKIP M6-CX1", "RECORDED T-R01"].every((start, at) => lines[at].startsWith(start)) && printed.summary().endsWith(", 1 skipped"), "results print as PASS, FAIL, SKIP and RECORDED, and the summary counts the skipped");
   const skippedRun = outcome((entry) => (entry.needs ? "skipped" : "pass"));
   check(skippedRun.code === 0 && JSON.stringify(skippedRun.skipped) === '["M6-CX1"]', "the store's deletion skipped for want of its secrets doesn't change the exit code, and is named");
   const cx1Failed = outcome((entry) => (entry.needs ? "fail" : "pass"));
@@ -87,7 +89,7 @@ const check = (passed, title) => {
       return true;
     }
   };
-  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-C01", "skipped")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "pass")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, only a check that needs secrets can be skipped, the recorded can't be judged, and none is added twice");
+  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-C01", "skipped")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "outOfScope")) && refuses(() => new Results(TOY, () => {}).add("T-R01", "pass")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "recorded")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, only a check that needs secrets can be skipped, the recorded can't be judged, and none is added twice");
   check(SIGN_UPS.length === 2, "the run plans 2 takes of the test sign-up");
   check(parseArgs(["--base-url", STAGING]).options?.base === STAGING && Boolean(parseArgs(["--base-url", "https://example.com"]).error) && parseArgs(["--help"]).options?.help === true, "the arguments are the release run's: staging only");
 }
@@ -111,6 +113,8 @@ const check = (passed, title) => {
   check(core.includes("pub const CODE_RELEASES_COMPLETE: bool = true;"), "this checkout's gate for apps with code is open");
   const handle = readFileSync(join(root, "apps/content/src/handle.ts"), "utf8");
   check(handle.includes("export const CODE_APPS_ENABLED: boolean = true;"), "this checkout's content Worker serves apps with code");
+  const holdMs = Number(readFileSync(join(root, "apps/content/src/hold.ts"), "utf8").match(/export const HOLD_MS = ([0-9_]+);/)?.[1]?.replaceAll("_", ""));
+  check(holdMs > 0 && AFTER_HOLD_MS >= holdMs + 1_000 && 300 < holdMs, "C09's second route stops at least a second past the content Worker's hold, and its first well within it");
 }
 
 // ---- the store's deletion, from the operator's side (M6-CX1) ----
@@ -201,7 +205,7 @@ try {
   };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(OUTBOUND_REFUSAL.body, { status: OUTBOUND_REFUSAL.status });
-  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replace(String(SPIN_ROUNDS), String(LIGHT_ROUNDS));
+  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replaceAll(String(SPIN_ROUNDS), String(LIGHT_ROUNDS)).replace(`setTimeout(done, ${AFTER_HOLD_MS})`, "setTimeout(done, 1)");
   const loaded = join(scratch, "runnable.mjs");
   writeFileSync(loaded, runnable);
   const { default: worker } = await import(loaded);
@@ -229,6 +233,8 @@ try {
   check(typeof moduleAnswer((await ask("/api/spin-light")).body, TAG)?.spun === "number", "the light work answers with its result");
   const streamed = await ask("/api/after-headers");
   check(streamed.status === 200 && streamed.body.startsWith("start\n") && streamed.body.endsWith("end\n"), "unstopped, the streamed answer begins, does its work and ends");
+  const late = await ask("/api/after-hold");
+  check(late.status === 200 && late.body.startsWith("start\n") && late.body.endsWith("end\n"), "unstopped, the answer that waits past the hold begins, waits, does its work and ends");
 } catch (error) {
   check(false, `the module ran here: ${error?.message ?? error}`);
 }
@@ -283,6 +289,31 @@ try {
 
   const line = afterHeadersLine({ status: 200, contentType: "text/plain", cacheControl: "no-store", allowOrigin: "null", text: "start\n", bytes: 6, ended: false, error: "TypeError (UND_ERR_SOCKET)", ms: 900 });
   check(line.includes("status 200") && line.includes("6 byte(s)") && line.includes("TypeError"), "what a visitor got after the headers is one line");
+
+  // C09, judged since 2026-11-26: an aborted body or the content Worker's own 502 passes; a clean truncated 200 fails.
+  const seenAs = (over) => ({ status: 200, headers: good, text: "start\n", bytes: 6, ended: false, error: "TypeError (UND_ERR_SOCKET)", ms: 900, ...over });
+  const held = seenAs({ status: 502, text: "app_error\n", bytes: 10, ended: true, error: undefined });
+  check(afterHeadersProblem(held, "held") === null, "stopped within the hold: the content Worker's own 502 app_error passes");
+  check(afterHeadersProblem(seenAs({}), "held") !== null, "stopped within the hold: an aborted 200 fails, as the hold didn't answer it");
+  check(afterHeadersProblem(seenAs({}), "aborted") === null, "stopped past the hold: a 200 whose body was aborted after the module's start passes");
+  check(afterHeadersProblem(seenAs({ error: "TypeError (ERR_STREAM_PREMATURE_CLOSE)" }), "aborted") === null, "an aborted body passes whatever the socket's error code");
+  check(afterHeadersProblem(held, "aborted") !== null, "stopped past the hold: a 502 fails, as it can't have been held");
+  for (const expected of ["held", "aborted"]) {
+    check(afterHeadersProblem(seenAs({ ended: true, error: undefined }), expected)?.includes("truncated 200"), `${expected}: a truncated 200 whose body ended normally fails, staging's 2026-11-25 answer`);
+    check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }), expected)?.includes("didn't stop"), `${expected}: a whole answer fails, as the limit didn't stop the module`);
+    check(afterHeadersProblem({ status: undefined, error: "TypeError (ECONNRESET)" }, expected) !== null && afterHeadersProblem(seenAs({ status: 500, ended: true }), expected) !== null, `${expected}: no answer, or any other status, fails`);
+  }
+  check(afterHeadersProblem(seenAs({ error: "TimeoutError" }), "aborted")?.includes("hung"), "a body that only hung until the run gave up isn't an abort");
+  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", ended: false, bytes: 3 }), "held") !== null && afterHeadersProblem(seenAs({ status: 502, text: "other\n", ended: true, error: undefined }), "held") !== null, "a 502 whose body failed, or that isn't app_error, fails");
+  check(afterHeadersProblem(seenAs({ headers: good.map(([n, v]) => [n, n === "cache-control" ? "public, max-age=60" : v]) }), "aborted") !== null && afterHeadersProblem({ ...held, headers: good.filter(([n]) => n !== "access-control-allow-origin") }, "held") !== null, "either answer without the fixed headers fails");
+  check(afterHeadersProblem(seenAs({ text: "", bytes: 0 }), "aborted") !== null, "an aborted 200 that didn't begin with the module's start fails");
+  let unsaid = false;
+  try {
+    afterHeadersProblem(held, "either");
+  } catch {
+    unsaid = true;
+  }
+  check(unsaid, "C09 says which answer it expects");
 }
 
 // ---- the script's source ----
@@ -323,7 +354,7 @@ try {
   {
     const dry = script([...base, "--dry-run"], { mode: "edge-down" });
     check(dry.code === 0 && dry.out.includes("Nothing was sent") && dry.requests === 0, "a dry run on this checkout's contract exits 0 and sends nothing");
-    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[needs: PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID]") && dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the recorded one and the one that needs secrets");
+    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[needs: PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID]") && !dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the one that needs secrets, and none as only recorded");
     check(dry.out.includes("The store's deletion (M6-CX1): skipped, needs PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID"), "without the store-list secrets, the dry run says the store's deletion is skipped and what it needs");
     const storeToken = "s".repeat(44);
     const storeAccount = "c".repeat(32);

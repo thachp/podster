@@ -166,6 +166,7 @@ export default {
       entries: { get: async (key) => ENTRIES[key] ?? null },
       apps: { get: (script) => ({ fetch: async (toApp) => serve(script, toApp) }) },
       now: () => Date.now(),
+      wait: (ms) => new Promise((done) => setTimeout(done, ms)),
       stop,
       domain: DOMAIN,
       codeApps: false,

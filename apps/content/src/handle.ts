@@ -39,10 +39,15 @@
 // With it on, every step before 6 that would refuse answers that `405` instead, and so does a static host. A static
 // host's answers are exactly what they were before.
 //
+// An answer from a host with code is held before its headers are sent (`hold.ts`, C09): a body that ends within the
+// hold is sent whole with its exact length, one that fails within it is `502 app_error`, and one that outgrows it is
+// streamed and aborted, never ended cleanly, if the app's body fails later.
+//
 // One thing is logged, and only for a dispatch that failed: its fixed class and the release's ID (`DispatchLog`).
 // Nothing else of a request is ever logged: no message, host, label, path, header or body (ADR 0010's "Logs").
 import { BUDGET_REFUSAL_STATUS, retryAfterSeconds } from "./budget";
 import type { WriteGate } from "./counter";
+import { HOLD_MS, holdBody } from "./hold";
 import type { DispatchLimits } from "./limits";
 import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, scriptRelease, STOP_KEY } from "./names";
 import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
@@ -88,9 +93,10 @@ export interface Apps {
  * The one line this Worker logs: a dispatch that failed. Its fixed class, and the release's ID from the script's name
  * (null if the name isn't a script's, which a confirmed entry never is). Never the rejection's message, the host, the
  * label, the path, a header or a body. It is the signal of a platform outage, which a static host answers as
- * not-found and so can't show by its status.
+ * not-found and so can't show by its status. `dispatch_stream_error` is a host with code's body that failed after its
+ * headers were sent (`hold.ts`, C09); a body that fails while held is `dispatch_error`, as a dispatch that throws.
  */
-export type DispatchLog = { event: "dispatch_missing" | "dispatch_error"; release: string | null };
+export type DispatchLog = { event: "dispatch_missing" | "dispatch_error" | "dispatch_stream_error"; release: string | null };
 
 /** What one running copy remembers of the stop. Only a read that answered is remembered. */
 export interface StopMemory {
@@ -101,6 +107,8 @@ export interface Deps {
   apps: Apps;
   /** The time now, in milliseconds. Passed in, so no test waits. */
   now: () => number;
+  /** Settles once `ms` milliseconds have passed: how long an app's body is held (`hold.ts`). Passed in, so no test waits. */
+  wait: (ms: number) => Promise<void>;
   stop: StopMemory;
   /** The content domain, from configuration. Not a host, and every request is not-found. */
   domain: string;
@@ -336,7 +344,8 @@ async function bodyWithin(request: Request): Promise<Uint8Array<ArrayBuffer> | n
  *   budget that can't be read, `503`.
  *
  * A script that isn't there is not-found; any other failure of the dispatch, an app that throws or passes a limit
- * among them, is `502 app_error`, with nothing of the app's message in it. Every answer here is never kept and is
+ * among them, is `502 app_error`, with nothing of the app's message in it; so is an answer whose body fails while it is
+ * held, before its headers are sent (`sendHeld`, C09). Every answer here is never kept and is
  * readable by the origin `null` only, an app's included, except a refused preflight's, which is readable by nobody,
  * so the browser sends nothing further.
  */
@@ -396,13 +405,42 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
       if (value !== null && !(bodiless && name === "content-length")) headers.set(name, value);
     }
     fixedHeaders(headers, site, true, CODE_ALLOW_ORIGIN);
-    return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
+    return bodiless ? new Response(null, { status: answer.status, headers }) : await sendHeld(deps, script, answer, headers, () => asCode(502, "app_error"));
   }
   // A read, sent on exactly as a static host's is: the visitor's URL, so its exact path and query, and three headers.
   const answer = await dispatch(deps, script, requestForApp(request, url, "read"), limits);
   if (answer === "missing") return asCode(404, "not_found", { "clear-site-data": '"cache"' });
   if (answer === "error") return asCode(502, "app_error");
-  return passRead(request, answer, site, CODE_ALLOW_ORIGIN, () => asCode(404, "not_found", { "clear-site-data": '"cache"' }), () => asCode(502, "app_answer_unservable"));
+  return await passRead(request, answer, site, CODE_ALLOW_ORIGIN, () => asCode(404, "not_found", { "clear-site-data": '"cache"' }), () => asCode(502, "app_answer_unservable"), (headers) => sendHeld(deps, script, answer, headers, () => asCode(502, "app_error")));
+}
+
+/**
+ * A host with code's answer with a body, held before its headers are sent (`hold.ts`, C09). Whole: sent with its exact
+ * length. Failed within the hold: `failed()`, this Worker's own error, and logged as a failed dispatch. Outgrown:
+ * streamed, and errored, never ended cleanly, if the app's body fails later, which is logged too.
+ */
+async function sendHeld(deps: Deps, script: string, answer: Response, headers: Headers, failed: () => Response): Promise<Response> {
+  if (answer.body === null) return new Response(null, { status: answer.status, headers });
+  const log = (event: DispatchLog["event"]) => {
+    try {
+      deps.log({ event, release: scriptRelease(script) });
+    } catch {
+      // Nothing: the answer is the same with or without the line.
+    }
+  };
+  // An event stream is meant to be read as it comes, so it isn't held for any time; it is still errored, never ended
+  // cleanly, if the app's body fails.
+  const eventStream = (answer.headers.get("content-type") ?? "").trim().toLowerCase().startsWith("text/event-stream");
+  const held = await holdBody(answer.body, eventStream ? Promise.resolve() : deps.wait(HOLD_MS), () => log("dispatch_stream_error"));
+  if (held.kind === "failed") {
+    log("dispatch_error");
+    return failed();
+  }
+  if (held.kind === "whole") {
+    headers.set("content-length", String(held.length));
+    return new Response(held.body, { status: answer.status, headers });
+  }
+  return new Response(held.body, { status: answer.status, headers });
 }
 
 /**
@@ -411,7 +449,7 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
  * this Worker's own. A static host's answer may be kept for a minute and read by any page; a host with code's
  * (`readableBy` the origin `null`) is never kept.
  */
-function passRead(request: Request, answer: Response, site: Site, readableBy: ReadableBy, offHost: () => Response, unservable: () => Response): Response {
+function passRead(request: Request, answer: Response, site: Site, readableBy: ReadableBy, offHost: () => Response, unservable: () => Response, send?: (headers: Headers) => Promise<Response>): Response | Promise<Response> {
   const headers = new Headers();
   if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return unservable();
   if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {
@@ -429,6 +467,8 @@ function passRead(request: Request, answer: Response, site: Site, readableBy: Re
   fixedHeaders(headers, site, readableBy === CODE_ALLOW_ORIGIN, readableBy);
   // A status that can't carry a body gets none, whatever the app sent.
   const bodiless = request.method === "HEAD" || [204, 205, 304].includes(answer.status);
+  // A host with code's body is held first (`sendHeld`); a static host's is passed as it comes.
+  if (!bodiless && send) return send(headers);
   return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
 }
 

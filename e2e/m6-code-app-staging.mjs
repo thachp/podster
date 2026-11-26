@@ -9,7 +9,8 @@
 // - writes within the budget reach the app, and the first over it is refused 429 with Retry-After;
 // - the app's fetch gets podster-outbound's 403, and its connect() is refused;
 // - an app that spins is stopped by the CPU limit (502 app_error);
-// - what a visitor gets when a limit hits after the headers were sent, recorded and not judged;
+// - a limit hit after the headers were sent never reaches a visitor as a clean 200: 502 app_error within the content
+//   Worker's hold, an aborted body past it;
 // - unpublish: the host answers not found, and a write no longer reaches the app;
 // - from the operator's side (M6-CX1): the app's store, a D1 database in the content account, is deleted once the
 //   unpublish retired its label. Read with a read-only token on that account, by GETs of its D1 list only; skipped,
@@ -51,7 +52,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, appFiles, appStoreOf, listStores, storeGone, storeListConfig, STORE_GONE_WAIT_MS, STORE_POLL_MS, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
+  afterHeadersLine, afterHeadersProblem, appFiles, appStoreOf, listStores, storeGone, storeListConfig, STORE_GONE_WAIT_MS, STORE_POLL_MS, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
   preflightProblem, Results, resultUrlProblem, runOutcome, secretProblem, SIGN_UPS, slowestLine, spinProblem, STAGING, STAGING_ORG, unknownLabel, USAGE, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -134,15 +135,30 @@ async function check(id, body) {
     return false;
   }
 }
-/** Records what was seen, never judged. A record that couldn't be made says why. */
-async function record(id, body) {
-  if (run.stopping) throw new Halt("stopped by a signal");
+/** Asks a host once and reads its body to the end or its failure: what a visitor got, for C09. */
+async function streamedAsk(url) {
+  const at = new Date().toISOString();
+  const begun = performance.now();
+  const seen = { bytes: 0, text: "", ended: false };
+  let res;
   try {
-    results.add(id, "recorded", await body());
+    res = await fetch(url, { redirect: "manual", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30_000) });
+    Object.assign(seen, { status: res.status, headers: [...res.headers], contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      seen.bytes += value.byteLength;
+      seen.text += decoder.decode(value, { stream: true });
+    }
+    seen.ended = true;
   } catch (error) {
-    if (error instanceof Halt) throw error;
-    results.add(id, "recorded", `nothing recorded: ${cause(error)}`);
+    seen.error = `${error?.name ?? "Error"}${error?.cause?.code ? ` (${error.cause.code})` : ""}`;
   }
+  seen.ms = Math.round(performance.now() - begun);
+  run.logRequest({ url, method: "GET", at, ms: seen.ms, ...(res ? { status: res.status } : { error: seen.error }) });
+  return seen;
 }
 /** Fails a check whose ground an earlier one didn't lay. */
 const after = (...ids) => {
@@ -370,31 +386,17 @@ async function main() {
     return `light work 200 in ${light.ms} ms; the spin answered 502 app_error in ${spun.ms} ms`;
   });
 
-  await record("M6-C09", async () => {
+  await check("M6-C09", async () => {
     after("M6-C01");
-    const url = app("/api/after-headers");
-    const at = new Date().toISOString();
-    const begun = performance.now();
-    const seen = { bytes: 0, text: "", ended: false };
-    let res;
-    try {
-      res = await fetch(url, { redirect: "manual", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30_000) });
-      Object.assign(seen, { status: res.status, contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        seen.bytes += value.byteLength;
-        seen.text += decoder.decode(value, { stream: true });
-      }
-      seen.ended = true;
-    } catch (error) {
-      seen.error = `${error?.name ?? "Error"}${error?.cause?.code ? ` (${error.cause.code})` : ""}`;
+    // Stopped within the content Worker's hold, then stopped past it.
+    const lines = [];
+    for (const [path, expected] of [["/api/after-headers", "held"], ["/api/after-hold", "aborted"]]) {
+      const seen = await streamedAsk(app(path));
+      const problem = afterHeadersProblem(seen, expected);
+      ok(problem === null, `${path}: ${problem}; seen: ${afterHeadersLine(seen)}`);
+      lines.push(`${path}: ${afterHeadersLine(seen)}`);
     }
-    seen.ms = Math.round(performance.now() - begun);
-    run.logRequest({ url, method: "GET", at, ms: seen.ms, ...(res ? { status: res.status } : { error: seen.error }) });
-    return afterHeadersLine(seen);
+    return lines.join("; ");
   });
 
   say("\n## unpublish");

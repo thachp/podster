@@ -11,13 +11,17 @@
 // - an app that spins is stopped by the CPU limit (502 app_error);
 // - a limit hit after the headers were sent never reaches a visitor as a clean 200: 502 app_error within the content
 //   Worker's hold, an aborted body past it;
-// - unpublish: the host answers not found, and a write no longer reaches the app.
+// - unpublish: the host answers not found, and a write no longer reaches the app;
+// - from the operator's side (M6-CX1): the app's store, a D1 database in the content account, is deleted once the
+//   unpublish retired its label. Read with a read-only token on that account, by GETs of its D1 list only; skipped,
+//   naming the two secrets it needs, until the workflow's environment holds them.
 //
 //   node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
 //
 // **It runs from GitHub Actions,** `.github/workflows/m6-code-app-staging.yml`, started by hand: the owner's machine
 // sits behind a web filter that blocks the content domain. The workflow's environment, `staging-e2e`, holds the one
-// secret it needs, PODSTER_E2E_SIGNUP_SECRET, set by the owner.
+// secret it needs, PODSTER_E2E_SIGNUP_SECRET, set by the owner, and M6-CX1's two, which scripts/wizards/store-list-token.sh
+// adds: PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID.
 //
 // Before any sign-up, signed out: staging's agent configuration answers, a signed-out room list is 401, capabilities
 // discovery lists `deploy_release`, and an unknown app's host on podster.site gets the content Worker's own not found.
@@ -48,7 +52,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, afterHeadersProblem, appFiles, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
+  afterHeadersLine, afterHeadersProblem, appFiles, appStoreOf, listStores, storeGone, storeListConfig, STORE_GONE_WAIT_MS, STORE_POLL_MS, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
   preflightProblem, Results, resultUrlProblem, runOutcome, secretProblem, SIGN_UPS, slowestLine, spinProblem, STAGING, STAGING_ORG, unknownLabel, USAGE, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -65,6 +69,8 @@ if (options.help) {
   process.exit(0);
 }
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
+/** M6-CX1's read of the content account: `{ config }`, `{ needs }` (skipped) or `{ problem }` (fails). */
+const storeList = storeListConfig(process.env);
 
 // ---- the contract and the configuration, before anything is sent ----
 
@@ -84,8 +90,9 @@ const grantProblem = deployGrantProblem(contractText);
   console.log(`Waits, in seconds: repository ${options.setupWait}, merge ${options.mergeWait}, release ${options.releaseWait}, takedown ${options.takedownWait}.`);
   if (options.dryRun) {
     console.log(`\nThe ${PLAN.length} checks, in order:`);
-    for (const entry of PLAN) console.log(`  ${entry.id.padEnd(7)} ${entry.title}${entry.outOfScope ? ` [out of scope: ${entry.outOfScope}]` : ""}${entry.recordOnly ? ` [recorded, not judged: ${entry.recordOnly}]` : ""}`);
+    for (const entry of PLAN) console.log(`  ${entry.id.padEnd(7)} ${entry.title}${entry.outOfScope ? ` [out of scope: ${entry.outOfScope}]` : ""}${entry.recordOnly ? ` [recorded, not judged: ${entry.recordOnly}]` : ""}${entry.needs ? ` [needs: ${entry.needs.join(" and ")}]` : ""}`);
   }
+  console.log(`\nThe store's deletion (M6-CX1): ${storeList.config ? "checked from the content account's D1 list, read-only" : storeList.needs ? `skipped, ${storeList.needs}` : `fails: ${storeList.problem}`}.`);
   const problem = secretProblem(signupSecret);
   if (grantProblem) {
     console.error(`\nRefused: ${grantProblem}. The run can't ask for a release without one. Nothing was sent.`);
@@ -109,6 +116,10 @@ const RUN = `M6 code app ${new Date().toISOString().slice(0, 16)}`;
 const TAG = `e2e-${randomBytes(6).toString("hex")}`;
 const run = releaseRun({ signupSecret, options, runName: RUN, workPrefix: "podster-m6-code-app-" });
 const { say, hostAsk, marker } = run;
+if (storeList.config) {
+  run.secret(storeList.config.token);
+  run.secret(storeList.config.accountId);
+}
 const results = new Results(PLAN, say);
 
 // ---- checks ----
@@ -163,6 +174,19 @@ const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, 
 let releaseOn = false;
 /** When each write the budget counted was sent, by this machine's clock: the burst's arithmetic needs them. */
 const counted = [];
+/** The content account's Podster stores just before the agent asked for the release, and once it was served (M6-CX1). */
+let storesBefore = null;
+let storesAfter = null;
+/** When release was switched off in the room, by this machine's clock: CX1's wait counts from it. */
+let offAt = null;
+/** A read of the content account's stores that never throws: `{ stores }` or `{ problem }`. Never printed. */
+const readStores = async () => {
+  try {
+    return await listStores(storeList.config);
+  } catch (error) {
+    return { problem: `the account's D1 list couldn't be read (${error?.name ?? "Error"})` };
+  }
+};
 
 const configOf = async () => owner.must("GET", `/v1/workspaces/${room}/release-config`);
 const app = (path) => `https://${host}${path}`;
@@ -233,6 +257,7 @@ async function main() {
     const on = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 });
     eq([on.enabled, on.set_by], [true, admin.id], "the configuration the admin set");
     await run.give(owner, coder, DEPLOY_GRANT.action, room);
+    if (storeList.config) storesBefore = await readStores();
     const asked = await coder.must("deploy_release", { workspace_id: room, task_id: task.id, commit_sha: task.mergeSha });
     eq([asked.state, asked.requested_by, asked.commit_sha], ["awaiting_approval", coder.id, task.mergeSha], "the agent's release as asked for");
     releaseId = asked.id;
@@ -246,6 +271,7 @@ async function main() {
     eq(resultUrlProblem(status.release.result_url, host), null, "the result URL");
     return `release ${releaseId} served after ${seconds} s at the app's default host`;
   });
+  if (storeList.config && results.passed("M6-C01")) storesAfter = await readStores();
 
   say("\n## the marker, and the module behind it");
   await check("M6-C02", async () => {
@@ -377,6 +403,7 @@ async function main() {
   await check("M6-C10", async () => {
     after("M6-C01");
     const config = await configOf();
+    offAt = Date.now();
     const off = await admin.must("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.version });
     eq(off.enabled, false, "the configuration switched off");
     releaseOn = false;
@@ -387,6 +414,27 @@ async function main() {
     eq((await run.statusOf(owner, task)).release, { exists: false }, "the task's release while release is off");
     return `the host answered not found ${down} s after release was switched off`;
   });
+
+  say("\n## the store's deletion, from the operator's side");
+  if (storeList.needs) results.add("M6-CX1", "skipped", storeList.needs);
+  else
+    await check("M6-CX1", async () => {
+      ok(!storeList.problem, storeList.problem);
+      after("M6-C01", "M6-C10");
+      ok(!storesBefore?.problem, `before the release: ${storesBefore?.problem}`);
+      ok(!storesAfter?.problem, `after the release: ${storesAfter?.problem}`);
+      const found = appStoreOf(storesBefore.stores, storesAfter.stores);
+      ok(!found.problem, found.problem);
+      say(`     the app's store was listed in the content account after the release; waiting up to ${STORE_GONE_WAIT_MS / 60_000} minutes for it to go`);
+      let last = null;
+      for (;;) {
+        last = await readStores();
+        if (!last.problem && storeGone(last.stores, found.store)) return `the app's store, listed after the release, was gone from the content account's D1 list ${Math.round((Date.now() - offAt) / 1000)} s after release was switched off`;
+        if (Date.now() - offAt >= STORE_GONE_WAIT_MS) break;
+        await run.pause(STORE_POLL_MS);
+      }
+      throw new Error(last.problem ? `the last read failed: ${last.problem}` : `the app's store was still listed ${Math.round((Date.now() - offAt) / 1000)} s after release was switched off`);
+    });
 
   say("\n## the room made private again");
   await check("M6-C11", async () => {
@@ -456,6 +504,7 @@ try {
     if (results.has(entry.id)) continue;
     if (entry.outOfScope) results.add(entry.id, "outOfScope", entry.outOfScope);
     else if (entry.recordOnly) results.add(entry.id, "recorded", `nothing recorded: ${notRun}`);
+    else if (entry.needs && storeList.needs) results.add(entry.id, "skipped", storeList.needs);
     else results.add(entry.id, "fail", notRun);
   }
   cleanupLines = await cleanUp();
@@ -473,6 +522,7 @@ const outcome = runOutcome(results, PLAN);
 say(`\n${results.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${run.signUpsAsked}.`);
 if (run.signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
 if (outcome.unshown.length) say(`Not shown, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
+if (outcome.skipped.length) say(`Skipped, for want of the secrets they need: ${outcome.skipped.join(", ")}. The exit code doesn't count them.`);
 say(`Left behind on staging: ${run.leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);
 say(slowestLine(run.requests));
 process.exit(outcome.code);

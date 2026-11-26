@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AFTER_HOLD_MS, afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
-  Results, runOutcome, SIGN_UPS, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
+  appStoreOf, CLOUDFLARE_API, listStores, Results, runOutcome, SIGN_UPS, storeGone, storeListConfig, STORE_LIST_PAGE, STORE_LIST_PAGES, STORE_LIST_SECRETS, STORE_LIST_WIZARD, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
@@ -51,7 +51,10 @@ const check = (passed, title) => {
 {
   const ids = PLAN.map((entry) => entry.id);
   check(new Set(ids).size === ids.length, "every check's ID is its own");
-  check(JSON.stringify(PLAN.filter((e) => e.outOfScope).map((e) => e.id)) === '["M6-CX1"]' && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === "[]", "one check is out of scope (the store's deletion), and none is only recorded: C09 is judged since 2026-11-26");
+  check(PLAN.every((e) => !e.outOfScope) && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === "[]", "no check is out of scope, and none is only recorded: C09 is judged since 2026-11-26");
+  check(JSON.stringify(PLAN.filter((e) => e.needs).map((e) => [e.id, e.needs])) === JSON.stringify([["M6-CX1", STORE_LIST_SECRETS]]) && STORE_LIST_SECRETS.join() === "PODSTER_E2E_STORE_LIST_TOKEN,PODSTER_E2E_CONTENT_ACCOUNT_ID", "only the store's deletion (M6-CX1) needs secrets: the store-list token and the content account's ID");
+  const ids2 = PLAN.map((e) => e.id);
+  check(ids2.indexOf("M6-CX1") === ids2.indexOf("M6-C10") + 1, "the store's deletion is checked straight after the unpublish");
   const owed = ["marker", "read", "budget", "fetch", "connect()", "spins", "after its answer's headers", "Unpublish"];
   check(owed.every((word) => PLAN.some((entry) => entry.title.includes(word))), "every item the plan owes a staging run has a check");
   const outcome = (status) => {
@@ -67,13 +70,17 @@ const check = (passed, title) => {
   check(runOutcome(partial, PLAN).code === 1, "a judged check with no result fails the run");
   const lines = [];
   // A plan with one recorded-only entry, to show how one prints: the run's own plan has none.
-  const TOY = [...PLAN, { id: "T-R01", title: "a toy record", outOfScope: null, recordOnly: "a toy" }];
+  const TOY = [...PLAN, { id: "T-R01", title: "a toy record", outOfScope: null, recordOnly: "a toy", needs: null }];
   const printed = new Results(TOY, (line) => lines.push(line));
   printed.add("M6-C01", "pass");
   printed.add("M6-C02", "fail", "why");
-  printed.add("M6-CX1", "outOfScope", "why");
+  printed.add("M6-CX1", "skipped", "needs");
   printed.add("T-R01", "recorded", "seen");
-  check(["PASS M6-C01", "FAIL M6-C02", "OUT OF SCOPE M6-CX1", "RECORDED T-R01"].every((start, at) => lines[at].startsWith(start)), "results print as PASS, FAIL, OUT OF SCOPE and RECORDED");
+  check(["PASS M6-C01", "FAIL M6-C02", "SKIP M6-CX1", "RECORDED T-R01"].every((start, at) => lines[at].startsWith(start)) && printed.summary().endsWith(", 1 skipped"), "results print as PASS, FAIL, SKIP and RECORDED, and the summary counts the skipped");
+  const skippedRun = outcome((entry) => (entry.needs ? "skipped" : "pass"));
+  check(skippedRun.code === 0 && JSON.stringify(skippedRun.skipped) === '["M6-CX1"]', "the store's deletion skipped for want of its secrets doesn't change the exit code, and is named");
+  const cx1Failed = outcome((entry) => (entry.needs ? "fail" : "pass"));
+  check(cx1Failed.code === 1 && JSON.stringify(cx1Failed.failed) === '["M6-CX1"]', "the store's deletion, checked and failed, fails the run");
   const refuses = (fn) => {
     try {
       fn();
@@ -82,7 +89,7 @@ const check = (passed, title) => {
       return true;
     }
   };
-  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "pass")) && refuses(() => new Results(TOY, () => {}).add("T-R01", "pass")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "recorded")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, nor the others judged, nor any added twice");
+  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-C01", "skipped")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "outOfScope")) && refuses(() => new Results(TOY, () => {}).add("T-R01", "pass")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "recorded")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, only a check that needs secrets can be skipped, the recorded can't be judged, and none is added twice");
   check(SIGN_UPS.length === 2, "the run plans 2 takes of the test sign-up");
   check(parseArgs(["--base-url", STAGING]).options?.base === STAGING && Boolean(parseArgs(["--base-url", "https://example.com"]).error) && parseArgs(["--help"]).options?.help === true, "the arguments are the release run's: staging only");
 }
@@ -108,6 +115,60 @@ const check = (passed, title) => {
   check(handle.includes("export const CODE_APPS_ENABLED: boolean = true;"), "this checkout's content Worker serves apps with code");
   const holdMs = Number(readFileSync(join(root, "apps/content/src/hold.ts"), "utf8").match(/export const HOLD_MS = ([0-9_]+);/)?.[1]?.replaceAll("_", ""));
   check(holdMs > 0 && AFTER_HOLD_MS >= holdMs + 1_000 && 300 < holdMs, "C09's second route stops at least a second past the content Worker's hold, and its first well within it");
+}
+
+// ---- the store's deletion, from the operator's side (M6-CX1) ----
+
+{
+  const TOKEN = "t".repeat(40);
+  const ACCOUNT = "a".repeat(32);
+  const both = { PODSTER_E2E_STORE_LIST_TOKEN: TOKEN, PODSTER_E2E_CONTENT_ACCOUNT_ID: ACCOUNT };
+  const none = storeListConfig({});
+  check(none.needs?.startsWith("needs PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID") && none.needs.includes(STORE_LIST_WIZARD) && !none.config, "with neither secret, the store's deletion is skipped, naming both and the wizard");
+  check(storeListConfig({ ...both, PODSTER_E2E_CONTENT_ACCOUNT_ID: "" }).needs?.startsWith("needs PODSTER_E2E_CONTENT_ACCOUNT_ID ") && storeListConfig({ PODSTER_E2E_CONTENT_ACCOUNT_ID: ACCOUNT }).needs?.startsWith("needs PODSTER_E2E_STORE_LIST_TOKEN "), "an empty or missing secret, as GitHub passes an unset one, is named alone");
+  check(Boolean(storeListConfig({ ...both, PODSTER_E2E_STORE_LIST_TOKEN: "short" }).problem) && Boolean(storeListConfig({ ...both, PODSTER_E2E_CONTENT_ACCOUNT_ID: "A".repeat(32) }).problem), "a malformed token or account ID is a problem, not a skip");
+  const config = storeListConfig(both).config;
+  check(config?.token === TOKEN && config?.accountId === ACCOUNT, "both secrets give the list's configuration");
+
+  const name = (n) => `podster-store-${n.toString(16).padStart(32, "0")}`;
+  const id = (n) => `${n.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  /** A stand-in for Cloudflare's D1 list: `pages` of entries, every call recorded. */
+  const standIn = (pages, { status = 200, success = true, errors = [] } = {}) => {
+    const calls = [];
+    const fetchFn = async (url, init) => {
+      calls.push({ url, init });
+      const page = Number(new URL(url).searchParams.get("page"));
+      const result = pages[page - 1] ?? [];
+      return { ok: status === 200, status, json: async () => ({ success, errors, result, result_info: { page, per_page: STORE_LIST_PAGE, total_pages: pages.length } }) };
+    };
+    return { fetchFn, calls };
+  };
+  const full = Array.from({ length: STORE_LIST_PAGE }, (_, n) => ({ uuid: id(n), name: n % 2 ? name(n) : `someone-elses-${n}` }));
+  const two = standIn([full, [{ uuid: id(500), name: name(500) }, { uuid: id(501), name: "podster-store-NOT-HEX" }]]);
+  const listed = await listStores(config, two.fetchFn);
+  check(listed.stores?.length === STORE_LIST_PAGE / 2 + 1 && listed.stores.every((s) => /^podster-store-[0-9a-f]{32}$/.test(s.name)), "the list reads every page and keeps Podster's store names alone");
+  check(two.calls.length === 2 && two.calls.every(({ url, init }) => url.startsWith(`${CLOUDFLARE_API}/accounts/${ACCOUNT}/d1/database?`) && init.method === "GET" && init.headers.authorization === `Bearer ${TOKEN}` && !url.includes(TOKEN)), "it sends only GETs of the account's D1 list, the token in the Authorization header alone");
+  const refused = await listStores(config, standIn([[]], { status: 403, success: false, errors: [{ code: 10000, message: "Authentication error" }] }).fetchFn);
+  check(refused.problem === "the account's D1 list answered 403 (Cloudflare 10000)", "a refused list is a problem naming its status and Cloudflare's code, not its message");
+  check(Boolean((await listStores(config, standIn([[]], { success: false }).fetchFn)).problem), "a list that isn't Cloudflare's success is no list");
+  check(Boolean((await listStores(config, standIn([[{ name: name(1) }]]).fetchFn)).problem), "an entry with no uuid is no list");
+  const endless = standIn(Array.from({ length: STORE_LIST_PAGES + 1 }, () => full));
+  const tooLong = await listStores(config, endless.fetchFn);
+  check(/can't be read whole/.test(tooLong.problem ?? "") && endless.calls.length === STORE_LIST_PAGES, `a list longer than ${STORE_LIST_PAGES} pages is no list, and no more than that is read`);
+  check((await listStores(config, async () => { throw Object.assign(new Error("x"), { name: "TimeoutError" }); })).problem === "the account's D1 list couldn't be read (TimeoutError)", "a list that couldn't be read is a problem");
+
+  const before = [{ id: id(1), name: name(1) }];
+  const mine = { id: id(2), name: name(2) };
+  check(appStoreOf(before, [...before, mine]).store === mine, "the app's store is the one store listed after the release and not before");
+  check(/no Podster store/.test(appStoreOf(before, before).problem ?? ""), "no new store is a problem");
+  check(/2 Podster stores/.test(appStoreOf(before, [...before, mine, { id: id(3), name: name(3) }]).problem ?? ""), "two new stores can't be told apart, so nothing is decided");
+  check(Boolean(appStoreOf(before, [{ id: id(9), name: name(1) }]).problem), "a store listed under a known name with a new ID isn't taken for the app's");
+  check(storeGone(before, mine) && !storeGone([...before, mine], mine) && !storeGone([{ id: mine.id, name: name(7) }], mine) && !storeGone([{ id: id(7), name: mine.name }], mine), "a store is gone only when neither its ID nor its name is listed");
+
+  const wizard = join(root, STORE_LIST_WIZARD);
+  const syntax = spawnSync("bash", ["-n", wizard], { encoding: "utf8" });
+  const help = spawnSync("bash", [wizard, "--help"], { encoding: "utf8", env: { PATH: process.env.PATH } });
+  check(syntax.status === 0 && help.status === 0 && STORE_LIST_SECRETS.every((n) => help.stdout.includes(n)) && help.stdout.includes("D1 · Read") && help.stdout.includes("staging-e2e"), "the wizard parses, and its --help names both secrets, D1 Read and the staging-e2e environment");
 }
 
 // ---- the app ----
@@ -260,7 +321,9 @@ try {
 {
   const script = readFileSync(join(here, "m6-code-app-staging.mjs"), "utf8");
   check(!/spawn\(/.test(script) && !/playwright/.test(script), "the script starts no process of its own and no browser: git is m6-release-run.mjs's");
-  check(!/api\.cloudflare\.com|gh run|npx /.test(script), "it calls no Cloudflare API, no npx tool and no gh run");
+  check(!/api\.cloudflare\.com|gh run|npx /.test(script), "it names no Cloudflare API host itself, no npx tool and no gh run");
+  const lib = readFileSync(join(here, "m6-code-app-staging-lib.mjs"), "utf8");
+  check((lib.match(/api\.cloudflare\.com/g) ?? []).length === 1 && (lib.match(/fetchFn\(/g) ?? []).length === 1 && /fetchFn\([^\n]*method: "GET"/.test(lib) && (script.match(/listStores\(/g) ?? []).length === 1, "its one call to Cloudflare's API is the store list's GET, from one place");
   check(script.includes("publisher.stop()") && script.includes("cleanUpShared()") && /enabled: false/.test(script), "clean-up switches release off, makes the room private, and runs the shared clean-up");
   check(script.includes('run.mask(owner.id, "[owner]")') && script.includes('run.mask(admin.id, "[admin]")'), "both people's IDs are printed as their role");
   check(script.includes("quiet: true") && /for \(let n = 1; n <= WRITE_CAP\.writes \+ BURST_SPARE; n\+\+\)/.test(script), "the burst is bounded and sent one at a time");
@@ -273,8 +336,8 @@ const noGrant = join(scratch, "openapi-no-deploy.yaml");
 writeFileSync(noGrant, contract.replace(/(action: \{ type: string, enum: \[)([^\]]*)\]/g, (whole, start, list) => `${start}${list.split(",").map((v) => v.trim()).filter((v) => v !== "deploy").join(", ")}]`));
 const SECRET = "x".repeat(40);
 /** Runs the script, with the stand-in in `mode` when given. Answers its exit code, its output and the stand-in's counts. */
-function script(args, { mode, secret = SECRET } = {}) {
-  const env = { PATH: process.env.PATH, HOME: scratch, ...(secret ? { PODSTER_E2E_SIGNUP_SECRET: secret } : {}), ...(mode ? { M6_RELEASE_STANDIN: mode } : {}) };
+function script(args, { mode, secret = SECRET, extra = {} } = {}) {
+  const env = { PATH: process.env.PATH, HOME: scratch, ...(secret ? { PODSTER_E2E_SIGNUP_SECRET: secret } : {}), ...(mode ? { M6_RELEASE_STANDIN: mode } : {}), ...extra };
   const preload = mode ? ["--import", join(here, "m6-release-staging-standin.mjs")] : [];
   const done = spawnSync(process.execPath, [...preload, join(here, "m6-code-app-staging.mjs"), ...args], { cwd: here, env, encoding: "utf8", timeout: 60_000 });
   const out = `${done.stdout}${done.stderr}`;
@@ -291,7 +354,14 @@ try {
   {
     const dry = script([...base, "--dry-run"], { mode: "edge-down" });
     check(dry.code === 0 && dry.out.includes("Nothing was sent") && dry.requests === 0, "a dry run on this checkout's contract exits 0 and sends nothing");
-    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope:") && !dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the out-of-scope one, and none as only recorded");
+    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[needs: PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID]") && !dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the one that needs secrets, and none as only recorded");
+    check(dry.out.includes("The store's deletion (M6-CX1): skipped, needs PODSTER_E2E_STORE_LIST_TOKEN and PODSTER_E2E_CONTENT_ACCOUNT_ID"), "without the store-list secrets, the dry run says the store's deletion is skipped and what it needs");
+    const storeToken = "s".repeat(44);
+    const storeAccount = "c".repeat(32);
+    const withStore = script([...base, "--dry-run"], { mode: "edge-down", extra: { PODSTER_E2E_STORE_LIST_TOKEN: storeToken, PODSTER_E2E_CONTENT_ACCOUNT_ID: storeAccount } });
+    check(withStore.code === 0 && withStore.requests === 0 && withStore.out.includes("The store's deletion (M6-CX1): checked from the content account's D1 list, read-only") && !withStore.out.includes(storeToken) && !withStore.out.includes(storeAccount), "with them, the dry run says it will be checked, sends nothing, and prints neither");
+    const badStore = script([...base, "--dry-run"], { mode: "edge-down", extra: { PODSTER_E2E_STORE_LIST_TOKEN: "short", PODSTER_E2E_CONTENT_ACCOUNT_ID: storeAccount } });
+    check(badStore.out.includes("The store's deletion (M6-CX1): fails: PODSTER_E2E_STORE_LIST_TOKEN isn't shaped like a Cloudflare API token"), "a malformed store-list token is named as a failure, not a skip");
     const missingGrant = script([...base, "--dry-run", "--contract", noGrant], { mode: "edge-down" });
     check(missingGrant.code === EXIT.releaseNotOn && missingGrant.out.includes("no route gives a deploy grant") && missingGrant.requests === 0, "a contract without the deploy grant exits 3, naming it, and sends nothing");
     const noSecret = script([...base, "--dry-run"], { mode: "edge-down", secret: null });

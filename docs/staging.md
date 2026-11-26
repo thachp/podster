@@ -715,7 +715,7 @@ The test customer's domain is `opster.dev`, on the podster.dev account; the cont
 
 **DNS writes go through one guard** (`dnsAllow` in `e2e/m6-custom-domain-staging-lib.mjs`, after spike D's `guard.mjs`): only `TXT` at `_podster-challenge.<name>` holding one challenge value, not proxied, and `CNAME` to `fallback.podster.site`, proxied exactly as the run's mode says, only at names under the run's label, TTL 60; a delete only of a record the run made, or that a listing of a name it tried finds under its label; no other type, no apex, no wildcard, no other zone, no `PUT` or `PATCH`. Cloudflare can't limit a token to record names, so this guard is what does. **Clean-up, on every way out:** each room's open hostname request removed through the API first, then every DNS record deleted and each name listed again, release off, the rooms private, grants taken back, the agent disconnected, sessions signed out. The removed claims stay `ending` until Cloudflare reads them gone; the three repositories stay for the owner to delete.
 
-**When the run is cancelled or times out,** GitHub Actions sends `SIGINT`, then `SIGTERM` a few seconds later, then `SIGKILL`. `SIGINT` starts the full clean-up above. `SIGTERM` cuts it short: it deletes every DNS record the run holds and asks each room's hostname request to be removed, side by side, for at most 2 seconds, then exits 143. **What may be left, for the owner to check after a cancelled or timed-out run:** a DNS record under the run's `cd-…` label on `opster.dev` (the output lists any still held; a create whose answer was lost isn't listed, so look under the label); a hostname request still `pending` or `claimed` in room A, B or C, and with it a custom hostname at Cloudflare on `podster.site`; release switched on and the rooms public; the agent's and people's grants; the agent's link; and the test sessions, which expire on their own.
+**When the run is cancelled or times out,** GitHub Actions sends `SIGINT`, then `SIGTERM` a few seconds later, then `SIGKILL`. `SIGINT` first takes the same fast path as `SIGTERM` below (in manual mode, after printing the records to delete), then the full clean-up above. `SIGTERM` cuts it short: it deletes every DNS record the run holds and asks each room's hostname request to be removed, side by side, for at most 2 seconds, then exits 143. **What may be left, for the owner to check after a cancelled or timed-out run:** a DNS record under the run's `cd-…` label on `opster.dev` (the output lists any still held; a create whose answer was lost isn't listed, so look under the label); a hostname request still `pending` or `claimed` in room A, B or C, and with it a custom hostname at Cloudflare on `podster.site`; release switched on and the rooms public; the agent's and people's grants; the agent's link; and the test sessions, which expire on their own.
 
 **The workflow** is `.github/workflows/m6-custom-domain-staging.yml`, started by hand only, sharing the code app run's concurrency group. Its one job uses the GitHub environment **`staging-dns`**, **deployable from `main` only, which the architect creates**. It holds three secrets: **`OPSTER_DNS_TOKEN`** and **`OPSTER_ZONE_ID`**, and its own copy of **`PODSTER_E2E_SIGNUP_SECRET`**. A job can use one environment, and the run interleaves API and DNS writes, so two jobs would have to hand a session or the token between them; a copy of the sign-up secret here is narrower, and keeps the DNS token out of `staging-e2e`. The secrets reach only the test step, as environment variables; the script takes the DNS pair out of its environment at once and scrubs both from its output.
 
@@ -736,6 +736,38 @@ gh run watch "$(gh run list --workflow m6-custom-domain-staging.yml --limit 1 --
 What remains: the token could rewrite any record on `opster.dev`, its wildcard included; that zone serves nothing else. For stronger isolation, use a throwaway test domain on an account of its own.
 
 `node m6-custom-domain-staging-selftest.mjs` checks the run without a network: its plan and exit code, the figures it expects against `crates/core`, `apps/api` and `apps/content`, the DNS guard, its DNS client against a stand-in fetch, how it judges answers, and each refusal before it takes a sign-up or writes DNS. CI runs it.
+
+### Manual-DNS mode: `war3.org`
+
+*Added 2026-11-26.* Run [45832698985](https://github.com/thachp/podster/actions/runs/45832698985), `dns-only` on `opster.dev`, still served `opster.dev`'s own `*.opster.dev` certificate, so X14-4 failed: Cloudflare picks the customer zone's certificate whenever the name is under a Cloudflare zone, proxied or not. X14-4 needs a customer domain whose DNS isn't on Cloudflare. The owner's **`war3.org`** is at Squarespace (name servers `ns-cloud-c*.googledomains.com`, SOA minimum 300 s), which has no DNS API, so **the owner adds the two records by hand while watching the run's log.**
+
+It is started with the workflow input `test_domain=war3.org`; the default, `opster.dev`, is the full run above. The input reaches the script through `env`, checked by a `case`, as `cname_mode` does. `war3.org` is the one manual domain, hard-coded in the script's allow-list (`MANUAL_DOMAINS`). Its CNAME is always DNS-only, and `-f cname_mode=proxied` with it is refused. In manual mode:
+
+- **Only room A's path runs:** sign-up, organization, room A, its repository and release, and room A's ask for `cd-<10 random characters>.war3.org`. No race, no decoy, no rooms B or C, no refused names.
+- **The run makes no DNS API call.** The workflow passes the `OPSTER_*` secrets empty, and the script doesn't read them. The job stays in `staging-dns` for its copy of the sign-up secret.
+- **Checks:**
+  - X14-2: the claim and Cloudflare `active`.
+  - X14-3: the release served over HTTPS.
+  - X14-4: judged with the `dns-only` rules. The certificate must name the exact host, must not be a wildcard of `war3.org` or `war3.org`'s own, must be trusted by Node, and must have been issued within 2 days. Its issuer and validity are recorded.
+  - X14-5: the removal.
+  - Every other check says "not in manual mode".
+- **Waiting:**
+  - The run waits up to 30 minutes for both records, checking every 15 s. It reads them from `war3.org`'s own name servers, found by an NS lookup and asked directly over UDP, so no resolver's cached miss hides them. If UDP fails or times out, it asks Google's DNS-over-HTTPS JSON API (`dns.google/resolve`) without caching.
+  - Then it waits at least 480 s for the claim. The API's proof check reads through `cloudflare-dns.com`, which may cache the challenge's name as missing for up to the SOA minimum of 300 s, and the proof job looks once a minute.
+- **Every way out prints `Delete these 2 records in Squarespace: …`:** pass, fail, the 30-minute timeout, and a cancel or timeout of the job (`SIGINT` or `SIGTERM`, where it is printed first). On a normal end it follows the usual clean-up of Podster's state. If the run stopped before room A asked, it says there is nothing to delete.
+
+**The owner's steps:**
+
+1. **Start the workflow** with `test_domain=war3.org`: `gh workflow run m6-custom-domain-staging.yml -f test_domain=war3.org`, or Actions → *M6 custom domain staging* → Run workflow, with `test_domain` set to `war3.org`.
+2. **Open the log:** `gh run watch "$(gh run list --workflow m6-custom-domain-staging.yml --limit 1 --json databaseId --jq '.[0].databaseId')"`, or the job's page in Actions. The release comes first and takes about 5 to 15 minutes. Then look for the block headed **`ADD THESE 2 DNS RECORDS for war3.org`**. It is printed again every 5 minutes while the run waits.
+3. **Add both records** in **Squarespace → Domains → `war3.org` → DNS → Custom records**, copying each field from the block:
+   - `TXT`, Host `_podster-challenge.cd-xxxxxxxxxx`, Data the 64-character challenge value as printed, without quotes.
+   - `CNAME`, Host `cd-xxxxxxxxxx`, Data `fallback.podster.site`.
+   - TTL 5 minutes (300 s), or the lowest Squarespace offers.
+
+   The block also gives each record's full name under `war3.org`.
+4. **Wait.** The log says when each record is seen at `war3.org`'s name servers, then the claim, `active` and the checks. Both records must show within 30 minutes of the block first appearing; otherwise X14-2 fails and the run cleans up.
+5. **Delete the 2 records afterwards,** however the run ended, on the same Squarespace page. The last lines of the log name them. A claim the run removed stays `ending` on Podster's side until Cloudflare reads it gone; that doesn't need the records.
 
 ## Explore's cursor key
 

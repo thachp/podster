@@ -146,12 +146,27 @@ export function deleteRecordsLine(records) {
   return `Delete these ${records.length} records in Squarespace (${SQUARESPACE_PATH(domain)}): ${records.map((r) => `${r.type} host ${r.host} (${r.name}) → ${r.value}`).join("; ")}.`;
 }
 
+/** Google's DNS-over-HTTPS JSON API: the fallback when the name servers can't be asked over UDP. */
+export const DOH_RESOLVE = "https://dns.google/resolve";
+const DOH_TYPES = { TXT: 16, CNAME: 5 };
+
+/** The strings of one TXT answer's data as Google's JSON gives it: quoted strings, joined; or the data itself. */
+export function dohTxtData(data) {
+  if (typeof data !== "string") return "";
+  const quoted = [...data.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, "$1"));
+  return quoted.length ? quoted.join("") : data;
+}
+
 /**
- * Read-only lookups at a manual domain's own name servers, found with an NS lookup, so a resolver's cached miss can't
- * hide a record the owner has just added. `Resolver` is node:dns/promises' class, passed in. Every name asked for must be
- * a manual run's name or its challenge's name: nothing else under the domain is read.
+ * Read-only lookups at a manual domain's own name servers, found with an NS lookup and asked directly over UDP, so a
+ * resolver's cached miss can't hide a record the owner has just added. When UDP fails or times out (finding the name
+ * servers, or asking them), the same name is asked of Google's DoH JSON API, `dns.google/resolve`, with no caching
+ * asked for; a miss there may be cached up to the SOA minimum, which the claim wait allows for anyway. `Resolver` is
+ * node:dns/promises' class and `fetch` the global one, both passed in. Every name asked for must be a manual run's name
+ * or its challenge's name: nothing else under the domain is read, and nothing is ever written. `lastVia` says how the
+ * last answer was read: `udp` or `doh`.
  */
-export function authoritativeLookup({ domain, Resolver, timeoutMs = 5000 }) {
+export function authoritativeLookup({ domain, Resolver, fetch, timeoutMs = 5000 }) {
   if (!isManualDomain(domain)) throw new Error(`authoritative lookups are only for ${MANUAL_DOMAINS.join(" and ")}`);
   let servers = null;
   const allowed = (name) => manualName(name) || (name.startsWith(`${CHALLENGE_PREFIX}.`) && manualName(name.slice(CHALLENGE_PREFIX.length + 1)));
@@ -165,24 +180,47 @@ export function authoritativeLookup({ domain, Resolver, timeoutMs = 5000 }) {
     servers = { names, ips: [...new Set(ips)] };
     return servers;
   }
-  async function ask(name, how) {
+  async function doh(name, type) {
+    if (typeof fetch !== "function") throw new Error("UDP failed, and no fetch was given for the DoH fallback");
+    const url = new URL(DOH_RESOLVE);
+    url.searchParams.set("name", name);
+    url.searchParams.set("type", type);
+    const res = await fetch(url.href, { method: "GET", redirect: "manual", headers: { accept: "application/dns-json", "cache-control": "no-cache" }, signal: AbortSignal.timeout(timeoutMs * 2) });
+    if (res.status !== 200) throw new Error(`DoH answered HTTP ${res.status}`);
+    const json = await res.json();
+    if (json?.Status === 3) return [];
+    if (json?.Status !== 0) throw new Error(`DoH answered status ${json?.Status}`);
+    const want = `${name.toLowerCase()}.`;
+    return (json.Answer ?? []).filter((a) => a?.type === DOH_TYPES[type] && String(a?.name ?? "").toLowerCase() === want).map((a) => (type === "TXT" ? dohTxtData(a.data) : String(a.data ?? "").toLowerCase().replace(/\.$/, "")));
+  }
+  const result = {
+    nameServers,
+    lastVia: null,
+    /** The TXT values at `name`, each record's strings joined. */
+    txt: (name) => ask(name, "TXT", async (r) => (await r.resolveTxt(name)).map((chunks) => chunks.join(""))),
+    /** The CNAME targets at `name`, lower case, with no trailing dot. */
+    cname: (name) => ask(name, "CNAME", async (r) => (await r.resolveCname(name)).map((t) => t.toLowerCase().replace(/\.$/, ""))),
+  };
+  async function ask(name, type, how) {
     if (!allowed(name)) throw new Error(`refusing a lookup of ${name}: only a manual run's names are read`);
-    const at = new Resolver({ timeout: timeoutMs, tries: 2 });
-    at.setServers((await nameServers()).ips);
     try {
-      return await how(at);
+      const at = new Resolver({ timeout: timeoutMs, tries: 2 });
+      at.setServers((await nameServers()).ips);
+      const answer = await how(at);
+      result.lastVia = "udp";
+      return answer;
     } catch (error) {
-      if (["ENODATA", "ENOTFOUND"].includes(error?.code)) return [];
-      throw error;
+      if (["ENODATA", "ENOTFOUND"].includes(error?.code)) {
+        result.lastVia = "udp";
+        return [];
+      }
+      // UDP failed or timed out: the same read-only question, over DoH.
+      const answer = await doh(name, type);
+      result.lastVia = "doh";
+      return answer;
     }
   }
-  return {
-    nameServers,
-    /** The TXT values at `name`, each record's strings joined. */
-    txt: (name) => ask(name, async (r) => (await r.resolveTxt(name)).map((chunks) => chunks.join(""))),
-    /** The CNAME targets at `name`, lower case, with no trailing dot. */
-    cname: (name) => ask(name, async (r) => (await r.resolveCname(name)).map((t) => t.toLowerCase().replace(/\.$/, ""))),
-  };
+  return result;
 }
 
 /** Which of the records `lookup` sees as the owner should have added them: { txt, cname, error }. Never throws. */

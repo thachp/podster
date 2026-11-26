@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   adoptable, CERT_MAX_AGE_MS, certificateLine, certificateProblem, CF_API, CNAME_MODES, cnameProxied, DEFAULT_CNAME_MODE, planFor, CHALLENGE_PREFIX, challengeName, challengeUnderRoot, CNAME_TARGET, CONTENT_DOMAIN, CUSTOM_HSTS, customHeaderProblems, dnsAllow, dnsClient, dnsEnvProblem, DNS_TTL, EXIT, GONE_SPAN_MS, parseArgs, PENDING_HOLD_MS, PLAN, PROOF_LOOK_MS, RACE_SETTLE_MS, raceOutcome,
-  authoritativeLookup, deleteRecordsLine, isManualDomain, manualName, manualRecords, MANUAL_CHECKS, MANUAL_CLAIM_WAIT_S, MANUAL_DNS_WAIT_MS, MANUAL_DOMAINS, MANUAL_POLL_MS, MANUAL_REPRINT_MS, MANUAL_SOA_MINIMUM_S, recordBlock, recordsSeen, TEST_DOMAINS,
+  authoritativeLookup, deleteRecordsLine, DOH_RESOLVE, dohTxtData, isManualDomain, manualName, manualRecords, MANUAL_CHECKS, MANUAL_CLAIM_WAIT_S, MANUAL_DNS_WAIT_MS, MANUAL_DOMAINS, MANUAL_POLL_MS, MANUAL_REPRINT_MS, MANUAL_SOA_MINIMUM_S, recordBlock, recordsSeen, TEST_DOMAINS,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, runLabel, runNames, runOutcome, RUN_LABEL, SIGN_UPS, STAGING, TEST_DOMAIN, txtContent, underRoot, WAITS,
 } from "./m6-custom-domain-staging-lib.mjs";
 
@@ -426,6 +426,65 @@ const MANUAL_NAMES = runNames(MANUAL_LABEL, "war3.org");
     }
   }
   check(refusedOther === 4 && !asked.some(([, name]) => name === "www.war3.org"), "nothing but the run's name and its challenge's name is looked up");
+
+  // The DoH fallback: UDP failing (a timeout) or the name servers not found sends the same question to dns.google.
+  const dohSent = [];
+  const dohZone = { TXT: new Map(), CNAME: new Map() };
+  const dohFetch = async (url, init) => {
+    const u = new URL(url);
+    dohSent.push({ url, method: init.method, body: init.body });
+    const name = u.searchParams.get("name");
+    const type = u.searchParams.get("type");
+    const data = dohZone[type]?.get(name);
+    const json = data === undefined ? { Status: 3 } : { Status: 0, Answer: [{ name: `${name}.`, type: type === "TXT" ? 16 : 5, data }] };
+    return new Response(JSON.stringify(json), { status: 200, headers: { "content-type": "application/dns-json" } });
+  };
+  class TimeoutResolver extends FakeResolver {
+    async resolveTxt() {
+      throw Object.assign(new Error("timeout"), { code: "ETIMEOUT" });
+    }
+    async resolveCname() {
+      throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+    }
+  }
+  class NoNsResolver extends FakeResolver {
+    async resolveNs() {
+      throw Object.assign(new Error("timeout"), { code: "ETIMEOUT" });
+    }
+  }
+  for (const [Kind, what] of [[TimeoutResolver, "a UDP timeout at the name servers"], [NoNsResolver, "the name servers not found"]]) {
+    dohSent.length = 0;
+    dohZone.TXT.clear();
+    dohZone.CNAME.clear();
+    const viaDoh = authoritativeLookup({ domain: "war3.org", Resolver: Kind, fetch: dohFetch });
+    const missing = await recordsSeen(viaDoh, records);
+    dohZone.TXT.set(txt.name, `"${VALUE.slice(0, 30)}" "${VALUE.slice(30)}"`);
+    dohZone.CNAME.set(cnameRecord.name, "fallback.podster.site.");
+    const found = await recordsSeen(viaDoh, records);
+    const urls = dohSent.map((r) => new URL(r.url));
+    check(!missing.txt && !missing.cname && missing.error === null && found.txt && found.cname && viaDoh.lastVia === "doh", `after ${what}, both records are read over DoH (NXDOMAIN as not seen; a TXT in quoted strings joined)`);
+    check(urls.length === 4 && urls.every((u) => u.origin === "https://dns.google" && u.pathname === "/resolve" && [...u.searchParams.keys()].join(",") === "name,type") && dohSent.every((r) => r.method === "GET" && r.body === undefined) && urls.every((u) => [txt.name, cnameRecord.name].includes(u.searchParams.get("name"))), `after ${what}, DoH gets only read-only GETs of the run's two names at dns.google/resolve`);
+  }
+  {
+    dohSent.length = 0;
+    const viaDoh = authoritativeLookup({ domain: "war3.org", Resolver: TimeoutResolver, fetch: dohFetch });
+    let refused = 0;
+    for (const name of ["www.war3.org", NAMES.main]) {
+      try {
+        await viaDoh.txt(name);
+      } catch {
+        refused++;
+      }
+    }
+    check(refused === 2 && dohSent.length === 0, "the allow-list holds over DoH too: another name is refused before anything is sent");
+    const noFetch = authoritativeLookup({ domain: "war3.org", Resolver: TimeoutResolver });
+    const seen = await recordsSeen(noFetch, records);
+    check(!seen.txt && Boolean(seen.error), "with no fetch for the fallback, a UDP failure is an error, not a record seen");
+    const lookupOk = authoritativeLookup({ domain: "war3.org", Resolver: FakeResolver, fetch: dohFetch });
+    await lookupOk.txt(txt.name);
+    check(lookupOk.lastVia === "udp" && dohSent.length === 0, "when UDP answers, even with no record, DoH isn't asked");
+  }
+  check(dohTxtData('"ab" "cd"') === "abcd" && dohTxtData("abcd") === "abcd" && dohTxtData('"a\\"b"') === 'a"b' && dohTxtData(null) === "" && DOH_RESOLVE === "https://dns.google/resolve", "DoH's TXT data is read as its quoted strings joined");
 }
 
 // ---- manual-DNS mode: no DNS API call ----
@@ -449,18 +508,25 @@ const MANUAL_NAMES = runNames(MANUAL_LABEL, "war3.org");
   const workflow = readFileSync(join(root, ".github/workflows/m6-custom-domain-staging.yml"), "utf8");
   check(/cname_mode:\n\s+description: [^\n]+\n\s+type: choice\n\s+options:\n\s+- dns-only\n\s+- proxied\n\s+default: dns-only/.test(workflow), "the workflow's cname_mode input is a choice of dns-only and proxied, defaulting to dns-only");
   check(/CNAME_MODE: \$\{\{ inputs\.cname_mode \|\| 'dns-only' \}\}/.test(workflow) && /case "\$CNAME_MODE" in\n\s+dns-only \| proxied\) ;;/.test(workflow) && /--cname-mode "\$CNAME_MODE"/.test(workflow) && (workflow.match(/inputs\.cname_mode/g) ?? []).length === 1, "the input reaches the run through env alone, checked against its two values, never written into the command");
-  check(/process\.on\("SIGTERM"/.test(script) && script.indexOf("dns.removeMade()") > script.indexOf('process.on("SIGTERM"') && /process\.exit\(143\)/.test(script), "SIGTERM removes DNS records and hostname requests first, then exits 143");
+  {
+    const fast = script.slice(script.indexOf("function fastPath("), script.indexOf('process.on("SIGINT"'));
+    const onInt = script.slice(script.indexOf('process.on("SIGINT"'), script.indexOf('process.on("SIGTERM"'));
+    const onTerm = script.slice(script.indexOf('process.on("SIGTERM"'));
+    check(fast.includes("dns.removeMade()") && /owner\?\.dash\("DELETE", hostnamePath\(room\)/.test(fast) && /setTimeout\(done, 2000\)/.test(fast), "the fast path removes DNS records and hostname requests side by side, bounded at 2 s");
+    check(/fastPath\("SIGINT"\)/.test(onInt) && !/process\.exit/.test(onInt), "SIGINT, which GitHub sends first on a cancel or timeout, takes the fast path and goes on to the full clean-up");
+    check(/fastPath\("SIGTERM"\)/.test(onTerm) && /process\.exit\(143\)/.test(onTerm), "SIGTERM takes the fast path, then exits 143");
+  }
   check(/try \{\n    const \{ left \} = await publisher\.stop\(\);/.test(script), "a failed unpublish doesn't stop the shared clean-up");
   check(!["m6-custom-domain-staging.mjs", "m6-custom-domain-staging-lib.mjs", "m6-custom-domain-staging-selftest.mjs"].some((f) => { const t = readFileSync(join(here, f), "utf8"); return t.includes("apps/content") && t.includes(["wran", "gler"].join("")); }), "no file of this run names both the content package and its deploy tool (the content package's config test)");
   check(script.includes('run.mask(owner.id, "[owner]")') && script.includes('run.mask(admin.id, "[admin]")'), "both people's IDs are printed as their role");
   check(script.indexOf("dns.verify()") < script.indexOf("await main()") && script.indexOf("run.preflight()") < script.indexOf("dns.verify()"), "the DNS token is checked after the signed-out preflight and before any sign-up");
   check(/const dns = MANUAL \? null : dnsClient\(/.test(script) && /if \(!MANUAL\) \{\n  let refusal = null;\n  try \{\n    if \(!\(await dns\.verify\(\)\)\)/.test(script), "manual mode makes no DNS API client, and skips the token's check");
   check(/const dnsToken = MANUAL \? undefined : process\.env\.OPSTER_DNS_TOKEN;/.test(script) && /const zoneId = MANUAL \? undefined : process\.env\.OPSTER_ZONE_ID;/.test(script) && /const dnsProblem = MANUAL \? null : dnsEnvProblem\(process\.env\);/.test(script), "manual mode doesn't read OPSTER_DNS_TOKEN or OPSTER_ZONE_ID");
-  check(/authoritativeLookup\(\{ domain: NAMES\.domain, Resolver \}\)/.test(script) && /import \{ Resolver \} from "node:dns\/promises";/.test(script), "manual mode reads the records with node:dns at the domain's own name servers");
+  check(/authoritativeLookup\(\{ domain: NAMES\.domain, Resolver, fetch: \(\.\.\.args\) => fetch\(\.\.\.args\) \}\)/.test(script) && /import \{ Resolver \} from "node:dns\/promises";/.test(script), "manual mode reads the records with node:dns at the domain's own name servers");
   check(/if \(MANUAL\) return manualChecks\(\);/.test(script) && script.indexOf("if (MANUAL) return manualChecks();") < script.indexOf('say("\\n## refused names")') && /if \(!MANUAL\) \{\n    rooms\.b = /.test(script), "manual mode makes no rooms B or C, and leaves before the refused names, the decoy and the race");
   check(/MANUAL_REPRINT_MS[\s\S]*?recordBlock\(manualShown/.test(script.slice(script.indexOf("async function manualChecks"))) && /Math\.max\(options\.claimWait, MANUAL_CLAIM_WAIT_S\)/.test(script), "manual mode prints the block again while waiting, and waits the claim for a cached miss");
-  const sigterm = script.slice(script.indexOf('process.on("SIGTERM"'));
-  check(/if \(MANUAL\) console\.log\(run\.out\(deleteRecordsLine\(manualShown\)\)\);/.test(sigterm.slice(0, sigterm.indexOf("const claims"))) && /dns \? dns\.removeMade\(\) : 0/.test(sigterm), "on SIGTERM, manual mode says which records to delete before anything else, with no DNS client");
+  const fastPathSource = script.slice(script.indexOf("function fastPath("));
+  check(/if \(MANUAL\) console\.log\(run\.out\(deleteRecordsLine\(manualShown\)\)\);/.test(fastPathSource.slice(0, fastPathSource.indexOf("const claims"))) && /dns \? dns\.removeMade\(\)/.test(fastPathSource), "on SIGINT or SIGTERM, manual mode says which records to delete before anything else, with no DNS client");
   check(/if \(MANUAL\) said\.push\(deleteRecordsLine\(manualShown\)\);/.test(script) && (script.match(/if \(MANUAL\) say\(`\\n\$\{deleteRecordsLine\(manualShown\)\}`\);/g) ?? []).length === 2, "every other way out, pass, fail, timeout or not on, ends by naming the records to delete");
 }
 

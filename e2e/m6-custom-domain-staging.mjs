@@ -446,7 +446,7 @@ async function manualChecks() {
   say(`\n## ${NAMES.main}: room A asks, and the owner adds the records by hand`);
   const requestA = await askFor(rooms.a, NAMES.main);
   manualShown = manualRecords(NAMES.main, requestA.challenge_value);
-  const lookup = authoritativeLookup({ domain: NAMES.domain, Resolver });
+  const lookup = authoritativeLookup({ domain: NAMES.domain, Resolver, fetch: (...args) => fetch(...args) });
   try {
     const { names } = await lookup.nameServers();
     say(`     ${NAMES.domain}'s name servers, asked directly: ${names.join(", ")}`);
@@ -462,7 +462,7 @@ async function manualChecks() {
     let last = "";
     for (;;) {
       const seen = await recordsSeen(lookup, manualShown);
-      const now = `TXT ${seen.txt ? "seen" : "not seen"}, CNAME ${seen.cname ? "seen" : "not seen"}${seen.error ? ` (a lookup failed: ${seen.error})` : ""}`;
+      const now = `TXT ${seen.txt ? "seen" : "not seen"}, CNAME ${seen.cname ? "seen" : "not seen"}${lookup.lastVia === "doh" ? " (read over DoH: UDP to the name servers failed)" : ""}${seen.error ? ` (a lookup failed: ${seen.error})` : ""}`;
       if (now !== last) say(`     at ${NAMES.domain}'s name servers, ${Math.round((Date.now() - askedAt) / 1000)} s after the ask: ${now}`);
       last = now;
       if (seen.txt && seen.cname) break;
@@ -527,23 +527,35 @@ async function cleanUp() {
   return said;
 }
 
-// SIGTERM, as GitHub Actions sends a few seconds after SIGINT when a run is cancelled or times out, and at most seconds
-// before SIGKILL: no full clean-up fits. What would outlive the run and cost or expose most goes first, side by side:
-// every DNS record the run made, and every open hostname request removed through the API (each a claim's custom
-// hostname at Cloudflare). Then it exits 143. Left behind: release on, the rooms public, grants, the agent and the
-// sessions, all named in docs/staging.md.
-let terminating = false;
-process.on("SIGTERM", () => {
-  if (terminating) return;
-  terminating = true;
-  console.log(`\nSIGTERM: removing ${MANUAL ? "" : "DNS records and "}hostname requests, then exiting without the rest of clean-up.`);
+// GitHub Actions, when a run is cancelled or times out, sends SIGINT, then SIGTERM a few seconds later, then SIGKILL
+// seconds after that. Both signals take the same fast path at once, side by side: in manual mode the records to delete
+// are printed first; then every DNS record the run made and every open hostname request (each a claim's custom hostname
+// at Cloudflare) are removed, bounded at 2 s. On SIGINT the run then goes on: m6-release-run.mjs's own SIGINT handler
+// has it stop at its next request, and the full clean-up runs (a second SIGINT quits at once, 130). On SIGTERM no full
+// clean-up fits, so it exits 143. Left behind then: release on, the rooms public, grants, the agent and the sessions,
+// all named in docs/staging.md.
+/** The fast path, once per signal name. Answers when it is done or 2 s have passed. */
+const fastDone = new Map();
+function fastPath(signal) {
+  if (fastDone.has(signal)) return fastDone.get(signal);
+  console.log(`\n${signal}: removing ${MANUAL ? "" : "DNS records and "}hostname requests at once${signal === "SIGTERM" ? ", then exiting without the rest of clean-up" : "; the full clean-up follows"}.`);
   // Manual mode: the records are the owner's to delete, so say so first, before anything can cut the run short.
   if (MANUAL) console.log(run.out(deleteRecordsLine(manualShown)));
   const claims = [...asked].map((room) => owner?.dash("DELETE", hostnamePath(room), {}, { timeoutMs: 2000 }).catch(() => null));
-  const bounded = Promise.race([Promise.all([dns ? dns.removeMade() : 0, ...claims]), new Promise((done) => setTimeout(done, 2000))]);
-  bounded.finally(() => {
+  const bounded = Promise.race([Promise.all([dns ? dns.removeMade().catch(() => null) : 0, ...claims]), new Promise((done) => setTimeout(done, 2000))]).then(() => {
     const held = dns ? `${dns.made.size} DNS record(s) still held (${[...dns.made.values()].map((r) => `${r.type} ${r.name}`).join(", ") || "none"})` : "no DNS record made through an API (manual mode)";
-    console.log(run.out(`SIGTERM clean-up: ${held}; hostname requests asked to be removed in ${asked.size} room(s). Release, the rooms' publicity, grants, the agent and the sessions are left: see docs/staging.md.`));
+    console.log(run.out(`${signal} fast clean-up: ${held}; hostname requests asked to be removed in ${asked.size} room(s).`));
+  });
+  fastDone.set(signal, bounded);
+  return bounded;
+}
+process.on("SIGINT", () => {
+  fastPath("SIGINT");
+});
+process.on("SIGTERM", () => {
+  if (fastDone.has("SIGTERM")) return;
+  fastPath("SIGTERM").finally(() => {
+    console.log(run.out("SIGTERM: release, the rooms' publicity, grants, the agent and the sessions are left: see docs/staging.md."));
     if (MANUAL) console.log(run.out(deleteRecordsLine(manualShown)));
     process.exit(143);
   });

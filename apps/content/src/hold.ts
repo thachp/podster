@@ -24,8 +24,9 @@
 // rest of an outgrown body is piped, with backpressure, so a slow visitor holds back the app, not this Worker's memory.
 // After the hold no code of this Worker's runs per chunk: the rest is a native pipe on Workers.
 //
-// What this can't do: if the platform ever ended a stopped app's body cleanly instead of failing it, no Worker in front
-// could tell that from a whole body. Staging's C09 shows which it is.
+// What this can't do: if the platform ended a stopped app's body cleanly instead of failing it, no Worker in front
+// could tell that from a whole body. Staging's run of 2026-11-26 saw a CPU stop past the hold reach the visitor that
+// way, a known platform limitation (docs/m6-plan.md, C09). A body the app itself fails is still errored here.
 
 /** The most of a body held before the headers are sent: 64 KiB, checked before each chunk is held. */
 export const HOLD_BYTES = 64 * 1024;

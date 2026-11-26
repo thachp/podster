@@ -29,6 +29,11 @@ export const PREFLIGHT_ALLOWANCE = { methods: "GET, HEAD, POST, PUT, PATCH, DELE
 export const STOP_WITHIN_MS = 10_000;
 /** The spin's loop, as rounds: seconds of CPU unstopped. Bounded, so an app the limit doesn't stop still ends. */
 export const SPIN_ROUNDS = 4_000_000_000;
+/**
+ * How long the module's second after-headers route waits after its first bytes before it spins: past the content
+ * Worker's 1-second hold (`apps/content/src/hold.ts`), so its stop lands after the headers were sent (C09).
+ */
+export const AFTER_HOLD_MS = 2_500;
 /** The light work the same module does, to show it computes when it isn't stopped. */
 export const LIGHT_ROUNDS = 100_000;
 /** Writes past the budget the run sends at most before it calls the budget not enforced: the burst is bounded. */
@@ -37,6 +42,19 @@ export const BURST_SPARE = 5;
 export const BURST_NEEDS_MS = 120_000;
 /** How far this machine's clock and the counter's may disagree on a window's edge, for the burst's arithmetic. */
 export const CLOCK_MARGIN_MS = 5_000;
+
+/**
+ * The secrets M6-CX1 needs, held by the workflow's environment: a read-only Cloudflare API token on the content account
+ * (the second account, which holds the content domain) with Account, D1, Read alone, and that account's ID. Without
+ * both, CX1 is skipped, naming them, and the run's exit code doesn't change. scripts/wizards/store-list-token.sh adds
+ * them.
+ */
+export const STORE_LIST_SECRETS = ["PODSTER_E2E_STORE_LIST_TOKEN", "PODSTER_E2E_CONTENT_ACCOUNT_ID"];
+export const STORE_LIST_WIZARD = "scripts/wizards/store-list-token.sh";
+/** How long CX1 waits, from release being switched off, for the store to leave the account's list. */
+export const STORE_GONE_WAIT_MS = 20 * 60_000;
+/** How often CX1 reads the list while it waits. */
+export const STORE_POLL_MS = 30_000;
 
 /** The test sign-up's takes one run spends, of 6 a minute and 40 a day across every run. The agent takes none. */
 export const SIGN_UPS = [
@@ -58,15 +76,15 @@ export const PLAN = [
   ["M6-C06", `The write budget, at the deployed ${WRITE_CAP.writes} writes a ${WRITE_CAP.windowMs / 60_000}-minute window: every write within it reaches the app, and the first over it is refused 429 write_budget_spent, with a Retry-After to the window's end that the page may read`],
   ["M6-C07", "The app's fetch gets podster-outbound's 403 and fixed body, and its connect() is refused before a socket opens"],
   ["M6-C08", `An app that spins is stopped by the ${APP_LIMITS.cpuMs} ms CPU limit: 502 app_error within ${STOP_WITHIN_MS / 1000} s, with nothing of the app's in it; the same module's light work answers 200`],
-  ["M6-C09", "What a visitor gets when an app passes a limit after its answer's headers were sent", { recordOnly: "the M6 plan says this is to be seen on staging, and doesn't say what it must be" }],
+  ["M6-C09", `An app that passes a limit after its answer's headers were sent never reaches a visitor as a clean 200: stopped within the content Worker's hold, it is 502 app_error; stopped ${AFTER_HOLD_MS / 1000} s in, past the hold, it is a 200 whose body was aborted; with the fixed headers either way`],
   ["M6-C10", "Unpublish: release switched off in the room; the host and its marker answer the content Worker's not found within the wait; a write gets 405 method_not_allowed and never reaches the app; while release is off the task's status says no release exists"],
+  ["M6-CX1", "From the operator's side: the app's store, the one D1 database the release made in the content account, is gone from that account's list once the unpublish retired its label", { needs: STORE_LIST_SECRETS }],
   ["M6-C11", "The room made private again, and the host still answers not found"],
-  ["M6-CX1", "The app's store deleted once the unpublish retires its label", { outOfScope: "no read a test person can make shows a store's deletion: it is the deletion job's, owed as label_retired, and checked by the API's own tests" }],
-].map(([id, title, flags = {}]) => ({ id, title, outOfScope: flags.outOfScope ?? null, recordOnly: flags.recordOnly ?? null }));
+].map(([id, title, flags = {}]) => ({ id, title, outOfScope: flags.outOfScope ?? null, recordOnly: flags.recordOnly ?? null, needs: flags.needs ?? null }));
 
-const LABELS = { pass: "PASS", fail: "FAIL", outOfScope: "OUT OF SCOPE", recorded: "RECORDED" };
+const LABELS = { pass: "PASS", fail: "FAIL", outOfScope: "OUT OF SCOPE", recorded: "RECORDED", skipped: "SKIP" };
 
-/** Results by ID, printed as they come: PASS, FAIL, OUT OF SCOPE or RECORDED. */
+/** Results by ID, printed as they come: PASS, FAIL, OUT OF SCOPE, RECORDED or SKIP. */
 export class Results {
   results = [];
   #say;
@@ -77,7 +95,10 @@ export class Results {
     this.#say = say;
   }
 
-  /** `status` is `pass`, `fail`, `outOfScope` or `recorded`. Each planned ID gets one result, and no other ID gets any. */
+  /**
+   * `status` is `pass`, `fail`, `outOfScope`, `recorded` or `skipped`. Each planned ID gets one result, and no other ID
+   * gets any. Only a check that `needs` secrets may be skipped, for want of them.
+   */
   add(id, status, detail = "") {
     const entry = this.#known.get(id);
     if (!entry) throw new Error(`${id} isn't in the plan`);
@@ -85,6 +106,7 @@ export class Results {
     if (!LABELS[status]) throw new Error(`${status} isn't a result`);
     if ((status === "outOfScope") !== Boolean(entry.outOfScope)) throw new Error(`${id} ${entry.outOfScope ? "is" : "isn't"} out of scope`);
     if ((status === "recorded") !== Boolean(entry.recordOnly)) throw new Error(`${id} ${entry.recordOnly ? "is only recorded" : "is judged"}`);
+    if (status === "skipped" && !entry.needs) throw new Error(`${id} needs nothing, so it can't be skipped`);
     this.results.push({ id, status, detail });
     this.#say(`${LABELS[status]} ${id.padEnd(7)} ${entry.title}${detail ? `\n             ${detail}` : ""}`);
   }
@@ -99,20 +121,21 @@ export class Results {
 
   summary() {
     const count = (status) => this.results.filter((r) => r.status === status).length;
-    return `${count("pass")} passed, ${count("fail")} failed, ${count("outOfScope")} out of scope, ${count("recorded")} recorded`;
+    return `${count("pass")} passed, ${count("fail")} failed, ${count("outOfScope")} out of scope, ${count("recorded")} recorded${count("skipped") ? `, ${count("skipped")} skipped` : ""}`;
   }
 }
 
 /**
  * The run's exit code, and what it didn't show. 0 only when every judged check passed. Out-of-scope and recorded checks
- * never change the code.
+ * never change the code, and nor does a check skipped for want of the secrets it needs: it is named in `skipped`.
  */
 export function runOutcome(results, plan = PLAN) {
   const status = new Map(results.results.map((r) => [r.id, r.status]));
-  const judged = plan.filter((entry) => !entry.outOfScope && !entry.recordOnly);
+  const skipped = plan.filter((entry) => entry.needs && status.get(entry.id) === "skipped").map((entry) => entry.id);
+  const judged = plan.filter((entry) => !entry.outOfScope && !entry.recordOnly && !skipped.includes(entry.id));
   const failed = judged.filter((entry) => status.get(entry.id) === "fail").map((entry) => entry.id);
   const unshown = judged.filter((entry) => status.get(entry.id) !== "pass").map((entry) => entry.id);
-  return { code: failed.length || unshown.length || judged.length === 0 ? 1 : 0, failed, unshown };
+  return { code: failed.length || unshown.length || judged.length === 0 ? 1 : 0, failed, unshown, skipped };
 }
 
 /** Exit codes, named once: the same as m6-release-staging.mjs's. */
@@ -134,6 +157,9 @@ reach the content domain.
   --takedown-wait   seconds to wait for the host to stop serving after the unpublish (default 180).
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed. Never printed.
+  PODSTER_E2E_STORE_LIST_TOKEN  a read-only token on the content account (Account, D1, Read alone), for M6-CX1.
+  PODSTER_E2E_CONTENT_ACCOUNT_ID  that account's ID, for M6-CX1. Without both, M6-CX1 is skipped, naming them, and
+                                the exit code doesn't change. Neither is printed, nor any store's name or ID.
 
   Refuses to start, exit 3, unless the contract's grant route gives a deploy grant; signed out, staging lists
   deploy_release; and ${CONTENT_DOMAIN} answers an unknown app's host with the content Worker's own not found. Then, after
@@ -145,7 +171,9 @@ reach the content domain.
   requests to the app's host, one at a time: the write budget is shown at its deployed figure. It may wait up to
   ${Math.ceil((BURST_NEEDS_MS + CLOCK_MARGIN_MS) / 1000)} s for a fresh write window. It cleans up: release off (which unpublishes the app and retires its
   label), the room private, grants taken back, the agent disconnected, sessions signed out. It can't delete the
-  repository: it prints its name for the owner to archive or delete. Person IDs are printed as their role.
+  repository: it prints its name for the owner to archive or delete. Person IDs are printed as their role. With
+  M6-CX1's secrets, it lists the content account's D1 databases before and after the release, and after the unpublish
+  every ${STORE_POLL_MS / 1000} s for up to ${STORE_GONE_WAIT_MS / 60_000} minutes, until the app's store is gone: GETs only.
 
   Exit 0 only when every judged check passed; 1 otherwise; 2 for a refused configuration or a failed preflight, with no
   sign-up taken; 3 when release isn't on with a provider, with at most the owner's sign-up.`;
@@ -233,6 +261,19 @@ export default {
         async start(controller) {
           controller.enqueue(encoder.encode("start\n"));
           await new Promise((done) => setTimeout(done, 300));
+          controller.enqueue(encoder.encode("spun " + spin(${SPIN_ROUNDS}) + "\n"));
+          controller.enqueue(encoder.encode("end\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    if (url.pathname === "/api/after-hold") {
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode("start\n"));
+          await new Promise((done) => setTimeout(done, ${AFTER_HOLD_MS}));
           controller.enqueue(encoder.encode("spun " + spin(${SPIN_ROUNDS}) + "\n"));
           controller.enqueue(encoder.encode("end\n"));
           controller.close();
@@ -356,8 +397,103 @@ export function budgetRefusalProblem({ status, body, headers }, nowMs, cap = WRI
   return problems.length ? problems.join("; ") : null;
 }
 
-/** What a visitor got from an app that passed a limit after its headers: one line, for the record. */
+/**
+ * Why what a visitor got from an app that passed a limit after its headers isn't what `expected` says, or null (C09,
+ * 2026-11-26). `held`: the body failed within the content Worker's hold, before the headers, so the answer is its own
+ * 502 app_error. `aborted`: the body failed past the hold, so the answer is a 200 whose body failed and didn't end. A
+ * 200 whose body ended normally always fails, cut short or whole, and so does a body that only hung until the run gave
+ * up, which is no abort.
+ */
+export function afterHeadersProblem({ status, text, bytes, ended, error, headers }, expected) {
+  const body = String(text ?? "");
+  if (status === undefined || status === null) return `no answer: ${error ?? "nothing"}`;
+  if (body.includes("end\n")) return `the module finished and answered ${status}: the CPU limit didn't stop it`;
+  if (status === 200 && ended) return `a truncated 200: ${bytes} byte(s) and a body that ended normally, which a visitor can't tell from a whole answer`;
+  if (expected === "held") {
+    if (status !== 502 || body.trim() !== "app_error" || !ended) return `answered ${status} ${JSON.stringify(body.trim().slice(0, 40))}${ended ? "" : ", whose body failed"}, not the content Worker's 502 app_error from its hold`;
+  } else if (expected === "aborted") {
+    if (status !== 200) return `answered ${status} ${JSON.stringify(body.trim().slice(0, 40))}, not a 200 whose body was aborted past the hold`;
+    if (/^(TimeoutError|AbortError)\b/.test(String(error ?? ""))) return `the body hung until the run gave up (${error}), which isn't an abort`;
+    if (!body.startsWith("start\n")) return `a 200 whose body failed, but began ${JSON.stringify(body.slice(0, 20))}, not the module's start`;
+  } else throw new Error(`afterHeadersProblem: expected is "held" or "aborted", not ${JSON.stringify(expected)}`);
+  const problems = codeHeaderProblems(headers ?? []);
+  return problems.length ? problems.join("; ") : null;
+}
+
+/** What a visitor got from an app that passed a limit after its headers: one line, for the run's output. */
 export function afterHeadersLine({ status, contentType, cacheControl, allowOrigin, text, bytes, ended, error, ms }) {
   const seen = JSON.stringify(String(text ?? "").slice(0, 60));
   return `status ${status ?? "none"}, content-type ${contentType ?? "none"}, cache-control ${cacheControl ?? "none"}, allow-origin ${allowOrigin ?? "none"}; body ${bytes} byte(s) ${seen}; ${ended ? "the body ended normally" : `the body ended with ${error ?? "nothing"}`}; ${ms} ms`;
 }
+
+// ---- the store's deletion, from the operator's side (M6-CX1) ----
+
+/** D1 databases asked for in one page of the list, and pages read at most: the API's reconcile's figures (core's LIST_PAGE and MAX_LIST_PAGES). */
+export const STORE_LIST_PAGE = 100;
+export const STORE_LIST_PAGES = 20;
+/** Cloudflare's API. The only host CX1 sends to, and only GETs of the account's D1 list. */
+export const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
+/** A store's name as the room gives it (podster_core::app_store::is_store_name): the prefix, then 32 lower-case hex digits. */
+const STORE_NAME = /^podster-store-[0-9a-f]{32}$/;
+const ACCOUNT_ID = /^[0-9a-f]{32}$/;
+const API_TOKEN = /^[A-Za-z0-9_-]{40,}$/;
+
+/**
+ * CX1's configuration from the environment: `{ config: { token, accountId } }`; `{ needs }`, the line a skipped CX1
+ * prints, when either secret is unset or empty (as GitHub passes an unset one); or `{ problem }` when one is set but
+ * malformed, which fails CX1 rather than skipping it.
+ */
+export function storeListConfig(env = {}) {
+  const missing = STORE_LIST_SECRETS.filter((name) => !env[name]);
+  if (missing.length) return { needs: `needs ${missing.join(" and ")} in the workflow's environment (${STORE_LIST_WIZARD} adds them, run by the owner)` };
+  const [token, accountId] = STORE_LIST_SECRETS.map((name) => env[name]);
+  if (!API_TOKEN.test(token)) return { problem: `${STORE_LIST_SECRETS[0]} isn't shaped like a Cloudflare API token` };
+  if (!ACCOUNT_ID.test(accountId)) return { problem: `${STORE_LIST_SECRETS[1]} isn't 32 hex digits` };
+  return { config: { token, accountId } };
+}
+
+/**
+ * The account's Podster stores, by a whole read of its D1 list: `{ stores: [{ id, name }] }`, or `{ problem }`. Only
+ * GETs, each with the token in the Authorization header alone. A list longer than STORE_LIST_PAGES pages, a page that
+ * isn't Cloudflare's success, or one whose entries aren't databases is no list. The answer is never printed: problems
+ * carry statuses and Cloudflare's error codes only.
+ */
+export async function listStores({ token, accountId }, fetchFn = fetch) {
+  const stores = [];
+  for (let page = 1; page <= STORE_LIST_PAGES; page++) {
+    let res, body;
+    try {
+      res = await fetchFn(`${CLOUDFLARE_API}/accounts/${accountId}/d1/database?page=${page}&per_page=${STORE_LIST_PAGE}`, { method: "GET", redirect: "manual", headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(20_000) });
+      body = await res.json();
+    } catch (error) {
+      return { problem: `the account's D1 list couldn't be read (${error?.name ?? "Error"})` };
+    }
+    if (!res.ok || body?.success !== true || !Array.isArray(body.result)) {
+      const codes = Array.isArray(body?.errors) ? body.errors.map((e) => e?.code).filter(Number.isInteger) : [];
+      return { problem: `the account's D1 list answered ${res.status}${codes.length ? ` (Cloudflare ${codes.join(", ")})` : ""}` };
+    }
+    for (const entry of body.result) {
+      if (typeof entry?.uuid !== "string" || typeof entry?.name !== "string") return { problem: "the account's D1 list held an entry with no uuid or name" };
+      if (STORE_NAME.test(entry.name)) stores.push({ id: entry.uuid, name: entry.name });
+    }
+    const pages = body.result_info?.total_pages;
+    if (body.result.length < STORE_LIST_PAGE || (Number.isInteger(pages) && page >= pages)) return { stores };
+  }
+  return { problem: `the account's D1 list is longer than ${STORE_LIST_PAGES} pages of ${STORE_LIST_PAGE}, so it can't be read whole` };
+}
+
+/**
+ * The app's store: the one Podster store listed after the release and not before it, `{ store }`, or `{ problem }`.
+ * None new means the release made none; more than one means another room made one meanwhile, and which is the app's
+ * can't be told, so CX1 decides nothing.
+ */
+export function appStoreOf(before, after) {
+  const known = new Set(before.flatMap((s) => [s.id, s.name]));
+  const made = after.filter((s) => !known.has(s.id) && !known.has(s.name));
+  if (made.length === 1) return { store: made[0] };
+  if (made.length === 0) return { problem: "no Podster store was listed after the release that wasn't before it, though the app asked for one" };
+  return { problem: `${made.length} Podster stores were made in the account during the release, so which is the app's can't be told` };
+}
+
+/** Whether a store is gone from a whole list: neither its ID nor its name is in it. */
+export const storeGone = (stores, store) => !stores.some((s) => s.id === store.id || s.name === store.name);

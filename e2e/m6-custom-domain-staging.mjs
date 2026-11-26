@@ -41,7 +41,7 @@ import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import {
-  certificateLine, challengeName, CNAME_TARGET, CONTENT_DOMAIN, contentNotFoundProblem, customHeaderProblems, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, dnsClient, dnsEnvProblem, EXIT, markerBody, parseArgs, PENDING_HOLD_MS, PLAN, raceOutcome,
+  certificateLine, challengeName, CNAME_TARGET, CONTENT_DOMAIN, contentNotFoundProblem, customHeaderProblems, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, dnsClient, dnsEnvProblem, EXIT, markerBody, parseArgs, PENDING_HOLD_MS, PLAN, RACE_SETTLE_MS, raceOutcome,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, resultUrlProblem, runLabel, runNames, runOutcome, secretProblem, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_ORG, TEST_DOMAIN, unclaimedLine, unknownLabel, USAGE,
 } from "./m6-custom-domain-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -297,6 +297,12 @@ async function main() {
   say(`     room A asked for ${NAMES.main}: its challenge goes at ${challengeName(NAMES.main)}; held unpublished for ${PENDING_HOLD_MS / 1000} s`);
 
   say(`\n## the race for ${NAMES.race}, rooms B and C`);
+  // A placeholder at the race's challenge name before either room asks: a room looks for its challenge as soon as it
+  // asks, before the run can publish it, and a resolver caches a missing TXT for the zone's negative TTL (Cloudflare's
+  // SOA minimum, 30 minutes by default), far past the wait. Run 45796822191 saw that: room C's challenge was still
+  // unread 9 minutes after it was published. A placeholder is cached for DNS_TTL alone, as the decoy is for the main
+  // name. It is no room's value, so it proves nothing.
+  await dns.txt(NAMES.race, randomBytes(32).toString("hex"));
   const [raceB, raceC] = [await askFor(rooms.b, NAMES.race), await askFor(rooms.c, NAMES.race)];
   await dns.txt(NAMES.race, raceB.challenge_value);
   await dns.txt(NAMES.race, raceC.challenge_value);
@@ -313,7 +319,8 @@ async function main() {
   });
 
   await check("X15-2", async () => {
-    const left = Math.max(10, options.claimWait - Math.round((Date.now() - raceStarted) / 1000));
+    const waitMs = Math.max(options.claimWait * 1000, RACE_SETTLE_MS);
+    const left = Math.max(10, Math.round((raceStarted + waitMs - Date.now()) / 1000));
     const both = await run.within(left, "the race's outcome", async () => [await requestOf(rooms.b), await requestOf(rooms.c)], ([b, c]) => b?.state !== "pending" && c?.state !== "pending", 5000);
     const [b, c] = both.value;
     for (const [request, label] of [[b, "B"], [c, "C"]]) eq(request?.hostname, NAMES.race, `room ${label}'s request's name`);

@@ -3,6 +3,7 @@ import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { CODE_APPS_ENABLED, type Deps, FORWARDED_REQUEST_HEADERS, handle, isValidationPath, KV_CACHE_SECONDS, PASSED_RESPONSE_HEADERS, sandboxPolicy, STOP_KEPT_MS, VALIDATION_PATHS } from "../src/handle";
 import { CODE_MARK, customEntryScript, defaultHostLabel, isHost, isScriptName, isWrittenHost, scriptLabel, STOP_KEY } from "../src/names";
 import type { Admission } from "../src/counter";
+import { HOLD_BYTES } from "../src/hold";
 import { MAX_WRITE_BODY_BYTES, READ_HEADERS, WRITE_METHODS } from "../src/requests";
 
 // The content Worker's handler, against stand-ins for its two bindings (M6 step 4(b), ADR 0010). Nothing here reaches
@@ -66,6 +67,8 @@ function world(): World {
       },
     },
     now: () => w.clock.now,
+    // The hold never runs out unless a test says so: a body that ends is held whole.
+    wait: () => new Promise(() => {}),
     stop: { read: null },
     domain: DOMAIN,
     codeApps: false,
@@ -928,6 +931,8 @@ function codeWorld(codeApps = true): World {
   w.deps.codeApps = codeApps;
   return w;
 }
+/** The exact length a held body is sent with (`hold.ts`, C09). */
+const lengthOf = (body: string) => ({ "content-length": String(new TextEncoder().encode(body).byteLength) });
 const answerOf = async (response: Response) => [response.status, headersOf(response), await response.text()];
 /** A body of exactly `bytes` bytes. */
 const bodyOf = (bytes: number) => "x".repeat(bytes);
@@ -987,7 +992,7 @@ describe("a host whose release carries code", () => {
     w.apps.set(SCRIPT, () => new Response("<h1>todo</h1>", { headers: { "content-type": "text/html", etag: '"e"', "set-cookie": "a=b", "cache-control": "max-age=999", "access-control-allow-origin": "*", "x-app": "1" } }));
     for (const method of ["GET", "HEAD"]) {
       const answer = await get(w, "/?x=1", { method, headers: { accept: "text/html", cookie: "a=b", authorization: "Bearer x", "if-none-match": '"d"' } });
-      expect(await answerOf(answer), method).toEqual([200, { ...CODE_APP, "content-type": "text/html", etag: '"e"' }, method === "HEAD" ? "" : "<h1>todo</h1>"]);
+      expect(await answerOf(answer), method).toEqual([200, { ...CODE_APP, "content-type": "text/html", etag: '"e"', ...(method === "HEAD" ? {} : lengthOf("<h1>todo</h1>")) }, method === "HEAD" ? "" : "<h1>todo</h1>"]);
       const sent = w.sent.at(-1)!.request;
       // The read's three headers and nothing else of the visitor's, at the visitor's exact path and query.
       expect([sent.method, sent.url, Object.fromEntries(sent.headers.entries())], method).toEqual([method, `${ORIGIN}/?x=1`, { accept: "text/html", "if-none-match": '"d"' }]);
@@ -1013,7 +1018,7 @@ describe("a host whose release carries code", () => {
     const w = codeWorld();
     w.apps.set(SCRIPT, (request) => (new URL(request.url).pathname === MARKER ? new Response(body, { headers: { "content-type": "application/json", etag: '"m"' } }) : new Response("module", { status: 500 })));
     const answer = await get(w, MARKER, { headers: { accept: "application/json", "cache-control": "no-cache" }, redirect: "manual" });
-    expect(await answerOf(answer)).toEqual([200, { ...CODE_APP, "content-type": "application/json", etag: '"m"' }, body]);
+    expect(await answerOf(answer)).toEqual([200, { ...CODE_APP, "content-type": "application/json", etag: '"m"', ...lengthOf(body) }, body]);
     const sent = w.sent[0].request;
     expect([w.sent.length, w.sent[0].script, sent.method, sent.url, Object.fromEntries(sent.headers.entries())]).toEqual([1, SCRIPT, "GET", `${ORIGIN}${MARKER}`, { accept: "application/json" }]);
     // The same on an app's custom hostname, whose entry names the same script.
@@ -1063,6 +1068,137 @@ describe("a host whose release carries code", () => {
     expect(await answerOf(await get(w, "/", { headers: { "if-none-match": '"e"' } }))).toEqual([304, { ...CODE_APP, etag: '"e"' }, ""]);
   });
 
+  it("holds an app's body before its headers: one that fails within the hold is 502 app_error, never a truncated 200 (C09)", async () => {
+    // Staging's C09: the app sent its headers and 6 bytes, then passed its CPU limit, which fails its body.
+    const failing = () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("start\n")); c.error(new Error("Worker exceeded CPU time limit.")); } }), { headers: { "content-type": "text/plain" } });
+    for (const [method, init] of [["GET", {}], ...WRITE_METHODS.map((method) => [method, { body: "{}", headers: JSON_HEADERS }])] as [string, RequestInit][]) {
+      const w = codeWorld();
+      w.apps.set(SCRIPT, failing);
+      expect(await answerOf(await get(w, "/api/after-headers", { method, ...init })), method).toEqual([502, CODE_OWN, "app_error\n"]);
+      // Logged as a failed dispatch, with nothing of the app's message.
+      expect(w.logged, method).toEqual([{ event: "dispatch_error", release: "rel_0123456789abcdef0123456789abcdef" }]);
+      // A write the app then fails still counts.
+      expect(w.counted, method).toEqual(method === "GET" ? [] : ["k3v9q2"]);
+    }
+    // A body that ends within the hold is sent whole with its exact length, whatever length the app declared.
+    const w = codeWorld();
+    w.apps.set(SCRIPT, () => new Response("start\nend\n", { headers: { "content-type": "text/plain", "content-length": "99" } }));
+    expect(await answerOf(await get(w, "/api/after-headers"))).toEqual([200, { ...CODE_APP, "content-type": "text/plain", ...lengthOf("start\nend\n") }, "start\nend\n"]);
+    // A HEAD's body isn't held: it gets none, as before.
+    w.apps.set(SCRIPT, failing);
+    expect(await answerOf(await get(w, "/api/after-headers", { method: "HEAD" }))).toEqual([200, { ...CODE_APP, "content-type": "text/plain" }, ""]);
+  });
+
+  it("streams a body that outgrows the hold, and aborts it, never ends it cleanly, when the app's body fails later (C09)", async () => {
+    const encoder = new TextEncoder();
+    /** A body the test feeds: chunks, then an end or a failure. */
+    const fed = () => {
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const seen = { cancelled: false };
+      const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; }, cancel() { seen.cancelled = true; } });
+      return { body, seen, send: (text: string) => controller.enqueue(encoder.encode(text)), fail: () => controller.error(new Error("Worker exceeded CPU time limit.")), end: () => controller.close() };
+    };
+    /** What a visitor reads of a body: its text, and whether it ended or failed, and with what. */
+    const readAll = async (response: Response) => {
+      const reader = response.body!.getReader();
+      let text = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return { text, ended: true, error: null };
+          text += new TextDecoder().decode(value);
+        }
+      } catch (error) {
+        return { text, ended: false, error: (error as Error).message };
+      }
+    };
+    // Outgrown by time: the hold runs out while the app's body is still open.
+    const w = codeWorld();
+    w.deps.wait = () => Promise.resolve();
+    const app = fed();
+    app.send("start\n");
+    w.apps.set(SCRIPT, () => new Response(app.body, { headers: { "content-type": "text/plain" } }));
+    const answer = await get(w, "/api/after-headers");
+    // The headers are the app's 200, with no length: the body is still coming.
+    expect([answer.status, headersOf(answer)]).toEqual([200, { ...CODE_APP, "content-type": "text/plain" }]);
+    const read = readAll(answer);
+    app.fail();
+    // What was held, then an error of this Worker's own, with nothing of the app's message: never a clean end.
+    expect(await read).toEqual({ text: "start\n", ended: false, error: "app_stream_failed" });
+    expect(w.logged).toEqual([{ event: "dispatch_stream_error", release: "rel_0123456789abcdef0123456789abcdef" }]);
+    // An outgrown body that ends cleanly is passed whole.
+    const whole = fed();
+    whole.send("start\n");
+    w.apps.set(SCRIPT, () => new Response(whole.body, { headers: { "content-type": "text/plain" } }));
+    const passed = readAll(await get(w, "/api/after-headers"));
+    whole.send("end\n");
+    whole.end();
+    expect(await passed).toEqual({ text: "start\nend\n", ended: true, error: null });
+    // An event stream isn't held for any time, though the hold's never runs out here, and is still aborted if it fails.
+    w.deps.wait = () => new Promise(() => {});
+    const events = fed();
+    events.send("data: 1\n\n");
+    w.apps.set(SCRIPT, () => new Response(events.body, { headers: { "content-type": "text/event-stream; charset=utf-8" } }));
+    const stream = await get(w, "/api/events");
+    expect([stream.status, stream.headers.get("content-length")]).toEqual([200, null]);
+    const streamRead = readAll(stream);
+    events.send("data: 2\n\n");
+    events.fail();
+    expect(await streamRead).toEqual({ text: "data: 1\n\ndata: 2\n\n", ended: false, error: "app_stream_failed" });
+    w.deps.wait = () => Promise.resolve();
+    // A visitor who goes away cancels the app's body.
+    const left = fed();
+    left.send("start\n");
+    w.apps.set(SCRIPT, () => new Response(left.body, { headers: { "content-type": "text/plain" } }));
+    await (await get(w, "/api/after-headers")).body!.cancel();
+    await vi.waitFor(() => expect(left.seen.cancelled).toBe(true));
+    // Going away isn't the app's failure: nothing more is logged.
+    expect(w.logged.map((line) => (line as { event: string }).event)).toEqual(["dispatch_stream_error", "dispatch_stream_error"]);
+  });
+
+  it("streams a body that outgrows the hold by size, held bytes first, and aborts it if the app's body then fails (C09)", async () => {
+    const w = codeWorld();
+    const big = new Uint8Array(HOLD_BYTES).fill(120);
+    let pulls = 0;
+    w.apps.set(SCRIPT, () => new Response(new ReadableStream<Uint8Array>({ pull(c) { const step = pulls++; if (step === 0) c.enqueue(big); else if (step === 1) c.enqueue(new TextEncoder().encode("yz")); else c.error(new Error("over")); } })));
+    const answer = await get(w, "/big");
+    expect([answer.status, answer.headers.get("content-length")]).toEqual([200, null]);
+    const reader = answer.body!.getReader();
+    let bytes = 0;
+    const failed = await (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return null;
+          bytes += value.byteLength;
+        }
+      } catch (error) {
+        return (error as Error).message;
+      }
+    })();
+    expect([bytes, failed]).toEqual([HOLD_BYTES + 2, "app_stream_failed"]);
+    expect(w.logged).toEqual([{ event: "dispatch_stream_error", release: "rel_0123456789abcdef0123456789abcdef" }]);
+    // A chunk that doesn't fit under the hold is never held, whatever its size: the answer starts at once, though the
+    // hold's time never runs out and the body stays open, and a visitor who goes away cancels it with nothing logged.
+    let cancelled = false;
+    const huge = new Uint8Array(16 * HOLD_BYTES).fill(120);
+    w.logged.length = 0;
+    w.apps.set(SCRIPT, () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(huge); }, cancel() { cancelled = true; } })));
+    const open = await get(w, "/huge");
+    expect([open.status, open.headers.get("content-length")]).toEqual([200, null]);
+    const first = await open.body!.getReader().read();
+    expect(first.value?.byteLength).toBe(16 * HOLD_BYTES);
+    const second = await get(w, "/huge");
+    await second.body!.cancel();
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+    expect(w.logged).toEqual([]);
+    // A static host's body is never held: it passes as it comes, with no length added.
+    const s = world();
+    s.apps.set(SCRIPT, () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("page")); c.close(); } })));
+    const page = await get(s);
+    expect([page.status, page.headers.get("content-length"), await page.text()]).toEqual([200, null, "page"]);
+  });
+
   it("answers an error after its kind is known as its own, readable by the origin null: a body that fails as it is counted", async () => {
     const w = codeWorld();
     const body = new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("the visitor went away")); } });
@@ -1085,7 +1221,7 @@ describe("a host whose release carries code", () => {
           if (declared) headers["content-length"] = String(bytes);
           const answer = await get(w, "/api/items?x=1", { method, body: bodyOf(bytes), headers });
           const label = `${method} ${bytes} ${declared ? "declared" : "counted"}`;
-          expect(await answerOf(answer), label).toEqual([200, { ...CODE_APP, "content-type": "text/html" }, "<h1>app</h1>"]);
+          expect(await answerOf(answer), label).toEqual([200, { ...CODE_APP, "content-type": "text/html", ...lengthOf("<h1>app</h1>") }, "<h1>app</h1>"]);
           // Counted once, for the app's label, before the app was asked.
           expect([w.counted, w.order], label).toEqual([["k3v9q2"], ["count", "dispatch"]]);
           // The app gets the method, the URL, the body as counted, and the write's headers, and nothing else.
@@ -1213,7 +1349,7 @@ describe("a host whose release carries code", () => {
     // The app's own refusal is passed on as the app's, with only the headers that pass, and is still counted.
     const w = codeWorld();
     w.apps.set(SCRIPT, () => new Response('{"error":"no"}', { status: 422, headers: { "content-type": "application/json", "set-cookie": "a=b", "access-control-allow-origin": "*", "cache-control": "max-age=999" } }));
-    expect(await answerOf(await get(w, "/api/items", write))).toEqual([422, { ...CODE_APP, "content-type": "application/json" }, '{"error":"no"}']);
+    expect(await answerOf(await get(w, "/api/items", write))).toEqual([422, { ...CODE_APP, "content-type": "application/json", ...lengthOf('{"error":"no"}') }, '{"error":"no"}']);
     expect(w.counted).toEqual(["k3v9q2"]);
     // An answer that can't carry a body gets none, and no length the app gave for the body it dropped.
     for (const status of [204, 205]) {

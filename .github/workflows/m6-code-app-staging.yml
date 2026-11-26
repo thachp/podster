@@ -5,10 +5,15 @@ name: M6 code app staging
 # 2026-11-25. Run by hand only: `gh workflow run m6-code-app-staging.yml`, then `gh run watch`.
 #
 # It runs against staging, the one host the script accepts, and podster.site, the content domain committed in it. Its
-# one secret, PODSTER_E2E_SIGNUP_SECRET, is held by the `staging-e2e` environment and set by the owner; it reaches the
+# sign-up secret, PODSTER_E2E_SIGNUP_SECRET, is held by the `staging-e2e` environment and set by the owner; it reaches the
 # test step alone, as an environment variable, and is never written into a command. The job's GITHUB_TOKEN can read
 # this repository and nothing else, and checkout doesn't keep it. The test pushes to the repository it has Podster make
 # in podsterdev with the coding agent's own short-lived token, and leaves that repository for the owner to delete.
+#
+# M6-CX1, the app's store deleted after the unpublish, is checked from the operator's side with two more secrets of the
+# same environment, PODSTER_E2E_STORE_LIST_TOKEN (a Cloudflare token with Account, D1, Read on the content account
+# alone) and PODSTER_E2E_CONTENT_ACCOUNT_ID, which scripts/wizards/store-list-token.sh adds. The run only lists that
+# account's D1 databases with them. Until both are set it skips M6-CX1, naming them, and its exit code doesn't change.
 on:
   workflow_dispatch:
 
@@ -24,9 +29,10 @@ jobs:
   code-app:
     runs-on: ubuntu-latest
     environment: staging-e2e
-    # The run's own waits come to at most about 25 minutes: repository, merge and release 5 each, the takedown 3, the
-    # write burst's wait for a fresh window 2, and the checks themselves.
-    timeout-minutes: 40
+    # The run's own waits come to at most about 45 minutes: repository, merge and release 5 each, the takedown 3, the
+    # write burst's wait for a fresh window 2, the store's deletion 20 (M6-CX1, counted from the unpublish), and the
+    # checks themselves.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -44,3 +50,5 @@ jobs:
         working-directory: e2e
         env:
           PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}
+          PODSTER_E2E_STORE_LIST_TOKEN: ${{ secrets.PODSTER_E2E_STORE_LIST_TOKEN }}
+          PODSTER_E2E_CONTENT_ACCOUNT_ID: ${{ secrets.PODSTER_E2E_CONTENT_ACCOUNT_ID }}

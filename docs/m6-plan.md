@@ -743,7 +743,7 @@ Contract and migration PRs merge one at a time, so M6's step 2 waits until every
 - **Status:** `get_task_release_status` gains the release, beside checks and merge, each with its own time, including failure.
 - **Limits and a stop:** budget caps per room, an owner's off switch that unpublishes, an operator's suspension of one app, and a stop for the whole content domain, built before anything is served. An app is served only while Rust has said so, host by host.
 - **Screens:** Release in room settings and setup, the deployment stage on a task's Release panel, and release approvals in Needs attention.
-- **Written policies** for custom domains, release approvals, and export or transfer, since criterion 8 says they must pass "their documented policies" and none is written.
+- **Written policies** for custom domains, release approvals, and export or transfer, since criterion 8 says they must pass "their documented policies" and none is written. *(2026-11-26: written, in [Release policies](spec/RELEASE-POLICIES.md).)*
 
 Not in M6: a way for a DevOps role to propose release settings through Podster. The spec says "a DevOps role can propose its settings", and no command, state or screen for a proposal is designed. In M6 such an agent can only say what it suggests in a task thread, which is data, and the owner or an admin configures release. A proposal command is left for a later design, because it would let agent-written text become configuration by one click.
 
@@ -764,6 +764,25 @@ From the specs. Nothing may say release works until all of these pass on staging
 
 The architect proposes the gate call, for the owner to review.
 
+### Criterion 8's written policies, 2026-11-26
+
+**F-8 of the [M6 security review](security/m6-review.md) is addressed:** the policies expanded criterion 8 names are written in [Release policies](spec/RELEASE-POLICIES.md). Each one describes M6 as built, citing code, ADR 0010, the PRODUCT.md decisions and this plan's staging runs.
+
+- **[Custom domains](spec/RELEASE-POLICIES.md#1-custom-domains):**
+  - who may ask, and the refused names, Public Suffix List included;
+  - the TXT proof and the claim race;
+  - the `CNAME` target and the certificate locks;
+  - the 72-hour expiry and the daily recheck;
+  - removal, and what a customer should expect.
+- **[Release approvals](spec/RELEASE-POLICIES.md#2-release-approvals):**
+  - who switches release on, and merged commits only;
+  - who asks and who approves, with the owner's ruling of 2026-11-16 on an agent's controller;
+  - public rooms only;
+  - unpublish retiring the label and owing the store's deletion.
+- **[Export and transfer](spec/RELEASE-POLICIES.md#3-export-and-transfer):** a room can take its public managed repository, by clone or fork, at the commit each release names. Every transfer or export route is marked **not built**.
+
+**Not done here:** the review's F-8 fix also asks for an addition to the terms and acceptable-use drafts covering hosted apps, custom domains and app data. That is owed before production, not for the staging gate (staging has only test people), as X14-4 was; it needs the owner's approval. M6-24 hasn't run on staging. It would check only that no export or transfer route exists.
+
 ### The owner's call, 2026-11-24: static sites
 
 **The owner said "Gate met" for M6's static-site release gate** on 2026-11-24, on that day's staging run of `e2e/m6-release-staging.mjs`:
@@ -780,8 +799,8 @@ The architect proposes the gate call, for the owner to review.
 
 - **10 passed, 0 failed, 1 out of scope, 1 recorded.** The passes were C01 to C08, C10 and C11.
 - **Run from** GitHub Actions run [45598024983](https://github.com/thachp/podster/actions/runs/45598024983) (workflow `m6-code-app-staging.yml`, added by PR #598), at main `77216ef0`, against the staging API at `6fa58cb8` and the content Worker `podster-content` at `f820ae78` with `podster-outbound` at `f98148a9`.
-- **Out of scope, CX1:** that the app's store was deleted once an unpublish retired its label. A test person sees no signal of it, so the run couldn't show it.
-- **Recorded, C09:** a limit hit after the headers were sent gave status `200` with the 6 bytes sent before the stop and a body that ended normally, so a truncated `200`. It affected only that app's own answer.
+- **Out of scope, CX1:** that the app's store was deleted once an unpublish retired its label. A test person sees no signal of it, so the run couldn't show it. *2026-11-26: the code makes this checkable from the operator's side, and the run now checks it: an unpublish for good owes the store's deletion as `label_retired` in its own transaction ([above](#an-unpublish-for-good-retires-the-label-2026-11-23)), and S4's job, woken by the room's alarm while a store provider is configured, deletes it at D1 once nothing can reach it, and never gives up. `e2e/m6-code-app-staging.mjs`'s M6-CX1 reads the content account's D1 list with a read-only token (Account · D1 · Read), takes the one store new across the release as the app's, and after M6-C10 waits up to 20 minutes for it to leave the list. It is skipped, naming them, until the owner adds `PODSTER_E2E_STORE_LIST_TOKEN` and `PODSTER_E2E_CONTENT_ACCOUNT_ID` to `staging-e2e` with `scripts/wizards/store-list-token.sh` ([staging.md](staging.md#m6s-staging-run-with-an-app-with-code)). Not yet run.*
+- **Recorded, C09:** a limit hit after the headers were sent gave status `200` with the 6 bytes sent before the stop and a body that ended normally, so a truncated `200`. It affected only that app's own answer. *2026-11-26: the content Worker now holds a host with code's answer body before sending its headers, up to 64 KiB, checked before each chunk is held, and 1 second, or no time for an event stream (`apps/content/src/hold.ts`). Nothing is copied, and the rest of an outgrown body is piped with backpressure. A body that fails within the hold is the content Worker's own `502 app_error`; one that ends is sent whole with its exact `Content-Length`; one that outgrows the hold is streamed and errored, never ended cleanly, if the app's body fails later, and that is logged as `dispatch_stream_error`. C09 is now judged, not recorded, on two routes of the app: one stopped within the hold must answer `502 app_error`, and one stopped 2.5 seconds in, past the hold, must be a `200` whose body was aborted. A `200` whose body ended normally fails either way. This rests on Cloudflare's documentation that a stopped user Worker throws, which a body read sees as a failure; if the platform instead ended a stopped app's body cleanly, no Worker in front could tell, and C09 would still fail. Not yet shown on staging: it needs the owner's content deploy (`scripts/deploy-content`), then a rerun of `m6-code-app-staging.yml`.*
 - **The content probes from CI** passed 5/5 in run [45594697996](https://github.com/thachp/podster/actions/runs/45594697996) (PR #597). The two-level host wasn't shown in that run.
 - **The PRs that got there:** #591 and #592, spike H and its socket control; #594, which flipped [the gate for apps with code](#the-gate-for-apps-with-code-flipped-2026-11-25), fixed `ASSETS_CONFIG` and made sure `run_worker_first` is never sent; #595, [the content Worker serving code](#the-content-worker-serves-apps-with-code-built-2026-11-25), with limits on every dispatch; #597, the content probes from CI; and #598, the run itself.
 - **The per-dispatch limits,** 50 CPU ms and 50 subrequests, were the architect's figures of 2026-11-25. They weren't measured, and were for the owner to review.
@@ -814,6 +833,30 @@ The architect proposes the gate call, for the owner to review.
 - **The PRs that got there:** #604, the run itself; #606, the fix to the `opster.dev` token wizard, whose zone check asked for one DNS record; and #607, the race's placeholder.
 
 **Still open, and not covered by this call:** X14-4's certificate validation off Cloudflare, before custom domains reach production *(closed 2026-11-26, see [the war3.org run](#war3-run-2026-11-26))*; X14-6, X26-2 and X26-3 on a deployment; and `RELEASES` and a provider in production, which are the owner's.
+
+### Security review, 2026-11-26
+
+**The gate's security review is done: [M6 security review](security/m6-review.md),** of `main` at `505ab312`, read-only, against [the threat model](#threat-model) row by row and six threats it misses. Nothing is fixed by it.
+
+- **No finding is in the code paths that keep authority.** No way was found to deploy:
+  - a commit Podster's merge didn't confirm;
+  - without a deploy grant and a person's approval;
+  - one room's app on another's host;
+  - a custom hostname a room hasn't proven.
+- **Blocking for the gate, 1:** F-8. Criterion 8's documented policies for custom domains, release approvals and export or transfer aren't written, and the terms don't cover hosted apps. It's a documentation fix.
+- **Before production, 5:**
+  - F-1: the write cap doesn't count store writes an app makes while handling a read.
+  - F-2: no spend ceiling on the second account is recorded.
+  - F-3: the reconcile doesn't compare the content and outbound Workers' deployed versions, which the threat model counts on.
+  - F-4: the store token reaches every app's data. Its D1-Edit-only repeat on the second account is still owed.
+  - F-5: CX1's deletion is guaranteed by the code once a store provider is set and hosts are confirmed down, but it was never seen against real D1.
+- **Nits, 5:**
+  - F-6: C09's truncated `200` touches only the app's own answer.
+  - F-7: one DNS resolver decides each proof.
+  - F-9: nothing refuses a `CONTENT_ACCOUNT_ID` that is Podster's own.
+  - F-10: 50 CPU ms and 50 subrequests are safe, and subrequests could be lower.
+  - F-11: stale comments.
+- **The owed items it answers:** the reconcile's token reach (F-4), CX1 (F-5), C09 (F-6) and the per-dispatch limits (F-10).
 
 ## What M6 needs from earlier milestones
 

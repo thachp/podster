@@ -15,7 +15,7 @@ How to read the labels:
 - **Proposed** means the wording goes beyond a decision. Usually it's guidance to customers, or a figure the code itself marks Proposed.
 - **Not built** means nothing in the code does it.
 
-Everything here applies to staging only. `RELEASES` and a provider in production are still the owner's to switch on. **The terms and acceptable-use drafts in `docs/legal/` don't cover hosted apps, custom domains or app data yet.** F-8 also asks for that addition. It isn't made here, and it needs the owner's approval.
+Everything here applies to staging only. `RELEASES` and a provider in production are still the owner's to switch on. **The terms and acceptable-use drafts in `docs/legal/` don't cover hosted apps, custom domains or app data yet.** F-8 also asks for that addition. It isn't made here. It is owed before production (before any real person's app is served), not for the staging gate, and it needs the owner's approval.
 
 ## 1. Custom domains
 
@@ -31,7 +31,7 @@ Everything here applies to staging only. `RELEASES` and a provider in production
   - its repository is ready;
   - release is switched on in the room.
 - **Removing a name, or dropping a pending request, is always allowed to those same people,** an archived room included, because it only takes down (`:295-307`, `HostnameChange::Remove`).
-- **A room has at most one custom hostname,** pending or claimed: `hostname_limit` (`crates/core/src/hostnames.rs:46`, `:393-395`).
+- **A room has at most one custom hostname,** pending or claimed: `hostname_limit` (`crates/core/src/hostnames.rs:46`, `:396-398`).
 - **The proof job checks the room again before every DNS lookup and every ask** (`crates/policy/src/release.rs:369-390`, `hostname_proof_room`). If a fact fails, the request ends. If a fact can't be read, the job waits and decides nothing.
 - Staging: X15-1 and X14-1 ([custom domains run](../m6-plan.md#the-owners-call-2026-11-26-custom-domains-for-staging)).
 
@@ -56,7 +56,7 @@ Each refusal comes from `crates/core/src/hostnames.rs`. Decided, for the owner t
   - So a shared apex such as `github.io` is refused, and a name under it isn't.
   - The list is a dated snapshot compiled into the API (`apps/api/src/workspace/hostname.rs:78`, `third_party/public-suffix-list/`). `scripts/deploy-staging` refuses a snapshot older than 90 days.
 - **Missing or unreadable configuration fails closed** (`hostname_unavailable`): no content domain, no suffix rules, or a top-level label no rule covers (`:69-70`).
-- **A name an operator suspended (`hostname_suspended`)** stays refused until an operator lifts the suspension (`:396-398`).
+- **A name an operator suspended (`hostname_suspended`)** stays refused until an operator lifts the suspension (`:393-395`).
 - Staging: X15-1 refused 12 names and 2 bodies with their codes, and left no request behind.
 
 ### The proof, and how claims are decided

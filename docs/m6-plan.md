@@ -781,7 +781,7 @@ The architect proposes the gate call, for the owner to review.
   - unpublish retiring the label and owing the store's deletion.
 - **[Export and transfer](spec/RELEASE-POLICIES.md#3-export-and-transfer):** a room can take its public managed repository, by clone or fork, at the commit each release names. Every transfer or export route is marked **not built**.
 
-**Not done here:** the review's F-8 fix also asks for an addition to the terms and acceptable-use drafts covering hosted apps, custom domains and app data. That is still owed, for the owner's approval. M6-24 hasn't run on staging. It would check only that no export or transfer route exists.
+**Not done here:** the review's F-8 fix also asks for an addition to the terms and acceptable-use drafts covering hosted apps, custom domains and app data. That is owed before production, not for the staging gate (staging has only test people), as X14-4 was; it needs the owner's approval. M6-24 hasn't run on staging. It would check only that no export or transfer route exists.
 
 ### The owner's call, 2026-11-24: static sites
 

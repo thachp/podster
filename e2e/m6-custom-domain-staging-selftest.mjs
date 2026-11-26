@@ -263,8 +263,10 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
 
   const claimed = { ...req, state: "claimed" };
   const refused = { ...req, state: "refused", end_reason: "hostname_claimed_elsewhere" };
-  check(raceOutcome(claimed, refused).winner === "a" && raceOutcome(refused, claimed).winner === "b" && raceOutcome(refused, claimed).reason === "hostname_claimed_elsewhere", "one claimed and one refused names the winner and the reason");
-  check(Boolean(raceOutcome(claimed, claimed).problem) && Boolean(raceOutcome(refused, refused).problem) && Boolean(raceOutcome(claimed, req).problem) && Boolean(raceOutcome(claimed, { ...refused, end_reason: null }).problem) && Boolean(raceOutcome(claimed, { ...req, state: "expired" }).problem), "both claimed, neither, one pending, a refusal with no reason or another end fails");
+  const BC = ["B", "C"];
+  check(raceOutcome(claimed, refused, BC).winner === "B" && raceOutcome(refused, claimed, BC).winner === "C" && raceOutcome(refused, claimed, BC).reason === "hostname_claimed_elsewhere", "one claimed and one refused names the winning room by its label, not its position, and the reason (run 45803085099 said room A for rooms B and C)");
+  check(Boolean(raceOutcome(claimed, refused).problem) && Boolean(raceOutcome(claimed, refused, ["B"]).problem) && Boolean(raceOutcome(claimed, refused, ["B", "B"]).problem), "a race whose two rooms aren't named, or are named alike, fails");
+  check(Boolean(raceOutcome(claimed, claimed, BC).problem) && Boolean(raceOutcome(refused, refused, BC).problem) && Boolean(raceOutcome(claimed, req, BC).problem) && Boolean(raceOutcome(claimed, { ...refused, end_reason: null }, BC).problem) && Boolean(raceOutcome(claimed, { ...req, state: "expired" }, BC).problem), "both claimed, neither, one pending, a refusal with no reason or another end fails");
 
   const good = [["referrer-policy", "no-referrer"], ["x-content-type-options", "nosniff"], ["strict-transport-security", CUSTOM_HSTS], ["content-security-policy", "sandbox allow-scripts; default-src 'self'"]];
   check(customHeaderProblems(good).length === 0, "a custom host's fixed headers pass");

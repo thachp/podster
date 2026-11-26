@@ -327,15 +327,18 @@ export function requestProblem(request, { hostname, state, setup }) {
 
 /**
  * The race's outcome, from both rooms' requests once neither is pending: one claimed, the other refused with a reason
- * code. Answers { winner: "a" | "b", reason } or { problem }.
+ * code. `labels` names the two rooms, in the order their requests are given, so the winner is named as the run names
+ * the room (run 45803085099 said "room A" for a race between rooms B and C). Answers { winner, reason }, the winner
+ * being one of `labels`, or { problem }.
  */
-export function raceOutcome(a, b) {
+export function raceOutcome(a, b, labels) {
+  if (!Array.isArray(labels) || labels.length !== 2 || labels[0] === labels[1]) return { problem: "the race's two rooms aren't named" };
   const states = [a?.state, b?.state];
   if (states.includes("pending")) return { problem: "a request is still pending" };
   const claimed = states.filter((s) => s === "claimed").length;
   if (claimed === 2) return { problem: "both rooms were claimed for one name" };
   if (claimed === 0) return { problem: `neither room was claimed (${states.join(" and ")})` };
-  const [winner, loser] = a.state === "claimed" ? ["a", b] : ["b", a];
+  const [winner, loser] = a.state === "claimed" ? [labels[0], b] : [labels[1], a];
   if (loser.state !== "refused") return { problem: `the room that lost is ${loser.state}, not refused` };
   if (!/^[a-z][a-z0-9_]*$/.test(loser.end_reason ?? "")) return { problem: "the refusal has no reason code" };
   return { winner, reason: loser.end_reason };

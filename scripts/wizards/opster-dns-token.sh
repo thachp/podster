@@ -345,11 +345,13 @@ while :; do
     warn "A zone ID is 32 characters of 0-9 and a-f. Copy it again."
     continue
   fi
-  if cf_get "zones/$OPSTER_ZONE_ID/dns_records?per_page=1" "$OPSTER_DNS_TOKEN" | grep -q '"success":true'; then
+  answer=$(cf_get "zones/$OPSTER_ZONE_ID/dns_records?per_page=5" "$OPSTER_DNS_TOKEN")
+  if grep -q '"success":true' <<<"$answer"; then
     say "The token can list records in that zone."
     break
   fi
-  warn "The token couldn't list records in that zone: the zone ID is another zone's, or the token isn't DNS Edit on $OPSTER_DOMAIN."
+  codes=$(grep -o '"code":[0-9]*' <<<"$answer" | tr '\n' ' ')
+  warn "The token couldn't list records in that zone (Cloudflare: ${codes:-no answer}): the zone ID is another zone's, or the token isn't DNS Edit on $OPSTER_DOMAIN."
   confirm "Try again?" || { OPSTER_DNS_TOKEN=""; OPSTER_ZONE_ID=""; return 1; }
 done
 set_env_secret OPSTER_ZONE_ID "$OPSTER_ZONE_ID" || true

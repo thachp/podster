@@ -206,7 +206,7 @@ finish() {
 #   scripts/wizards/opster-dns-token.sh
 #
 # Nothing typed is echoed, written to a file or passed on a command line: each value goes to `gh secret set` and to
-# curl on standard input. The checks it makes are reads: the token's own verification, and a listing of one record.
+# curl on standard input. The checks it makes are reads: the token's own verification, and a listing of a few records, and on failure the zones the token sees by name.
 
 OPSTER_REPO="thachp/podster"
 OPSTER_ENV="staging-dns"

@@ -39,6 +39,12 @@ export const GONE_SPAN_MS = 10 * 60_000;
 export const CUSTOM_HSTS = "max-age=31536000";
 /** A DNS record's TTL, in seconds: the least Cloudflare takes, so a change is seen soon. */
 export const DNS_TTL = 60;
+/**
+ * The least the race is waited for once both challenges are published: the placeholder's TTL, for a resolver that read
+ * the challenge's name before they were published to forget the placeholder alone, then two of the proof job's looks,
+ * then half a minute for the asks to the hostname's object. The race waits this or the claim wait, whichever is longer.
+ */
+export const RACE_SETTLE_MS = DNS_TTL * 1000 + 2 * PROOF_LOOK_MS + 30_000;
 
 /** Cloudflare's API, the one origin the DNS client sends to. */
 export const CF_API = "https://api.cloudflare.com/client/v4";

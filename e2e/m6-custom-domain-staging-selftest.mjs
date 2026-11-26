@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  adoptable, certificateLine, CF_API, CHALLENGE_PREFIX, challengeName, challengeUnderRoot, CNAME_TARGET, CONTENT_DOMAIN, CUSTOM_HSTS, customHeaderProblems, dnsAllow, dnsClient, dnsEnvProblem, DNS_TTL, EXIT, GONE_SPAN_MS, parseArgs, PENDING_HOLD_MS, PLAN, PROOF_LOOK_MS, raceOutcome,
+  adoptable, certificateLine, CF_API, CHALLENGE_PREFIX, challengeName, challengeUnderRoot, CNAME_TARGET, CONTENT_DOMAIN, CUSTOM_HSTS, customHeaderProblems, dnsAllow, dnsClient, dnsEnvProblem, DNS_TTL, EXIT, GONE_SPAN_MS, parseArgs, PENDING_HOLD_MS, PLAN, PROOF_LOOK_MS, RACE_SETTLE_MS, raceOutcome,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, runLabel, runNames, runOutcome, RUN_LABEL, SIGN_UPS, STAGING, TEST_DOMAIN, txtContent, underRoot, WAITS,
 } from "./m6-custom-domain-staging-lib.mjs";
 
@@ -88,6 +88,7 @@ const hostnamesRs = readFileSync(join(root, "crates/core/src/hostnames.rs"), "ut
   check(hostnamesRs.includes(`pub const CHALLENGE_PREFIX: &str = "${CHALLENGE_PREFIX}";`), "the challenge's prefix is core's");
   check(hostnamesRs.includes('pub const CNAME_TARGET_LABEL: &str = "fallback";') && CNAME_TARGET === `fallback.${CONTENT_DOMAIN}`, "the CNAME target is core's label on the content domain");
   check(hostnamesRs.includes("pub const PROOF_EARLY_INTERVAL_MS: i64 = 60 * 1000;") && PROOF_LOOK_MS === 60_000 && PENDING_HOLD_MS >= 2 * PROOF_LOOK_MS, "the proof job looks each minute, and the hold outlasts two looks");
+  check(RACE_SETTLE_MS >= DNS_TTL * 1000 + 2 * PROOF_LOOK_MS, "the race is waited for past the placeholder's TTL and two looks");
   check(hostnamesRs.includes("pub const PENDING_TTL_MS: i64 = 72 * 60 * 60 * 1000;") && hostnamesRs.includes("pub const RECHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;"), "the expiry and the recheck are 72 and 24 hours, so a run can't wait them out");
   const requestsRs = readFileSync(join(root, "crates/core/src/hostname_requests.rs"), "utf8");
   check(requestsRs.includes(`pub const GONE_SPAN_MS: i64 = ${GONE_SPAN_MS / 60_000} * 60 * 1000;`), "the gone reads' span is core's");

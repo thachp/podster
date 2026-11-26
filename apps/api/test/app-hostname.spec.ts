@@ -206,9 +206,8 @@ describe("a room's custom hostname: the request and its challenge (M6 step 8)", 
         [{ hostname: "bad_name.example.net" }, 400, "hostname_invalid"],
         [{ hostname: "app.podster.dev" }, 409, "hostname_reserved"],
         [{ hostname: `other.${FAKE.domain}` }, 409, "hostname_reserved"],
-        // Podster's other domains, the content domain first named and the one named since, and every name under them.
-        [{ hostname: "opster.dev" }, 409, "hostname_reserved"],
-        [{ hostname: "x.opster.dev" }, 409, "hostname_reserved"],
+        // The content domain named since, and every name under it. (`opster.dev`, the one first named, is no longer
+        // reserved: it is the test customer's domain since the owner's ruling of 2026-11-25; core's tests map it.)
         [{ hostname: "podster.site" }, 409, "hostname_reserved"],
         [{ hostname: "app.podster.site" }, 409, "hostname_reserved"],
         [{ hostname: "co.uk" }, 409, "hostname_public_suffix"],

@@ -23,10 +23,11 @@ pub const MAX_HOSTNAME_LEN: usize = 253;
 pub const MAX_HOSTNAME_LABEL_LEN: usize = 63;
 /// Podster's own domain. Neither it nor anything under it may be mapped.
 pub const PODSTER_DOMAIN: &str = "podster.dev";
-/// Every domain of Podster's that no room may map, nor any name under one: its own, the content domain first named
-/// (`opster.dev`, replaced the same day and still Podster's), and the content domain named since (`podster.site`). A
-/// deployment's configured content domain is refused as well, whatever it is.
-pub const RESERVED_DOMAINS: [&str; 3] = [PODSTER_DOMAIN, "opster.dev", "podster.site"];
+/// Every domain of Podster's that no room may map, nor any name under one: its own, and the content domain
+/// (`podster.site`). A deployment's configured content domain is refused as well, whatever it is. `opster.dev`, the
+/// content domain first named, is no longer reserved (the owner's ruling of 2026-11-25): it is the test customer's
+/// domain for staging's custom-domain run, and only the owner controls its DNS, so the TXT proof still bars others.
+pub const RESERVED_DOMAINS: [&str; 2] = [PODSTER_DOMAIN, "podster.site"];
 /// The name the challenge's TXT record goes at, before the hostname.
 pub const CHALLENGE_PREFIX: &str = "_podster-challenge";
 /// The label of the content domain's fallback origin, the name a room's owner points their hostname's `CNAME` at.

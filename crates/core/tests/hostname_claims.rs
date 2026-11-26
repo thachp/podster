@@ -353,8 +353,6 @@ fn podsters_own_domains_and_the_content_domains_are_reserved_with_every_name_und
     for name in [
         "podster.dev",
         "app.podster.dev",
-        "opster.dev",
-        "x.opster.dev",
         "podster.site",
         "anything.podster.site",
         "a.b.content.example",
@@ -366,17 +364,21 @@ fn podsters_own_domains_and_the_content_domains_are_reserved_with_every_name_und
         );
     }
     // Neighbours that only end in the same letters aren't under them.
-    for name in ["mypodster.dev", "notopster.dev", "xpodster.site"] {
+    // `opster.dev`, the test customer's domain since the owner's ruling of 2026-11-25, is mappable like any other.
+    for name in [
+        "mypodster.dev",
+        "notopster.dev",
+        "xpodster.site",
+        "opster.dev",
+        "x.opster.dev",
+    ] {
         assert_eq!(
             mappable(name, "content.example", &rules, false, 0).as_deref(),
             Ok(name),
             "{name}"
         );
     }
-    assert_eq!(
-        RESERVED_DOMAINS,
-        ["podster.dev", "opster.dev", "podster.site"]
-    );
+    assert_eq!(RESERVED_DOMAINS, ["podster.dev", "podster.site"]);
 }
 
 #[test]

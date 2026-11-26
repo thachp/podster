@@ -10,15 +10,23 @@
 //   and the certificate served for it (the first live check of HTTP validation with the `*/*` route);
 // - removal: the request ending, and the name no longer serving.
 //
-//   node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
+//   node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev [--cname-mode dns-only|proxied] [--dry-run]
+//
+// The CNAME mode (2026-11-26). By default the name's CNAME to the fallback origin is DNS-only, as a customer whose DNS
+// isn't on Cloudflare publishes it: the content zone's custom hostname then serves its own certificate, issued by HTTP
+// validation through the `*/*` route, and X14-4 judges it (the exact host named, not opster.dev's own certificate,
+// trusted, issued within 2 days). `--cname-mode proxied` publishes it proxied, as spike D did: opster.dev is a Cloudflare
+// zone on another account, so Cloudflare uses orange-to-orange and serves opster.dev's own certificate, and X14-4 is
+// only recorded. In either mode, before the custom hostname is active and has its certificate, the name may answer an
+// error page or fail its TLS handshake; every check counts that as not serving the marker.
 //
 // **It runs from GitHub Actions,** `.github/workflows/m6-custom-domain-staging.yml`, started by hand: the owner's machine
 // sits behind a web filter that blocks the content domain. The workflow's environment, `staging-dns`, holds the three
 // secrets it needs: PODSTER_E2E_SIGNUP_SECRET, OPSTER_DNS_TOKEN and OPSTER_ZONE_ID.
 //
 // DNS: every write goes through `dnsAllow` (m6-custom-domain-staging-lib.mjs), as spike D's guard.mjs did for its
-// token: only TXT at `_podster-challenge.<name>` and CNAME to the fallback origin, only under this run's label, and a
-// delete only of a record this run made. Clean-up deletes them all and lists each name again. The token and the zone's
+// token: only TXT at `_podster-challenge.<name>` and CNAME to the fallback origin, proxied as the run's mode says and
+// no other way, only under this run's label, and a delete only of a record this run made. Clean-up deletes them all and lists each name again. The token and the zone's
 // ID are read once, taken out of the environment, and scrubbed from every line printed.
 //
 // People: 2 takes of staging's test sign-up, of its 6 a minute and 40 a day: the rooms' owner and admin. The coding
@@ -41,7 +49,7 @@ import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import {
-  certificateLine, challengeName, CNAME_TARGET, CONTENT_DOMAIN, contentNotFoundProblem, customHeaderProblems, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, dnsClient, dnsEnvProblem, EXIT, markerBody, parseArgs, PENDING_HOLD_MS, PLAN, RACE_SETTLE_MS, raceOutcome,
+  certificateLine, certificateProblem, challengeName, CNAME_TARGET, CONTENT_DOMAIN, contentNotFoundProblem, customHeaderProblems, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, dnsClient, dnsEnvProblem, EXIT, markerBody, parseArgs, PENDING_HOLD_MS, planFor, RACE_SETTLE_MS, raceOutcome,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, resultUrlProblem, runLabel, runNames, runOutcome, secretProblem, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_ORG, TEST_DOMAIN, unclaimedLine, unknownLabel, USAGE,
 } from "./m6-custom-domain-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -57,6 +65,9 @@ if (options.help) {
   console.log(USAGE);
   process.exit(0);
 }
+/** The checks for this run's CNAME mode: X14-4 is judged with a DNS-only CNAME and only recorded with a proxied one. */
+const PLAN = planFor(options.cnameMode);
+const DNS_ONLY = options.cnameMode === "dns-only";
 // Read once, and taken out of the environment, so nothing this process starts can inherit them.
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
 const dnsProblem = dnsEnvProblem(process.env);
@@ -83,7 +94,7 @@ const readText = (path) => {
   console.log(`M6's staging run for custom domains, against ${STAGING}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
   console.log(`\nSign-ups this run takes: ${SIGN_UPS.length}, of the test sign-up's 6 a minute and 40 a day.`);
   for (const { who, why } of SIGN_UPS) console.log(`  - ${who}: ${why}`);
-  console.log(`\nTest domain: ${TEST_DOMAIN}. This run's names: ${NAMES.main} (mapped and routed) and ${NAMES.race} (raced for). CNAME target: ${CNAME_TARGET}. GitHub organization: ${STAGING_ORG}.`);
+  console.log(`\nTest domain: ${TEST_DOMAIN}. This run's names: ${NAMES.main} (mapped and routed) and ${NAMES.race} (raced for). CNAME target: ${CNAME_TARGET}, ${DNS_ONLY ? "DNS-only (the default): X14-4 judges the custom hostname's own certificate" : "proxied: orange-to-orange, so X14-4 only records the customer zone's certificate"}. GitHub organization: ${STAGING_ORG}.`);
   console.log(`Waits, in seconds: repository ${options.setupWait}, merge ${options.mergeWait}, release ${options.releaseWait}, claim ${options.claimWait}, active ${options.activeWait}, serve ${options.serveWait}, takedown ${options.takedownWait}; the pending hold ${PENDING_HOLD_MS / 1000}.`);
   if (options.dryRun) {
     console.log(`\nThe ${PLAN.length} checks, in order:`);
@@ -115,7 +126,7 @@ const run = releaseRun({ signupSecret, options, runName: RUN, workPrefix: "podst
 run.secret(dnsToken);
 run.secret(zoneId);
 const { say, hostAsk, marker } = run;
-const dns = dnsClient({ token: dnsToken, zoneId, root: NAMES.root, fetch: (...args) => fetch(...args), log: (line) => say(`     ${line}`) });
+const dns = dnsClient({ token: dnsToken, zoneId, root: NAMES.root, cnameMode: options.cnameMode, fetch: (...args) => fetch(...args), log: (line) => say(`     ${line}`) });
 const results = new Results(PLAN, say);
 
 // ---- checks ----
@@ -173,7 +184,11 @@ async function askFor(room, hostname) {
 }
 /** Polls a room's request until `done` accepts it, for at most `seconds`. */
 const requestWithin = (seconds, what, room, done) => run.within(seconds, what, () => requestOf(room), done, 5000);
-/** The custom name's marker, or the error its request ended in. */
+/**
+ * The custom name's marker, or the error its request ended in. Before the custom hostname is active and has its
+ * certificate, the name may answer Cloudflare's error page (proxied) or fail its TLS handshake (DNS-only): both are
+ * "not serving the marker", never a thrown check.
+ */
 async function customMarker() {
   try {
     return { answer: await marker(NAMES.main) };
@@ -317,7 +332,7 @@ async function main() {
     eq((await configOf(rooms.a)).custom_host, null, "room A's custom host while pending");
     const { answer, error } = await customMarker();
     ok(error || answer.body !== markerBody(releaseId, task.mergeSha), `${NAMES.main} served room A's marker while its request was pending`);
-    return `pending after ${Math.round(PENDING_HOLD_MS / 1000)} s with the CNAME and room B's value published; the name answered ${unclaimedLine(answer, error)}`;
+    return `pending after ${Math.round(PENDING_HOLD_MS / 1000)} s with the ${options.cnameMode} CNAME and room B's value published; the name answered ${unclaimedLine(answer, error)}`;
   });
 
   await check("X15-2", async () => {
@@ -351,7 +366,7 @@ async function main() {
   await check("X14-3", async () => {
     after("X14-2");
     // Any answer but the marker naming this release is waited out: before the route, the name may answer an error or
-    // nothing at all.
+    // nothing at all, and with a DNS-only CNAME its TLS handshake fails until the custom hostname's certificate is issued.
     const { seconds } = await run.within(options.serveWait, `${NAMES.main} serving release ${releaseId}`, () => customMarker(), ({ answer }) => answer?.status === 200 && answer.body === markerBody(releaseId, task.mergeSha), 5000);
     const read = await marker(NAMES.main);
     eq(read.body, markerBody(releaseId, task.mergeSha), "the marker on the custom name");
@@ -362,10 +377,21 @@ async function main() {
     return `the marker named release ${releaseId} and the merge commit within ${seconds} s of active; the index is the release's`;
   });
 
-  await record("X14-4", async () => {
-    after("X14-3");
-    return certificateLine(await certificateOf(NAMES.main), NAMES.main);
-  });
+  if (DNS_ONLY) {
+    // The custom hostname's own certificate, from HTTP validation through the `*/*` route: judged.
+    await check("X14-4", async () => {
+      after("X14-3");
+      const cert = await certificateOf(NAMES.main);
+      const problem = certificateProblem(cert, NAMES.main);
+      ok(problem === null, `${problem}; the certificate ${certificateLine(cert, NAMES.main)}`);
+      return `the custom hostname's own certificate: ${certificateLine(cert, NAMES.main)}`;
+    });
+  } else {
+    await record("X14-4", async () => {
+      after("X14-3");
+      return `${certificateLine(await certificateOf(NAMES.main), NAMES.main)} (proxied CNAME: orange-to-orange serves ${TEST_DOMAIN}'s own certificate, not the custom hostname's)`;
+    });
+  }
 
   say(`\n## removing ${NAMES.main}`);
   await check("X14-5", async () => {

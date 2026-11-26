@@ -35,7 +35,7 @@ The security review [M7's build order](../m7-plan.md#build-order) asks for in st
 - the "trust statement" an unattended room must accept doesn't exist as text; it is a bare `true` in `policy.json`, and the README's example sets it (F-3);
 - Runner already runs tasks on Linux and WSL2 once its start check passes, but S-47's end-to-end rerun on a Linux host hasn't happened, and neither has step 16's WSL2 run (F-4).
 
-**Decision 29's default should stay ask-first** until F-1, F-3 and F-5 are closed. Conditions 1 to 4 hold as built; condition 5 holds in part ([below](#decision-29s-five-conditions)).
+**Decision 29's default should stay ask-first** until F-1, F-3 and F-5 are closed. *The architect's ruling, 2026-11-26:* keeping ask-first as the default is separate from M7's gate. The gate shows unattended runs only in workrooms the machine's owner switched on, under decision 29's ruling, so F-5 stays rated before publication; it blocks changing the default, not the gate. Conditions 1 to 4 hold as built; condition 5 holds in part ([below](#decision-29s-five-conditions)).
 
 ## Decision 29's five conditions
 

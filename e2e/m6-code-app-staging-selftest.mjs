@@ -236,8 +236,8 @@ try {
     const res = await worker.fetch(new Request(`https://app.${CONTENT_DOMAIN}${path}`), {});
     const reader = res.body.getReader();
     const first = new TextDecoder().decode((await reader.read()).value);
-    const failed = await reader.read().then(() => null, (e) => String(e?.message));
-    return res.status === 200 && first === "start\n" && failed === APP_BODY_FAILURE;
+    const bodyError = await reader.read().then(() => null, (e) => String(e?.message));
+    return res.status === 200 && first === "start\n" && bodyError === APP_BODY_FAILURE;
   };
   check(await failsAfter("/api/after-headers"), "the answer whose body fails within the hold begins, then fails with the fixed message");
   check(await failsAfter("/api/after-hold"), "the answer whose body fails past the hold begins, waits, then fails with the fixed message");

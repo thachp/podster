@@ -397,8 +397,8 @@ async function main() {
       if (problem !== null) problems.push(`${path}: ${problem}; seen: ${afterHeadersLine(seen)}`);
       lines.push(`${path}: ${afterHeadersLine(seen)}`);
     }
-    // Recorded, not judged (2026-11-26): what a CPU stop past the hold reaches a visitor as. Staging has seen the
-    // platform end that body normally, which no Worker in front can tell from a whole one (docs/m6-plan.md, C09).
+    // Recorded, not judged (2026-11-26): what a CPU stop past the hold reaches a visitor as. Staging saw a body that
+    // ended normally; most likely the platform ended it, unconfirmed until /api/after-hold passes (docs/m6-plan.md, C09).
     const spun = await streamedAsk(app("/api/spin-after-hold"));
     lines.push(`recorded, not judged: /api/spin-after-hold: ${afterHeadersLine(spun)}`);
     ok(problems.length === 0, `${problems.join(" | ")}; also ${lines[lines.length - 1]}`);

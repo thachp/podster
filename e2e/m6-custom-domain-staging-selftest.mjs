@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  adoptable, certificateLine, CF_API, CHALLENGE_PREFIX, challengeName, challengeUnderRoot, CNAME_TARGET, CONTENT_DOMAIN, CUSTOM_HSTS, customHeaderProblems, dnsAllow, dnsClient, dnsEnvProblem, DNS_TTL, EXIT, GONE_SPAN_MS, parseArgs, PENDING_HOLD_MS, PLAN, PROOF_LOOK_MS, RACE_SETTLE_MS, raceOutcome,
+  adoptable, CERT_MAX_AGE_MS, certificateLine, certificateProblem, CF_API, CNAME_MODES, cnameProxied, DEFAULT_CNAME_MODE, planFor, CHALLENGE_PREFIX, challengeName, challengeUnderRoot, CNAME_TARGET, CONTENT_DOMAIN, CUSTOM_HSTS, customHeaderProblems, dnsAllow, dnsClient, dnsEnvProblem, DNS_TTL, EXIT, GONE_SPAN_MS, parseArgs, PENDING_HOLD_MS, PLAN, PROOF_LOOK_MS, RACE_SETTLE_MS, raceOutcome,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, runLabel, runNames, runOutcome, RUN_LABEL, SIGN_UPS, STAGING, TEST_DOMAIN, txtContent, underRoot, WAITS,
 } from "./m6-custom-domain-staging-lib.mjs";
 
@@ -60,7 +60,20 @@ const scratch = mkdtempSync(join(tmpdir(), "m6-custom-domain-selftest-"));
 {
   const ids = PLAN.map((entry) => entry.id);
   check(new Set(ids).size === ids.length, "every check's ID is its own");
-  check(JSON.stringify(PLAN.filter((e) => e.outOfScope).map((e) => e.id)) === '["X14-6","X26-2","X26-3"]' && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === '["X14-4"]', "three checks are out of scope (the freed claim, the 72-hour expiry, the 24-hour recheck) and one only recorded (the certificate)");
+  check(JSON.stringify(PLAN.filter((e) => e.outOfScope).map((e) => e.id)) === '["X14-6","X26-2","X26-3"]', "three checks are out of scope (the freed claim, the 72-hour expiry, the 24-hour recheck)");
+  const proxiedPlan = planFor("proxied");
+  check(DEFAULT_CNAME_MODE === "dns-only" && JSON.stringify(CNAME_MODES) === '["dns-only","proxied"]' && JSON.stringify(PLAN) === JSON.stringify(planFor("dns-only")), "the default plan is the DNS-only one");
+  check(PLAN.every((e) => !e.recordOnly) && JSON.stringify(proxiedPlan.filter((e) => e.recordOnly).map((e) => e.id)) === '["X14-4"]' && /orange-to-orange/.test(proxiedPlan.find((e) => e.id === "X14-4").recordOnly), "with a DNS-only CNAME the certificate (X14-4) is judged; with a proxied one it is only recorded, saying orange-to-orange");
+  check(JSON.stringify(proxiedPlan.map((e) => e.id)) === JSON.stringify(ids) && proxiedPlan.every((e, i) => e.title === PLAN[i].title && e.outOfScope === PLAN[i].outOfScope), "the two modes' plans differ only in whether X14-4 is judged");
+  check(refuses(() => planFor("orange")) && refuses(() => planFor(undefined)) && refuses(() => cnameProxied("")) && cnameProxied("proxied") === true && cnameProxied("dns-only") === false, "a mode that isn't one of the two is refused, never guessed");
+  {
+    const results = new Results(proxiedPlan, () => {});
+    for (const entry of proxiedPlan) results.add(entry.id, entry.outOfScope ? "outOfScope" : entry.recordOnly ? "recorded" : "pass", "");
+    check(runOutcome(results, proxiedPlan).code === 0, "a proxied run with every judged check passed exits 0, the certificate recorded");
+    const dnsOnly = new Results(PLAN, () => {});
+    for (const entry of PLAN) dnsOnly.add(entry.id, entry.outOfScope ? "outOfScope" : entry.id === "X14-4" ? "fail" : "pass", "");
+    check(runOutcome(dnsOnly, PLAN).code === 1 && JSON.stringify(runOutcome(dnsOnly, PLAN).failed) === '["X14-4"]', "a DNS-only run whose certificate check failed fails, naming X14-4");
+  }
   check(["M6-X14", "M6-X15", "M6-X26"].every((label) => PLAN.some((e) => !e.outOfScope && !e.recordOnly && e.title.startsWith(label))), "each of M6-X14, M6-X15 and M6-X26 has a judged check");
   check(PLAN.filter((e) => e.outOfScope && e.id.startsWith("X26")).every((e) => /time-dependent/.test(e.outOfScope) && /test clock/.test(e.outOfScope)), "the time-dependent gaps say why");
   const outcome = (status) => {
@@ -78,6 +91,8 @@ const scratch = mkdtempSync(join(tmpdir(), "m6-custom-domain-selftest-"));
   check(parseArgs(["--base-url", STAGING]).options?.base === STAGING && Boolean(parseArgs(["--base-url", "https://example.com"]).error) && parseArgs(["--help"]).options?.help === true, "staging only");
   const waits = parseArgs(["--base-url", STAGING, "--claim-wait", "60", "--core-hostnames", "x.rs"]).options;
   check(waits?.claimWait === 60 && waits.coreHostnames === "x.rs" && waits.activeWait === WAITS["--active-wait"][1], "its own waits and the reserved list's file are options");
+  check(parseArgs(["--base-url", STAGING]).options?.cnameMode === "dns-only" && parseArgs(["--base-url", STAGING, "--cname-mode", "proxied"]).options?.cnameMode === "proxied" && parseArgs(["--base-url", STAGING, "--cname-mode", "dns-only"]).options?.cnameMode === "dns-only", "the CNAME mode defaults to dns-only, and proxied is an option");
+  check(["true", "PROXIED", "dns_only", "", "proxied;x"].every((mode) => Boolean(parseArgs(["--base-url", STAGING, "--cname-mode", mode]).error)) && Boolean(parseArgs(["--base-url", STAGING, "--cname-mode"]).error), "any other CNAME mode, or none, is refused");
   check(Boolean(parseArgs(["--base-url", STAGING, "--serve-wait", "5"]).error) && Boolean(parseArgs(["--base-url", STAGING, "--claim-wait"]).error) && Boolean(parseArgs(["--base-url", STAGING, "--zone", "x"]).error), "a wait out of bounds, a missing value or an unknown flag is refused");
 }
 
@@ -138,13 +153,21 @@ const ZONE = "0123456789abcdef0123456789abcdef";
 const VALUE = "ab".repeat(32);
 const base = `${CF_API}/zones/${ZONE}/dns_records`;
 const MADE = "fedcba9876543210fedcba9876543210";
-const ctx = { zoneId: ZONE, root: NAMES.root, made: new Set([MADE]) };
+const ctx = { zoneId: ZONE, root: NAMES.root, made: new Set([MADE]), cnameMode: "dns-only" };
+const proxiedCtx = { ...ctx, cnameMode: "proxied" };
 const body = (record) => JSON.stringify({ type: "TXT", name: challengeName(NAMES.main), content: txtContent(VALUE), ttl: DNS_TTL, proxied: false, ...record });
-const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, content: CNAME_TARGET, ttl: DNS_TTL, proxied: true, ...record });
+const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, content: CNAME_TARGET, ttl: DNS_TTL, proxied: false, ...record });
 {
   const allowed = (method, url, b) => !refuses(() => dnsAllow(method, url, b, ctx));
   check(allowed("POST", base, body()) && allowed("POST", base, body({ name: challengeName(NAMES.race) })), "a TXT challenge at a run name is allowed");
-  check(allowed("POST", base, cname()) && allowed("POST", base, cname({ name: NAMES.race })), "a proxied CNAME to the fallback origin at a run name is allowed");
+  check(allowed("POST", base, cname()) && allowed("POST", base, cname({ name: NAMES.race })), "in dns-only mode, a DNS-only CNAME to the fallback origin at a run name is allowed");
+  const allowedProxied = (b) => !refuses(() => dnsAllow("POST", base, b, proxiedCtx));
+  check(allowedProxied(cname({ proxied: true })) && allowedProxied(cname({ proxied: true, name: NAMES.race })), "in proxied mode, a proxied CNAME to the fallback origin at a run name is allowed");
+  check(!allowed("POST", base, cname({ proxied: true })), "in dns-only mode, a proxied CNAME is refused");
+  check(!allowedProxied(cname({ proxied: false })), "in proxied mode, a DNS-only CNAME is refused");
+  check([undefined, null, "1", 1, 0, "true"].every((proxied) => !allowed("POST", base, cname({ proxied })) && !allowedProxied(cname({ proxied }))), "in either mode, a CNAME whose proxied isn't exactly the mode's boolean is refused");
+  check([undefined, "", "orange", "PROXIED"].every((cnameMode) => refuses(() => dnsAllow("POST", base, cname(), { ...ctx, cnameMode })) && refuses(() => dnsAllow("POST", base, cname({ proxied: true }), { ...ctx, cnameMode }))), "without one of the two modes, no CNAME is allowed");
+  check(allowedProxied(body()) && !allowedProxied(body({ proxied: true })) && allowedProxied(cname({ proxied: true, ttl: DNS_TTL })) && !allowedProxied(cname({ proxied: true, ttl: 1 })), "the TXT and TTL guards are the same in proxied mode");
   check(allowed("DELETE", `${base}/${MADE}`) && allowed("GET", `${base}/${MADE}`), "a record the run made may be read and deleted");
   check(allowed("GET", `${base}?name=${NAMES.main}`) && allowed("GET", `${base}?name=${challengeName(NAMES.main)}`) && allowed("GET", `${CF_API}/user/tokens/verify`), "a listing of one run name, and the token's verification, may be read");
   const refusals = [
@@ -160,7 +183,7 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
     ["a TXT unquoted", "POST", base, body({ content: VALUE })],
     ["a TXT proxied", "POST", base, body({ proxied: true })],
     ["a CNAME elsewhere", "POST", base, cname({ content: "evil.example" })],
-    ["a CNAME not proxied", "POST", base, cname({ proxied: false })],
+    ["a CNAME proxied in dns-only mode", "POST", base, cname({ proxied: true })],
     ["a CNAME at the apex", "POST", base, cname({ name: TEST_DOMAIN })],
     ["a CNAME at a wildcard", "POST", base, cname({ name: `*.${NAMES.root}` })],
     ["a CNAME at another name of the zone", "POST", base, cname({ name: `www.${TEST_DOMAIN}` })],
@@ -204,7 +227,7 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
     if (init.method === "POST") {
       const r = JSON.parse(init.body);
       const id = (++ids).toString(16).padStart(32, "0");
-      zone.set(id, { id, type: r.type, name: r.name, content: r.content });
+      zone.set(id, { id, type: r.type, name: r.name, content: r.content, proxied: r.proxied });
       if (lose) throw new TypeError("fetch failed");
       return reply(200, { success: true, result: { id } });
     }
@@ -214,10 +237,12 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   };
   // Something else in the zone, which the run must never touch.
   zone.set("e".repeat(32), { id: "e".repeat(32), type: "A", name: `www.${TEST_DOMAIN}`, content: "192.0.2.1" });
-  const dns = dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, fetch: fake, log: (line) => lines.push(line) });
+  const dns = dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, cnameMode: "dns-only", fetch: fake, log: (line) => lines.push(line) });
+  check(refuses(() => dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, fetch: fake })) && refuses(() => dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, cnameMode: "orange", fetch: fake })), "a DNS client needs one of the two CNAME modes");
   check((await dns.verify()) === true, "the token's verification reads active");
   const txt = await dns.txt(NAMES.main, VALUE);
-  await dns.cname(NAMES.main);
+  const madeCname = await dns.cname(NAMES.main);
+  check(zone.get(madeCname)?.proxied === false && zone.get(txt)?.proxied === false, "in dns-only mode the client makes the CNAME not proxied");
   check(dns.made.size === 2 && zone.get(txt)?.content === txtContent(VALUE) && sent.every((r) => r.auth === `Bearer ${TOKEN}`), "a TXT and a CNAME are made and noted, with the token as a bearer header");
   const before = sent.length;
   let thrown = 0;
@@ -238,8 +263,9 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   }
   lose = false;
   check(lostThrew && dns.made.size === 2 && dns.tried.has(challengeName(NAMES.race)), "a create whose answer is lost throws, and its name is kept for clean-up");
-  const quick = dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, fetch: fake, log: () => {} });
-  await quick.cname(NAMES.race);
+  const quick = dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, cnameMode: "proxied", fetch: fake, log: () => {} });
+  const quickCname = await quick.cname(NAMES.race);
+  check(zone.get(quickCname)?.proxied === true, "in proxied mode the client makes the CNAME proxied");
   check((await quick.removeMade()) === 0 && quick.made.size === 0, "the SIGTERM clean-up deletes every record held, with no listing");
   const { left, unread, held } = await dns.removeAll();
   check(left.length === 0 && unread.length === 0 && held.length === 0 && dns.made.size === 0, "clean-up deletes every record made, adopts the lost one from a listing, and lists every name empty");
@@ -278,6 +304,19 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   check(certificateLine({ ...cert, subjectaltname: `DNS:*.${TEST_DOMAIN}` }, NAMES.main).startsWith("names the host") && certificateLine({ ...cert, subjectaltname: `DNS:*.${TEST_DOMAIN}` }, NAMES.race).startsWith("does NOT"), "a wildcard covers one label only");
   check(certificateLine(null, NAMES.main) === "no certificate was read" && certificateLine({ ...cert, authorized: false, authorizationError: "CERT_HAS_EXPIRED" }, NAMES.main).includes("not trusted"), "no certificate, or one not trusted, says so");
   check(certificateLine({ handshakeError: "CERT_HAS_EXPIRED" }, NAMES.main).includes("validation on failed: CERT_HAS_EXPIRED"), "a handshake that fails validation records its error as the finding");
+
+  // X14-4 with a DNS-only CNAME: the custom hostname's own certificate, judged.
+  const NOW = Date.parse("2026-11-26T12:00:00Z");
+  const own = { ...cert, valid_from: "Nov 26 10:00:00 2026 GMT", valid_to: "Feb 24 10:00:00 2027 GMT" };
+  const judge = (c, host = NAMES.main) => certificateProblem(c, host, { now: NOW });
+  check(judge(own) === null, "an exact-host certificate, trusted and issued today, passes");
+  check(judge({ ...own, subjectaltname: `DNS:${NAMES.main}, DNS:${NAMES.race}` }) === null && judge({ ...own, subjectaltname: `DNS:${NAMES.main.toUpperCase()}` }) === null, "other names of the run beside it, or the host in upper case, still pass");
+  check(/wildcard isn't enough/.test(judge({ ...own, subjectaltname: `DNS:*.${TEST_DOMAIN}` }) ?? ""), "a wildcard-only certificate fails, though it covers the host");
+  check(/test zone's own/.test(judge({ ...own, subjectaltname: `DNS:${TEST_DOMAIN}, DNS:*.${TEST_DOMAIN}, DNS:${NAMES.main}` }) ?? "") && /test zone's own/.test(judge({ ...own, subjectaltname: `DNS:${NAMES.main}, DNS:*.${TEST_DOMAIN}` }) ?? ""), "the test zone's universal certificate fails, even naming the host");
+  check(/hours ago/.test(judge({ ...own, valid_from: "Nov 23 10:00:00 2026 GMT" }) ?? "") && judge({ ...own, valid_from: new Date(NOW - CERT_MAX_AGE_MS + 60_000).toUTCString() }) === null, "a certificate issued more than 2 days ago fails; one just inside passes");
+  check(/trust/.test(judge({ ...own, authorized: false, authorizationError: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }) ?? "") && /trust/.test(judge({ ...own, authorized: undefined }) ?? ""), "a certificate Node doesn't trust, or one with no verdict, fails");
+  check(judge({ ...own, valid_from: "Dec 26 10:00:00 2026 GMT" }) !== null && judge({ ...own, valid_to: "Nov 26 11:00:00 2026 GMT" }) !== null && judge({ ...own, valid_from: "?" }) !== null, "one not yet valid, expired, or with dates unread fails");
+  check(judge({ handshakeError: "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR" }) !== null && judge(null) !== null && judge({ ...own, subjectaltname: `DNS:${NAMES.race}` }) !== null, "a failed handshake, no certificate, or one for another run name fails");
 }
 
 // ---- the script's source ----
@@ -290,6 +329,11 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   check(script.includes("dns.removeAll()") && /owner\.dash\("DELETE", hostnamePath\(room\)/.test(script) && script.includes("publisher.stop()") && script.includes("cleanUpShared()") && /enabled: false/.test(script), "clean-up removes each open hostname request, every DNS record, release and the rooms' publicity, then the shared clean-up");
   check(script.indexOf("for (const room of asked)") < script.indexOf("dns.removeAll()"), "clean-up ends the claims through the API before it deletes DNS");
   check(!/rejectUnauthorized/.test(script) && script.includes("tls.connect("), "the certificate is read with validation on");
+  check(/if \(DNS_ONLY\) \{[\s\S]*?await check\("X14-4"[\s\S]*?certificateProblem\(cert, NAMES\.main\)[\s\S]*?\} else \{\s*await record\("X14-4"/.test(script), "X14-4 is a judged check on certificateProblem with a DNS-only CNAME, and recorded with a proxied one");
+  check(/cnameMode: options\.cnameMode/.test(script) && /const PLAN = planFor\(options\.cnameMode\)/.test(script), "the DNS client and the plan both take the run's CNAME mode");
+  const workflow = readFileSync(join(root, ".github/workflows/m6-custom-domain-staging.yml"), "utf8");
+  check(/cname_mode:\n\s+description: [^\n]+\n\s+type: choice\n\s+options:\n\s+- dns-only\n\s+- proxied\n\s+default: dns-only/.test(workflow), "the workflow's cname_mode input is a choice of dns-only and proxied, defaulting to dns-only");
+  check(/CNAME_MODE: \$\{\{ inputs\.cname_mode \|\| 'dns-only' \}\}/.test(workflow) && /case "\$CNAME_MODE" in\n\s+dns-only \| proxied\) ;;/.test(workflow) && /--cname-mode "\$CNAME_MODE"/.test(workflow) && (workflow.match(/inputs\.cname_mode/g) ?? []).length === 1, "the input reaches the run through env alone, checked against its two values, never written into the command");
   check(/process\.on\("SIGTERM"/.test(script) && script.indexOf("dns.removeMade()") > script.indexOf('process.on("SIGTERM"') && /process\.exit\(143\)/.test(script), "SIGTERM removes DNS records and hostname requests first, then exits 143");
   check(/try \{\n    const \{ left \} = await publisher\.stop\(\);/.test(script), "a failed unpublish doesn't stop the shared clean-up");
   check(!["m6-custom-domain-staging.mjs", "m6-custom-domain-staging-lib.mjs", "m6-custom-domain-staging-selftest.mjs"].some((f) => { const t = readFileSync(join(here, f), "utf8"); return t.includes("apps/content") && t.includes(["wran", "gler"].join("")); }), "no file of this run names both the content package and its deploy tool (the content package's config test)");
@@ -333,7 +377,10 @@ try {
   {
     const dry = script([...openAt, "--dry-run"], { mode: "edge-down" });
     check(dry.code === 0 && dry.out.includes("Nothing was sent") && dry.requests === 0 && hidden(dry.out), "a dry run with the test domain unreserved exits 0, sends nothing and prints no secret");
-    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope:") && dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the out-of-scope and recorded ones");
+    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope:") && !dry.out.includes("[recorded, not judged:") && dry.out.includes("DNS-only (the default)"), "the default dry run is DNS-only and prints every check, marking the out-of-scope ones, with none only recorded");
+    const dryProxied = script([...openAt, "--dry-run", "--cname-mode", "proxied"], { mode: "edge-down" });
+    check(dryProxied.code === 0 && dryProxied.requests === 0 && /X14-4 .*\[recorded, not judged: proxied CNAME/.test(dryProxied.out) && dryProxied.out.includes("orange-to-orange"), "a proxied dry run marks X14-4 recorded, saying orange-to-orange, and sends nothing");
+    check(script([...openAt, "--dry-run", "--cname-mode", "orange"], { mode: "edge-down" }).code === EXIT.refused, "an unknown CNAME mode exits 2");
     check(/cd-[a-z0-9]{10}\.opster\.dev/.test(dry.out), "the dry run names this run's label under the test domain");
     const reserved = script([...at, "--dry-run", "--core-hostnames", closed], { mode: "edge-down" });
     check(reserved.code === EXIT.releaseNotOn && reserved.out.includes("RESERVED_DOMAINS") && reserved.requests === 0, "with the test domain reserved, it exits 3 naming RESERVED_DOMAINS and sends nothing");

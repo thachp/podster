@@ -4,12 +4,20 @@ name: M6 custom domain staging
 # GitHub's network: the owner's machine sits behind a web filter that blocks the content domain, podster.site, as for
 # m6-code-app-staging.yml. Run by hand only: `gh workflow run m6-custom-domain-staging.yml`, then `gh run watch`.
 #
+# The input `cname_mode` (2026-11-26) says how the custom name's CNAME to the fallback origin is published. `dns-only`,
+# the default, isn't proxied, as a customer whose DNS isn't on Cloudflare publishes it: the content zone's custom
+# hostname serves its own certificate, issued by HTTP validation through the `*/*` route, and X14-4 judges it.
+# `proxied` (`-f cname_mode=proxied`) is spike D's way: opster.dev is a Cloudflare zone on another account, so
+# Cloudflare uses orange-to-orange and serves opster.dev's own certificate, and X14-4 is only recorded. The input
+# reaches the script through `env` alone, checked against the two values, never written into the command.
+#
 # It runs against staging, the one host the script accepts; podster.site, the content domain; and Cloudflare's DNS API
-# for opster.dev, the test customer's domain, through one guard that writes only TXT challenges and CNAMEs under the
-# run's own random label and deletes only what the run made.
+# for opster.dev, the test customer's domain, through one guard that writes only TXT challenges and CNAMEs (proxied
+# as the mode says) under the run's own random label and deletes only what the run made.
 #
 # One job, in the environment `staging-dns`, deployable from main only, which holds the three secrets it needs:
-# OPSTER_DNS_TOKEN (Zone, DNS, Edit on opster.dev alone, with an expiry), OPSTER_ZONE_ID, and its own copy of
+# OPSTER_DNS_TOKEN (Zone, DNS, Edit on opster.dev alone, with an expiry; the run uses it only for TXT and CNAME records
+# under its own label, in either mode), OPSTER_ZONE_ID, and its own copy of
 # PODSTER_E2E_SIGNUP_SECRET. The owner sets them with scripts/wizards/opster-dns-token.sh. A job can use one environment,
 # and the run interleaves API and DNS writes for minutes, so splitting it into two jobs would mean handing a session or
 # the token from one job to the other; a copy of the sign-up secret in this environment is the narrower choice, and
@@ -20,6 +28,14 @@ name: M6 custom domain staging
 # the three repositories for the owner to delete.
 on:
   workflow_dispatch:
+    inputs:
+      cname_mode:
+        description: "The custom name's CNAME: dns-only judges the custom hostname's own certificate (X14-4); proxied is orange-to-orange and only records it"
+        type: choice
+        options:
+          - dns-only
+          - proxied
+        default: dns-only
 
 permissions:
   contents: read
@@ -53,9 +69,16 @@ jobs:
       # Checks itself before it sends anything: its plan, its DNS guard and its refusals, against stand-ins.
       - run: node m6-custom-domain-staging-selftest.mjs
         working-directory: e2e
-      - run: exec node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev
+      # The mode comes through env and is checked against its two values before it is passed as one quoted argument.
+      - run: |
+          case "$CNAME_MODE" in
+            dns-only | proxied) ;;
+            *) echo "cname_mode must be dns-only or proxied" >&2; exit 2 ;;
+          esac
+          exec node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev --cname-mode "$CNAME_MODE"
         working-directory: e2e
         env:
+          CNAME_MODE: ${{ inputs.cname_mode || 'dns-only' }}
           PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}
           OPSTER_DNS_TOKEN: ${{ secrets.OPSTER_DNS_TOKEN }}
           OPSTER_ZONE_ID: ${{ secrets.OPSTER_ZONE_ID }}

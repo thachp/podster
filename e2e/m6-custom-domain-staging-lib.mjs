@@ -46,6 +46,25 @@ export const DNS_TTL = 60;
  */
 export const RACE_SETTLE_MS = DNS_TTL * 1000 + 2 * PROOF_LOOK_MS + 30_000;
 
+/**
+ * How the custom name's CNAME to the fallback origin is published, one per run (`--cname-mode`):
+ * - `dns-only`, the default since 2026-11-26: the record isn't proxied, as a customer whose DNS isn't on Cloudflare
+ *   would publish it. The content zone's custom hostname then serves its own certificate, issued by HTTP validation
+ *   through the catch-all Worker route and its no-Worker validation routes, and X14-4 judges that certificate.
+ * - `proxied`: the record is proxied, as spike D's was. `opster.dev` is itself a Cloudflare zone on another account, so
+ *   Cloudflare uses orange-to-orange (O2O) and serves the customer zone's own certificate; X14-4 is only recorded.
+ * Cloudflare's documentation: cloudflare-for-saas/saas-customers/how-it-works and ssl/reference/certificate-and-hostname-priority.
+ */
+export const CNAME_MODES = ["dns-only", "proxied"];
+export const DEFAULT_CNAME_MODE = "dns-only";
+/** Whether the CNAME is proxied in `mode`. Throws for anything but the two modes, so nothing is guessed. */
+export function cnameProxied(mode) {
+  if (!CNAME_MODES.includes(mode)) throw new Error(`the CNAME mode is one of ${CNAME_MODES.join(" and ")}`);
+  return mode === "proxied";
+}
+/** How recently a custom hostname's own certificate must have been issued for X14-4 to count it as this run's: 2 days. */
+export const CERT_MAX_AGE_MS = 2 * 24 * 60 * 60_000;
+
 /** Cloudflare's API, the one origin the DNS client sends to. */
 export const CF_API = "https://api.cloudflare.com/client/v4";
 const CF_ORIGIN = "https://api.cloudflare.com";
@@ -80,16 +99,17 @@ export function challengeUnderRoot(name, root) {
 export const txtContent = (value) => `"${value}"`;
 
 /**
- * Throws unless the DNS request may be sent. `ctx`: { zoneId, root, made } — the test zone's ID, the run's root and the
- * set of record IDs the run made, or found by a listing under its root. Cloudflare can't limit a token to record names,
+ * Throws unless the DNS request may be sent. `ctx`: { zoneId, root, made, cnameMode } — the test zone's ID, the run's
+ * root, the set of record IDs the run made, or found by a listing under its root, and the run's CNAME mode. Cloudflare can't limit a token to record names,
  * so this is what does (spike D's guard.mjs, for DNS):
  * - GET: the token's own verification, a listing of one exact name under the root, or a record the run made;
  * - POST: a TXT at `_podster-challenge.<name under the root>` holding one challenge value, not proxied; or a CNAME at a
- *   name under the root to the fallback origin, proxied; with exactly type, name, content, ttl and proxied;
+ *   name under the root to the fallback origin, proxied exactly when the run's mode is `proxied` and not proxied when
+ *   it is `dns-only`; with exactly type, name, content, ttl and proxied;
  * - DELETE: only a record ID in `made`.
  * Nothing else: no PUT or PATCH, no other type, no apex, no wildcard, no other zone, no query but the listing's.
  */
-export function dnsAllow(method, url, body, { zoneId, root, made }) {
+export function dnsAllow(method, url, body, { zoneId, root, made, cnameMode }) {
   const refuse = (why) => {
     throw new Error(`refusing a DNS request: ${why}`);
   };
@@ -133,7 +153,8 @@ export function dnsAllow(method, url, body, { zoneId, root, made }) {
     if (record.type === "CNAME") {
       if (!underRoot(record.name, root)) refuse("a CNAME goes only at a name under the run's root");
       if (record.content !== CNAME_TARGET) refuse(`a CNAME points only at ${CNAME_TARGET}`);
-      if (record.proxied !== true) refuse("the CNAME is proxied, as spike D's was");
+      if (!CNAME_MODES.includes(cnameMode)) refuse(`the run's CNAME mode isn't one of ${CNAME_MODES.join(" and ")}`);
+      if (record.proxied !== cnameProxied(cnameMode)) refuse(`a CNAME in ${cnameMode} mode has proxied ${cnameProxied(cnameMode)}`);
       return;
     }
     refuse("only TXT and CNAME records");
@@ -161,11 +182,12 @@ export function adoptable(record, root) {
  * so clean-up can list a name whose create's answer was lost and delete what the listing finds there. `log` gets one
  * line per request: method, type, name and status, never the token, the zone's ID or a URL.
  */
-export function dnsClient({ token, zoneId, root, fetch, log = () => {}, timeoutMs = 30_000 }) {
+export function dnsClient({ token, zoneId, root, cnameMode, fetch, log = () => {}, timeoutMs = 30_000 }) {
+  const proxied = cnameProxied(cnameMode);
   const made = new Map();
   const tried = new Set();
   async function send(method, url, body, what) {
-    dnsAllow(method, url, body, { zoneId, root, made: new Set(made.keys()) });
+    dnsAllow(method, url, body, { zoneId, root, made: new Set(made.keys()), cnameMode });
     let res;
     try {
       res = await fetch(url, { method, redirect: "manual", headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { "content-type": "application/json" } : {}) }, body, signal: AbortSignal.timeout(timeoutMs) });
@@ -200,7 +222,7 @@ export function dnsClient({ token, zoneId, root, fetch, log = () => {}, timeoutM
     async create(type, name, content, proxied) {
       const body = JSON.stringify({ type, name, content, ttl: DNS_TTL, proxied });
       // Checked before the name is noted, so a refused create notes nothing.
-      dnsAllow("POST", zoneBase, body, { zoneId, root, made: new Set(made.keys()) });
+      dnsAllow("POST", zoneBase, body, { zoneId, root, made: new Set(made.keys()), cnameMode });
       tried.add(name);
       const { status, json } = await send("POST", zoneBase, body, `${type} ${name}`);
       const id = json?.result?.id;
@@ -213,7 +235,7 @@ export function dnsClient({ token, zoneId, root, fetch, log = () => {}, timeoutM
       return this.create("TXT", challengeName(hostname), txtContent(value), false);
     },
     cname(hostname) {
-      return this.create("CNAME", hostname, CNAME_TARGET, true);
+      return this.create("CNAME", hostname, CNAME_TARGET, proxied);
     },
     /** Deletes one record the run made. Answers whether it is gone. */
     async remove(id) {
@@ -362,14 +384,44 @@ export function unclaimedLine(answer, error) {
   return `HTTP ${answer.status}${answer.headers ? `, ${new Headers(answer.headers).get("server") ?? "no server header"}` : ""}`;
 }
 
+/** A certificate's DNS names, from Node's `subjectaltname` string. */
+const certNames = (cert) =>
+  String(cert?.subjectaltname ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.startsWith("DNS:"))
+    .map((s) => s.slice(4).toLowerCase());
+
 /** One line on the certificate a custom host served: its names, issuer and dates, and whether it names the host. */
 export function certificateLine(cert, host) {
   if (cert && typeof cert === "object" && cert.handshakeError) return `the TLS handshake with certificate validation on failed: ${cert.handshakeError}`;
   if (!cert || typeof cert !== "object" || !cert.subject) return "no certificate was read";
-  const names = String(cert.subjectaltname ?? "").split(",").map((s) => s.trim().replace(/^DNS:/, "")).filter(Boolean);
+  const names = certNames(cert);
   const covers = names.some((name) => name === host || (name.startsWith("*.") && host.endsWith(name.slice(1)) && !host.slice(0, -name.length + 1).includes(".")));
   const issuer = [cert.issuer?.O, cert.issuer?.CN].filter(Boolean).join(", ") || "unknown issuer";
-  return `${covers ? "names the host" : "does NOT name the host"}; names ${names.length ? names.join(" ") : "nothing"}; issued by ${issuer}; valid ${cert.valid_from ?? "?"} to ${cert.valid_to ?? "?"}${cert.authorized === false ? `; not trusted (${cert.authorizationError ?? "unknown"})` : "; trusted by Node"}`;
+  return `${covers ? "names the host" : "does NOT name the host"}; names ${names.length ? names.join(" ") : "nothing"}; issued by ${issuer}; valid ${cert.valid_from ?? "?"} to ${cert.valid_to ?? "?"}${cert.authorized === true ? "; trusted by Node" : `; not trusted (${cert.authorizationError ?? "unknown"})`}`;
+}
+
+/**
+ * X14-4 in dns-only mode: what's wrong with the certificate served for the custom name, or null. It must be the content
+ * zone's own certificate for this custom hostname: naming the exact host among its DNS names (a wildcard alone doesn't
+ * do); not the test zone's universal certificate (one naming the test domain or `*.<test domain>`, as O2O serves); trusted
+ * by Node; issued within `maxAgeMs` of `now`, since every run's name is new; and not yet expired.
+ */
+export function certificateProblem(cert, host, { now = Date.now(), maxAgeMs = CERT_MAX_AGE_MS, domain = TEST_DOMAIN } = {}) {
+  if (cert && typeof cert === "object" && cert.handshakeError) return `the TLS handshake with certificate validation on failed (${cert.handshakeError})`;
+  if (!cert || typeof cert !== "object" || !cert.subject) return "no certificate was read";
+  const names = certNames(cert);
+  if (!names.includes(host)) return `its DNS names don't include ${host} itself${names.some((n) => n.startsWith("*.")) ? " (a wildcard isn't enough)" : ""}`;
+  if (names.includes(domain) || names.includes(`*.${domain}`)) return `it names ${domain} or *.${domain}: it is the test zone's own certificate, not one issued for the custom hostname`;
+  if (cert.authorized !== true) return `Node doesn't trust it (${cert.authorizationError ?? "unknown"})`;
+  const from = Date.parse(cert.valid_from ?? "");
+  const to = Date.parse(cert.valid_to ?? "");
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return "its validity dates couldn't be read";
+  if (from > now + 60 * 60_000) return "it isn't valid yet";
+  if (now - from > maxAgeMs) return `it was issued ${Math.round((now - from) / 3_600_000)} hours ago, more than ${Math.round(maxAgeMs / 3_600_000)}: not one issued for this run's new name`;
+  if (to <= now) return "it has expired";
+  return null;
 }
 
 // ---- the plan ----
@@ -382,24 +434,34 @@ export const SIGN_UPS = [
 
 const TIME_GAP = "time-dependent: staging has no test clock (failpoints never ship in the API's deployed build), and a run can't wait the days it takes. Checked by crates/core's and the API's own tests; on staging it would need state kept across days, as m6-staging-kept.mjs does";
 
+/** Why X14-4 is only recorded with a proxied CNAME. */
+const X14_4_PROXIED = `proxied CNAME: ${TEST_DOMAIN} is a Cloudflare zone, so Cloudflare uses orange-to-orange and serves the customer zone's own certificate, not one issued for the custom hostname; run with --cname-mode dns-only to judge it`;
+
 /**
- * Every check, in the order it runs. `outOfScope` checks always say OUT OF SCOPE, with why, and don't stop exit 0.
- * `recordOnly` checks say RECORDED with what was seen, are never judged, and don't change the exit code. Every other
- * check must pass for exit 0.
+ * Every check, in the order it runs, for a proxied CNAME. `outOfScope` checks always say OUT OF SCOPE, with why, and
+ * don't stop exit 0. `recordOnly` checks say RECORDED with what was seen, are never judged, and don't change the exit
+ * code. Every other check must pass for exit 0. `planFor` gives the plan for a run's mode.
  */
-export const PLAN = [
+const PROXIED_PLAN = [
   ["X15-1", "M6-X15, refused names, in a room with release on: Podster's own domains, the content domain, its fallback origin and names under them hostname_reserved (409); public suffixes (github.io, co.uk) hostname_public_suffix (409); an IP address, a wildcard and a single label 400 with their codes; malformed names hostname_invalid (400); a body that isn't { hostname } invalid_argument. None leaves a request"],
   ["X14-1", "M6-X14, before proof: with the name's CNAME to the fallback origin in place and only another room's challenge at its challenge name, the room's request stays pending (proof_pending), the configuration names no custom host, and the name doesn't serve the room's marker"],
   ["X15-2", "M6-X15, a race: two other rooms ask for one name and both challenges are published at once; exactly one room is claimed and the other refused with a reason code"],
   ["X26-1", "M6-X26: another room's value at the challenge's name didn't claim the name during the hold; once the room publishes its own, it is claimed within the wait"],
   ["X14-2", "M6-X14, after proof: Cloudflare reads the custom hostname active (setup_status active), and the release configuration names it as custom_host"],
   ["X14-3", "M6-X14 and 8e, over HTTPS on the custom name: the marker names the room's served release and merge commit; the index is the release's, with the content Worker's fixed headers, HSTS without includeSubDomains, and no cookie"],
-  ["X14-4", "The certificate served for the custom name: the first live check that Cloudflare's HTTP validation passes with the */* route and its no-Worker validation routes in place (ssl.status active)", { recordOnly: "the API doesn't expose ssl.status; a certificate Node trusts naming the host is what it shows" }],
+  ["X14-4", "The certificate served for the custom name: the first live check that Cloudflare's HTTP validation passes with the */* route and its no-Worker validation routes in place (ssl.status active). With a DNS-only CNAME: a certificate Node trusts, naming the exact host, not the test zone's own, issued within 2 days", { recordOnly: X14_4_PROXIED }],
   ["X14-5", "M6-X14, removal: the request goes ending, the configuration names no custom host at once, and the name stops serving the marker within the wait"],
   ["X14-6", "A removed claim is freed (ended) once Cloudflare reads the custom hostname gone twice, GONE_SPAN_MS apart", { outOfScope: `it takes at least ${(2 * GONE_SPAN_MS) / 60_000} minutes after the delete; the run leaves the request ending, and the API's tests check the count` }],
   ["X26-2", "M6-26: a pending request nobody proved expires after 72 hours", { outOfScope: TIME_GAP }],
   ["X26-3", "M6-26: the daily recheck ends a claim after two definite noes at least 24 hours apart, or seven days with no match", { outOfScope: TIME_GAP }],
 ].map(([id, title, flags = {}]) => ({ id, title, outOfScope: flags.outOfScope ?? null, recordOnly: flags.recordOnly ?? null }));
+
+/** The plan for a CNAME mode: with `dns-only`, X14-4 is judged; with `proxied`, it is only recorded. */
+export function planFor(mode) {
+  return cnameProxied(mode) ? PROXIED_PLAN : PROXIED_PLAN.map((entry) => (entry.id === "X14-4" ? { ...entry, recordOnly: null } : entry));
+}
+/** The default run's plan. */
+export const PLAN = planFor(DEFAULT_CNAME_MODE);
 
 /** The waits, in seconds: flag, option name, default. Each is bounded from 10 to 1800. */
 export const WAITS = {
@@ -412,7 +474,7 @@ export const WAITS = {
   "--serve-wait": ["serveWait", 600],
 };
 
-export const USAGE = `Usage: node m6-custom-domain-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--core-hostnames FILE] [--setup-wait S] [--merge-wait S] [--release-wait S] [--takedown-wait S] [--claim-wait S] [--active-wait S] [--serve-wait S]
+export const USAGE = `Usage: node m6-custom-domain-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--core-hostnames FILE] [--setup-wait S] [--merge-wait S] [--release-wait S] [--takedown-wait S] [--claim-wait S] [--active-wait S] [--serve-wait S] [--cname-mode dns-only|proxied]
 
 M6's staging acceptance test for custom domains (M6-X14, M6-X15, M6-X26). One room releases a tiny static site; then
 names under a fresh label of ${TEST_DOMAIN}, cd-<random>.${TEST_DOMAIN}, are asked for, proved through Cloudflare's DNS
@@ -429,13 +491,18 @@ can't reach the content domain.
   --claim-wait       seconds to wait for a claim, or the race's outcome (default 300).
   --active-wait      seconds to wait for Cloudflare to read the custom hostname active (default 900).
   --serve-wait       seconds to wait for the custom name to serve the release's marker (default 600).
+  --cname-mode       dns-only (the default) or proxied: whether the custom name's CNAME to ${CNAME_TARGET} is proxied.
+                     dns-only is how a customer off Cloudflare publishes it: the content zone serves the custom hostname's
+                     own certificate, and X14-4 judges it. proxied makes ${TEST_DOMAIN}, itself a Cloudflare zone,
+                     orange-to-orange: its own certificate is served, and X14-4 is only recorded.
 
   PODSTER_E2E_SIGNUP_SECRET   staging's test sign-up secret. Needed. Never printed.
-  OPSTER_DNS_TOKEN            a Cloudflare API token with Zone, DNS, Edit on ${TEST_DOMAIN} alone. Needed. Never printed.
+  OPSTER_DNS_TOKEN            a Cloudflare API token with Zone, DNS, Edit on ${TEST_DOMAIN} alone, used only for TXT and
+                              CNAME records under the run's own label. Needed. Never printed.
   OPSTER_ZONE_ID              ${TEST_DOMAIN}'s zone ID. Needed. Never printed.
 
-  Every DNS write goes through one guard: only TXT at _podster-challenge.<name> and CNAME to ${CNAME_TARGET}, only
-  under the run's own label, and a delete only of a record the run made. Refuses to start, exit 3, when ${TEST_DOMAIN}
+  Every DNS write goes through one guard: only TXT at _podster-challenge.<name> and CNAME to ${CNAME_TARGET}, proxied
+  as the mode says and no other way, only under the run's own label, and a delete only of a record the run made. Refuses to start, exit 3, when ${TEST_DOMAIN}
   is one of the API's reserved domains; when the contract's grant route gives no deploy grant; or when, signed out,
   staging doesn't list deploy_release, or ${CONTENT_DOMAIN} or ${CNAME_TARGET} doesn't answer with the content Worker's
   own not found. Refuses, exit 2, when the DNS token isn't active or can't list a name in the zone. Neither takes a
@@ -453,18 +520,22 @@ can't reach the content domain.
 
 /** The run's options, or why they're refused. An unknown flag or a missing value is an error: nothing is guessed. */
 export function parseArgs(argv, env = {}) {
-  const options = { base: undefined, dryRun: false, help: false, contract: undefined, coreHostnames: undefined };
+  const options = { base: undefined, dryRun: false, help: false, contract: undefined, coreHostnames: undefined, cnameMode: DEFAULT_CNAME_MODE };
   for (const [name, fallback] of Object.values(WAITS)) options[name] = fallback;
   for (let at = 0; at < argv.length; at++) {
     const flag = argv[at];
     if (flag === "--dry-run") options.dryRun = true;
     else if (flag === "--help" || flag === "-h") options.help = true;
-    else if (flag === "--base-url" || flag === "--contract" || flag === "--core-hostnames" || WAITS[flag]) {
+    else if (flag === "--base-url" || flag === "--contract" || flag === "--core-hostnames" || flag === "--cname-mode" || WAITS[flag]) {
       const value = argv[++at];
       if (value === undefined || value.startsWith("--")) return { error: `${flag} needs a value` };
       if (flag === "--base-url") options.base = value;
       else if (flag === "--contract") options.contract = value;
       else if (flag === "--core-hostnames") options.coreHostnames = value;
+      else if (flag === "--cname-mode") {
+        if (!CNAME_MODES.includes(value)) return { error: `--cname-mode is ${CNAME_MODES.join(" or ")}` };
+        options.cnameMode = value;
+      }
       else {
         if (!/^\d+$/.test(value) || Number(value) < 10 || Number(value) > 1800) return { error: `${flag} takes whole seconds from 10 to 1800` };
         options[WAITS[flag][0]] = Number(value);

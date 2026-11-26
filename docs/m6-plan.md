@@ -743,7 +743,7 @@ Contract and migration PRs merge one at a time, so M6's step 2 waits until every
 - **Status:** `get_task_release_status` gains the release, beside checks and merge, each with its own time, including failure.
 - **Limits and a stop:** budget caps per room, an owner's off switch that unpublishes, an operator's suspension of one app, and a stop for the whole content domain, built before anything is served. An app is served only while Rust has said so, host by host.
 - **Screens:** Release in room settings and setup, the deployment stage on a task's Release panel, and release approvals in Needs attention.
-- **Written policies** for custom domains, release approvals, and export or transfer, since criterion 8 says they must pass "their documented policies" and none is written.
+- **Written policies** for custom domains, release approvals, and export or transfer, since criterion 8 says they must pass "their documented policies" and none is written. *(2026-11-26: written, in [Release policies](spec/RELEASE-POLICIES.md).)*
 
 Not in M6: a way for a DevOps role to propose release settings through Podster. The spec says "a DevOps role can propose its settings", and no command, state or screen for a proposal is designed. In M6 such an agent can only say what it suggests in a task thread, which is data, and the owner or an admin configures release. A proposal command is left for a later design, because it would let agent-written text become configuration by one click.
 
@@ -763,6 +763,25 @@ From the specs. Nothing may say release works until all of these pass on staging
 - **A security review** of the built system against the [threat model](#threat-model), with the result written into this plan.
 
 The architect proposes the gate call, for the owner to review.
+
+### Criterion 8's written policies, 2026-11-26
+
+**F-8 of the [M6 security review](security/m6-review.md) is addressed:** the policies expanded criterion 8 names are written in [Release policies](spec/RELEASE-POLICIES.md). Each one describes M6 as built, citing code, ADR 0010, the PRODUCT.md decisions and this plan's staging runs.
+
+- **[Custom domains](spec/RELEASE-POLICIES.md#1-custom-domains):**
+  - who may ask, and the refused names, Public Suffix List included;
+  - the TXT proof and the claim race;
+  - the `CNAME` target and the certificate locks;
+  - the 72-hour expiry and the daily recheck;
+  - removal, and what a customer should expect.
+- **[Release approvals](spec/RELEASE-POLICIES.md#2-release-approvals):**
+  - who switches release on, and merged commits only;
+  - who asks and who approves, with the owner's ruling of 2026-11-16 on an agent's controller;
+  - public rooms only;
+  - unpublish retiring the label and owing the store's deletion.
+- **[Export and transfer](spec/RELEASE-POLICIES.md#3-export-and-transfer):** a room can take its public managed repository, by clone or fork, at the commit each release names. Every transfer or export route is marked **not built**.
+
+**Not done here:** the review's F-8 fix also asks for an addition to the terms and acceptable-use drafts covering hosted apps, custom domains and app data. That is owed before production, not for the staging gate (staging has only test people), as X14-4 was; it needs the owner's approval. M6-24 hasn't run on staging. It would check only that no export or transfer route exists.
 
 ### The owner's call, 2026-11-24: static sites
 

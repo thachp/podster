@@ -2547,6 +2547,16 @@ What a host whose serve entry carries the code mark now gets, by the rules `requ
 
 **Also owed:** a staging run with a real app with code through the deployed content Worker: its read, its marker, a write within and over the budget, a `fetch` and a socket refused, and an app that spins being stopped (ADR 0010's revision, section 10). Nothing here measured the extra time a dispatch with limits takes, and spellings of the marker's path that the job never asks (a trailing `/`, an upper-case `.WELL-KNOWN`), which spike H saw reach the module, are still sent to the app as any other path is. `docs/content-deploy.md`'s note on a failed deploy, and `scripts/deploy-content`'s message for it, were reworded, since the switch was no longer off; the self-test's check of that message was changed with it.
 
+#### A rate limit on the content zone, approved 2026-11-26
+
+**The owner approved on 2026-11-26 one WAF rate limiting rule on the content domain's zone, `podster.site`, as one free-plan rule, managed by `scripts/deploy-content`.** It is the request-rate abuse control for apps: every app's default host and every custom hostname enters through that zone, so one rule there protects them all from a request flood, before any request reaches the content Worker or an app's code.
+
+- **The figures:** counted per IP (`cf.colo.id` and `ip.src`, the pair the API requires), across the zone; **300 requests per 10 s**, the owner's starting figure; action **block**; mitigation timeout **10 s**, the shortest the free plan allows, and on Free the only period and timeout there are ([availability](https://developers.cloudflare.com/waf/rate-limiting-rules/#availability), read 2026-11-26).
+- **Why one free-plan rule:** the free plan allows one rate limiting rule per zone at no cost, which is enough for a per-IP ceiling across all apps; anything finer (per host, per app, a longer timeout, a counting expression) needs a paid plan, which is a billed resource and the owner's call.
+- **Left out of the rule:** `/.well-known/acme-challenge/` and `/.well-known/pki-validation/`, so issuing or renewing a certificate is never rate limited. The free plan allows no regex, so the expression uses `starts_with` on the path.
+- **How it is kept:** the report run says whether the rule is missing, matching or different; `--deploy` creates or updates only the rule with ref `podster_content_rate_limit`, before either Worker, and checks it after. It refuses if another rule would push the zone past the free plan's one. The token needs Zone WAF Edit on the zone, which the owner adds. [docs/content-deploy.md](content-deploy.md) has the rule's exact fields.
+- **Not shown:** a flood actually blocked, and Cloudflare keeping the expression as sent. Both wait for the owner's first run.
+
 #### The gate on the release path, flipped 2026-11-23, for static sites
 
 `RELEASE_PATH_COMPLETE` is true since 2026-11-23. Each item of the list above, checked against `main` that day:

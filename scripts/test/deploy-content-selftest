@@ -69,6 +69,18 @@ ZONE=99887766554433221100ffeeddccbbaa
 ROUTES_OK='{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r3","pattern":"*/*","script":"podster-content"},{"id":"ra","pattern":"*/.well-known/acme-challenge/*"},{"id":"rp","pattern":"*/.well-known/pki-validation/*","script":null},{"id":"r2","pattern":"content-selftest.example/x"}]}'
 # The same before the no-Worker routes were added: the zone as the first */* deploy finds it.
 ROUTES_NO_BYPASS='{"success":true,"result":[{"id":"r1","pattern":"*.content-selftest.example/*","script":"podster-content"},{"id":"r2","pattern":"content-selftest.example/x"}]}'
+# The zone's rate limiting rule as this script deploys it, written here on its own so the test pins every value: the
+# owner's 300 requests per 10 s per IP, block, the free plan's 10 s timeout, and the two validation folders left out.
+RL_WANT=$(jq -c -n '{ref: "podster_content_rate_limit", description: "Podster: requests per IP to every app and custom hostname, managed by scripts/deploy-content",
+  expression: "(not starts_with(http.request.uri.path, \"/.well-known/acme-challenge/\") and not starts_with(http.request.uri.path, \"/.well-known/pki-validation/\"))",
+  action: "block", enabled: true, ratelimit: {characteristics: ["cf.colo.id", "ip.src"], period: 10, requests_per_period: 300, mitigation_timeout: 10}}')
+RL_SET=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+RL_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+rl_entry() { jq -c -n --argjson rules "$1" --arg id "$RL_SET" '{success: true, result: {id: $id, name: "default", kind: "zone", phase: "http_ratelimit", version: "3", rules: $rules}}'; }
+# As Cloudflare holds it: with its IDs, requests_to_origin false, and the characteristics in the other order.
+RL_OURS=$(jq -c --arg id "$RL_ID" '. + {id: $id, version: "1", last_updated: "2026-11-26T00:00:00Z"} | .ratelimit.requests_to_origin = false | .ratelimit.characteristics = ["ip.src", "cf.colo.id"]' <<< "$RL_WANT")
+RL_OK=$(rl_entry "[$RL_OURS]")
+RL_OTHER='{"id":"cccccccccccccccccccccccccccccccc","ref":"someone_elses","description":"another","expression":"true","action":"block","enabled":true,"ratelimit":{"characteristics":["cf.colo.id","ip.src"],"period":10,"requests_per_period":50,"mitigation_timeout":10}}'
 CONTENT_SETTINGS_OK='{"success":true,"result":{"bindings":[{"type":"kv_namespace","name":"SERVE","namespace_id":"00112233445566778899aabbccddeeff"},{"type":"dispatch_namespace","name":"APPS","namespace":"podster-apps","outbound":{"worker":{"service":"podster-outbound","environment":"production"},"params":[]}},{"type":"plain_text","name":"APP_LIMIT_CPU_MS","text":"50"},{"type":"plain_text","name":"APP_LIMIT_SUBREQUESTS","text":"50"}]}}'
 echo "$TOKEN" > "$fix/token-expected"
 
@@ -191,10 +203,10 @@ case "$url" in
   https://api.cloudflare.com/client/v4/*)
     path=${url#https://api.cloudflare.com/client/v4}
     echo "curl $method $path auth=$auth q_first=$first env=$leaks" >> "$fix/calls"
-    # What a POST sent, compacted: the body, read from the file `@` names.
-    if [ "$method" = POST ]; then
+    # What a POST or PATCH sent, compacted: the body, read from the file `@` names.
+    if [ "$method" = POST ] || [ "$method" = PATCH ]; then
       if [[ "$data" == @* ]]; then posted=$(jq -c . "${data#@}" 2> /dev/null || echo unreadable); else posted=not-a-file; fi
-      echo "posted $path $posted" >> "$fix/calls"
+      if [ "$method" = POST ]; then echo "posted $path $posted" >> "$fix/calls"; else echo "patched $path $posted" >> "$fix/calls"; fi
     fi
     case "$path" in
       /user/tokens/verify) key=verify-user ;;
@@ -209,6 +221,10 @@ case "$url" in
       /accounts/*/workers/scripts/podster-outbound/subdomain) key=outbound-subdomain ;;
       /accounts/*/workers/scripts/podster-content/settings) key=content-settings ;;
       /zones/*/workers/routes) key=routes ;;
+      /zones/*/rulesets/phases/http_ratelimit/entrypoint) key=ratelimit ;;
+      /zones/*/rulesets/*/rules/*) key=ratelimit-update ;;
+      /zones/*/rulesets/*/rules) key=ratelimit-add ;;
+      /zones/*/rulesets) key=ratelimit-create ;;
       /accounts/*/workers/dispatch/namespaces/*) key=namespace ;;
       /accounts/*/storage/kv/namespaces/*) key=kv ;;
       *) echo "stand-in curl: unexpected API path $path" >&2; exit 97 ;;
@@ -217,12 +233,18 @@ case "$url" in
     if [ "$key" = routes ] && [ "$method" = POST ]; then key=route-create; fi
     # The zone's routes once the content Worker is deployed, if a case gives them apart: api-routes-after.
     if [ "$key" = routes ] && [ -f "$fix/deployed-podster-content.json" ] && [ -f "$fix/api-routes-after.status" ]; then key=routes-after; fi
+    # The same for the zone's rate limiting rules: api-ratelimit-after.
+    if [ "$key" = ratelimit ] && [ -f "$fix/deployed-podster-content.json" ] && [ -f "$fix/api-ratelimit-after.status" ]; then key=ratelimit-after; fi
     status=$(cat "$fix/api-$key.status")
     if [ "$status" = unreachable ]; then echo "curl: (7) could not connect" >&2; printf 000; exit 7; fi
     if [ "$(cat "$fix/api-$key.body")" = LEAK ]; then printf '{"success":true,"echo":"%s"}' "$expected" > "$out"
     elif [ "$key" = route-create ]; then
       # The route made answers with the pattern posted wherever the configured answer says PATTERN.
       jq -c --arg p "$(jq -r .pattern "${data#@}" 2> /dev/null)" 'walk(if . == "PATTERN" then $p else . end)' "$fix/api-$key.body" > "$out" 2> /dev/null || cat "$fix/api-$key.body" > "$out"
+    elif [ "$(cat "$fix/api-$key.body")" = ECHO ]; then
+      # A rate limiting write answers as Cloudflare does, with the whole ruleset: here, the rule or ruleset sent, with
+      # the IDs and the fields Cloudflare adds of its own.
+      jq -c '(if has("rules") then .rules else [.] end) as $r | {success: true, result: {id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", name: "default", kind: "zone", phase: "http_ratelimit", version: "2", rules: ($r | map(. + {id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", version: "1", last_updated: "2026-11-26T00:00:00Z"} | .ratelimit.requests_to_origin = false))}}' "${data#@}" > "$out"
     else cat "$fix/api-$key.body" > "$out"; fi
     printf '%s' "$status"
     ;;
@@ -314,6 +336,10 @@ healthy() {
   api content-settings 200 "$CONTENT_SETTINGS_OK"
   api namespace 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'
   api kv 200 "{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
+  api ratelimit 200 "$RL_OK"
+  api ratelimit-create 200 ECHO
+  api ratelimit-add 200 ECHO
+  api ratelimit-update 200 ECHO
   probe probe-unknown 404 not_found
   probe probe-http 301 moved_to_https "location: https://{HOST}/probe?x=1"
   probe probe-post 405 method_not_allowed "allow: GET, HEAD"
@@ -727,7 +753,7 @@ fresh; dc 0 "${files[@]}" || true
 check "without --deploy: exit 0, every check passed, nothing deployed" bash -c "[ $LAST -eq 0 ] && grep -q 'Nothing was deployed: this run had no --deploy' '$tmp/out'"
 check "  it says what it would deploy, and where" bash -c "grep -q -E \"would deploy podster-content at [0-9a-f]{40}, origin/main's tip with ci.yml green\" '$tmp/out' && grep -q -F 'on the routes *.content-selftest.example/* and */*, both on the content domain' '$tmp/out' && grep -q -F 'zone only, with the content domain content-selftest.example' '$tmp/out'"
 check "  every API call was a GET, -q first, the token on stdin, nothing of the caller's environment" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]"
-check "  it read all ten things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 10 ]"
+check "  it read all eleven things it checks" bash -c "[ \$(grep -c -E '^curl GET /' '$fix/calls') -eq 11 ]"
 check "  it read the account's custom domains, and says none runs podster-outbound" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/domains auth=ok' '$fix/calls' && grep -q '^ok   no custom domain on the account runs podster-outbound$' '$tmp/out' && grep -q 'deploy-content: every check passed. Nothing was deployed' '$tmp/out'"
 check "  it listed the account's scripts and the content zone's routes, by the zone's ID" bash -c "grep -q '^curl GET /accounts/$ACCOUNT/workers/scripts auth=ok' '$fix/calls' && grep -q '^curl GET /zones/$ZONE/workers/routes auth=ok' '$fix/calls'"
 check "  it says podster-outbound exists, and the deploy replaces it" said "^ok   the account's scripts can be listed: podster-outbound exists, and the deploy replaces it$"
@@ -947,6 +973,76 @@ outbound_check "a binding to another namespace: exit 4" 4 "^FAIL    podster-cont
 outbound_check "settings that can't be read: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding names podster-outbound as outbound: its settings couldn't be read in the shape expected \\(HTTP 403\\)" content-settings 403 '{"success":false,"errors":[]}'
 check "  and no PASS for the binding, and never the success line" bash -c "! grep -q '^PASS    podster-content.s deployed binding' '$tmp/out' && ! grep -q 'every probe passed' '$tmp/out' && grep -q 'but 0 probe(s) failed and 2 check(s) were NOT SHOWN (above): the Workers are deployed and NOT verified' '$tmp/out'"
 outbound_check "settings in another shape: NOT SHOWN, never a pass, and exit 4" 4 "^NOT SHOWN whether podster-content's deployed binding" content-settings 200 '{"success":true,"result":{"bindings":{}}}'
+
+# --- the zone's rate limiting rule ---
+# A report says which of three it is, and writes nothing; a deploy writes only this script's rule, before either Worker.
+RL_PATH="/zones/$ZONE/rulesets/phases/http_ratelimit/entrypoint"
+fresh; dc 0 "${files[@]}" || true
+check "rate limiting, report, the rule matching: exit 0, says matching" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   the zone.s rate limiting rule podster_content_rate_limit: matching, nothing to change$' '$tmp/out' && grep -q 'every check passed' '$tmp/out'"
+check "  it read the zone's http_ratelimit entry point once, with the token on stdin" bash -c "[ \$(grep -c '^curl GET $RL_PATH auth=ok q_first=yes env=none$' '$fix/calls') -eq 1 ]"
+check "  it says the rule's figures in what it would deploy" said "rate limiting rule podster_content_rate_limit is 300 requests per 10 s per IP, blocked for 10 s, outside the two validation folders \\(matching now\\)"
+fresh; api ratelimit 404 '{"success":false,"errors":[{"code":10003,"message":"not found"}]}'; dc 0 "${files[@]}" || true
+check "rate limiting, report, no entry point: exit 0, says missing" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   the zone.s rate limiting rule podster_content_rate_limit: missing, a deploy adds it$' '$tmp/out'"
+check "  nothing written" unchanged
+fresh; api ratelimit 200 "$(rl_entry '[]')"; dc 0 "${files[@]}" || true
+check "rate limiting, report, an entry point with no rules: says missing" bash -c "[ $LAST -eq 0 ] && grep -q 'podster_content_rate_limit: missing, a deploy adds it' '$tmp/out'"
+check "  nothing written" unchanged
+fresh; api ratelimit 200 "$(rl_entry "[$(jq -c '.ratelimit.period = 60' <<< "$RL_OURS")]")"; dc 0 "${files[@]}" || true
+check "rate limiting, report, the rule with another period: says different" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   the zone.s rate limiting rule podster_content_rate_limit: different from this script.s, a deploy updates that rule alone$' '$tmp/out'"
+check "  nothing written" unchanged
+for edit in '.expression = "true"' '.action = "log"' '.enabled = false' '.ratelimit.requests_per_period = 3000' '.ratelimit.mitigation_timeout = 60' '.ratelimit.characteristics = ["cf.colo.id"]' '.ratelimit.requests_to_origin = true' '.description = "x"'; do
+  fresh; api ratelimit 200 "$(rl_entry "[$(jq -c "$edit" <<< "$RL_OURS")]")"; dc 0 "${files[@]}" || true
+  check "  and with $edit: different" bash -c "[ $LAST -eq 0 ] && grep -q 'podster_content_rate_limit: different' '$tmp/out'"
+done
+fresh; api ratelimit 200 "$(rl_entry "[$RL_OTHER]")"; dc 1 "${files[@]}" || true
+check "rate limiting, another rule on the zone and this script's missing: refused, the free plan's one rule named" refused "the content domain's zone already has 1 rate limiting rule\\(s\\) that aren't this script's \\(podster_content_rate_limit\\), and the free plan allows one per zone"
+fresh; api ratelimit 200 "$(rl_entry "[$RL_OTHER,$RL_OURS]")"; dc 0 "${files[@]}" || true
+check "rate limiting, another rule beside this script's: left alone, a report passes" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   1 other rate limiting rule(s) on the zone, left alone$' '$tmp/out' && grep -q 'podster_content_rate_limit: matching' '$tmp/out'"
+fresh; api ratelimit 200 "$(rl_entry "[$RL_OURS,$(jq -c '.id = "dddddddddddddddddddddddddddddddd"' <<< "$RL_OURS")]")"; dc 1 "${files[@]}" || true
+check "rate limiting, two rules with this script's ref: refused" refused "the zone has 2 rate limiting rules with the ref podster_content_rate_limit"
+fresh; api ratelimit 403 '{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'; dc 1 "${files[@]}" || true
+check "rate limiting, the token can't read the rules (403): refused, naming the permission to add" refused "the token can't read the content domain's zone's rate limiting rules \\(HTTP 403\\).*Add this permission to the token: Zone > Zone WAF > Edit, on the content domain's zone only"
+fresh; api ratelimit 401 '{"success":false,"errors":[]}'; dc 1 "${files[@]}" || true
+check "  and a 401 the same" refused "the token can't read the content domain's zone's rate limiting rules \\(HTTP 401\\).*Zone WAF > Edit"
+bad_api "rate limiting, an entry point in another shape is refused" "the zone's rate limiting rules \\(its http_ratelimit entry point\\) aren't in the shape expected" ratelimit 200 '{"success":true,"result":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phase":"http_ratelimit","rules":{}}}'
+bad_api "rate limiting, an entry point of another phase is refused" "the zone's rate limiting rules \\(its http_ratelimit entry point\\) aren't in the shape expected" ratelimit 200 '{"success":true,"result":{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","phase":"http_request_firewall_custom","rules":[]}}'
+bad_api "rate limiting, a 404 that isn't Cloudflare's own is refused" "reading the zone's rate limiting rules answered HTTP 404 with an answer of another shape" ratelimit 404 '<html>'
+bad_api "rate limiting, an error reading the rules is refused" "reading the content domain's zone's rate limiting rules failed \\(HTTP 500\\)" ratelimit 500 '{"success":false,"errors":[]}'
+
+# A deploy: each of the three writes, and only that one, before either Worker.
+rl_deploy() { # rl_deploy ENTRY-BODY [ENTRY-STATUS]: a deploy that finds the zone's rules so, and finds the rule in place after
+  fresh
+  api ratelimit "${2:-200}" "$1"
+  api ratelimit-after 200 "$RL_OK"
+  at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
+}
+rl_before_workers() { first_write=$(grep -n -E '^curl (POST|PATCH) /zones/[^ ]*/rulesets' "$fix/calls" | tail -n 1 | cut -d: -f1); first_deploy=$(grep -n '^wrangler deploy' "$fix/calls" | head -n 1 | cut -d: -f1); [ -n "$first_write" ] && [ -n "$first_deploy" ] && [ "$first_write" -lt "$first_deploy" ]; }
+rl_deploy '{"success":false,"errors":[{"code":10003}]}' 404
+check "rate limiting, deploy with no entry point: exit 0, the entry point made with the rule" bash -c "[ $LAST -eq 0 ] && grep -q '^ok      added, with the zone.s http_ratelimit entry point the rate limiting rule podster_content_rate_limit: 300 requests per 10 s per IP, blocked for 10 s' '$tmp/out' && grep -q 'every probe passed' '$tmp/out'"
+check "  by one POST to the zone's rulesets, exactly the rule, and no other write but none" bash -c "[ \$(grep -c '^curl POST /zones/$ZONE/rulesets auth=ok q_first=yes env=none$' '$fix/calls') -eq 1 ] && [ -z \"\$(grep -E '^curl (POST|PUT|PATCH|DELETE) ' '$fix/calls' | grep -v '^curl POST /zones/$ZONE/rulesets ')\" ]"
+check "  the ruleset sent: kind zone, phase http_ratelimit, and exactly this script's rule" bash -c "line=\$(grep '^posted /zones/$ZONE/rulesets ' '$fix/calls' | sed 's|^posted /zones/$ZONE/rulesets ||'); jq -e --argjson w '$RL_WANT' '. == {name: \"default\", kind: \"zone\", phase: \"http_ratelimit\", rules: [\$w]}' <<< \"\$line\" > /dev/null"
+check "  before either Worker's deploy" rl_before_workers
+check "  and checked after: in place" said "^PASS    the zone's rate limiting rule podster_content_rate_limit is in place: 300 requests per 10 s per IP, blocked for 10 s, outside the validation folders"
+check "  the token is in no argument and no output" no_token
+rl_deploy "$(rl_entry "[]")"
+check "rate limiting, deploy to an entry point with no rules: exit 0, the rule added to it" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^curl POST /zones/$ZONE/rulesets/$RL_SET/rules auth=ok q_first=yes env=none$' '$fix/calls') -eq 1 ] && [ \$(grep -c -E '^curl (POST|PUT|PATCH|DELETE) ' '$fix/calls') -eq 1 ]"
+check "  exactly this script's rule sent" bash -c "line=\$(grep '^posted /zones/$ZONE/rulesets/$RL_SET/rules ' '$fix/calls' | sed 's|^posted [^ ]* ||'); jq -e --argjson w '$RL_WANT' '. == \$w' <<< \"\$line\" > /dev/null"
+check "  before either Worker's deploy" rl_before_workers
+rl_deploy "$(rl_entry "[$RL_OTHER,$(jq -c '.ratelimit.requests_per_period = 100' <<< "$RL_OURS")]")"
+check "rate limiting, deploy with the rule different and another's beside it: exit 0, this rule alone updated by its ID" bash -c "[ $LAST -eq 0 ] && [ \$(grep -c '^curl PATCH /zones/$ZONE/rulesets/$RL_SET/rules/$RL_ID auth=ok q_first=yes env=none$' '$fix/calls') -eq 1 ] && [ \$(grep -c -E '^curl (POST|PUT|PATCH|DELETE) ' '$fix/calls') -eq 1 ] && grep -q '^ok      updated the rate limiting rule podster_content_rate_limit' '$tmp/out'"
+check "  exactly this script's rule sent" bash -c "line=\$(grep '^patched /zones/$ZONE/rulesets/$RL_SET/rules/$RL_ID ' '$fix/calls' | sed 's|^patched [^ ]* ||'); jq -e --argjson w '$RL_WANT' '. == \$w' <<< \"\$line\" > /dev/null"
+check "  before either Worker's deploy" rl_before_workers
+fresh; api ratelimit 200 "$(rl_entry '[]')"; api ratelimit-add 403 '{"success":false,"errors":[{"code":10000}]}'; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "rate limiting, a write the token may not make (403): exit 3, the permission named, neither Worker deployed" bash -c "[ $LAST -eq 3 ] && grep -q '^STOPPED writing the zone.s rate limiting rule (POST /zones/$ZONE/rulesets/$RL_SET/rules) answered HTTP 403' '$tmp/out' && grep -q 'Add this permission to the token: Zone > Zone WAF > Edit, on the content domain.s zone only' '$tmp/out' && grep -q 'neither Worker was deployed' '$tmp/out' && ! grep -q '^wrangler deploy' '$fix/calls' && ! grep -q '^probe ' '$fix/calls'"
+fresh; api ratelimit 200 "$(rl_entry '[]')"; api ratelimit-add 200 "$(rl_entry "[$(jq -c '.ratelimit.period = 60' <<< "$RL_OURS")]")"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "rate limiting, an answer that doesn't hold the rule as sent: exit 3, neither Worker deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'not the ruleset holding that rule as sent' '$tmp/out' && ! grep -q '^wrangler deploy' '$fix/calls'"
+fresh; api ratelimit 200 "$(rl_entry '[]')"; api ratelimit-add 200 LEAK; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "rate limiting, an answer holding the token: exit 3, not printed, neither Worker deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED Cloudflare.s answer to POST /zones/$ZONE/rulesets/$RL_SET/rules held the token' '$tmp/out' && grep -q 'while writing the zone.s rate limiting rule' '$tmp/out' && ! grep -q '^wrangler deploy' '$fix/calls'"
+check "  the token is in no output" no_token
+fresh; api ratelimit-after 200 "$(rl_entry '[]')"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "rate limiting, the rule gone after the deploy: exit 4, not verified" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    the zone.s rate limiting rule podster_content_rate_limit isn.t in place as deployed' '$tmp/out' && grep -q 'the Workers are deployed and NOT verified' '$tmp/out'"
+fresh; api ratelimit-after 403 '{"success":false,"errors":[]}'; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "rate limiting, the rules unreadable after the deploy: exit 4, not verified" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    the zone.s rate limiting rules couldn.t be read (HTTP 403): not verified' '$tmp/out'"
 
 # --- custom domains ---
 bad_api "a custom domain on the account that runs the outbound Worker is refused" "a custom domain on the account runs podster-outbound" domains 200 '{"success":true,"result":[{"id":"d","hostname":"x.content-selftest.example","service":"podster-outbound","zone_id":"z","zone_name":"content-selftest.example"}]}'

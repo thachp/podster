@@ -9,7 +9,7 @@
 // - writes within the budget reach the app, and the first over it is refused 429 with Retry-After;
 // - the app's fetch gets podster-outbound's 403, and its connect() is refused;
 // - an app that spins is stopped by the CPU limit (502 app_error);
-// - what a visitor gets when a limit hits after the headers were sent, recorded and not judged;
+// - a limit hit after the headers were sent never reaches a visitor as a clean 200: 502 app_error, or an aborted body;
 // - unpublish: the host answers not found, and a write no longer reaches the app.
 //
 //   node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
@@ -47,7 +47,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, appFiles, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
+  afterHeadersLine, afterHeadersProblem, appFiles, budgetRefusalProblem, burstPlan, BURST_SPARE, codeHeaderProblems, CONTENT_DOMAIN, contentNotFoundProblem, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, EXIT, MANIFEST, markerBody, MARKER_PATH, moduleAnswer, outboundProblems, parseArgs, PLAN,
   preflightProblem, Results, resultUrlProblem, runOutcome, secretProblem, SIGN_UPS, slowestLine, spinProblem, STAGING, STAGING_ORG, unknownLabel, USAGE, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -121,16 +121,6 @@ async function check(id, body) {
     if (error instanceof Halt || error instanceof NotOn) throw error;
     results.add(id, "fail", cause(error));
     return false;
-  }
-}
-/** Records what was seen, never judged. A record that couldn't be made says why. */
-async function record(id, body) {
-  if (run.stopping) throw new Halt("stopped by a signal");
-  try {
-    results.add(id, "recorded", await body());
-  } catch (error) {
-    if (error instanceof Halt) throw error;
-    results.add(id, "recorded", `nothing recorded: ${cause(error)}`);
   }
 }
 /** Fails a check whose ground an earlier one didn't lay. */
@@ -344,7 +334,7 @@ async function main() {
     return `light work 200 in ${light.ms} ms; the spin answered 502 app_error in ${spun.ms} ms`;
   });
 
-  await record("M6-C09", async () => {
+  await check("M6-C09", async () => {
     after("M6-C01");
     const url = app("/api/after-headers");
     const at = new Date().toISOString();
@@ -353,7 +343,7 @@ async function main() {
     let res;
     try {
       res = await fetch(url, { redirect: "manual", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30_000) });
-      Object.assign(seen, { status: res.status, contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
+      Object.assign(seen, { status: res.status, headers: [...res.headers], contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       for (;;) {
@@ -368,6 +358,8 @@ async function main() {
     }
     seen.ms = Math.round(performance.now() - begun);
     run.logRequest({ url, method: "GET", at, ms: seen.ms, ...(res ? { status: res.status } : { error: seen.error }) });
+    const problem = afterHeadersProblem(seen);
+    ok(problem === null, `${problem}; seen: ${afterHeadersLine(seen)}`);
     return afterHeadersLine(seen);
   });
 

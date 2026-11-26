@@ -444,7 +444,7 @@ What Cloudflare's documentation adds:
 
 ### Logs
 
-**Proposed.** Every Worker logs IDs and reason codes only: no token, no file's content or path, no hostname. The content Worker logs nothing per request but one line for a dispatch that failed: `dispatch_missing` or `dispatch_error`, and the release's ID, never the rejection's message, the host, the label, the path, a header or a body (2026-11-24).
+**Proposed.** Every Worker logs IDs and reason codes only: no token, no file's content or path, no hostname. The content Worker logs nothing per request but one line for a dispatch that failed: `dispatch_missing` or `dispatch_error`, and the release's ID, never the rejection's message, the host, the label, the path, a header or a body (2026-11-24). A host with code's body that fails after its headers were sent logs `dispatch_stream_error` the same way (C09, 2026-11-26).
 
 ## Alternatives not taken
 

@@ -58,7 +58,7 @@ export const PLAN = [
   ["M6-C06", `The write budget, at the deployed ${WRITE_CAP.writes} writes a ${WRITE_CAP.windowMs / 60_000}-minute window: every write within it reaches the app, and the first over it is refused 429 write_budget_spent, with a Retry-After to the window's end that the page may read`],
   ["M6-C07", "The app's fetch gets podster-outbound's 403 and fixed body, and its connect() is refused before a socket opens"],
   ["M6-C08", `An app that spins is stopped by the ${APP_LIMITS.cpuMs} ms CPU limit: 502 app_error within ${STOP_WITHIN_MS / 1000} s, with nothing of the app's in it; the same module's light work answers 200`],
-  ["M6-C09", "What a visitor gets when an app passes a limit after its answer's headers were sent", { recordOnly: "the M6 plan says this is to be seen on staging, and doesn't say what it must be" }],
+  ["M6-C09", "An app that passes a limit after its answer's headers were sent never reaches a visitor as a clean 200: it is the content Worker's 502 app_error, or a 200 whose body was aborted, with the fixed headers either way"],
   ["M6-C10", "Unpublish: release switched off in the room; the host and its marker answer the content Worker's not found within the wait; a write gets 405 method_not_allowed and never reaches the app; while release is off the task's status says no release exists"],
   ["M6-C11", "The room made private again, and the host still answers not found"],
   ["M6-CX1", "The app's store deleted once the unpublish retires its label", { outOfScope: "no read a test person can make shows a store's deletion: it is the deletion job's, owed as label_retired, and checked by the API's own tests" }],
@@ -356,7 +356,28 @@ export function budgetRefusalProblem({ status, body, headers }, nowMs, cap = WRI
   return problems.length ? problems.join("; ") : null;
 }
 
-/** What a visitor got from an app that passed a limit after its headers: one line, for the record. */
+/**
+ * Why what a visitor got from an app that passed a limit after its headers is an answer a visitor can't tell from a
+ * whole one, or null (C09, 2026-11-26). It passes as the content Worker's own 502 app_error (the body failed while held,
+ * before the headers), or as a 200 whose body was aborted: it failed, and didn't end. A 200 whose body ended normally
+ * fails, cut short or whole, and so does a body that only hung until the run gave up, which is no abort.
+ */
+export function afterHeadersProblem({ status, text, bytes, ended, error, headers }) {
+  const body = String(text ?? "");
+  if (status === undefined || status === null) return `no answer: ${error ?? "nothing"}`;
+  if (body.includes("end\n")) return `the module finished and answered ${status}: the CPU limit didn't stop it`;
+  if (status === 502) {
+    if (body.trim() !== "app_error" || !ended) return `answered 502 ${JSON.stringify(body.trim().slice(0, 40))}${ended ? "" : ", whose body failed"}, not the content Worker's app_error`;
+  } else if (status === 200) {
+    if (ended) return `a truncated 200: ${bytes} byte(s) and a body that ended normally, which a visitor can't tell from a whole answer`;
+    if (/^(TimeoutError|AbortError)\b/.test(String(error ?? ""))) return `the body hung until the run gave up (${error}), which isn't an abort`;
+    if (!body.startsWith("start\n")) return `a 200 whose body failed, but began ${JSON.stringify(body.slice(0, 20))}, not the module's start`;
+  } else return `answered ${status}, not 502 app_error or a 200 whose body was aborted`;
+  const problems = codeHeaderProblems(headers ?? []);
+  return problems.length ? problems.join("; ") : null;
+}
+
+/** What a visitor got from an app that passed a limit after its headers: one line, for the run's output. */
 export function afterHeadersLine({ status, contentType, cacheControl, allowOrigin, text, bytes, ended, error, ms }) {
   const seen = JSON.stringify(String(text ?? "").slice(0, 60));
   return `status ${status ?? "none"}, content-type ${contentType ?? "none"}, cache-control ${cacheControl ?? "none"}, allow-origin ${allowOrigin ?? "none"}; body ${bytes} byte(s) ${seen}; ${ended ? "the body ended normally" : `the body ended with ${error ?? "nothing"}`}; ${ms} ms`;

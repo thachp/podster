@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
+  afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
   Results, runOutcome, SIGN_UPS, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 
@@ -51,7 +51,7 @@ const check = (passed, title) => {
 {
   const ids = PLAN.map((entry) => entry.id);
   check(new Set(ids).size === ids.length, "every check's ID is its own");
-  check(JSON.stringify(PLAN.filter((e) => e.outOfScope).map((e) => e.id)) === '["M6-CX1"]' && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === '["M6-C09"]', "one check is out of scope (the store's deletion) and one only recorded (a limit after the headers)");
+  check(JSON.stringify(PLAN.filter((e) => e.outOfScope).map((e) => e.id)) === '["M6-CX1"]' && JSON.stringify(PLAN.filter((e) => e.recordOnly).map((e) => e.id)) === "[]", "one check is out of scope (the store's deletion), and none is only recorded: C09 is judged since 2026-11-26");
   const owed = ["marker", "read", "budget", "fetch", "connect()", "spins", "after its answer's headers", "Unpublish"];
   check(owed.every((word) => PLAN.some((entry) => entry.title.includes(word))), "every item the plan owes a staging run has a check");
   const outcome = (status) => {
@@ -66,12 +66,14 @@ const check = (passed, title) => {
   partial.add("M6-C01", "pass");
   check(runOutcome(partial, PLAN).code === 1, "a judged check with no result fails the run");
   const lines = [];
-  const printed = new Results(PLAN, (line) => lines.push(line));
+  // A plan with one recorded-only entry, to show how one prints: the run's own plan has none.
+  const TOY = [...PLAN, { id: "T-R01", title: "a toy record", outOfScope: null, recordOnly: "a toy" }];
+  const printed = new Results(TOY, (line) => lines.push(line));
   printed.add("M6-C01", "pass");
   printed.add("M6-C02", "fail", "why");
   printed.add("M6-CX1", "outOfScope", "why");
-  printed.add("M6-C09", "recorded", "seen");
-  check(["PASS M6-C01", "FAIL M6-C02", "OUT OF SCOPE M6-CX1", "RECORDED M6-C09"].every((start, at) => lines[at].startsWith(start)), "results print as PASS, FAIL, OUT OF SCOPE and RECORDED");
+  printed.add("T-R01", "recorded", "seen");
+  check(["PASS M6-C01", "FAIL M6-C02", "OUT OF SCOPE M6-CX1", "RECORDED T-R01"].every((start, at) => lines[at].startsWith(start)), "results print as PASS, FAIL, OUT OF SCOPE and RECORDED");
   const refuses = (fn) => {
     try {
       fn();
@@ -80,7 +82,7 @@ const check = (passed, title) => {
       return true;
     }
   };
-  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "pass")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "pass")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, nor the others judged, nor any added twice");
+  check(refuses(() => new Results(PLAN, () => {}).add("M6-C01", "outOfScope")) && refuses(() => new Results(PLAN, () => {}).add("M6-CX1", "pass")) && refuses(() => new Results(TOY, () => {}).add("T-R01", "pass")) && refuses(() => new Results(PLAN, () => {}).add("M6-C09", "recorded")) && refuses(() => printed.add("M6-C01", "pass")), "a judged check can't be out of scope or recorded, nor the others judged, nor any added twice");
   check(SIGN_UPS.length === 2, "the run plans 2 takes of the test sign-up");
   check(parseArgs(["--base-url", STAGING]).options?.base === STAGING && Boolean(parseArgs(["--base-url", "https://example.com"]).error) && parseArgs(["--help"]).options?.help === true, "the arguments are the release run's: staging only");
 }
@@ -222,6 +224,19 @@ try {
 
   const line = afterHeadersLine({ status: 200, contentType: "text/plain", cacheControl: "no-store", allowOrigin: "null", text: "start\n", bytes: 6, ended: false, error: "TypeError (UND_ERR_SOCKET)", ms: 900 });
   check(line.includes("status 200") && line.includes("6 byte(s)") && line.includes("TypeError"), "what a visitor got after the headers is one line");
+
+  // C09, judged since 2026-11-26: an aborted body or the content Worker's own 502 passes; a clean truncated 200 fails.
+  const seenAs = (over) => ({ status: 200, headers: good, text: "start\n", bytes: 6, ended: false, error: "TypeError (UND_ERR_SOCKET)", ms: 900, ...over });
+  check(afterHeadersProblem(seenAs({})) === null, "a 200 whose body was aborted after the module's start passes");
+  check(afterHeadersProblem(seenAs({ error: "TypeError (ERR_STREAM_PREMATURE_CLOSE)" })) === null, "an aborted body passes whatever the socket's error code");
+  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", bytes: 10, ended: true, error: undefined })) === null, "the content Worker's own 502 app_error, held before the headers, passes");
+  check(afterHeadersProblem(seenAs({ ended: true, error: undefined }))?.includes("truncated 200"), "a truncated 200 whose body ended normally fails: staging's 2026-11-25 answer");
+  check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }))?.includes("didn't stop"), "a whole answer fails: the limit didn't stop the module");
+  check(afterHeadersProblem(seenAs({ error: "TimeoutError" }))?.includes("hung"), "a body that only hung until the run gave up isn't an abort");
+  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", ended: false, bytes: 3 })) !== null && afterHeadersProblem(seenAs({ status: 502, text: "other\n", ended: true, error: undefined })) !== null, "a 502 whose body failed, or that isn't app_error, fails");
+  check(afterHeadersProblem(seenAs({ headers: good.map(([n, v]) => [n, n === "cache-control" ? "public, max-age=60" : v]) })) !== null, "an aborted 200 without the fixed headers fails");
+  check(afterHeadersProblem(seenAs({ text: "", bytes: 0 })) !== null, "an aborted 200 that didn't begin with the module's start fails");
+  check(afterHeadersProblem({ status: undefined, error: "TypeError (ECONNRESET)" }) !== null && afterHeadersProblem(seenAs({ status: 500, ended: true })) !== null, "no answer, or any other status, fails");
 }
 
 // ---- the script's source ----
@@ -260,7 +275,7 @@ try {
   {
     const dry = script([...base, "--dry-run"], { mode: "edge-down" });
     check(dry.code === 0 && dry.out.includes("Nothing was sent") && dry.requests === 0, "a dry run on this checkout's contract exits 0 and sends nothing");
-    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope:") && dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the out-of-scope and recorded ones");
+    check(PLAN.every((entry) => dry.out.includes(entry.id)) && dry.out.includes("[out of scope:") && !dry.out.includes("[recorded, not judged:"), "the dry run prints every check, marking the out-of-scope one, and none as only recorded");
     const missingGrant = script([...base, "--dry-run", "--contract", noGrant], { mode: "edge-down" });
     check(missingGrant.code === EXIT.releaseNotOn && missingGrant.out.includes("no route gives a deploy grant") && missingGrant.requests === 0, "a contract without the deploy grant exits 3, naming it, and sends nothing");
     const noSecret = script([...base, "--dry-run"], { mode: "edge-down", secret: null });

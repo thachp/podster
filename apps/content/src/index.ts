@@ -36,6 +36,7 @@ export default {
       entries: { get: (key, options) => env.SERVE.get(key, options) },
       apps: { get: (name, args, options) => env.APPS.get(name, args, options) },
       now: () => Date.now(),
+      wait: (ms) => new Promise((done) => setTimeout(done, ms)),
       stop,
       // Anything but a string is no domain, and then every host is not-found.
       domain: typeof env.CONTENT_DOMAIN === "string" ? env.CONTENT_DOMAIN : "",

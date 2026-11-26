@@ -733,6 +733,11 @@ jobs:
       # expects, the app's module run with stand-ins, how it judges a host's answers, and its refusals before anything is sent.
       - run: node m6-code-app-staging-selftest.mjs
         working-directory: e2e
+      # M6's staging run for custom domains, without a network: its plan and exit code, the figures it reads from core and
+      # the content Worker, the guard every DNS write goes through, its DNS client against a stand-in, and its refusals
+      # before it takes a sign-up or writes DNS.
+      - run: node m6-custom-domain-staging-selftest.mjs
+        working-directory: e2e
       # The scripts agents merge, deploy and probe with: every refusal, with stand-ins for gh, wrangler and curl. The content
       # Worker's deploy (M6 step 4(b)): every refusal makes no changing call, the token is in no argument or output, and
       # --deploy needs a terminal. It deploys nothing. These three are the slowest, so they run side by side; each has its

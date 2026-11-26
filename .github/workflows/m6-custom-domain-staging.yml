@@ -1,0 +1,58 @@
+name: M6 custom domain staging
+
+# M6's staging acceptance test for custom domains, e2e/m6-custom-domain-staging.mjs (M6-X14, M6-X15, M6-X26), from
+# GitHub's network: the owner's machine sits behind a web filter that blocks the content domain, podster.site, as for
+# m6-code-app-staging.yml. Run by hand only: `gh workflow run m6-custom-domain-staging.yml`, then `gh run watch`.
+#
+# It runs against staging, the one host the script accepts; podster.site, the content domain; and Cloudflare's DNS API
+# for opster.dev, the test customer's domain, through one guard that writes only TXT challenges and CNAMEs under the
+# run's own random label and deletes only what the run made.
+#
+# One job, in the environment `staging-dns`, deployable from main only, which holds the three secrets it needs:
+# OPSTER_DNS_TOKEN (Zone, DNS, Edit on opster.dev alone, with an expiry), OPSTER_ZONE_ID, and its own copy of
+# PODSTER_E2E_SIGNUP_SECRET. The owner sets them with scripts/wizards/opster-dns-token.sh. A job can use one environment,
+# and the run interleaves API and DNS writes for minutes, so splitting it into two jobs would mean handing a session or
+# the token from one job to the other; a copy of the sign-up secret in this environment is the narrower choice, and
+# keeps the DNS token out of `staging-e2e`, which m6-code-app-staging.yml uses. The secrets reach the test step alone,
+# as environment variables, never written into a command; the script reads the DNS pair once and drops them from its
+# environment. The job's GITHUB_TOKEN can read this repository and nothing else, and checkout doesn't keep it. The test
+# pushes to the repository it has Podster make in podsterdev with the coding agent's own short-lived token, and leaves
+# the three repositories for the owner to delete.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The code app run's group: both take the test sign-up's limits and serve on the same content domain, so one at a time.
+concurrency:
+  group: m6-code-app-staging
+  cancel-in-progress: false
+
+jobs:
+  custom-domain:
+    runs-on: ubuntu-latest
+    environment: staging-dns
+    # The run's own waits come to at most about 60 minutes: three repositories, the merge and the release 5 each, the
+    # pending hold 2.5, the claim and the race 5, Cloudflare active 15, the route 10 and the removal 3. It usually takes
+    # far less; the margin is for clean-up, which runs on every way out.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # No package's install script runs: the test needs the packages' code only, and no browser.
+      - run: npm ci --ignore-scripts
+        working-directory: e2e
+      # Checks itself before it sends anything: its plan, its DNS guard and its refusals, against stand-ins.
+      - run: node m6-custom-domain-staging-selftest.mjs
+        working-directory: e2e
+      - run: node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev
+        working-directory: e2e
+        env:
+          PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}
+          OPSTER_DNS_TOKEN: ${{ secrets.OPSTER_DNS_TOKEN }}
+          OPSTER_ZONE_ID: ${{ secrets.OPSTER_ZONE_ID }}

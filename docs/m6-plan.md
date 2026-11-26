@@ -786,7 +786,26 @@ The architect proposes the gate call, for the owner to review.
 - **The PRs that got there:** #591 and #592, spike H and its socket control; #594, which flipped [the gate for apps with code](#the-gate-for-apps-with-code-flipped-2026-11-25), fixed `ASSETS_CONFIG` and made sure `run_worker_first` is never sent; #595, [the content Worker serving code](#the-content-worker-serves-apps-with-code-built-2026-11-25), with limits on every dispatch; #597, the content probes from CI; and #598, the run itself.
 - **The per-dispatch limits,** 50 CPU ms and 50 subrequests, were the architect's figures of 2026-11-25. They weren't measured, and were for the owner to review.
 
-**Still open, and not covered by this call:** CX1, the store's deletion, which needs a check from the operator's side; C09's truncated `200`; the owner's review of the limits; custom domains (M6-X14, M6-X15 and M6-X26); and `RELEASES` and a provider in production, which are the owner's. The owner's machine couldn't reach `*.podster.site`, so checks on `podster.site` ran from CI. The gate above, as written, still holds for what is open.
+**Still open, and not covered by this call:** CX1, the store's deletion, which needs a check from the operator's side; C09's truncated `200`; the owner's review of the limits; custom domains (M6-X14, M6-X15 and M6-X26); and `RELEASES` and a provider in production, which are the owner's. The owner's machine couldn't reach `*.podster.site`, so checks on `podster.site` ran from CI. The gate above, as written, still holds for what is open. *2026-11-26: the owner accepted the custom-domains gate as met for staging, with X14-4 owed before production: [the call](#the-owners-call-2026-11-26-custom-domains-for-staging).*
+
+### The owner's call, 2026-11-26: custom domains, for staging
+
+**The owner accepted M6's custom-domains gate as met for staging** on 2026-11-26, on that day's runs of `e2e/m6-custom-domain-staging.mjs` from GitHub Actions (workflow `m6-custom-domain-staging.yml`), with the X14-4 gap below owed before production.
+
+- **The first run,** [45796822191](https://github.com/thachp/podster/actions/runs/45796822191) at main `e57b6743`: **6 passed, 1 failed, 3 out of scope, 1 recorded.** Everything in scope passed except X15-2, which timed out: a room looked for its challenge as soon as it asked, before the run had published it, and the resolver cached the empty answer past the wait. PR #607 fixed that by publishing a placeholder at the race's challenge name before either room asks.
+- **The second run,** [45803085099](https://github.com/thachp/podster/actions/runs/45803085099) at main `b73694c8`: **7 passed, 0 failed, 3 out of scope, 1 recorded,** in 528 s with 2 sign-ups. Every in-scope check passed:
+  - **X15-1:** 12 names and 2 bodies refused with their codes, and no request left behind.
+  - **X14-1:** held pending (`proof_pending`) with the `CNAME` in place and only another room's challenge published; no custom host, and the name didn't serve the room's marker.
+  - **X15-2:** of rooms B and C racing for one name, one was claimed and the other refused `hostname_claimed`, settled 148 s after both challenges were published. *The run's line said "room A claimed"; that was a labelling bug in the script, not the outcome, fixed in the PR that recorded this.*
+  - **X26-1:** another room's value didn't claim the name during the hold; the room was claimed 31.3 s after publishing its own challenge.
+  - **X14-2:** Cloudflare read the custom hostname `active` 119.1 s after the claim, and the release configuration named it as `custom_host`.
+  - **X14-3:** over HTTPS on the custom name, the marker named the room's served release and merge commit, and the index came with the content Worker's fixed headers, HSTS without `includeSubDomains`, and no cookie.
+  - **X14-5:** after removal the request went `ending`, the configuration named no custom host at once, and the name stopped serving the marker within 46.4 s.
+- **Out of scope, for the reasons the run gives:** X14-6, a removed claim reaching `ended`, takes at least 20 minutes after the delete, so the run leaves the request `ending` and the API's tests check the count; X26-2, the 72-hour expiry, and X26-3, the daily recheck, are time-dependent, staging has no test clock, and `crates/core`'s and the API's own tests check them.
+- **Recorded, X14-4, and a gap owed before production.** The certificate served for the name was `opster.dev`'s own `*.opster.dev` certificate from Let's Encrypt. `opster.dev` is itself a Cloudflare zone, so this was orange-to-orange, and the run doesn't show that Cloudflare's HTTP certificate validation for a custom hostname passes with the `*/*` route and its no-Worker validation routes in place (the item owed in [content-deploy.md](content-deploy.md#owed)). Showing it needs a test customer domain whose DNS isn't on Cloudflare, for example a subdomain of `opster.dev` delegated to a DNS host other than Cloudflare.
+- **The PRs that got there:** #604, the run itself; #606, the fix to the `opster.dev` token wizard, whose zone check asked for one DNS record; and #607, the race's placeholder.
+
+**Still open, and not covered by this call:** X14-4's certificate validation off Cloudflare, before custom domains reach production; X14-6, X26-2 and X26-3 on a deployment; and `RELEASES` and a provider in production, which are the owner's.
 
 ## What M6 needs from earlier milestones
 

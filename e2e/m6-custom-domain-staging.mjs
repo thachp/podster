@@ -326,9 +326,9 @@ async function main() {
     const both = await run.within(left, "the race's outcome", async () => [await requestOf(rooms.b), await requestOf(rooms.c)], ([b, c]) => b?.state !== "pending" && c?.state !== "pending", 5000);
     const [b, c] = both.value;
     for (const [request, label] of [[b, "B"], [c, "C"]]) eq(request?.hostname, NAMES.race, `room ${label}'s request's name`);
-    const outcome = raceOutcome(b, c);
+    const outcome = raceOutcome(b, c, ["B", "C"]);
     ok(!outcome.problem, outcome.problem);
-    return `room ${outcome.winner.toUpperCase()} claimed ${NAMES.race}; the other was refused ${outcome.reason}; settled ${Math.round((Date.now() - raceStarted) / 1000)} s after both challenges were published`;
+    return `room ${outcome.winner} claimed ${NAMES.race}; the other was refused ${outcome.reason}; settled ${Math.round((Date.now() - raceStarted) / 1000)} s after both challenges were published`;
   });
 
   say(`\n## room A's own challenge for ${NAMES.main}`);

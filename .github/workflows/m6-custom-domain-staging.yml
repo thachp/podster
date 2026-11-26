@@ -11,6 +11,15 @@ name: M6 custom domain staging
 # Cloudflare uses orange-to-orange and serves opster.dev's own certificate, and X14-4 is only recorded. The input
 # reaches the script through `env` alone, checked against the two values, never written into the command.
 #
+# The input `test_domain` (2026-11-26): `opster.dev`, the default, is the full run above. `war3.org`
+# (`-f test_domain=war3.org`) is manual-DNS mode: run 45832698985 (dns-only, opster.dev) still served opster.dev's own
+# certificate, since Cloudflare picks the customer zone's certificate whenever the name is under a Cloudflare zone, so
+# X14-4 needs a domain off Cloudflare. war3.org's DNS is at Squarespace, which has no DNS API: the run prints the TXT
+# challenge and the CNAME for room A's one name, the owner adds them by hand while watching this log, and the run reads
+# them from war3.org's own name servers for up to 30 minutes, then runs X14-2 to X14-5 alone. It makes no DNS API call,
+# and the OPSTER_* secrets aren't passed to it. war3.org is the one manual domain, hard-coded in the script's allow-list.
+# The input reaches the script as cname_mode does: through env, checked by a `case`.
+#
 # It runs against staging, the one host the script accepts; podster.site, the content domain; and Cloudflare's DNS API
 # for opster.dev, the test customer's domain, through one guard that writes only TXT challenges and CNAMEs (proxied
 # as the mode says) under the run's own random label and deletes only what the run made.
@@ -36,6 +45,13 @@ on:
           - dns-only
           - proxied
         default: dns-only
+      test_domain:
+        description: "opster.dev runs everything, its DNS through Cloudflare's API; war3.org is manual-DNS mode: the owner adds two records in Squarespace by hand while watching the log"
+        type: choice
+        options:
+          - opster.dev
+          - war3.org
+        default: opster.dev
 
 permissions:
   contents: read
@@ -55,7 +71,12 @@ jobs:
     # listed again, release off in three rooms, the publish wait of 60 s, grants, the agent and sign-outs, each request
     # bounded at 30 s. With the install and the self-test, 90 leaves about 15 minutes of margin. Should it still hit
     # the limit, the SIGTERM that follows removes the DNS records and hostname requests first.
-    timeout-minutes: 90
+    # Manual mode (war3.org) waits, at its worst, about 81 minutes: one repository 5, the merge and the release 5 each, the
+    # owner's records 30, the claim 8 (the SOA minimum of 300 s a resolver may cache a miss for, two of the proof job's
+    # looks and a minute), Cloudflare active 15, the route 10 and the removal 3. Clean-up for one room is shorter, about
+    # 4. With the install and the self-test, 105 leaves about 15 minutes of margin in either mode; the SIGTERM fast path
+    # is kept, and in manual mode it prints the two records to delete first.
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -69,16 +90,22 @@ jobs:
       # Checks itself before it sends anything: its plan, its DNS guard and its refusals, against stand-ins.
       - run: node m6-custom-domain-staging-selftest.mjs
         working-directory: e2e
-      # The mode comes through env and is checked against its two values before it is passed as one quoted argument.
+      # The mode and the test domain come through env and are each checked against their values before they are passed
+      # as quoted arguments. In manual mode (war3.org) the OPSTER_* secrets are empty: neither needed nor read.
       - run: |
           case "$CNAME_MODE" in
             dns-only | proxied) ;;
             *) echo "cname_mode must be dns-only or proxied" >&2; exit 2 ;;
           esac
-          exec node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev --cname-mode "$CNAME_MODE"
+          case "$TEST_DOMAIN" in
+            opster.dev | war3.org) ;;
+            *) echo "test_domain must be opster.dev or war3.org" >&2; exit 2 ;;
+          esac
+          exec node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev --cname-mode "$CNAME_MODE" --test-domain "$TEST_DOMAIN"
         working-directory: e2e
         env:
           CNAME_MODE: ${{ inputs.cname_mode || 'dns-only' }}
+          TEST_DOMAIN: ${{ inputs.test_domain || 'opster.dev' }}
           PODSTER_E2E_SIGNUP_SECRET: ${{ secrets.PODSTER_E2E_SIGNUP_SECRET }}
-          OPSTER_DNS_TOKEN: ${{ secrets.OPSTER_DNS_TOKEN }}
-          OPSTER_ZONE_ID: ${{ secrets.OPSTER_ZONE_ID }}
+          OPSTER_DNS_TOKEN: ${{ inputs.test_domain != 'war3.org' && secrets.OPSTER_DNS_TOKEN || '' }}
+          OPSTER_ZONE_ID: ${{ inputs.test_domain != 'war3.org' && secrets.OPSTER_ZONE_ID || '' }}

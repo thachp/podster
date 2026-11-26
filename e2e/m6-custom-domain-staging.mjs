@@ -10,7 +10,16 @@
 //   and the certificate served for it (the first live check of HTTP validation with the `*/*` route);
 // - removal: the request ending, and the name no longer serving.
 //
-//   node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev [--cname-mode dns-only|proxied] [--dry-run]
+//   node m6-custom-domain-staging.mjs --base-url https://gateway-staging.podster.dev [--cname-mode dns-only|proxied] [--test-domain opster.dev|war3.org] [--dry-run]
+//
+// Manual-DNS mode (2026-11-26), `--test-domain war3.org`, the one domain of MANUAL_DOMAINS. Run 45832698985 (dns-only,
+// opster.dev) still served opster.dev's own certificate: Cloudflare picks the customer zone's certificate whenever the
+// name is under a Cloudflare zone, so X14-4 needs a customer domain off Cloudflare. war3.org's DNS is at Squarespace,
+// which has no DNS API. Only room A's path runs: sign-up, organization, room A, its repository and release, and the ask
+// for `cd-<random>.war3.org`. The run prints the TXT challenge and the CNAME as one block to copy (again every 5
+// minutes), the owner adds them by hand, the run reads them from war3.org's own name servers for up to 30 minutes, then
+// X14-2 to X14-5. No race, no decoy, no rooms B or C, no DNS API call, and OPSTER_* aren't read. Every way out, SIGTERM
+// included, prints the two records to delete.
 //
 // The CNAME mode (2026-11-26). By default the name's CNAME to the fallback origin is DNS-only, as a customer whose DNS
 // isn't on Cloudflare publishes it: the content zone's custom hostname then serves its own certificate, issued by HTTP
@@ -44,11 +53,13 @@
 // twice ten minutes apart; the run doesn't wait for that. Left behind, as every staging run's are: the two test people,
 // the organization, the rooms and the task, and the three repositories, which it prints for the owner to delete.
 import { randomBytes } from "node:crypto";
+import { Resolver } from "node:dns/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import {
+  authoritativeLookup, deleteRecordsLine, manualRecords, MANUAL_CLAIM_WAIT_S, MANUAL_DNS_WAIT_MS, MANUAL_POLL_MS, MANUAL_REPRINT_MS, recordBlock, recordsSeen,
   certificateLine, certificateProblem, challengeName, CNAME_TARGET, CONTENT_DOMAIN, contentNotFoundProblem, customHeaderProblems, defaultHostProblem, DEPLOY_GRANT, deployGrantProblem, dnsClient, dnsEnvProblem, EXIT, markerBody, parseArgs, PENDING_HOLD_MS, planFor, RACE_SETTLE_MS, raceOutcome,
   REFUSED_BODIES, REFUSED_NAMES, requestProblem, reservedProblem, Results, resultUrlProblem, runLabel, runNames, runOutcome, secretProblem, SIGN_UPS, SITE, slowestLine, STAGING, STAGING_ORG, TEST_DOMAIN, unclaimedLine, unknownLabel, USAGE,
 } from "./m6-custom-domain-staging-lib.mjs";
@@ -65,19 +76,27 @@ if (options.help) {
   console.log(USAGE);
   process.exit(0);
 }
-/** The checks for this run's CNAME mode: X14-4 is judged with a DNS-only CNAME and only recorded with a proxied one. */
-const PLAN = planFor(options.cnameMode);
+/**
+ * The checks for this run's CNAME mode and test domain: X14-4 is judged with a DNS-only CNAME and only recorded with a
+ * proxied one; in manual mode only X14-2 to X14-5 run.
+ */
+const PLAN = planFor(options.cnameMode, options.testDomain);
 const DNS_ONLY = options.cnameMode === "dns-only";
-// Read once, and taken out of the environment, so nothing this process starts can inherit them.
+/** Manual-DNS mode: the owner adds the records by hand, and the run makes no DNS API call. */
+const MANUAL = options.manual;
+// Read once, and taken out of the environment, so nothing this process starts can inherit them. In manual mode the DNS
+// pair isn't read at all.
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
-const dnsProblem = dnsEnvProblem(process.env);
-const dnsToken = process.env.OPSTER_DNS_TOKEN;
-const zoneId = process.env.OPSTER_ZONE_ID;
+const dnsProblem = MANUAL ? null : dnsEnvProblem(process.env);
+const dnsToken = MANUAL ? undefined : process.env.OPSTER_DNS_TOKEN;
+const zoneId = MANUAL ? undefined : process.env.OPSTER_ZONE_ID;
 delete process.env.OPSTER_DNS_TOKEN;
 delete process.env.OPSTER_ZONE_ID;
 
 const LABEL = runLabel(randomBytes(10));
-const NAMES = runNames(LABEL);
+const NAMES = runNames(LABEL, options.testDomain);
+/** In manual mode, the records printed for the owner once room A has asked: every way out says to delete them. */
+let manualShown = null;
 
 // ---- the configuration, before anything is sent ----
 
@@ -90,11 +109,12 @@ const readText = (path) => {
 };
 {
   const grantProblem = deployGrantProblem(readText(options.contract ?? join(here, "../packages/contracts/openapi.yaml")));
-  const reserved = reservedProblem(readText(options.coreHostnames ?? join(here, "../crates/core/src/hostnames.rs")));
+  const reserved = reservedProblem(readText(options.coreHostnames ?? join(here, "../crates/core/src/hostnames.rs")), options.testDomain);
   console.log(`M6's staging run for custom domains, against ${STAGING}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
   console.log(`\nSign-ups this run takes: ${SIGN_UPS.length}, of the test sign-up's 6 a minute and 40 a day.`);
   for (const { who, why } of SIGN_UPS) console.log(`  - ${who}: ${why}`);
-  console.log(`\nTest domain: ${TEST_DOMAIN}. This run's names: ${NAMES.main} (mapped and routed) and ${NAMES.race} (raced for). CNAME target: ${CNAME_TARGET}, ${DNS_ONLY ? "DNS-only (the default): X14-4 judges the custom hostname's own certificate" : "proxied: orange-to-orange, so X14-4 only records the customer zone's certificate"}. GitHub organization: ${STAGING_ORG}.`);
+  if (MANUAL) console.log(`\nTest domain: ${NAMES.domain}, manual-DNS mode: the owner adds the records by hand in Squarespace, and the run makes no DNS API call. This run's name: ${NAMES.main} (room A alone; no race, no decoy, no rooms B or C). CNAME target: ${CNAME_TARGET}, DNS-only: X14-4 judges the custom hostname's own certificate. The records are waited for up to ${MANUAL_DNS_WAIT_MS / 60_000} minutes, then the claim at least ${MANUAL_CLAIM_WAIT_S} s. GitHub organization: ${STAGING_ORG}.`);
+  else console.log(`\nTest domain: ${TEST_DOMAIN}. This run's names: ${NAMES.main} (mapped and routed) and ${NAMES.race} (raced for). CNAME target: ${CNAME_TARGET}, ${DNS_ONLY ? "DNS-only (the default): X14-4 judges the custom hostname's own certificate" : "proxied: orange-to-orange, so X14-4 only records the customer zone's certificate"}. GitHub organization: ${STAGING_ORG}.`);
   console.log(`Waits, in seconds: repository ${options.setupWait}, merge ${options.mergeWait}, release ${options.releaseWait}, claim ${options.claimWait}, active ${options.activeWait}, serve ${options.serveWait}, takedown ${options.takedownWait}; the pending hold ${PENDING_HOLD_MS / 1000}.`);
   if (options.dryRun) {
     console.log(`\nThe ${PLAN.length} checks, in order:`);
@@ -126,7 +146,7 @@ const run = releaseRun({ signupSecret, options, runName: RUN, workPrefix: "podst
 run.secret(dnsToken);
 run.secret(zoneId);
 const { say, hostAsk, marker } = run;
-const dns = dnsClient({ token: dnsToken, zoneId, root: NAMES.root, cnameMode: options.cnameMode, fetch: (...args) => fetch(...args), log: (line) => say(`     ${line}`) });
+const dns = MANUAL ? null : dnsClient({ token: dnsToken, zoneId, root: NAMES.root, cnameMode: options.cnameMode, fetch: (...args) => fetch(...args), log: (line) => say(`     ${line}`) });
 const results = new Results(PLAN, say);
 
 // ---- checks ----
@@ -161,6 +181,8 @@ const after = (...ids) => {
 let owner, admin, coder, team, task, host, releaseId;
 /** The three rooms: A releases and maps the run's name; B and C race for another. */
 const rooms = { a: null, b: null, c: null };
+/** The rooms this run made: A alone in manual mode. */
+const roomsMade = () => Object.values(rooms).filter(Boolean);
 const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, sleep });
 /** Rooms where release may be on: clean-up switches it off. */
 const releaseOn = new Set();
@@ -174,7 +196,7 @@ const requestOf = async (room) => (await owner.must("GET", hostnamePath(room))).
 async function askFor(room, hostname) {
   asked.add(room);
   const answer = await owner.dash("PUT", hostnamePath(room), { hostname });
-  if (answer.status === 409 && answer.code === "hostname_reserved" && hostname.endsWith(`.${TEST_DOMAIN}`)) throw new NotOn(`${hostname} was refused hostname_reserved: ${TEST_DOMAIN} is one of the deployed API's reserved domains`);
+  if (answer.status === 409 && answer.code === "hostname_reserved" && hostname.endsWith(`.${NAMES.domain}`)) throw new NotOn(`${hostname} was refused hostname_reserved: ${NAMES.domain} is one of the deployed API's reserved domains`);
   if (answer.status === 409 && answer.code === "hostname_unavailable") throw new NotOn("a name was refused hostname_unavailable: the deployment can't classify names (no content domain, or no Public Suffix List)");
   if (answer.status === 409 && answer.code === "release_not_available") throw new NotOn("a name was refused release_not_available: the release path isn't complete on staging");
   ok(answer.ok, `asking for ${hostname}: HTTP ${answer.status} ${answer.code ?? ""}`);
@@ -253,23 +275,25 @@ async function main() {
     await admin.must("POST", "/org-invitations/accept", { token: run.secret(invited.token) });
     admin.org = admin.actingOrg = team;
   }
-  rooms.b = await owner.createRoom(`${RUN} B`);
-  run.leftBehind.push(`room ${rooms.b}`);
-  rooms.c = await owner.createRoom(`${RUN} C`);
-  run.leftBehind.push(`room ${rooms.c}`);
-  say(`     organization ${team}; rooms A ${rooms.a}, B ${rooms.b}, C ${rooms.c}`);
-  for (const room of Object.values(rooms)) await run.addPerson(owner, team, admin, "admin", room);
+  if (!MANUAL) {
+    rooms.b = await owner.createRoom(`${RUN} B`);
+    run.leftBehind.push(`room ${rooms.b}`);
+    rooms.c = await owner.createRoom(`${RUN} C`);
+    run.leftBehind.push(`room ${rooms.c}`);
+  }
+  say(`     organization ${team}; rooms A ${rooms.a}${MANUAL ? " alone (manual mode)" : `, B ${rooms.b}, C ${rooms.c}`}`);
+  for (const room of roomsMade()) await run.addPerson(owner, team, admin, "admin", room);
   coder = await run.agentOf(owner, "coder");
   run.leftBehind.push(`agent ${coder.id}`);
   await owner.addAgent(rooms.a, coder);
-  for (const [key, room] of Object.entries(rooms)) await run.setUpRepository(owner, room, `cd-${key}`);
+  for (const [key, room] of Object.entries(rooms)) if (room) await run.setUpRepository(owner, room, `cd-${key}`);
   await run.give(owner, coder, "push", rooms.a);
   await run.give(owner, admin, "merge", rooms.a);
   task = await run.newTask({ owner, coder, reviewer: admin }, "site", rooms.a);
   await run.changeAndMerge({ owner, coder, merger: admin }, task, SITE);
 
-  say("\n## release on in each room, and room A's release served");
-  for (const room of Object.values(rooms)) await publicWithRelease(room);
+  say(`\n## release on in ${MANUAL ? "room A" : "each room"}, and room A's release served`);
+  for (const room of roomsMade()) await publicWithRelease(room);
   await run.give(owner, coder, DEPLOY_GRANT.action, rooms.a);
   {
     const requested = await coder.must("deploy_release", { workspace_id: rooms.a, task_id: task.id, commit_sha: task.mergeSha });
@@ -285,6 +309,8 @@ async function main() {
     eq(config.custom_host, null, "room A's custom host before any request");
     say(`     release ${releaseId} served after ${seconds} s at the app's default host`);
   }
+
+  if (MANUAL) return manualChecks();
 
   say("\n## refused names");
   await check("X15-1", async () => {
@@ -363,6 +389,11 @@ async function main() {
     return `setup_status active ${seconds} s after the claim`;
   });
 
+  await servedChecks();
+}
+
+/** X14-3 to X14-5, once X14-2 has passed or failed: in both modes. */
+async function servedChecks() {
   await check("X14-3", async () => {
     after("X14-2");
     // Any answer but the marker naming this release is waited out: before the route, the name may answer an error or
@@ -382,7 +413,7 @@ async function main() {
     await check("X14-4", async () => {
       after("X14-3");
       const cert = await certificateOf(NAMES.main);
-      const problem = certificateProblem(cert, NAMES.main);
+      const problem = certificateProblem(cert, NAMES.main, { domain: NAMES.domain });
       ok(problem === null, `${problem}; the certificate ${certificateLine(cert, NAMES.main)}`);
       return `the custom hostname's own certificate: ${certificateLine(cert, NAMES.main)}`;
     });
@@ -406,6 +437,56 @@ async function main() {
   });
 }
 
+/**
+ * Manual-DNS mode, once room A's release is served: room A asks for its one name, the run prints the two records for the
+ * owner to add by hand (again every 5 minutes), reads them from the domain's own name servers for up to 30 minutes, then
+ * waits for the claim, Cloudflare active, and the served checks. No DNS API call.
+ */
+async function manualChecks() {
+  say(`\n## ${NAMES.main}: room A asks, and the owner adds the records by hand`);
+  const requestA = await askFor(rooms.a, NAMES.main);
+  manualShown = manualRecords(NAMES.main, requestA.challenge_value);
+  const lookup = authoritativeLookup({ domain: NAMES.domain, Resolver, fetch: (...args) => fetch(...args) });
+  try {
+    const { names } = await lookup.nameServers();
+    say(`     ${NAMES.domain}'s name servers, asked directly: ${names.join(", ")}`);
+  } catch (error) {
+    say(`     ${NAMES.domain}'s name servers couldn't be found yet (${cause(error)}): the run keeps asking`);
+  }
+  const askedAt = Date.now();
+  const deadline = askedAt + MANUAL_DNS_WAIT_MS;
+  say(recordBlock(manualShown, { minutesLeft: MANUAL_DNS_WAIT_MS / 60_000 }));
+
+  await check("X14-2", async () => {
+    let shownAt = Date.now();
+    let last = "";
+    for (;;) {
+      const seen = await recordsSeen(lookup, manualShown);
+      const now = `TXT ${seen.txt ? "seen" : "not seen"}, CNAME ${seen.cname ? "seen" : "not seen"}${lookup.lastVia === "doh" ? " (read over DoH: UDP to the name servers failed)" : ""}${seen.error ? ` (a lookup failed: ${seen.error})` : ""}`;
+      if (now !== last) say(`     at ${NAMES.domain}'s name servers, ${Math.round((Date.now() - askedAt) / 1000)} s after the ask: ${now}`);
+      last = now;
+      if (seen.txt && seen.cname) break;
+      ok(Date.now() < deadline, `the two records weren't both at ${NAMES.domain}'s name servers within ${MANUAL_DNS_WAIT_MS / 60_000} minutes: ${now}`);
+      if (Date.now() - shownAt >= MANUAL_REPRINT_MS) {
+        say(`\n     still waiting for the records: ${now}`);
+        say(recordBlock(manualShown, { minutesLeft: Math.max(0, Math.ceil((deadline - Date.now()) / 60_000)) }));
+        shownAt = Date.now();
+      }
+      await run.pause(MANUAL_POLL_MS);
+    }
+    const seenAfter = Math.round((Date.now() - askedAt) / 1000);
+    // The API's proof check reads through cloudflare-dns.com, which may still hold the challenge's name as missing for
+    // up to the SOA minimum: the claim wait allows for that.
+    const claim = await requestWithin(Math.max(options.claimWait, MANUAL_CLAIM_WAIT_S), "room A's claim", rooms.a, (r) => r?.state !== "pending");
+    eq(requestProblem(claim.value, { hostname: NAMES.main, state: "claimed" }), null, `room A's request${claim.value?.end_reason ? ` (${claim.value.end_reason})` : ""}`);
+    const { value, seconds } = await requestWithin(options.activeWait, "Cloudflare reading the custom hostname active", rooms.a, (r) => r?.setup_status !== "provider_pending");
+    eq(requestProblem(value, { hostname: NAMES.main, state: "claimed", setup: "active" }), null, "room A's request");
+    eq((await configOf(rooms.a)).custom_host, NAMES.main, "room A's custom host");
+    return `both records at ${NAMES.domain}'s name servers ${seenAfter} s after the ask; claimed ${claim.seconds} s later; setup_status active ${seconds} s after the claim`;
+  });
+  await servedChecks();
+}
+
 // ---- clean-up ----
 
 async function cleanUp() {
@@ -423,7 +504,7 @@ async function cleanUp() {
     else if (state) said.push(`room ${room}'s request is ${state}`);
   }
   // Then DNS: every record made, and anything a listing of a name it tried finds there.
-  if (dns.tried.size) {
+  if (dns?.tried.size) {
     const { left, unread, held } = await dns.removeAll().catch((error) => ({ left: [], unread: [...dns.tried], held: [`(${cause(error)})`] }));
     if (!left.length && !unread.length && !held.length) said.push(`every DNS record this run made under ${NAMES.root} is deleted, and a listing of each name finds none`);
     if (left.length) said.push(`DNS records are still listed at ${left.join(", ")}: the owner deletes them in ${TEST_DOMAIN}'s DNS`);
@@ -442,23 +523,40 @@ async function cleanUp() {
     said.push(`the rooms could NOT all be made private again (${cause(error)}): their owner makes them private`);
   }
   said.push(...(await run.cleanUpShared()));
+  if (MANUAL) said.push(deleteRecordsLine(manualShown));
   return said;
 }
 
-// SIGTERM, as GitHub Actions sends a few seconds after SIGINT when a run is cancelled or times out, and at most seconds
-// before SIGKILL: no full clean-up fits. What would outlive the run and cost or expose most goes first, side by side:
-// every DNS record the run made, and every open hostname request removed through the API (each a claim's custom
-// hostname at Cloudflare). Then it exits 143. Left behind: release on, the rooms public, grants, the agent and the
-// sessions, all named in docs/staging.md.
-let terminating = false;
-process.on("SIGTERM", () => {
-  if (terminating) return;
-  terminating = true;
-  console.log("\nSIGTERM: removing DNS records and hostname requests, then exiting without the rest of clean-up.");
+// GitHub Actions, when a run is cancelled or times out, sends SIGINT, then SIGTERM a few seconds later, then SIGKILL
+// seconds after that. Both signals take the same fast path at once, side by side: in manual mode the records to delete
+// are printed first; then every DNS record the run made and every open hostname request (each a claim's custom hostname
+// at Cloudflare) are removed, bounded at 2 s. On SIGINT the run then goes on: m6-release-run.mjs's own SIGINT handler
+// has it stop at its next request, and the full clean-up runs (a second SIGINT quits at once, 130). On SIGTERM no full
+// clean-up fits, so it exits 143. Left behind then: release on, the rooms public, grants, the agent and the sessions,
+// all named in docs/staging.md.
+/** The fast path, once per signal name. Answers when it is done or 2 s have passed. */
+const fastDone = new Map();
+function fastPath(signal) {
+  if (fastDone.has(signal)) return fastDone.get(signal);
+  console.log(`\n${signal}: removing ${MANUAL ? "" : "DNS records and "}hostname requests at once${signal === "SIGTERM" ? ", then exiting without the rest of clean-up" : "; the full clean-up follows"}.`);
+  // Manual mode: the records are the owner's to delete, so say so first, before anything can cut the run short.
+  if (MANUAL) console.log(run.out(deleteRecordsLine(manualShown)));
   const claims = [...asked].map((room) => owner?.dash("DELETE", hostnamePath(room), {}, { timeoutMs: 2000 }).catch(() => null));
-  const bounded = Promise.race([Promise.all([dns.removeMade(), ...claims]), new Promise((done) => setTimeout(done, 2000))]);
-  bounded.finally(() => {
-    console.log(run.out(`SIGTERM clean-up: ${dns.made.size} DNS record(s) still held (${[...dns.made.values()].map((r) => `${r.type} ${r.name}`).join(", ") || "none"}); hostname requests asked to be removed in ${asked.size} room(s). Release, the rooms' publicity, grants, the agent and the sessions are left: see docs/staging.md.`));
+  const bounded = Promise.race([Promise.all([dns ? dns.removeMade().catch(() => null) : 0, ...claims]), new Promise((done) => setTimeout(done, 2000))]).then(() => {
+    const held = dns ? `${dns.made.size} DNS record(s) still held (${[...dns.made.values()].map((r) => `${r.type} ${r.name}`).join(", ") || "none"})` : "no DNS record made through an API (manual mode)";
+    console.log(run.out(`${signal} fast clean-up: ${held}; hostname requests asked to be removed in ${asked.size} room(s).`));
+  });
+  fastDone.set(signal, bounded);
+  return bounded;
+}
+process.on("SIGINT", () => {
+  fastPath("SIGINT");
+});
+process.on("SIGTERM", () => {
+  if (fastDone.has("SIGTERM")) return;
+  fastPath("SIGTERM").finally(() => {
+    console.log(run.out("SIGTERM: release, the rooms' publicity, grants, the agent and the sessions are left: see docs/staging.md."));
+    if (MANUAL) console.log(run.out(deleteRecordsLine(manualShown)));
     process.exit(143);
   });
 });
@@ -491,7 +589,7 @@ try {
   }
   say("     signed out: deploy_release is listed, and the content domain and its fallback origin answer with the content Worker's not found");
 }
-{
+if (!MANUAL) {
   let refusal = null;
   try {
     if (!(await dns.verify())) refusal = "the DNS token isn't active";
@@ -536,6 +634,7 @@ if (notOn) {
   say(`\nCustom domains aren't on with release on staging: ${notOn}. Sign-ups taken: ${run.signUpsAsked}.`);
   say(`Left behind on staging: ${run.leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);
   say(slowestLine(run.requests));
+  if (MANUAL) say(`\n${deleteRecordsLine(manualShown)}`);
   process.exit(EXIT.releaseNotOn);
 }
 const outcome = runOutcome(results, PLAN);
@@ -544,4 +643,5 @@ if (run.signUpUnknown) say("A sign-up's answer was lost in transport: whether st
 if (outcome.unshown.length) say(`Not shown, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
 say(`Left behind on staging: ${run.leftBehind.join("; ") || "nothing"}. Every test session was signed out.`);
 say(slowestLine(run.requests));
+if (MANUAL) say(`\n${deleteRecordsLine(manualShown)}`);
 process.exit(outcome.code);

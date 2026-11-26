@@ -65,6 +65,178 @@ export function cnameProxied(mode) {
 /** How recently a custom hostname's own certificate must have been issued for X14-4 to count it as this run's: 2 days. */
 export const CERT_MAX_AGE_MS = 2 * 24 * 60 * 60_000;
 
+// ---- manual-DNS mode (2026-11-26) ----
+//
+// Run 45832698985 (dns-only, opster.dev) still served opster.dev's own `*.opster.dev` certificate: Cloudflare picks the
+// customer zone's certificate whenever the name is under a Cloudflare zone, proxied or not. X14-4 needs a customer domain
+// whose DNS isn't on Cloudflare. The owner's `war3.org` is at Squarespace, which has no DNS API, so in manual mode the run
+// prints the two records, the owner adds them by hand while watching the log, and the run reads them from war3.org's own
+// name servers. The run makes no DNS API call in this mode.
+
+/** The only domains manual mode accepts. Hard-coded: a domain is added here by a reviewed change, never by an input. */
+export const MANUAL_DOMAINS = Object.freeze(["war3.org"]);
+/** Every test domain a run accepts: the API-driven one, then the manual ones. */
+export const TEST_DOMAINS = Object.freeze([TEST_DOMAIN, ...MANUAL_DOMAINS]);
+/** Whether `domain` is one manual mode accepts. */
+export const isManualDomain = (domain) => MANUAL_DOMAINS.includes(domain);
+/** How long the run waits for the owner's two records to show at the domain's name servers: 30 minutes. */
+export const MANUAL_DNS_WAIT_MS = 30 * 60_000;
+/** How often the record block is printed again while waiting: every 5 minutes. */
+export const MANUAL_REPRINT_MS = 5 * 60_000;
+/** How often the name servers are asked while waiting. */
+export const MANUAL_POLL_MS = 15_000;
+/** war3.org's SOA minimum, in seconds: how long a resolver may cache a miss. Also the TTL suggested for the records. */
+export const MANUAL_SOA_MINIMUM_S = 300;
+/**
+ * The least the claim is waited for once both records show at the name servers: the API's proof check reads through
+ * cloudflare-dns.com, which may have cached the challenge's name missing for up to the SOA minimum, then two of the
+ * proof job's looks, then a minute more.
+ */
+export const MANUAL_CLAIM_WAIT_S = MANUAL_SOA_MINIMUM_S + (2 * PROOF_LOOK_MS) / 1000 + 60;
+/** Where the owner adds the records. */
+export const SQUARESPACE_PATH = (domain) => `Squarespace → Domains → ${domain} → DNS → Custom records`;
+
+/** Whether `name` is a manual run's name: exactly `cd-<10 characters>.<a manual domain>`. */
+export function manualName(name) {
+  if (typeof name !== "string") return false;
+  const at = name.indexOf(".");
+  return at > 0 && RUN_LABEL.test(name.slice(0, at)) && isManualDomain(name.slice(at + 1));
+}
+
+/**
+ * The two records the owner adds by hand for a manual run's name: the TXT challenge and the CNAME to the fallback origin,
+ * each with its full name and the host field Squarespace wants (the name relative to the domain). Throws unless the name
+ * is `cd-<random>.<a manual domain>` and the value is one challenge value.
+ */
+export function manualRecords(hostname, challengeValue) {
+  if (!manualName(hostname)) throw new Error(`manual mode asks only for cd-<random>.<${MANUAL_DOMAINS.join(" or ")}>`);
+  if (!HEX64.test(challengeValue ?? "")) throw new Error("a challenge value is 64 hex characters");
+  const domain = hostname.slice(hostname.indexOf(".") + 1);
+  const relative = (name) => name.slice(0, -(domain.length + 1));
+  const txt = challengeName(hostname);
+  return [
+    { type: "TXT", name: txt, host: relative(txt), value: challengeValue },
+    { type: "CNAME", name: hostname, host: relative(hostname), value: CNAME_TARGET },
+  ].map((record) => ({ ...record, domain, ttl: MANUAL_SOA_MINIMUM_S }));
+}
+
+/** The block the owner copies from the log: both records, with the full name and Squarespace's host field. */
+export function recordBlock(records, { minutesLeft } = {}) {
+  const domain = records[0].domain;
+  const rule = "=".repeat(100);
+  return [
+    rule,
+    `ADD THESE ${records.length} DNS RECORDS for ${domain}, in ${SQUARESPACE_PATH(domain)} → Add record:`,
+    ...records.flatMap((r, i) => [
+      `  ${i + 1}. Type:  ${r.type}`,
+      `     Host:  ${r.host}`,
+      `     Data:  ${r.value}${r.type === "TXT" ? "   (as it is, without quotes)" : ""}`,
+      `     TTL:   ${r.ttl / 60} minutes (${r.ttl} s), or the lowest Squarespace offers`,
+      `     Full name: ${r.name}`,
+    ]),
+    `The run reads them from ${domain}'s own name servers${minutesLeft === undefined ? "" : `, for ${minutesLeft} more minute(s)`}. Delete both when the run ends; it says so.`,
+    rule,
+  ].join("\n");
+}
+
+/** The line every way out prints: the records to delete, or that none were asked for. */
+export function deleteRecordsLine(records) {
+  if (!records?.length) return "No records were asked for in manual mode, so there is nothing to delete in Squarespace.";
+  const domain = records[0].domain;
+  return `Delete these ${records.length} records in Squarespace (${SQUARESPACE_PATH(domain)}): ${records.map((r) => `${r.type} host ${r.host} (${r.name}) → ${r.value}`).join("; ")}.`;
+}
+
+/** Google's DNS-over-HTTPS JSON API: the fallback when the name servers can't be asked over UDP. */
+export const DOH_RESOLVE = "https://dns.google/resolve";
+const DOH_TYPES = { TXT: 16, CNAME: 5 };
+
+/** The strings of one TXT answer's data as Google's JSON gives it: quoted strings, joined; or the data itself. */
+export function dohTxtData(data) {
+  if (typeof data !== "string") return "";
+  const quoted = [...data.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, "$1"));
+  return quoted.length ? quoted.join("") : data;
+}
+
+/**
+ * Read-only lookups at a manual domain's own name servers, found with an NS lookup and asked directly over UDP, so a
+ * resolver's cached miss can't hide a record the owner has just added. When UDP fails or times out (finding the name
+ * servers, or asking them), the same name is asked of Google's DoH JSON API, `dns.google/resolve`, with no caching
+ * asked for; a miss there may be cached up to the SOA minimum, which the claim wait allows for anyway. `Resolver` is
+ * node:dns/promises' class and `fetch` the global one, both passed in. Every name asked for must be a manual run's name
+ * or its challenge's name: nothing else under the domain is read, and nothing is ever written. `lastVia` says how the
+ * last answer was read: `udp` or `doh`.
+ */
+export function authoritativeLookup({ domain, Resolver, fetch, timeoutMs = 5000 }) {
+  if (!isManualDomain(domain)) throw new Error(`authoritative lookups are only for ${MANUAL_DOMAINS.join(" and ")}`);
+  let servers = null;
+  const allowed = (name) => manualName(name) || (name.startsWith(`${CHALLENGE_PREFIX}.`) && manualName(name.slice(CHALLENGE_PREFIX.length + 1)));
+  async function nameServers() {
+    if (servers) return servers;
+    const system = new Resolver({ timeout: timeoutMs, tries: 2 });
+    const names = (await system.resolveNs(domain)).map((n) => n.toLowerCase().replace(/\.$/, "")).sort();
+    const ips = [];
+    for (const name of names) ips.push(...(await system.resolve4(name).catch(() => [])));
+    if (!ips.length) throw new Error(`none of ${domain}'s name servers (${names.join(", ") || "none listed"}) resolved`);
+    servers = { names, ips: [...new Set(ips)] };
+    return servers;
+  }
+  async function doh(name, type) {
+    if (typeof fetch !== "function") throw new Error("UDP failed, and no fetch was given for the DoH fallback");
+    const url = new URL(DOH_RESOLVE);
+    url.searchParams.set("name", name);
+    url.searchParams.set("type", type);
+    const res = await fetch(url.href, { method: "GET", redirect: "manual", headers: { accept: "application/dns-json", "cache-control": "no-cache" }, signal: AbortSignal.timeout(timeoutMs * 2) });
+    if (res.status !== 200) throw new Error(`DoH answered HTTP ${res.status}`);
+    const json = await res.json();
+    if (json?.Status === 3) return [];
+    if (json?.Status !== 0) throw new Error(`DoH answered status ${json?.Status}`);
+    const want = `${name.toLowerCase()}.`;
+    return (json.Answer ?? []).filter((a) => a?.type === DOH_TYPES[type] && String(a?.name ?? "").toLowerCase() === want).map((a) => (type === "TXT" ? dohTxtData(a.data) : String(a.data ?? "").toLowerCase().replace(/\.$/, "")));
+  }
+  const result = {
+    nameServers,
+    lastVia: null,
+    /** The TXT values at `name`, each record's strings joined. */
+    txt: (name) => ask(name, "TXT", async (r) => (await r.resolveTxt(name)).map((chunks) => chunks.join(""))),
+    /** The CNAME targets at `name`, lower case, with no trailing dot. */
+    cname: (name) => ask(name, "CNAME", async (r) => (await r.resolveCname(name)).map((t) => t.toLowerCase().replace(/\.$/, ""))),
+  };
+  async function ask(name, type, how) {
+    if (!allowed(name)) throw new Error(`refusing a lookup of ${name}: only a manual run's names are read`);
+    try {
+      const at = new Resolver({ timeout: timeoutMs, tries: 2 });
+      at.setServers((await nameServers()).ips);
+      const answer = await how(at);
+      result.lastVia = "udp";
+      return answer;
+    } catch (error) {
+      if (["ENODATA", "ENOTFOUND"].includes(error?.code)) {
+        result.lastVia = "udp";
+        return [];
+      }
+      // UDP failed or timed out: the same read-only question, over DoH.
+      const answer = await doh(name, type);
+      result.lastVia = "doh";
+      return answer;
+    }
+  }
+  return result;
+}
+
+/** Which of the records `lookup` sees as the owner should have added them: { txt, cname, error }. Never throws. */
+export async function recordsSeen(lookup, records) {
+  const seen = { txt: false, cname: false, error: null };
+  for (const record of records) {
+    try {
+      if (record.type === "TXT") seen.txt = (await lookup.txt(record.name)).includes(record.value);
+      else if (record.type === "CNAME") seen.cname = (await lookup.cname(record.name)).includes(record.value);
+    } catch (error) {
+      seen.error = String(error?.code ?? error?.message ?? error);
+    }
+  }
+  return seen;
+}
+
 /** Cloudflare's API, the one origin the DNS client sends to. */
 export const CF_API = "https://api.cloudflare.com/client/v4";
 const CF_ORIGIN = "https://api.cloudflare.com";
@@ -75,11 +247,16 @@ const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 /** A run's label from random bytes: `cd-` and ten characters of [a-z0-9]. */
 export const runLabel = (bytes) => `cd-${Array.from(bytes.slice(0, 10), (b) => "abcdefghijklmnopqrstuvwxyz0123456789"[b % 36]).join("")}`;
 
-/** The run's names: its root, which is also the name it maps and routes, and the name two rooms race for. */
-export function runNames(label) {
+/**
+ * The run's names: its root, which is also the name it maps and routes, and the name two rooms race for. In manual mode
+ * (a domain of MANUAL_DOMAINS) there is no race, so no race name: only `cd-<random>.<domain>`.
+ */
+export function runNames(label, domain = TEST_DOMAIN) {
   if (!RUN_LABEL.test(label)) throw new Error("not a run label");
-  const root = `${label}.${TEST_DOMAIN}`;
-  return { root, main: root, race: `race.${root}` };
+  if (!TEST_DOMAINS.includes(domain)) throw new Error(`the test domain is one of ${TEST_DOMAINS.join(" and ")}`);
+  const root = `${label}.${domain}`;
+  if (isManualDomain(domain)) return { domain, root, main: root, race: null };
+  return { domain, root, main: root, race: `race.${root}` };
 }
 export const challengeName = (hostname) => `${CHALLENGE_PREFIX}.${hostname}`;
 
@@ -428,7 +605,7 @@ export function certificateProblem(cert, host, { now = Date.now(), maxAgeMs = CE
 
 /** The test sign-up's takes one run spends, of 6 a minute and 40 a day across every run. The agent takes none. */
 export const SIGN_UPS = [
-  { who: "the rooms' owner", why: "owns the organization, the three rooms and their repositories, links the coding agent, and asks for the names. Taken only after the signed-out preflight and the DNS token's check" },
+  { who: "the rooms' owner", why: "owns the organization, the rooms (three, or room A alone in manual mode) and their repositories, links the coding agent, and asks for the names. Taken only after the signed-out preflight and, outside manual mode, the DNS token's check" },
   { who: "the rooms' admin", why: "a second person, who doesn't control the agent: merges its task, switches release on in each room and approves the release. Taken only once the owner's room shows release answers" },
 ];
 
@@ -456,9 +633,23 @@ const PROXIED_PLAN = [
   ["X26-3", "M6-26: the daily recheck ends a claim after two definite noes at least 24 hours apart, or seven days with no match", { outOfScope: TIME_GAP }],
 ].map(([id, title, flags = {}]) => ({ id, title, outOfScope: flags.outOfScope ?? null, recordOnly: flags.recordOnly ?? null }));
 
-/** The plan for a CNAME mode: with `dns-only`, X14-4 is judged; with `proxied`, it is only recorded. */
-export function planFor(mode) {
-  return cnameProxied(mode) ? PROXIED_PLAN : PROXIED_PLAN.map((entry) => (entry.id === "X14-4" ? { ...entry, recordOnly: null } : entry));
+/** The checks manual mode runs: room A's name, active, served over HTTPS, its certificate, and its removal. */
+export const MANUAL_CHECKS = Object.freeze(["X14-2", "X14-3", "X14-4", "X14-5"]);
+const NOT_IN_MANUAL = "not in manual mode: it runs room A's one name alone, with no race, no other room's challenge and no refused names";
+
+/**
+ * The plan for a CNAME mode and test domain: with `dns-only`, X14-4 is judged; with `proxied`, it is only recorded. With
+ * a manual domain the CNAME is DNS-only (a proxied one is refused), only MANUAL_CHECKS run, judged, and every other check
+ * says it isn't in manual mode.
+ */
+export function planFor(mode, domain = TEST_DOMAIN) {
+  if (!TEST_DOMAINS.includes(domain)) throw new Error(`the test domain is one of ${TEST_DOMAINS.join(" and ")}`);
+  const proxied = cnameProxied(mode);
+  if (isManualDomain(domain)) {
+    if (proxied) throw new Error("manual mode's CNAME is DNS-only");
+    return PROXIED_PLAN.map((entry) => (MANUAL_CHECKS.includes(entry.id) ? { ...entry, outOfScope: null, recordOnly: null } : { ...entry, recordOnly: null, outOfScope: entry.outOfScope ? `not in manual mode; ${entry.outOfScope}` : NOT_IN_MANUAL }));
+  }
+  return proxied ? PROXIED_PLAN : PROXIED_PLAN.map((entry) => (entry.id === "X14-4" ? { ...entry, recordOnly: null } : entry));
 }
 /** The default run's plan. */
 export const PLAN = planFor(DEFAULT_CNAME_MODE);
@@ -474,7 +665,7 @@ export const WAITS = {
   "--serve-wait": ["serveWait", 600],
 };
 
-export const USAGE = `Usage: node m6-custom-domain-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--core-hostnames FILE] [--setup-wait S] [--merge-wait S] [--release-wait S] [--takedown-wait S] [--claim-wait S] [--active-wait S] [--serve-wait S] [--cname-mode dns-only|proxied]
+export const USAGE = `Usage: node m6-custom-domain-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--core-hostnames FILE] [--setup-wait S] [--merge-wait S] [--release-wait S] [--takedown-wait S] [--claim-wait S] [--active-wait S] [--serve-wait S] [--cname-mode dns-only|proxied] [--test-domain opster.dev|war3.org]
 
 M6's staging acceptance test for custom domains (M6-X14, M6-X15, M6-X26). One room releases a tiny static site; then
 names under a fresh label of ${TEST_DOMAIN}, cd-<random>.${TEST_DOMAIN}, are asked for, proved through Cloudflare's DNS
@@ -495,11 +686,17 @@ can't reach the content domain.
                      dns-only is how a customer off Cloudflare publishes it: the content zone serves the custom hostname's
                      own certificate, and X14-4 judges it. proxied makes ${TEST_DOMAIN}, itself a Cloudflare zone,
                      orange-to-orange: its own certificate is served, and X14-4 is only recorded.
+  --test-domain      ${TEST_DOMAIN} (the default, the full run, its DNS written through Cloudflare's API) or one of the
+                     manual domains, ${MANUAL_DOMAINS.join(", ")}: manual-DNS mode. Its DNS is off Cloudflare and has no API,
+                     so the run prints the TXT and CNAME for room A's one name, cd-<random>.<domain>, waits up to
+                     ${MANUAL_DNS_WAIT_MS / 60_000} minutes for the owner to add them by hand (read from the domain's own name servers),
+                     and runs X14-2 to X14-5 alone. No race, no decoy, no rooms B or C, no DNS API call, and the
+                     OPSTER_* settings aren't read. Every way out prints the records to delete. Only dns-only.
 
   PODSTER_E2E_SIGNUP_SECRET   staging's test sign-up secret. Needed. Never printed.
   OPSTER_DNS_TOKEN            a Cloudflare API token with Zone, DNS, Edit on ${TEST_DOMAIN} alone, used only for TXT and
-                              CNAME records under the run's own label. Needed. Never printed.
-  OPSTER_ZONE_ID              ${TEST_DOMAIN}'s zone ID. Needed. Never printed.
+                              CNAME records under the run's own label. Needed, except in manual mode. Never printed.
+  OPSTER_ZONE_ID              ${TEST_DOMAIN}'s zone ID. Needed, except in manual mode. Never printed.
 
   Every DNS write goes through one guard: only TXT at _podster-challenge.<name> and CNAME to ${CNAME_TARGET}, proxied
   as the mode says and no other way, only under the run's own label, and a delete only of a record the run made. Refuses to start, exit 3, when ${TEST_DOMAIN}
@@ -520,13 +717,13 @@ can't reach the content domain.
 
 /** The run's options, or why they're refused. An unknown flag or a missing value is an error: nothing is guessed. */
 export function parseArgs(argv, env = {}) {
-  const options = { base: undefined, dryRun: false, help: false, contract: undefined, coreHostnames: undefined, cnameMode: DEFAULT_CNAME_MODE };
+  const options = { base: undefined, dryRun: false, help: false, contract: undefined, coreHostnames: undefined, cnameMode: DEFAULT_CNAME_MODE, testDomain: TEST_DOMAIN };
   for (const [name, fallback] of Object.values(WAITS)) options[name] = fallback;
   for (let at = 0; at < argv.length; at++) {
     const flag = argv[at];
     if (flag === "--dry-run") options.dryRun = true;
     else if (flag === "--help" || flag === "-h") options.help = true;
-    else if (flag === "--base-url" || flag === "--contract" || flag === "--core-hostnames" || flag === "--cname-mode" || WAITS[flag]) {
+    else if (flag === "--base-url" || flag === "--contract" || flag === "--core-hostnames" || flag === "--cname-mode" || flag === "--test-domain" || WAITS[flag]) {
       const value = argv[++at];
       if (value === undefined || value.startsWith("--")) return { error: `${flag} needs a value` };
       if (flag === "--base-url") options.base = value;
@@ -535,6 +732,9 @@ export function parseArgs(argv, env = {}) {
       else if (flag === "--cname-mode") {
         if (!CNAME_MODES.includes(value)) return { error: `--cname-mode is ${CNAME_MODES.join(" or ")}` };
         options.cnameMode = value;
+      } else if (flag === "--test-domain") {
+        if (!TEST_DOMAINS.includes(value)) return { error: `--test-domain is ${TEST_DOMAINS.join(" or ")}` };
+        options.testDomain = value;
       }
       else {
         if (!/^\d+$/.test(value) || Number(value) < 10 || Number(value) > 1800) return { error: `${flag} takes whole seconds from 10 to 1800` };
@@ -543,6 +743,8 @@ export function parseArgs(argv, env = {}) {
     } else return { error: `unknown argument ${flag}` };
   }
   if (options.help) return { options };
+  options.manual = isManualDomain(options.testDomain);
+  if (options.manual && cnameProxied(options.cnameMode)) return { error: `--test-domain ${options.testDomain} is manual-DNS mode, whose CNAME is DNS-only: --cname-mode proxied isn't taken with it` };
   options.base ??= env.PODSTER_E2E_BASE_URL;
   if (!options.base) return { error: "pass --base-url, or set PODSTER_E2E_BASE_URL" };
   const refusal = stagingOnly(options.base);

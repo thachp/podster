@@ -1,7 +1,7 @@
 // A stand-in for staging and the content domain, for m6-release-staging-selftest.mjs only. Loaded with `node --import`
 // before m6-release-staging.mjs, it replaces fetch, so no request leaves this machine: every one is answered here, and
 // none is passed on. At exit it prints how many requests it answered, how many were the test sign-up, and how many
-// signed a session out.
+// signed a session out, and how many were sent to Cloudflare's API (answered 599, like any other host it doesn't stand in for).
 //
 // M6_RELEASE_STANDIN picks what staging does:
 // - edge-down: every request answers 502, as Cloudflare's edge does when a Worker is down.
@@ -12,7 +12,7 @@
 const mode = process.env.M6_RELEASE_STANDIN;
 if (!["edge-down", "off", "no-content", "not-available"].includes(mode)) throw new Error(`M6_RELEASE_STANDIN must be edge-down, off, no-content or not-available, not ${mode}`);
 
-const counts = { requests: 0, signUps: 0, signOuts: 0 };
+const counts = { requests: 0, signUps: 0, signOuts: 0, cloudflare: 0 };
 const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const SANDBOX = "sandbox allow-scripts; default-src https://x.podster.site";
 let next = 1;
@@ -21,6 +21,7 @@ const id = (prefix) => `${prefix}_standin${next++}`;
 globalThis.fetch = async (input, init = {}) => {
   counts.requests++;
   const url = new URL(typeof input === "string" ? input : input.url);
+  if (url.hostname === "api.cloudflare.com") counts.cloudflare++;
   const method = (init.method ?? "GET").toUpperCase();
   if (mode === "edge-down") return new Response("bad gateway", { status: 502 });
   if (url.hostname.endsWith(".podster.site")) {
@@ -51,5 +52,5 @@ globalThis.fetch = async (input, init = {}) => {
 };
 
 process.on("exit", () => {
-  console.log(`stand-in: ${counts.requests} requests, ${counts.signUps} sign-ups, ${counts.signOuts} sign-outs`);
+  console.log(`stand-in: ${counts.requests} requests, ${counts.signUps} sign-ups, ${counts.signOuts} sign-outs, ${counts.cloudflare} to Cloudflare's API`);
 });

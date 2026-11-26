@@ -206,7 +206,7 @@ finish() {
 #   scripts/wizards/opster-dns-token.sh
 #
 # Nothing typed is echoed, written to a file or passed on a command line: each value goes to `gh secret set` and to
-# curl on standard input. The checks it makes are reads: the token's own verification, and a listing of one record.
+# curl on standard input. The checks it makes are reads: the token's own verification, and a listing of a few records, and on failure the zones the token sees by name.
 
 OPSTER_REPO="thachp/podster"
 OPSTER_ENV="staging-dns"
@@ -345,11 +345,25 @@ while :; do
     warn "A zone ID is 32 characters of 0-9 and a-f. Copy it again."
     continue
   fi
-  if cf_get "zones/$OPSTER_ZONE_ID/dns_records?per_page=1" "$OPSTER_DNS_TOKEN" | grep -q '"success":true'; then
+  answer=$(cf_get "zones/$OPSTER_ZONE_ID/dns_records?per_page=5" "$OPSTER_DNS_TOKEN")
+  if grep -q '"success":true' <<<"$answer"; then
     say "The token can list records in that zone."
     break
   fi
-  warn "The token couldn't list records in that zone: the zone ID is another zone's, or the token isn't DNS Edit on $OPSTER_DOMAIN."
+  codes=$(grep -o '"code":[0-9]*' <<<"$answer" | tr '\n' ' ' || true)
+  warn "The token couldn't list records in that zone (Cloudflare: ${codes:-no answer}): the zone ID is another zone's, or the token isn't DNS Edit on $OPSTER_DOMAIN."
+  # Diagnosis, IDs and codes only. Each grep may find nothing, so none of them may stop the script.
+  verify=$(cf_get "user/tokens/verify" "$OPSTER_DNS_TOKEN")
+  v_status=$(grep -o '"status":"[a-z]*"' <<<"$verify" | head -n1 || true)
+  v_nbf=$(grep -o '"not_before":"[^"]*"' <<<"$verify" | head -n1 || true)
+  v_exp=$(grep -o '"expires_on":"[^"]*"' <<<"$verify" | head -n1 || true)
+  note "Token: ${v_status:-no status} ${v_nbf:-no start date} ${v_exp:-no end date}; time now (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  seen=$(cf_get "zones?name=$OPSTER_DOMAIN" "$OPSTER_DNS_TOKEN")
+  z_codes=$(grep -o '"code":[0-9]*' <<<"$seen" | tr '\n' ' ' || true)
+  z_count=$(grep -o '"total_count":[0-9]*' <<<"$seen" | tail -n1 || true)
+  z_match=no
+  if grep -q "\"id\":\"$OPSTER_ZONE_ID\"" <<<"$seen"; then z_match=yes; fi
+  note "Zones named $OPSTER_DOMAIN the token sees: ${z_count:-none listed} ${z_codes:+(Cloudflare: $z_codes)}; pasted zone ID among them: $z_match"
   confirm "Try again?" || { OPSTER_DNS_TOKEN=""; OPSTER_ZONE_ID=""; return 1; }
 done
 set_env_secret OPSTER_ZONE_ID "$OPSTER_ZONE_ID" || true

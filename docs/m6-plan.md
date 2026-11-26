@@ -834,6 +834,30 @@ The architect proposes the gate call, for the owner to review.
 
 **Still open, and not covered by this call:** X14-4's certificate validation off Cloudflare, before custom domains reach production *(closed 2026-11-26, see [the war3.org run](#war3-run-2026-11-26))*; X14-6, X26-2 and X26-3 on a deployment; and `RELEASES` and a provider in production, which are the owner's.
 
+### The owner's call, 2026-11-26: M6 met on staging
+
+**The owner said "Yes, M6 met" on 2026-11-26: M6's gate is met, for staging only** ([decision 249](spec/PRODUCT.md#decisions-needed)). The call rests on:
+
+- **Static sites,** called met on 2026-11-24 on a run of 17 passed, 0 failed, 4 out of scope, from `d7c7247d` ([the call](#the-owners-call-2026-11-24-static-sites)).
+- **Apps with code,** called met on 2026-11-25 ([the call](#the-owners-call-2026-11-25-apps-with-code)). The latest run, [45879669440](https://github.com/thachp/podster/actions/runs/45879669440) at main `b0dc969e`, had **11 passed and 1 failed.**
+  - **M6-CX1 passed:** the app's store was gone from the content account's D1 list 47 s after the unpublish, and 52 s in run [45874919600](https://github.com/thachp/podster/actions/runs/45874919600). This is the live check F-5 of the security review asked for.
+  - **M6-C09 failed,** only past the hold. See the known limit below.
+- **Custom domains,** accepted for staging on 2026-11-26 ([the call](#the-owners-call-2026-11-26-custom-domains-for-staging)), including [the `war3.org` manual-DNS run](#war3-run-2026-11-26), which passed X14-4 off Cloudflare and closed that gap.
+- **The security review,** [M6 security review](security/m6-review.md) ([summary above](#security-review-2026-11-26)), with its one blocking finding, F-8, addressed by [criterion 8's written policies](#criterion-8s-written-policies-2026-11-26) in [Release policies](spec/RELEASE-POLICIES.md).
+- **The rate limit on `podster.site`:** one WAF rate limiting rule on the content zone ([PR #617](https://github.com/thachp/podster/pull/617); [why](#a-rate-limit-on-the-content-zone-approved-2026-11-26); [content-deploy.md](content-deploy.md)). The owner deployed it on 2026-11-26 as content Worker version `b9df198f` with outbound `93506a04`, and the content probes from CI passed in run [45874833598](https://github.com/thachp/podster/actions/runs/45874833598).
+
+**Known limit, C09.** In run [45879669440](https://github.com/thachp/podster/actions/runs/45879669440), `/api/after-hold`, where the app's own body errors 2.5 s in, past the 1-second hold, reached the visitor as a `200` with 6 bytes whose body ended normally, not an aborted one. The route whose body errors 300 ms in, within the hold, got its `502 app_error`. It isn't yet known whether the platform or `apps/content/src/hold.ts` drops the error past the hold. Next steps: check the content Worker's `dispatch_stream_error` log for that run, and weigh the end-marker wrapper idea in [C09's note](#the-owners-call-2026-11-25-apps-with-code). It touches only the app's own answer and is rated a nit, F-6 of the security review. It is owed before production.
+
+**Owed before production,** and not covered by this call:
+
+- C09, the known limit above.
+- From the security review: F-1, the write cap doesn't count store writes made while handling a read; F-2, no spend ceiling recorded on the second account; F-3, the reconcile doesn't compare the content and outbound Workers' deployed versions; F-4, the store token's reach, and its D1-Edit-only repeat on the second account.
+- The addition to the [terms and acceptable-use drafts](legal/README.md) covering hosted apps, custom domains and app data, which needs the owner's approval.
+- `RELEASES` and a provider in production, which are the owner's.
+- The content domain's Public Suffix List entry.
+- Real people. The gate's runs used test people, as [decision 79](spec/PRODUCT.md#decisions-needed) allows.
+- X14-6, X26-2 and X26-3 on a deployment.
+
 ### Security review, 2026-11-26
 
 **The gate's security review is done: [M6 security review](security/m6-review.md),** of `main` at `505ab312`, read-only, against [the threat model](#threat-model) row by row and six threats it misses. Nothing is fixed by it.
@@ -2816,7 +2840,7 @@ The agent is disconnected at the end, which ends its OAuth credential; the outpu
 | 20 | Does M6 serve previews of uploaded HTML, SVG or video? | No. Decision 52's download-only stands. The content domain makes a later preview possible, on a per-object origin, as its own change. | Bring previews into M6. Not proposed. |
 | 21 | Can a public claimant hold a deployment grant? | No. The Public participant and Guest presets never carry one, and a grant needs the owner's explicit act for a named principal. | Allowed by explicit grant. **Owner's yes.** |
 | 22 | When does M6's code start, and when does its gate run? | Step 1 now. Steps 4, 8, 9 and 10(a) once step 2 has merged and the owner has said yes to the domain and the add-on. The rest behind the M5 steps named. The gate waits for M5's. | Wait for M5's gate before any M6 code. |
-| 23 | Calling M6's gate | The architect proposes it after the staging run and the security review, for the owner to review. Test people count, as decision 79 says; real people stay owed before production. | |
+| 23 | Calling M6's gate | The architect proposes it after the staging run and the security review, for the owner to review. Test people count, as decision 79 says; real people stay owed before production. *2026-11-26: the owner called it, "Yes, M6 met", for staging only ([the call](#the-owners-call-2026-11-26-m6-met-on-staging)).* | |
 | 24 | Which reading of criterion 8 does M6's gate use? | **Owner only.** The milestone table gives M6 the whole criterion. Proposed: the whole of it, with upload permissions, retention and public-room abuse controls shown again by rerunning the M2 and M4 staging scripts at the gate's commit. | Only the custom-domain, export or transfer and release-approval parts, resting on M2's and M4's own gates for the others. |
 
 ## Risks to test

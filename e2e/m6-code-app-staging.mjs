@@ -9,7 +9,8 @@
 // - writes within the budget reach the app, and the first over it is refused 429 with Retry-After;
 // - the app's fetch gets podster-outbound's 403, and its connect() is refused;
 // - an app that spins is stopped by the CPU limit (502 app_error);
-// - a limit hit after the headers were sent never reaches a visitor as a clean 200: 502 app_error, or an aborted body;
+// - a limit hit after the headers were sent never reaches a visitor as a clean 200: 502 app_error within the content
+//   Worker's hold, an aborted body past it;
 // - unpublish: the host answers not found, and a write no longer reaches the app.
 //
 //   node m6-code-app-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
@@ -122,6 +123,31 @@ async function check(id, body) {
     results.add(id, "fail", cause(error));
     return false;
   }
+}
+/** Asks a host once and reads its body to the end or its failure: what a visitor got, for C09. */
+async function streamedAsk(url) {
+  const at = new Date().toISOString();
+  const begun = performance.now();
+  const seen = { bytes: 0, text: "", ended: false };
+  let res;
+  try {
+    res = await fetch(url, { redirect: "manual", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30_000) });
+    Object.assign(seen, { status: res.status, headers: [...res.headers], contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      seen.bytes += value.byteLength;
+      seen.text += decoder.decode(value, { stream: true });
+    }
+    seen.ended = true;
+  } catch (error) {
+    seen.error = `${error?.name ?? "Error"}${error?.cause?.code ? ` (${error.cause.code})` : ""}`;
+  }
+  seen.ms = Math.round(performance.now() - begun);
+  run.logRequest({ url, method: "GET", at, ms: seen.ms, ...(res ? { status: res.status } : { error: seen.error }) });
+  return seen;
 }
 /** Fails a check whose ground an earlier one didn't lay. */
 const after = (...ids) => {
@@ -336,31 +362,15 @@ async function main() {
 
   await check("M6-C09", async () => {
     after("M6-C01");
-    const url = app("/api/after-headers");
-    const at = new Date().toISOString();
-    const begun = performance.now();
-    const seen = { bytes: 0, text: "", ended: false };
-    let res;
-    try {
-      res = await fetch(url, { redirect: "manual", headers: { "cache-control": "no-cache" }, signal: AbortSignal.timeout(30_000) });
-      Object.assign(seen, { status: res.status, headers: [...res.headers], contentType: res.headers.get("content-type"), cacheControl: res.headers.get("cache-control"), allowOrigin: res.headers.get("access-control-allow-origin") });
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        seen.bytes += value.byteLength;
-        seen.text += decoder.decode(value, { stream: true });
-      }
-      seen.ended = true;
-    } catch (error) {
-      seen.error = `${error?.name ?? "Error"}${error?.cause?.code ? ` (${error.cause.code})` : ""}`;
+    // Stopped within the content Worker's hold, then stopped past it.
+    const lines = [];
+    for (const [path, expected] of [["/api/after-headers", "held"], ["/api/after-hold", "aborted"]]) {
+      const seen = await streamedAsk(app(path));
+      const problem = afterHeadersProblem(seen, expected);
+      ok(problem === null, `${path}: ${problem}; seen: ${afterHeadersLine(seen)}`);
+      lines.push(`${path}: ${afterHeadersLine(seen)}`);
     }
-    seen.ms = Math.round(performance.now() - begun);
-    run.logRequest({ url, method: "GET", at, ms: seen.ms, ...(res ? { status: res.status } : { error: seen.error }) });
-    const problem = afterHeadersProblem(seen);
-    ok(problem === null, `${problem}; seen: ${afterHeadersLine(seen)}`);
-    return afterHeadersLine(seen);
+    return lines.join("; ");
   });
 
   say("\n## unpublish");

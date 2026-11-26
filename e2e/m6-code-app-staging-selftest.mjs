@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
+  AFTER_HOLD_MS, afterHeadersLine, afterHeadersProblem, APP_LIMITS, appFiles, budgetRefusalProblem, burstPlan, BURST_NEEDS_MS, CLOCK_MARGIN_MS, codeHeaderProblems, CONTENT_DOMAIN, EXIT, LIGHT_ROUNDS, MANIFEST, moduleAnswer, moduleSource, outboundProblems, OUTBOUND_REFUSAL, parseArgs, PLAN, PREFLIGHT_ALLOWANCE, preflightProblem,
   Results, runOutcome, SIGN_UPS, spinProblem, SPIN_ROUNDS, STAGING, STOP_WITHIN_MS, windowStart, WRITE_CAP,
 } from "./m6-code-app-staging-lib.mjs";
 
@@ -106,6 +106,8 @@ const check = (passed, title) => {
   check(core.includes("pub const CODE_RELEASES_COMPLETE: bool = true;"), "this checkout's gate for apps with code is open");
   const handle = readFileSync(join(root, "apps/content/src/handle.ts"), "utf8");
   check(handle.includes("export const CODE_APPS_ENABLED: boolean = true;"), "this checkout's content Worker serves apps with code");
+  const holdMs = Number(readFileSync(join(root, "apps/content/src/hold.ts"), "utf8").match(/export const HOLD_MS = ([0-9_]+);/)?.[1]?.replaceAll("_", ""));
+  check(holdMs > 0 && AFTER_HOLD_MS >= holdMs + 1_000 && 300 < holdMs, "C09's second route stops at least a second past the content Worker's hold, and its first well within it");
 }
 
 // ---- the app ----
@@ -142,7 +144,7 @@ try {
   };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(OUTBOUND_REFUSAL.body, { status: OUTBOUND_REFUSAL.status });
-  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replace(String(SPIN_ROUNDS), String(LIGHT_ROUNDS));
+  const runnable = source.replace('import { connect } from "cloudflare:sockets";\n', "const connect = (to) => globalThis.__standinConnect(to);\n").replaceAll(String(SPIN_ROUNDS), String(LIGHT_ROUNDS)).replace(`setTimeout(done, ${AFTER_HOLD_MS})`, "setTimeout(done, 1)");
   const loaded = join(scratch, "runnable.mjs");
   writeFileSync(loaded, runnable);
   const { default: worker } = await import(loaded);
@@ -170,6 +172,8 @@ try {
   check(typeof moduleAnswer((await ask("/api/spin-light")).body, TAG)?.spun === "number", "the light work answers with its result");
   const streamed = await ask("/api/after-headers");
   check(streamed.status === 200 && streamed.body.startsWith("start\n") && streamed.body.endsWith("end\n"), "unstopped, the streamed answer begins, does its work and ends");
+  const late = await ask("/api/after-hold");
+  check(late.status === 200 && late.body.startsWith("start\n") && late.body.endsWith("end\n"), "unstopped, the answer that waits past the hold begins, waits, does its work and ends");
 } catch (error) {
   check(false, `the module ran here: ${error?.message ?? error}`);
 }
@@ -227,16 +231,28 @@ try {
 
   // C09, judged since 2026-11-26: an aborted body or the content Worker's own 502 passes; a clean truncated 200 fails.
   const seenAs = (over) => ({ status: 200, headers: good, text: "start\n", bytes: 6, ended: false, error: "TypeError (UND_ERR_SOCKET)", ms: 900, ...over });
-  check(afterHeadersProblem(seenAs({})) === null, "a 200 whose body was aborted after the module's start passes");
-  check(afterHeadersProblem(seenAs({ error: "TypeError (ERR_STREAM_PREMATURE_CLOSE)" })) === null, "an aborted body passes whatever the socket's error code");
-  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", bytes: 10, ended: true, error: undefined })) === null, "the content Worker's own 502 app_error, held before the headers, passes");
-  check(afterHeadersProblem(seenAs({ ended: true, error: undefined }))?.includes("truncated 200"), "a truncated 200 whose body ended normally fails: staging's 2026-11-25 answer");
-  check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }))?.includes("didn't stop"), "a whole answer fails: the limit didn't stop the module");
-  check(afterHeadersProblem(seenAs({ error: "TimeoutError" }))?.includes("hung"), "a body that only hung until the run gave up isn't an abort");
-  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", ended: false, bytes: 3 })) !== null && afterHeadersProblem(seenAs({ status: 502, text: "other\n", ended: true, error: undefined })) !== null, "a 502 whose body failed, or that isn't app_error, fails");
-  check(afterHeadersProblem(seenAs({ headers: good.map(([n, v]) => [n, n === "cache-control" ? "public, max-age=60" : v]) })) !== null, "an aborted 200 without the fixed headers fails");
-  check(afterHeadersProblem(seenAs({ text: "", bytes: 0 })) !== null, "an aborted 200 that didn't begin with the module's start fails");
-  check(afterHeadersProblem({ status: undefined, error: "TypeError (ECONNRESET)" }) !== null && afterHeadersProblem(seenAs({ status: 500, ended: true })) !== null, "no answer, or any other status, fails");
+  const held = seenAs({ status: 502, text: "app_error\n", bytes: 10, ended: true, error: undefined });
+  check(afterHeadersProblem(held, "held") === null, "stopped within the hold: the content Worker's own 502 app_error passes");
+  check(afterHeadersProblem(seenAs({}), "held") !== null, "stopped within the hold: an aborted 200 fails, as the hold didn't answer it");
+  check(afterHeadersProblem(seenAs({}), "aborted") === null, "stopped past the hold: a 200 whose body was aborted after the module's start passes");
+  check(afterHeadersProblem(seenAs({ error: "TypeError (ERR_STREAM_PREMATURE_CLOSE)" }), "aborted") === null, "an aborted body passes whatever the socket's error code");
+  check(afterHeadersProblem(held, "aborted") !== null, "stopped past the hold: a 502 fails, as it can't have been held");
+  for (const expected of ["held", "aborted"]) {
+    check(afterHeadersProblem(seenAs({ ended: true, error: undefined }), expected)?.includes("truncated 200"), `${expected}: a truncated 200 whose body ended normally fails, staging's 2026-11-25 answer`);
+    check(afterHeadersProblem(seenAs({ ended: true, error: undefined, text: "start\nspun 1\nend\n", bytes: 17 }), expected)?.includes("didn't stop"), `${expected}: a whole answer fails, as the limit didn't stop the module`);
+    check(afterHeadersProblem({ status: undefined, error: "TypeError (ECONNRESET)" }, expected) !== null && afterHeadersProblem(seenAs({ status: 500, ended: true }), expected) !== null, `${expected}: no answer, or any other status, fails`);
+  }
+  check(afterHeadersProblem(seenAs({ error: "TimeoutError" }), "aborted")?.includes("hung"), "a body that only hung until the run gave up isn't an abort");
+  check(afterHeadersProblem(seenAs({ status: 502, text: "app_error\n", ended: false, bytes: 3 }), "held") !== null && afterHeadersProblem(seenAs({ status: 502, text: "other\n", ended: true, error: undefined }), "held") !== null, "a 502 whose body failed, or that isn't app_error, fails");
+  check(afterHeadersProblem(seenAs({ headers: good.map(([n, v]) => [n, n === "cache-control" ? "public, max-age=60" : v]) }), "aborted") !== null && afterHeadersProblem({ ...held, headers: good.filter(([n]) => n !== "access-control-allow-origin") }, "held") !== null, "either answer without the fixed headers fails");
+  check(afterHeadersProblem(seenAs({ text: "", bytes: 0 }), "aborted") !== null, "an aborted 200 that didn't begin with the module's start fails");
+  let unsaid = false;
+  try {
+    afterHeadersProblem(held, "either");
+  } catch {
+    unsaid = true;
+  }
+  check(unsaid, "C09 says which answer it expects");
 }
 
 // ---- the script's source ----

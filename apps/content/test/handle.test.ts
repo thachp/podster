@@ -1134,12 +1134,26 @@ describe("a host whose release carries code", () => {
     whole.send("end\n");
     whole.end();
     expect(await passed).toEqual({ text: "start\nend\n", ended: true, error: null });
+    // An event stream isn't held for any time, though the hold's never runs out here, and is still aborted if it fails.
+    w.deps.wait = () => new Promise(() => {});
+    const events = fed();
+    events.send("data: 1\n\n");
+    w.apps.set(SCRIPT, () => new Response(events.body, { headers: { "content-type": "text/event-stream; charset=utf-8" } }));
+    const stream = await get(w, "/api/events");
+    expect([stream.status, stream.headers.get("content-length")]).toEqual([200, null]);
+    const streamRead = readAll(stream);
+    events.send("data: 2\n\n");
+    events.fail();
+    expect(await streamRead).toEqual({ text: "data: 1\n\ndata: 2\n\n", ended: false, error: "app_stream_failed" });
+    w.deps.wait = () => Promise.resolve();
     // A visitor who goes away cancels the app's body.
     const left = fed();
     left.send("start\n");
     w.apps.set(SCRIPT, () => new Response(left.body, { headers: { "content-type": "text/plain" } }));
     await (await get(w, "/api/after-headers")).body!.cancel();
-    expect(left.seen.cancelled).toBe(true);
+    await vi.waitFor(() => expect(left.seen.cancelled).toBe(true));
+    // Going away isn't the app's failure: nothing more is logged.
+    expect(w.logged.map((line) => (line as { event: string }).event)).toEqual(["dispatch_stream_error", "dispatch_stream_error"]);
   });
 
   it("streams a body that outgrows the hold by size, held bytes first, and aborts it if the app's body then fails (C09)", async () => {
@@ -1163,6 +1177,21 @@ describe("a host whose release carries code", () => {
       }
     })();
     expect([bytes, failed]).toEqual([HOLD_BYTES + 2, "app_stream_failed"]);
+    expect(w.logged).toEqual([{ event: "dispatch_stream_error", release: "rel_0123456789abcdef0123456789abcdef" }]);
+    // A chunk that doesn't fit under the hold is never held, whatever its size: the answer starts at once, though the
+    // hold's time never runs out and the body stays open, and a visitor who goes away cancels it with nothing logged.
+    let cancelled = false;
+    const huge = new Uint8Array(16 * HOLD_BYTES).fill(120);
+    w.logged.length = 0;
+    w.apps.set(SCRIPT, () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(huge); }, cancel() { cancelled = true; } })));
+    const open = await get(w, "/huge");
+    expect([open.status, open.headers.get("content-length")]).toEqual([200, null]);
+    const first = await open.body!.getReader().read();
+    expect(first.value?.byteLength).toBe(16 * HOLD_BYTES);
+    const second = await get(w, "/huge");
+    await second.body!.cancel();
+    await vi.waitFor(() => expect(cancelled).toBe(true));
+    expect(w.logged).toEqual([]);
     // A static host's body is never held: it passes as it comes, with no length added.
     const s = world();
     s.apps.set(SCRIPT, () => new Response(new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("page")); c.close(); } })));

@@ -428,14 +428,17 @@ async function sendHeld(deps: Deps, script: string, answer: Response, headers: H
       // Nothing: the answer is the same with or without the line.
     }
   };
-  const held = await holdBody(answer.body, deps.wait(HOLD_MS), () => log("dispatch_stream_error"));
+  // An event stream is meant to be read as it comes, so it isn't held for any time; it is still errored, never ended
+  // cleanly, if the app's body fails.
+  const eventStream = (answer.headers.get("content-type") ?? "").trim().toLowerCase().startsWith("text/event-stream");
+  const held = await holdBody(answer.body, eventStream ? Promise.resolve() : deps.wait(HOLD_MS), () => log("dispatch_stream_error"));
   if (held.kind === "failed") {
     log("dispatch_error");
     return failed();
   }
   if (held.kind === "whole") {
-    headers.set("content-length", String(held.bytes.byteLength));
-    return new Response(held.bytes, { status: answer.status, headers });
+    headers.set("content-length", String(held.length));
+    return new Response(held.body, { status: answer.status, headers });
   }
   return new Response(held.body, { status: answer.status, headers });
 }

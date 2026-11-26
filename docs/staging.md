@@ -692,6 +692,48 @@ Before a run, check with the owner that the deployed content Worker serves apps 
 
 `node m6-code-app-staging-selftest.mjs` checks the run without a network: its plan and exit code, the figures it expects against `apps/content` and `apps/outbound`, the app's module run with stand-ins, how it judges answers, and each refusal before anything is sent. CI runs it.
 
+## M6's staging run for custom domains
+
+*Added 2026-11-25.* `e2e/m6-custom-domain-staging.mjs` is the acceptance test for custom domains: it turns M6-X14, M6-X15 and M6-X26 (labels in `e2e/m6-release-staging-lib.mjs`) into checks against staging. **It runs from GitHub Actions, not from a laptop,** for the same reason as the code app run: the owner's machine can't reach `*.podster.site`. **It hasn't run yet:** it needs this workflow on `main`, the `staging-dns` environment and its three secrets.
+
+**Blocked today by `RESERVED_DOMAINS`.** The test customer's domain is `opster.dev`, and `opster.dev` is one of `podster_core::hostnames::RESERVED_DOMAINS`, so the API refuses every name under it `hostname_reserved`. The script reads that list from the checkout before it takes a sign-up and refuses, exit 3, naming it. Taking `opster.dev` off the list (a core and contract change) or naming another test domain is a ruling, owed before the first run.
+
+The test customer's domain is `opster.dev`, on the podster.dev account; the content zone, `podster.site`, is on the second account, so this is a cross-account (orange-to-orange) case, which spike D didn't try. Each run uses a fresh label, `cd-<10 random characters>.opster.dev`, since a claim never transfers. It releases a tiny static site in room A through the real flow (the code app run's steps, `e2e/m6-release-run.mjs`), and makes rooms B and C, each public with release on and a repository (switching release on needs one). Then:
+
+- **X15-1:** in room A, Podster's own domains, the content domain, its fallback origin and names under them are refused `hostname_reserved`; `github.io` and `co.uk` `hostname_public_suffix`; an IP, a wildcard and a single label `400` with their codes; malformed names `hostname_invalid`; a body that isn't `{ hostname }` `invalid_argument`. None leaves a request.
+- **X14-1:** room B asks for the run's name and drops the request at once; its challenge value and the name's `CNAME` to `fallback.podster.site` (proxied) are published. Room A asks for the same name and is held for 150 s (two of the proof job's looks): it stays `pending` (`proof_pending`), the configuration names no custom host, and the name doesn't serve room A's marker.
+- **X15-2:** rooms B and C ask for `race.<run name>` and both challenges are published at once: exactly one is claimed, the other refused with a reason code.
+- **X26-1:** room B's value didn't claim the name during the hold; once room A publishes its own, it is claimed within the wait.
+- **X14-2:** Cloudflare reads the custom hostname `active` (`setup_status`), and `custom_host` names it.
+- **X14-3:** over HTTPS on the custom name, the marker names the served release and merge commit, and the index is the release's, with the fixed headers, `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`) and no cookie.
+- **X14-4, recorded:** the certificate served for the name: its names, issuer and dates, and whether Node trusts it. This is the first live check that HTTP validation passes with the `*/*` route and its no-Worker validation routes (`ssl.status` reaching active); the API doesn't expose `ssl.status` itself.
+- **X14-5:** the removal: the request goes `ending`, `custom_host` is null at once, and the name stops serving the marker within the wait.
+
+**Out of scope, with why:** a removed claim being freed (`ended`) needs Cloudflare to read the hostname gone twice ten minutes apart (`GONE_SPAN_MS`), so at least 20 minutes (X14-6); the 72-hour expiry of a pending request (X26-2) and the daily recheck ending a claim after two definite noes 24 hours apart (X26-3) are time-dependent, and staging has no test clock. People: **2 takes of the test sign-up** (the rooms' owner and admin); the agent takes none. Each room makes at most two hostname requests, of its 5 an hour; at most 2 custom hostnames are made at Cloudflare.
+
+**DNS writes go through one guard** (`dnsAllow` in `e2e/m6-custom-domain-staging-lib.mjs`, after spike D's `guard.mjs`): only `TXT` at `_podster-challenge.<name>` holding one challenge value, and `CNAME` to `fallback.podster.site`, only at names under the run's label, TTL 60; a delete only of a record the run made, or that a listing of a name it tried finds under its label; no other type, no apex, no wildcard, no other zone, no `PUT` or `PATCH`. Cloudflare can't limit a token to record names, so this guard is what does. **Clean-up, on every way out:** each room's open hostname request removed through the API first, then every DNS record deleted and each name listed again, release off, the rooms private, grants taken back, the agent disconnected, sessions signed out. The removed claims stay `ending` until Cloudflare reads them gone; the three repositories stay for the owner to delete.
+
+**When the run is cancelled or times out,** GitHub Actions sends `SIGINT`, then `SIGTERM` a few seconds later, then `SIGKILL`. `SIGINT` starts the full clean-up above. `SIGTERM` cuts it short: it deletes every DNS record the run holds and asks each room's hostname request to be removed, side by side, for at most 2 seconds, then exits 143. **What may be left, for the owner to check after a cancelled or timed-out run:** a DNS record under the run's `cd-…` label on `opster.dev` (the output lists any still held; a create whose answer was lost isn't listed, so look under the label); a hostname request still `pending` or `claimed` in room A, B or C, and with it a custom hostname at Cloudflare on `podster.site`; release switched on and the rooms public; the agent's and people's grants; the agent's link; and the test sessions, which expire on their own.
+
+**The workflow** is `.github/workflows/m6-custom-domain-staging.yml`, started by hand only, sharing the code app run's concurrency group. Its one job uses the GitHub environment **`staging-dns`**, **deployable from `main` only, which the architect creates**. It holds three secrets: **`OPSTER_DNS_TOKEN`** and **`OPSTER_ZONE_ID`**, and its own copy of **`PODSTER_E2E_SIGNUP_SECRET`**. A job can use one environment, and the run interleaves API and DNS writes, so two jobs would have to hand a session or the token between them; a copy of the sign-up secret here is narrower, and keeps the DNS token out of `staging-e2e`. The secrets reach only the test step, as environment variables; the script takes the DNS pair out of its environment at once and scrubs both from its output.
+
+**The owner's step:** run the wizard at a terminal. It walks Cloudflare's dashboard (My Profile → API Tokens → Create Token → Custom token): **Zone → DNS → Edit, on `opster.dev` only, no Zone Read, an expiry about 90 days out, no IP filtering**. It reads the token hidden, checks Cloudflare reads it active, and sets it with `gh secret set OPSTER_DNS_TOKEN --env staging-dns`; then the zone ID from `opster.dev`'s Overview page, checked by listing one record, set the same way; then the sign-up secret from `~/.podster/e2e-signup-secret.staging`. It never echoes a value. Run it again to renew the token.
+
+```bash
+scripts/wizards/opster-dns-token.sh
+```
+
+Then:
+
+```bash
+gh workflow run m6-custom-domain-staging.yml
+gh run watch "$(gh run list --workflow m6-custom-domain-staging.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+What remains: the token could rewrite any record on `opster.dev`, its wildcard included; that zone serves nothing else. For stronger isolation, use a throwaway test domain on an account of its own.
+
+`node m6-custom-domain-staging-selftest.mjs` checks the run without a network: its plan and exit code, the figures it expects against `crates/core`, `apps/api` and `apps/content`, the DNS guard, its DNS client against a stand-in fetch, how it judges answers, and each refusal before it takes a sign-up or writes DNS. CI runs it.
+
 ## Explore's cursor key
 
 `EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. It has been set on staging since 2026-11-09. Changing it later only ends cursors already handed out.

@@ -18,7 +18,7 @@ This is what Podster is built with. The choices come from [ARCHITECTURE.md](ARCH
 | Async | Outbox in the `Workspace` object, delivered by alarm. Queues only for outbound HTTP and provider jobs | No message bus. The queues are `podster-wake`, `podster-scan` and `podster-a2a`, with dead-letter queues for scan and A2A; staging's carry a `-staging` suffix |
 | Rate limits | Workers rate limit bindings | `RL_GENERAL`, `RL_ACCOUNT` and `RL_SENSITIVE` on the gateway; `PUBLIC_PAGE_LIMIT` and `EXPLORE_LIMIT` on the web Worker |
 | Scanning | ClamAV in a Cloudflare Container | [ADR 0006](../adr/0006-uploads-and-scanning.md) |
-| Served apps | A separate content domain on a second Cloudflare account | [ADR 0010](../adr/0010-release-and-the-content-domain.md); M6, in progress. What Podster hosts here is an open question for the owner; see the note under [Deliberately not used](#deliberately-not-used) |
+| Served apps | A separate content domain on a second Cloudflare account | [ADR 0010](../adr/0010-release-and-the-content-domain.md); M6, called met on staging by the owner on 2026-11-26 ([decision 249](PRODUCT.md#decisions-needed)), not in production. What Podster hosts here is an open question for the owner; see the note under [Deliberately not used](#deliberately-not-used) |
 | Compatibility date | `2026-08-01` on every Worker | |
 
 ## Applications

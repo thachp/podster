@@ -33,10 +33,13 @@ jobs:
   custom-domain:
     runs-on: ubuntu-latest
     environment: staging-dns
-    # The run's own waits come to at most about 60 minutes: three repositories, the merge and the release 5 each, the
-    # pending hold 2.5, the claim and the race 5, Cloudflare active 15, the route 10 and the removal 3. It usually takes
-    # far less; the margin is for clean-up, which runs on every way out.
-    timeout-minutes: 75
+    # The run's own waits, at their worst, come to about 65.5 minutes: three repositories 5 each, the merge and the release
+    # 5 each, the pending hold 2.5, the race 5, the claim 5, Cloudflare active 15, the route 10 and the removal 3. Clean-up
+    # after that, on every way out, can take about 6 more: each request read and removed, every DNS record deleted and
+    # listed again, release off in three rooms, the publish wait of 60 s, grants, the agent and sign-outs, each request
+    # bounded at 30 s. With the install and the self-test, 90 leaves about 15 minutes of margin. Should it still hit
+    # the limit, the SIGTERM that follows removes the DNS records and hostname requests first.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

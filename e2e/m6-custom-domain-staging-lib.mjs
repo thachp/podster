@@ -35,7 +35,7 @@ export const PENDING_HOLD_MS = 2 * PROOF_LOOK_MS + 30_000;
  * twice this: the run doesn't wait for it.
  */
 export const GONE_SPAN_MS = 10 * 60_000;
-/** The HSTS a custom host's answers carry: no includeSubDomains, no preload (apps/content/src/handle.ts; **Proposed**). */
+/** The HSTS a custom host's answers carry: no includeSubDomains, no preload (the content Worker's handle.ts; **Proposed**). */
 export const CUSTOM_HSTS = "max-age=31536000";
 /** A DNS record's TTL, in seconds: the least Cloudflare takes, so a change is seen soon. */
 export const DNS_TTL = 60;
@@ -220,6 +220,14 @@ export function dnsClient({ token, zoneId, root, fetch, log = () => {}, timeoutM
       return false;
     },
     /**
+     * The fast clean-up a SIGTERM gets: every record the run holds deleted at once, side by side, with no listing.
+     * Answers how many are still held.
+     */
+    async removeMade() {
+      await Promise.all([...made.keys()].map((id) => this.remove(id).catch(() => false)));
+      return made.size;
+    },
+    /**
      * Clean-up: every name the run tried is listed, and what is found there that is the run's is adopted; then every
      * record the run holds is deleted, and every name listed again. Answers what is left, by name, and what couldn't be read.
      */
@@ -347,6 +355,7 @@ export function unclaimedLine(answer, error) {
 
 /** One line on the certificate a custom host served: its names, issuer and dates, and whether it names the host. */
 export function certificateLine(cert, host) {
+  if (cert && typeof cert === "object" && cert.handshakeError) return `the TLS handshake with certificate validation on failed: ${cert.handshakeError}`;
   if (!cert || typeof cert !== "object" || !cert.subject) return "no certificate was read";
   const names = String(cert.subjectaltname ?? "").split(",").map((s) => s.trim().replace(/^DNS:/, "")).filter(Boolean);
   const covers = names.some((name) => name === host || (name.startsWith("*.") && host.endsWith(name.slice(1)) && !host.slice(0, -name.length + 1).includes(".")));
@@ -362,7 +371,7 @@ export const SIGN_UPS = [
   { who: "the rooms' admin", why: "a second person, who doesn't control the agent: merges its task, switches release on in each room and approves the release. Taken only once the owner's room shows release answers" },
 ];
 
-const TIME_GAP = "time-dependent: staging has no test clock (failpoints never ship, apps/api/wrangler.jsonc), and a run can't wait the days it takes. Checked by crates/core's and the API's own tests; on staging it would need state kept across days, as m6-staging-kept.mjs does";
+const TIME_GAP = "time-dependent: staging has no test clock (failpoints never ship in the API's deployed build), and a run can't wait the days it takes. Checked by crates/core's and the API's own tests; on staging it would need state kept across days, as m6-staging-kept.mjs does";
 
 /**
  * Every check, in the order it runs. `outOfScope` checks always say OUT OF SCOPE, with why, and don't stop exit 0.

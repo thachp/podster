@@ -247,7 +247,8 @@ as secrets of the GitHub environment $OPSTER_ENV in $OPSTER_REPO:
 OPSTER_DNS_TOKEN, OPSTER_ZONE_ID and PODSTER_E2E_SIGNUP_SECRET.
 
 It needs gh, signed in with admin rights on the repository, and curl. The environment must already exist (the
-architect makes it, deployable from main only). Nothing typed is echoed or written to a file. It changes nothing on
+architect makes it; the wizard refuses unless its only
+deployment branch policy is the branch main). Nothing typed is echoed or written to a file. It changes nothing on
 Cloudflare: you make the token in the dashboard; it only reads, to check the token and the zone ID.
 EOF
 }
@@ -280,13 +281,22 @@ if ! command -v curl >/dev/null 2>&1; then
   warn "curl isn't installed: the wizard uses it to check the token."
   return 1
 fi
-if ! gh api "repos/$OPSTER_REPO/environments/$OPSTER_ENV" --jq .name >/dev/null 2>&1; then
-  warn "The environment $OPSTER_ENV doesn't exist in $OPSTER_REPO yet. The architect makes it, deployable from main"
-  warn "only; ask for it, then run this wizard again. Nothing was set."
+# Fail closed: the environment must exist and be deployable from main alone, by a custom branch policy whose one
+# entry is the branch main. A null policy, protected branches, a tag policy or any other pattern is refused, since the
+# token would then reach a workflow run from another branch.
+ENV_POLICY="$(gh api "repos/$OPSTER_REPO/environments/$OPSTER_ENV" --jq '(.deployment_branch_policy.custom_branch_policies == true) and (.deployment_branch_policy.protected_branches == false)' 2>/dev/null || printf 'unread')"
+if [[ "$ENV_POLICY" != "true" ]]; then
+  warn "The environment $OPSTER_ENV doesn't exist in $OPSTER_REPO, couldn't be read, or isn't limited by a custom"
+  warn "branch policy (with protected branches off). The architect sets it to deploy from main only. Nothing was set."
   return 1
 fi
-say "The environment $OPSTER_ENV exists. Its deployment branches:"
-note "  $(gh api "repos/$OPSTER_REPO/environments/$OPSTER_ENV" --jq 'if .deployment_branch_policy == null then "any branch (ask the architect to limit it to main)" else "limited by a policy" end' 2>/dev/null || printf 'unread')"
+BRANCH_POLICY="$(gh api "repos/$OPSTER_REPO/environments/$OPSTER_ENV/deployment-branch-policies" --jq '(.total_count == 1) and ((.branch_policies | length) == 1) and (.branch_policies[0].name == "main") and (.branch_policies[0].type == "branch")' 2>/dev/null || printf 'unread')"
+if [[ "$BRANCH_POLICY" != "true" ]]; then
+  warn "The environment $OPSTER_ENV's branch policies aren't exactly one: the branch main. The architect fixes that"
+  warn "first. Nothing was set."
+  return 1
+fi
+say "The environment $OPSTER_ENV exists, and deploys from the branch main alone."
 pause "Press Enter to continue"
 
 # ── 2 ────────────────────────────────────────────────────────────────────

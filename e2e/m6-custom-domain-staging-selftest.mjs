@@ -237,10 +237,13 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   }
   lose = false;
   check(lostThrew && dns.made.size === 2 && dns.tried.has(challengeName(NAMES.race)), "a create whose answer is lost throws, and its name is kept for clean-up");
+  const quick = dnsClient({ token: TOKEN, zoneId: ZONE, root: NAMES.root, fetch: fake, log: () => {} });
+  await quick.cname(NAMES.race);
+  check((await quick.removeMade()) === 0 && quick.made.size === 0, "the SIGTERM clean-up deletes every record held, with no listing");
   const { left, unread, held } = await dns.removeAll();
   check(left.length === 0 && unread.length === 0 && held.length === 0 && dns.made.size === 0, "clean-up deletes every record made, adopts the lost one from a listing, and lists every name empty");
   check(zone.size === 1 && zone.has("e".repeat(32)), "the zone's other record is untouched");
-  check(sent.filter((r) => r.method === "DELETE").length === 3, "it deleted exactly the run's three records");
+  check(sent.filter((r) => r.method === "DELETE").length === 4, "it deleted exactly the runs' four records");
   check(lines.length > 0 && lines.every((line) => !line.includes(TOKEN) && !line.includes(ZONE) && !line.includes("https://")), "its log lines carry neither the token, the zone's ID nor a URL");
 }
 
@@ -271,6 +274,7 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   check(certificateLine(cert, NAMES.main).startsWith("names the host") && certificateLine(cert, NAMES.main).includes("trusted by Node"), "a certificate naming the host says so");
   check(certificateLine({ ...cert, subjectaltname: `DNS:*.${TEST_DOMAIN}` }, NAMES.main).startsWith("names the host") && certificateLine({ ...cert, subjectaltname: `DNS:*.${TEST_DOMAIN}` }, NAMES.race).startsWith("does NOT"), "a wildcard covers one label only");
   check(certificateLine(null, NAMES.main) === "no certificate was read" && certificateLine({ ...cert, authorized: false, authorizationError: "CERT_HAS_EXPIRED" }, NAMES.main).includes("not trusted"), "no certificate, or one not trusted, says so");
+  check(certificateLine({ handshakeError: "CERT_HAS_EXPIRED" }, NAMES.main).includes("validation on failed: CERT_HAS_EXPIRED"), "a handshake that fails validation records its error as the finding");
 }
 
 // ---- the script's source ----
@@ -282,6 +286,10 @@ const cname = (record) => JSON.stringify({ type: "CNAME", name: NAMES.main, cont
   check(/delete process\.env\.OPSTER_DNS_TOKEN;/.test(script) && /delete process\.env\.OPSTER_ZONE_ID;/.test(script) && /run\.secret\(dnsToken\)/.test(script) && /run\.secret\(zoneId\)/.test(script), "the token and the zone's ID leave the environment and are scrubbed from the output");
   check(script.includes("dns.removeAll()") && /owner\.dash\("DELETE", hostnamePath\(room\)/.test(script) && script.includes("publisher.stop()") && script.includes("cleanUpShared()") && /enabled: false/.test(script), "clean-up removes each open hostname request, every DNS record, release and the rooms' publicity, then the shared clean-up");
   check(script.indexOf("for (const room of asked)") < script.indexOf("dns.removeAll()"), "clean-up ends the claims through the API before it deletes DNS");
+  check(!/rejectUnauthorized/.test(script) && script.includes("tls.connect("), "the certificate is read with validation on");
+  check(/process\.on\("SIGTERM"/.test(script) && script.indexOf("dns.removeMade()") > script.indexOf('process.on("SIGTERM"') && /process\.exit\(143\)/.test(script), "SIGTERM removes DNS records and hostname requests first, then exits 143");
+  check(/try \{\n    const \{ left \} = await publisher\.stop\(\);/.test(script), "a failed unpublish doesn't stop the shared clean-up");
+  check(!["m6-custom-domain-staging.mjs", "m6-custom-domain-staging-lib.mjs", "m6-custom-domain-staging-selftest.mjs"].some((f) => { const t = readFileSync(join(here, f), "utf8"); return t.includes("apps/content") && t.includes(["wran", "gler"].join("")); }), "no file of this run names both the content package and its deploy tool (the content package's config test)");
   check(script.includes('run.mask(owner.id, "[owner]")') && script.includes('run.mask(admin.id, "[admin]")'), "both people's IDs are printed as their role");
   check(script.indexOf("dns.verify()") < script.indexOf("await main()") && script.indexOf("run.preflight()") < script.indexOf("dns.verify()"), "the DNS token is checked after the signed-out preflight and before any sign-up");
 }

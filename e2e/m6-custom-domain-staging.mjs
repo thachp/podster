@@ -181,19 +181,22 @@ async function customMarker() {
     return { error: cause(error) };
   }
 }
-/** The certificate the custom name serves, read from one TLS connection with its name as SNI. */
+/**
+ * The certificate the custom name serves, read from one TLS connection with its name as SNI and certificate validation
+ * on, as Node's default is. A handshake that fails validation answers its error's code, which is the finding.
+ */
 function certificateOf(name) {
   return new Promise((resolve) => {
-    const socket = tls.connect({ host: name, port: 443, servername: name, rejectUnauthorized: false, timeout: 15_000 }, () => {
+    const socket = tls.connect({ host: name, port: 443, servername: name, timeout: 15_000 }, () => {
       const cert = socket.getPeerCertificate();
       resolve({ subject: cert?.subject, subjectaltname: cert?.subjectaltname, issuer: cert?.issuer, valid_from: cert?.valid_from, valid_to: cert?.valid_to, authorized: socket.authorized, authorizationError: socket.authorizationError ? String(socket.authorizationError) : null });
       socket.end();
     });
     socket.on("timeout", () => {
       socket.destroy();
-      resolve(null);
+      resolve({ handshakeError: "timeout" });
     });
-    socket.on("error", () => resolve(null));
+    socket.on("error", (error) => resolve({ handshakeError: String(error?.code ?? error?.name ?? "Error") }));
   });
 }
 /** Makes a room public with person review on, and switches release on there as the admin. */
@@ -397,11 +400,33 @@ async function cleanUp() {
     const off = config?.ok && config.body?.enabled ? await admin.dash("PUT", `/v1/workspaces/${room}/release-config`, { enabled: false, expected_version: config.body.version }).catch(() => null) : config;
     said.push(off?.ok && off.body?.enabled === false ? `release is off in room ${room}` : `release could NOT be switched off in room ${room}: its owner switches it off`);
   }
-  const { left } = await publisher.stop();
-  if (left) said.push(`${[...publisher.published.keys()].map((at) => `room ${at}`).join(" and ")} could NOT be made private again`);
+  try {
+    const { left } = await publisher.stop();
+    if (left) said.push(`${[...publisher.published.keys()].map((at) => `room ${at}`).join(" and ")} could NOT be made private again`);
+  } catch (error) {
+    said.push(`the rooms could NOT all be made private again (${cause(error)}): their owner makes them private`);
+  }
   said.push(...(await run.cleanUpShared()));
   return said;
 }
+
+// SIGTERM, as GitHub Actions sends a few seconds after SIGINT when a run is cancelled or times out, and at most seconds
+// before SIGKILL: no full clean-up fits. What would outlive the run and cost or expose most goes first, side by side:
+// every DNS record the run made, and every open hostname request removed through the API (each a claim's custom
+// hostname at Cloudflare). Then it exits 143. Left behind: release on, the rooms public, grants, the agent and the
+// sessions, all named in docs/staging.md.
+let terminating = false;
+process.on("SIGTERM", () => {
+  if (terminating) return;
+  terminating = true;
+  console.log("\nSIGTERM: removing DNS records and hostname requests, then exiting without the rest of clean-up.");
+  const claims = [...asked].map((room) => owner?.dash("DELETE", hostnamePath(room), {}, { timeoutMs: 2000 }).catch(() => null));
+  const bounded = Promise.race([Promise.all([dns.removeMade(), ...claims]), new Promise((done) => setTimeout(done, 2000))]);
+  bounded.finally(() => {
+    console.log(run.out(`SIGTERM clean-up: ${dns.made.size} DNS record(s) still held (${[...dns.made.values()].map((r) => `${r.type} ${r.name}`).join(", ") || "none"}); hostname requests asked to be removed in ${asked.size} room(s). Release, the rooms' publicity, grants, the agent and the sessions are left: see docs/staging.md.`));
+    process.exit(143);
+  });
+});
 
 const started = Date.now();
 try {

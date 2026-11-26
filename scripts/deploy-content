@@ -117,8 +117,13 @@ a custom hostname of Cloudflare for SaaS reaches it. That one is security-sensit
 content Worker every host on the zone, and it answers its own not-found for any host with no live
 serve entry, the content domain itself and the fallback origin's name included. Before either Worker,
 it makes sure the zone holds */.well-known/acme-challenge/* and */.well-known/pki-validation/*, each
-running no Worker, with the zone's routes API (POST, its one write outside wrangler), so a
-certificate authority's validation of a custom hostname never reaches an app. The outbound Worker
+running no Worker, with the zone's routes API (POST, one of its two writes outside wrangler), so a
+certificate authority's validation of a custom hostname never reaches an app. Also before either
+Worker, it makes sure the zone's one WAF rate limiting rule, ref podster_content_rate_limit, is 300
+requests per 10 s per IP (cf.colo.id and ip.src), action block for 10 s, on every path but those
+two validation folders: the request-rate abuse control for every app and custom hostname. It reads
+the zone's http_ratelimit entry point and says whether that rule is missing, matching or different,
+and a deploy creates or updates that rule alone, never another's. The outbound Worker
 always deploys: no flag or key leaves it out. Without --deploy it only reports: it runs every check below, reads Cloudflare's
 API, and prints what it would deploy, both Workers, changing nothing. With --deploy it also deploys
 both, checks the outbound Worker by Cloudflare's API, and probes the content domain signed out.
@@ -184,6 +189,9 @@ It refuses, before changing anything, unless:
       podster-content has no route on that zone but the two it deploys (a route that runs no
       Worker is left alone, and the two below are added if missing)
       no custom domain on the account runs podster-outbound (if they can't be read: NOT SHOWN)
+      the zone's rate limiting rules can be read (a 401 or 403 names the permission to add:
+      Zone > Zone WAF > Edit on that zone), at most one rule has this script's ref, and if it is
+      missing, no other rule is there: the free plan allows one per zone
     Any error, or an answer of any other shape, refuses.
 
 The deploy runs wrangler twice, outbound first. If the outbound Worker's deploy fails, or Cloudflare's
@@ -203,13 +211,14 @@ preview address, and no route on the content domain's zone names it (other zones
 see, and can't add routes on); that podster-content's routes on that zone are exactly the two
 deployed, the two no-Worker routes are there, and no route there runs another Worker; and, from
 podster-content's deployed settings, that its APPS binding names podster-outbound as outbound; and
-that no custom domain on the account runs podster-outbound. A route someone adds on the zone during
+that no custom domain on the account runs podster-outbound; and that the zone's rate limiting rule
+is there exactly as deployed. A route someone adds on the zone during
 a deploy is reported by that check, never prevented.
 If those settings or the custom domains can't be read, it says NOT SHOWN, never passed, and exits 4.
 An app's fetch being refused is NOT SHOWN: it needs an app with code, and none exists yet.
 
 Exit codes: 0 reported (no --deploy), or deployed and every probe passed; 1 refused, nothing changed;
-2 wrong usage; 3 the deploy failed part-way, adding a no-Worker route included (the output says what
+2 wrong usage; 3 the deploy failed part-way, adding a no-Worker route or writing the rate limiting rule included (the output says what
 wrangler or Cloudflare said, redacted, and which Worker was deployed); 4 deployed, but a probe or check failed or was NOT SHOWN: the Workers are
 deployed and not
 verified; 129, 130 or 143 stopped by
@@ -267,6 +276,7 @@ on_signal() { # on_signal NAME CODE
   case "$phase" in
     checking) echo "STOPPED by $1 before anything was deployed. Nothing changed." ;;
     routing) echo "STOPPED by $1 while adding the routes that run no Worker, before either Worker was deployed. One may have been added, which only keeps Workers off a validation path: run this again." ;;
+    ratelimiting) echo "STOPPED by $1 while writing the zone's rate limiting rule, before either Worker was deployed. The rule may or may not have changed: run this again, and its report says which." ;;
     deploying-outbound) echo "STOPPED by $1 while deploying the outbound Worker. podster-outbound may or may not be deployed, and the content Worker wasn't: check the account before running this again." ;;
     deploying) echo "STOPPED by $1 during wrangler deploy of the content Worker. podster-outbound is deployed; the content Worker may or may not be deployed: check the account before running this again." ;;
     probing) echo "STOPPED by $1 during the probes. The Workers are deployed and NOT verified." ;;
@@ -433,24 +443,30 @@ cf() {
     exit 3
   fi
 }
-# cf_post PATH JSON-FILE: POSTs the file to Cloudflare's API, the same way as cf, and sets $status. The one write this
-# script makes outside wrangler: a route that runs no Worker, which wrangler can't make.
-cf_post() {
+# cf_send METHOD PATH JSON-FILE: sends the file to Cloudflare's API with METHOD (POST or PATCH), the same way as cf, and
+# sets $status. The writes this script makes outside wrangler, all before either Worker deploys: a route that runs no
+# Worker, which wrangler can't make, and the zone's rate limiting rule.
+cf_send() {
   : > "$work/body"
   { printf 'header = "Authorization: Bearer '; tr -d '\n' < "$token_file"; printf '"\n'; } \
-    | curl_clean --config - --silent --show-error --proto =https --max-time 30 -X POST -H 'Content-Type: application/json' \
-      --data-binary "@$2" -o "$work/body" -w '%{http_code}' \
-      "https://api.cloudflare.com/client/v4$1" > "$work/status" 2> "$work/curl.err" || echo 000 > "$work/status"
+    | curl_clean --config - --silent --show-error --proto =https --max-time 30 -X "$1" -H 'Content-Type: application/json' \
+      --data-binary "@$3" -o "$work/body" -w '%{http_code}' \
+      "https://api.cloudflare.com/client/v4$2" > "$work/status" 2> "$work/curl.err" || echo 000 > "$work/status"
   status=$(cat "$work/status")
   [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
   if leaked "$work/body" "$work/curl.err" "$work/status"; then
     redact "$work/body"
-    echo "STOPPED Cloudflare's answer to POST $1 held the token. It wasn't printed."
-    echo "deploy-content: stopped while adding the routes that run no Worker, before either Worker was deployed. Make a new token."
+    echo "STOPPED Cloudflare's answer to $1 $2 held the token. It wasn't printed."
+    if [ "$phase" = ratelimiting ]; then
+      echo "deploy-content: stopped while writing the zone's rate limiting rule, before either Worker was deployed. Make a new token."
+    else
+      echo "deploy-content: stopped while adding the routes that run no Worker, before either Worker was deployed. Make a new token."
+    fi
     dc_meant=1
     exit 3
   fi
 }
+cf_post() { cf_send POST "$1" "$2"; }
 # shaped FILTER [ARG...]: the body is a success in exactly the shape FILTER describes. jq's arguments follow the filter.
 # one_document FILTER [ARG...]: the body is exactly one JSON document, and FILTER holds of it. jq's -e alone judges
 # only the last document of a stream, so `{"success":false}{...}` would pass; slurped, there must be one.
@@ -573,8 +589,7 @@ route_all="*/*"
 # under `*/*` a custom hostname's validation would otherwise reach the content Worker, and through it an app. A route
 # with no Worker "will act to negate any less specific patterns" (Cloudflare's Workers routes page), so Cloudflare's
 # edge answers its own validations there. Wrangler only makes routes that run its Worker, so these are made with the
-# zone's routes API (POST /zones/<zone>/workers/routes, `script` left out), which takes Workers Routes Edit on the zone,
-# the token's one zone permission. The content Worker refuses those paths too (`isValidationPath`), and a release
+# zone's routes API (POST /zones/<zone>/workers/routes, `script` left out), which takes Workers Routes Edit on the zone. The content Worker refuses those paths too (`isValidationPath`), and a release
 # can't hold files there (`podster_core::release_tree::VALIDATION_DIRECTORIES`).
 route_acme="*/.well-known/acme-challenge/*"
 route_pki="*/.well-known/pki-validation/*"
@@ -608,6 +623,82 @@ else
   report_not_shown=$((report_not_shown + 1))
   echo "NOT SHOWN whether a custom domain runs $OUTBOUND: the account's custom domains couldn't be read in the shape expected (HTTP $status). A deploy would end with exit 4, not verified, until the token can read them."
 fi
+
+# --- the zone's rate limiting rule ---
+# One WAF rate limiting rule on the content domain's zone, the request-rate abuse control for every app and custom
+# hostname, which all enter through that zone (approved by the owner 2026-11-26, as one free-plan rule). The free plan
+# allows one rule per zone, counted by IP (characteristics cf.colo.id and ip.src, both required), a 10 s period and a
+# 10 s mitigation timeout, and an expression on the path only, with no regex (`matches` is Business and up). The
+# expression leaves out the two certificate validation folders, so issuing or renewing a certificate is never limited.
+# It lives in the zone's http_ratelimit entry point ruleset (Rulesets API), and this script's rule is the one whose ref
+# is RL_REF: it creates or updates that rule alone, and never changes or deletes another.
+RL_REF=podster_content_rate_limit
+RL_DESCRIPTION="Podster: requests per IP to every app and custom hostname, managed by scripts/deploy-content"
+RL_EXPRESSION='(not starts_with(http.request.uri.path, "/.well-known/acme-challenge/") and not starts_with(http.request.uri.path, "/.well-known/pki-validation/"))'
+RL_REQUESTS=300
+RL_PERIOD=10
+RL_TIMEOUT=10
+RL_PERMISSION="Zone > Zone WAF > Edit, on the content domain's zone only"
+rl_rule=$(jq -c -n --arg ref "$RL_REF" --arg d "$RL_DESCRIPTION" --arg e "$RL_EXPRESSION" \
+  --argjson n "$RL_REQUESTS" --argjson p "$RL_PERIOD" --argjson t "$RL_TIMEOUT" '{
+    ref: $ref, description: $d, expression: $e, action: "block", enabled: true,
+    ratelimit: { characteristics: ["cf.colo.id", "ip.src"], period: $p, requests_per_period: $n, mitigation_timeout: $t }
+  }')
+# A rule is this script's rule as it deploys it: the same action, expression, description and figures, enabled, the same
+# two characteristics in any order, and nothing that changes what is counted (no counting expression, no cache
+# exclusion). Fields Cloudflare adds of its own (id, version, last_updated, requests_to_origin false) are ignored.
+RL_MATCHES='(type == "object") and .action == $w.action and .expression == $w.expression and (.description // "") == $w.description
+  and (if has("enabled") then .enabled else true end) == true and (.ratelimit | type) == "object" and (.ratelimit.characteristics | type) == "array"
+  and (.ratelimit.characteristics | sort) == ($w.ratelimit.characteristics | sort) and .ratelimit.period == $w.ratelimit.period
+  and .ratelimit.requests_per_period == $w.ratelimit.requests_per_period and .ratelimit.mitigation_timeout == $w.ratelimit.mitigation_timeout
+  and ((.ratelimit.counting_expression // "") == "") and ((.ratelimit.requests_to_origin // false) == false)'
+# The entry point ruleset: an object with an ID, of the http_ratelimit phase, whose rules (absent when it has none) are
+# a list of objects, each with an ID.
+RL_ENTRY_SHAPE='(.result | type) == "object" and (.result.id | type) == "string" and .result.phase == "http_ratelimit"
+  and ((.result.rules // []) | type) == "array" and all((.result.rules // [])[]; type == "object" and (.id | type) == "string")'
+# ours_in_result: exactly one rule with RL_REF in the answer's ruleset, and it matches.
+RL_OURS_IN_RESULT='[(.result.rules // [])[] | select(.ref == $ref)] | length == 1 and (.[0] | '"$RL_MATCHES"')'
+rl_entry="/zones/$zone_id/rulesets/phases/http_ratelimit/entrypoint"
+rl_ruleset_id=""
+rl_rule_id=""
+rl_state=""
+cf "$rl_entry"
+case "$status" in
+  200)
+    shaped "$RL_ENTRY_SHAPE" || refuse "the zone's rate limiting rules (its http_ratelimit entry point) aren't in the shape expected"
+    rl_ruleset_id=$(jq -r '.result.id | ascii_downcase' "$work/body")
+    [[ "$rl_ruleset_id" =~ ^[0-9a-f]{32}$ ]] || refuse "the zone's rate limiting ruleset has no ruleset ID in the shape expected"
+    rl_ours=$(jq -r --arg ref "$RL_REF" '[(.result.rules // [])[] | select(.ref == $ref)] | length' "$work/body")
+    rl_others=$(jq -r --arg ref "$RL_REF" '[(.result.rules // [])[] | select(.ref != $ref)] | length' "$work/body")
+    if [ "$rl_ours" -gt 1 ]; then refuse "the zone has $rl_ours rate limiting rules with the ref $RL_REF, which is this script's alone. Remove all but one in the dashboard."; fi
+    if [ "$rl_ours" = 1 ]; then
+      rl_rule_id=$(jq -r --arg ref "$RL_REF" '(.result.rules // [])[] | select(.ref == $ref) | .id | ascii_downcase' "$work/body")
+      [[ "$rl_rule_id" =~ ^[0-9a-f]{32}$ ]] || refuse "the zone's rate limiting rule $RL_REF has no rule ID in the shape expected"
+      if jq -e --arg ref "$RL_REF" --argjson w "$rl_rule" "$RL_OURS_IN_RESULT" "$work/body" > /dev/null; then rl_state=matching; else rl_state=different; fi
+    else
+      rl_state=missing
+      if [ "$rl_others" -gt 0 ]; then
+        refuse "the content domain's zone already has $rl_others rate limiting rule(s) that aren't this script's ($RL_REF), and the free plan allows one per zone, so adding it would pass that limit. This script never changes or removes another's rule: remove that rule in the dashboard (the zone's Security rules) if it is to go, then run this again."
+      fi
+    fi
+    if [ "$rl_others" -gt 0 ]; then echo "ok   $rl_others other rate limiting rule(s) on the zone, left alone"; fi
+    ;;
+  404)
+    # No entry point yet: no rate limiting rule on the zone at all. Cloudflare's own not-found, or it says nothing.
+    one_document '.success == false and (.errors | type) == "array"' \
+      || refuse "reading the zone's rate limiting rules answered HTTP 404 with an answer of another shape, which says nothing"
+    rl_state=missing
+    ;;
+  401 | 403)
+    refuse "the token can't read the content domain's zone's rate limiting rules (HTTP $status), so it can't make or check the rule either. Add this permission to the token: $RL_PERMISSION (Zone WAF Write in Cloudflare's list of permissions; Edit includes Read). Then run this again."
+    ;;
+  *) refuse "reading the content domain's zone's rate limiting rules failed (HTTP $status)" ;;
+esac
+case "$rl_state" in
+  matching) echo "ok   the zone's rate limiting rule $RL_REF: matching, nothing to change" ;;
+  different) echo "ok   the zone's rate limiting rule $RL_REF: different from this script's, a deploy updates that rule alone" ;;
+  missing) echo "ok   the zone's rate limiting rule $RL_REF: missing, a deploy adds it" ;;
+esac
 
 # --- what would be deployed ---
 # The committed file gives the Worker's name, entry point and compatibility date, the write counter (its binding and its
@@ -684,6 +775,7 @@ echo "the dispatch binding APPS naming $OUTBOUND as the namespace's outbound Wor
 echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
 echo "Each dispatch to an app with code is limited to $cpu_ms CPU ms and $subrequests subrequests."
 echo "Before either Worker, it would make sure the zone holds $route_acme and $route_pki, each running no Worker."
+echo "Before either Worker, too, it would make sure the zone's rate limiting rule $RL_REF is $RL_REQUESTS requests per $RL_PERIOD s per IP, blocked for $RL_TIMEOUT s, outside the two validation folders ($rl_state now)."
 echo "No other route, no workers.dev address and no preview address."
 
 if [ "$deploy" != true ]; then
@@ -765,6 +857,35 @@ if [ "${#bypass_missing[@]}" -gt 0 ]; then
     fi
     echo "ok      added $pattern, running no Worker"
   done
+fi
+
+# Then the zone's rate limiting rule, also before either Worker, so the zone is never served without it. Only this
+# script's rule is written: added to the entry point (or the entry point made with it, when the zone has none), or
+# updated by its own rule ID. Every answer is the ruleset, and must hold that rule exactly as sent.
+phase=ratelimiting
+if [ "$rl_state" != matching ]; then
+  step "the zone's rate limiting rule"
+  printf '%s\n' "$rl_rule" > "$work/ratelimit.json"
+  if [ "$rl_state" = different ]; then
+    rl_method=PATCH rl_path="/zones/$zone_id/rulesets/$rl_ruleset_id/rules/$rl_rule_id" rl_did=updated
+  elif [ -n "$rl_ruleset_id" ]; then
+    rl_method=POST rl_path="/zones/$zone_id/rulesets/$rl_ruleset_id/rules" rl_did=added
+  else
+    jq -n --argjson r "$rl_rule" '{name: "default", kind: "zone", phase: "http_ratelimit", rules: [$r]}' > "$work/ratelimit.json"
+    rl_method=POST rl_path="/zones/$zone_id/rulesets" rl_did="added, with the zone's http_ratelimit entry point"
+  fi
+  cf_send "$rl_method" "$rl_path" "$work/ratelimit.json"
+  if { [ "$status" != 200 ] && [ "$status" != 201 ]; } || ! shaped "$RL_ENTRY_SHAPE and ($RL_OURS_IN_RESULT)" --arg ref "$RL_REF" --argjson w "$rl_rule"; then
+    echo
+    echo "STOPPED writing the zone's rate limiting rule ($rl_method $rl_path) answered HTTP $status, not the ruleset holding that rule as sent."
+    case "$status" in
+      401 | 403) echo "deploy-content: the token may lack the permission to write it. Add this permission to the token: $RL_PERMISSION. Then run this again." ;;
+    esac
+    echo "deploy-content: neither Worker was deployed. Run this again: its report says whether the rule is missing, matching or different."
+    dc_meant=1
+    exit 3
+  fi
+  echo "ok      $rl_did the rate limiting rule $RL_REF: $RL_REQUESTS requests per $RL_PERIOD s per IP, blocked for $RL_TIMEOUT s"
 fi
 
 # Then the outbound Worker. The content Worker's binding names it, so the content Worker never deploys without it.
@@ -894,7 +1015,19 @@ if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then
 else
   not_shown "whether a custom domain runs $OUTBOUND: the account's custom domains couldn't be read in the shape expected (HTTP $status)"
 fi
+# The zone's rate limiting rule, as the zone holds it after the deploy: this script's rule, exactly as deployed.
+cf "$rl_entry"
+if [ "$status" = 200 ] && shaped "$RL_ENTRY_SHAPE"; then
+  if jq -e --arg ref "$RL_REF" --argjson w "$rl_rule" "$RL_OURS_IN_RESULT" "$work/body" > /dev/null; then
+    pass "the zone's rate limiting rule $RL_REF is in place: $RL_REQUESTS requests per $RL_PERIOD s per IP, blocked for $RL_TIMEOUT s, outside the validation folders"
+  else
+    fail "the zone's rate limiting rule $RL_REF isn't in place as deployed"
+  fi
+else
+  fail "the zone's rate limiting rules couldn't be read (HTTP $status): not verified"
+fi
 echo "NOT SHOWN an app's fetch refused by $OUTBOUND: that needs an app with code, and none exists yet"
+echo "NOT SHOWN a request flood blocked by the rate limiting rule: no probe sends $RL_REQUESTS requests in $RL_PERIOD s"
 echo "NOT SHOWN a custom hostname reaching podster-content through $route_all: that needs an active custom hostname, which this script never makes"
 
 echo

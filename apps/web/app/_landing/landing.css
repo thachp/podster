@@ -1,0 +1,63 @@
+/*
+ * The landing page wears the demo's look (apps/demo/index.html, the UI source of truth since 2026-11-24): a monochrome shell,
+ * and orange only for "this needs you". It renames nothing: it gives the app's own tokens the demo's values, inside `.landing`
+ * only, so the page uses the same Tailwind names as every other screen and the rest of the app is untouched. Light only,
+ * like the app and like the screenshots it shows.
+ */
+.landing {
+  --background: #f5f6f8;
+  --foreground: #14161b;
+  --card: #ffffff;
+  --card-foreground: #14161b;
+  --muted: #eef0f3;
+  --muted-foreground: #5c6270;
+  --border: #e3e6eb;
+  --primary: #14161b;
+  --primary-foreground: #ffffff;
+  --ring: #2f6bd8;
+  /* The one accent. Text in it is at least 4.5:1 on the background; the dot needs only 3:1. */
+  --need: #c2410c;
+  --need-dot: #d9480f;
+  --shadow: 0 1px 2px rgba(20, 22, 27, 0.06), 0 8px 24px rgba(20, 22, 27, 0.06);
+  /* The app doesn't load Geist, and its CSP allows fonts only from itself, so these fall back to the system's own. */
+  --font-landing: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-landing);
+  line-height: 1.5;
+}
+
+.landing :focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.landing h1,
+.landing h2,
+.landing h3 {
+  text-wrap: balance;
+  letter-spacing: -0.02em;
+}
+
+/* The demo's mark: an ink square with the orange dot. */
+.landing-mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--foreground);
+}
+.landing-mark::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--need-dot);
+}
+
+.landing-shot {
+  box-shadow: var(--shadow);
+}

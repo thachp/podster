@@ -50,6 +50,10 @@ cd ../../e2e && node run-upload-browser.mjs
 
 `GATEWAY_URL` in `wrangler.jsonc` is the gateway's public address, shown in the connection Sheet. It's set per environment, and never called from here.
 
+## The landing page
+
+Signed out, `/` is the landing page (`app/_landing/`). Signed in, it still goes to `/attention`. It uses the same session read as `/sign-in` and reads nothing else. It wears the demo's look by giving the app's own tokens the demo's values inside `.landing`. Its screenshots in `public/landing/` come from demo.podster.dev, and `node e2e/capture-landing-shots.mjs` takes them again (it needs `cwebp`).
+
 ## Adding a screen
 
 Nothing shared needs editing. In particular, there's no route table, no API client to extend, and no Sheet registry.

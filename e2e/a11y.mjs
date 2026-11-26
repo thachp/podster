@@ -349,6 +349,7 @@ const screens = (s) => {
   return [
     // [name, path, text that shows the real screen, who]
     ["Sign in", "/sign-in", "Sign in", null],
+    ["Landing", "/", "You stay in charge", null],
     ["Workrooms", "/workrooms", "Billing v2"],
     ["Create a workroom", "/workrooms/new", "Create workroom"],
     ["Explore", "/workrooms/explore", "Explore"],

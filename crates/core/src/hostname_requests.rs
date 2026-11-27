@@ -566,6 +566,39 @@ pub fn provider_status_form(status: &str) -> bool {
     (1..=32).contains(&status.len()) && status.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
 }
 
+/// **Assumed, from Cloudflare's documented list of custom hostname statuses; no spike has seen most of them.** The only
+/// status codes the room keeps or shows (2026-11-27, the security review of PR #630). Anything else Cloudflare sends,
+/// well-formed or not, is kept and shown as `unknown`, never as itself. Only the hostname's own `status` is read; no SSL
+/// status is kept.
+pub const PROVIDER_STATUSES: [&str; 17] = [
+    "active",
+    "pending",
+    "active_redeploying",
+    "moved",
+    "pending_deletion",
+    "deleted",
+    "pending_blocked",
+    "pending_migration",
+    "pending_provisioned",
+    "test_pending",
+    "test_active",
+    "test_active_apex",
+    "test_blocked",
+    "test_failed",
+    "provisioned",
+    "blocked",
+    "unknown",
+];
+
+/// A status Cloudflare gave, as the room keeps it: one of [`PROVIDER_STATUSES`], or `unknown` for anything else.
+pub fn known_provider_status(status: &str) -> &'static str {
+    PROVIDER_STATUSES
+        .iter()
+        .copied()
+        .find(|known| *known == status)
+        .unwrap_or("unknown")
+}
+
 #[cfg(test)]
 mod tests {
     use super::HostnameRequestState;
@@ -711,6 +744,26 @@ mod tests {
                     retry_after_secs: 30
                 }
             );
+        }
+    }
+
+    #[test]
+    fn a_provider_status_is_kept_only_from_the_fixed_set() {
+        use super::{known_provider_status, provider_status_form, PROVIDER_STATUSES};
+        for status in PROVIDER_STATUSES {
+            assert_eq!(known_provider_status(status), status);
+            assert!(provider_status_form(status), "{status}");
+        }
+        for odd in [
+            "",
+            "Active",
+            "active ",
+            "pending_validation_x",
+            "verification failed: see https://example.com",
+            &"a".repeat(32),
+            &"pending".repeat(100),
+        ] {
+            assert_eq!(known_provider_status(odd), "unknown", "{odd}");
         }
     }
 }

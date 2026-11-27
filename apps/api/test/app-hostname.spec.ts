@@ -454,6 +454,29 @@ describe("Check now while waiting for Cloudflare: the custom hostname read at on
     await due(r);
     const blocked = await check(r);
     expect(blocked.body.request).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "blocked" });
+    // A status outside the fixed set is kept and shown as `unknown`, never as Cloudflare's own string.
+    const odd = "pending_new_kind_of_check";
+    await setAtCloudflare(name, odd);
+    await due(r);
+    const unknown = await check(r);
+    expect(unknown.body.request).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "unknown" });
+    const stored = () => inRoom(r.room, (sql) => sql.exec("SELECT provider_status FROM hostname_provider").toArray()[0].provider_status);
+    expect(await stored()).toBe("unknown");
+    // One too long, or not of the form, isn't read at all: what was kept stays, and the string goes nowhere.
+    for (const bad of ["x".repeat(200), "Pending: see https://example.com"]) {
+      await setAtCloudflare(name, bad);
+      await due(r);
+      const answer = await check(r);
+      expect(answer.status).toBe(200);
+      expect(answer.body.request.provider_status).toBe("unknown");
+      expect(JSON.stringify(answer.body)).not.toContain(bad);
+      expect(await stored()).toBe("unknown");
+    }
+    // A string kept before the fixed set is shown as `unknown` too.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_provider SET provider_status = ?", odd));
+    const read = (await switchedOn(() => get(r))).body;
+    expect(read.request.provider_status).toBe("unknown");
+    expect(JSON.stringify(read)).not.toContain(odd);
     await setAtCloudflare(name, "moved");
     await due(r);
     const moved = await check(r);

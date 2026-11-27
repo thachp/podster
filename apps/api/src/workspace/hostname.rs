@@ -53,7 +53,7 @@
 use super::*;
 use crate::hostname_proof::Resolver;
 use podster_core::hostname_requests::{
-    after_ask, check_now, claimed_read_wait_ms, provider_status_form, request_rate_allows,
+    after_ask, check_now, claimed_read_wait_ms, known_provider_status, request_rate_allows,
     setup_status, unmap, CheckNow, HostnameRequestState, HostnameSetup, Unmap,
 };
 use podster_core::hostnames::{
@@ -228,7 +228,7 @@ fn request_view(sql: &SqlStorage, row: &Value, now: i64, domain: Option<&str>) -
         _ => next_check_at,
     };
     // Cloudflare's own status code from its last read, while a committed claim's custom hostname is being set up or
-    // ended: only a code of its checked form (`provider_status_form`), never Cloudflare's message text.
+    // ended: only one of core's fixed set (`known_provider_status`), never Cloudflare's own string or message text.
     let provider_status = if matches!(
         read_state,
         HostnameRequestState::Claimed | HostnameRequestState::Ending
@@ -241,7 +241,7 @@ fn request_view(sql: &SqlStorage, row: &Value, now: i64, domain: Option<&str>) -
         )?
         .first()
         .and_then(|found| text(&found["provider_status"]))
-        .filter(|status| provider_status_form(status))
+        .map(|status| known_provider_status(&status).to_owned())
     } else {
         None
     };

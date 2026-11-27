@@ -8,7 +8,9 @@
 //!   `core::repo_merge`: a visible task, a `merge` grant that counts, a requester whose controlling person isn't the
 //!   submitter's, an approval with a reviewed commit that Podster read for itself and hasn't seen change since. In a
 //!   private room the person who controls the submitting agent and approved its reviewed commit may merge it too, as a
-//!   self-reviewed merge (decision 186 as amended 2026-11-20), which is recorded as one on the change and its events.
+//!   self-reviewed merge (decision 186 as amended 2026-11-20), which is recorded as one on the change and its events. In
+//!   a public room only the room's owner may, and only with the request's `public_repository_acknowledged` (revised
+//!   2026-11-27), which the room keeps in `merge_public_ack` for the job's recheck.
 //! - **The job** ([`Workspace::merge_upkeep`]) runs from the room's alarm, which may run it more than once, so each
 //!   pass starts from what the room holds and what GitHub shows, and writes down what it is about to do before each
 //!   call that changes anything there:
@@ -58,6 +60,9 @@ const SYSTEM: &str = "system";
 /// The reason a merge's `merge.requested` and `merge.succeeded` carry when it was self-reviewed: decision 186 as amended
 /// 2026-11-20. A code, never anyone's text.
 pub(super) const SELF_REVIEWED: &str = "self_reviewed";
+/// The merge request's field that acknowledges a public room's repository is public and nobody else reviewed the work
+/// (decision 186 as revised 2026-11-27).
+pub(super) const PUBLIC_ACK: &str = "public_repository_acknowledged";
 
 fn refuse(status: u16, code: &'static str) -> ApiError {
     ApiError::api(status, code)
@@ -71,6 +76,7 @@ fn refused(refusal: MergeRefusal) -> ApiError {
         MergeRefusal::TaskHidden => ApiError::task_not_found(),
         MergeRefusal::Grant(_)
         | MergeRefusal::SelfMerge
+        | MergeRefusal::PublicUnacknowledged
         | MergeRefusal::SelfReview
         | MergeRefusal::ControllerDeparted
         | MergeRefusal::PublicParticipant
@@ -165,23 +171,29 @@ fn read_inputs(sql: &SqlStorage, requester: &str, task_id: &str, now: i64) -> R<
     }))
 }
 
-/// Whether the room is private now, from its own row: a self-reviewed merge is for private rooms only. A room whose
-/// visibility reads as anything but `private` keeps the second-person rule.
+/// Whether the room is private now, from its own row. A room whose visibility reads as anything but `private` keeps the
+/// second-person rule for everyone but its owner, who needs the public acknowledgement (decision 186 as revised
+/// 2026-11-27).
 pub(super) fn room_is_private(sql: &SqlStorage) -> R<bool> {
     Ok(rows(sql, "SELECT visibility FROM workspace", vec![])?
         .first()
         .is_some_and(|room| room["visibility"].as_str() == Some("private")))
 }
 
-/// What a self-reviewed merge by `caller` would rest on, from the room's rows: its visibility and the approval on record.
+/// What a self-reviewed merge by `caller` would rest on, from the room's rows: its visibility, whether the caller is its
+/// owner now, and the approval on record. `public_acknowledged` is the request's acknowledgement, or for the job's
+/// recheck the room's record of it ([`public_ack_on_record`]).
 pub(super) fn self_review_of<'a>(
     caller: &Caller,
     room_private: bool,
+    public_acknowledged: bool,
     reviewer: Option<&'a (String, Option<String>)>,
 ) -> SelfReview<'a> {
     SelfReview {
         room_private,
         requester_is_person: caller.kind == PrincipalKind::Person,
+        requester_is_room_owner: caller.kind == PrincipalKind::Person && caller.role == Role::Owner,
+        public_acknowledged,
         reviewer: reviewer.map(|(id, person)| Actor {
             id,
             person: person.as_deref(),
@@ -261,6 +273,8 @@ struct Requester<'a> {
     caller: &'a Caller,
     person: Option<&'a str>,
     controller_holds: bool,
+    /// The request's public acknowledgement, or for the job's recheck the room's record of it.
+    public_acknowledged: bool,
 }
 
 /// Why a merge may not go on: the policy's refusal of who is asking, or core's of the rest.
@@ -310,7 +324,12 @@ fn decide_merge<T>(
     };
     // A self-reviewed merge rests on the room's visibility and the approval on record, both from this transaction.
     let reviewer = inputs.reviewer();
-    let review = self_review_of(caller, inputs.room_private, reviewer.as_ref());
+    let review = self_review_of(
+        caller,
+        inputs.room_private,
+        requester.public_acknowledged,
+        reviewer.as_ref(),
+    );
     match authorize_merge(
         caller,
         requester.person,
@@ -386,19 +405,24 @@ pub(super) fn request(
         ),
         merge_reason: merge_reason.as_deref(),
     });
+    // The public acknowledgement only ever narrows what the room's rows allow: it counts for a public room's owner alone,
+    // and only as exactly `true`. Anything else in it is refused with the rest of the body below.
+    let public_acknowledged = body.get(PUBLIC_ACK) == Some(&Value::Bool(true));
     let requester = Requester {
         caller,
         person: asked.caller_person.as_deref(),
         controller_holds: asked.controller_holds,
+        public_acknowledged,
     };
-    // The contract takes these two fields and no other: nothing here can name a repository or a pull request. Read
-    // after the policy, so someone who may not know of the task learns nothing from a malformed body either.
+    // The contract takes these fields and no other: nothing here can name a repository or a pull request. Read after
+    // the policy, so someone who may not know of the task learns nothing from a malformed body either.
     let named = || -> R<(u32, String)> {
         if body.as_object().is_none_or(|fields| {
             fields
                 .keys()
-                .any(|name| name != "submission_no" && name != "commit_sha")
-        }) {
+                .any(|name| name != "submission_no" && name != "commit_sha" && name != PUBLIC_ACK)
+        }) || body.get(PUBLIC_ACK).is_some_and(|ack| !ack.is_boolean())
+        {
             return Err(ApiError::invalid_argument());
         }
         let submission_no = body
@@ -439,6 +463,9 @@ pub(super) fn request(
         Err(Denied::Policy(denial)) => return Err(repositories::denied(denial)),
         Err(Denied::Core(refusal)) => return Err(refused(refusal)),
     };
+    // A self-reviewed merge in a public room rested on the acknowledgement, so the room keeps it for this request, for
+    // the job's recheck. Any other request clears what an earlier one left.
+    let keep_ack = self_reviewed && !inputs.room_private;
     // Every request is logged and counts: for the room this hour, and for the task for good. Asking again never
     // resets either, and the log is kept.
     let count = |filter: &str, bindings: Vec<V>| -> R<u32> {
@@ -464,6 +491,19 @@ pub(super) fn request(
         "INSERT INTO merge_request (at, task_id) VALUES (?, ?)",
         vec![now.into(), task_id.into()],
     )?;
+    if keep_ack {
+        exec(
+            sql,
+            "INSERT OR REPLACE INTO merge_public_ack (task_id, requested_at) VALUES (?, ?)",
+            vec![task_id.into(), now.into()],
+        )?;
+    } else {
+        exec(
+            sql,
+            "DELETE FROM merge_public_ack WHERE task_id = ?",
+            vec![task_id.into()],
+        )?;
+    }
     // What an earlier request left of its mark and its call stays: a merge that request made, and that only shows now,
     // is still read as Podster's own.
     exec(
@@ -601,7 +641,7 @@ fn authority(
 ) -> R<Option<std::result::Result<MergeAuthorized, MergeFailure>>> {
     let asked = rows(
         sql,
-        "SELECT merge_requested_by, merge_requester_person, submission_no FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
+        "SELECT merge_requested_by, merge_requester_person, merge_requested_at, submission_no FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
         vec![task_id.into()],
     )?;
     let Some(row) = asked.first() else {
@@ -632,10 +672,12 @@ fn authority(
         return Ok(None);
     };
     let caller = caller_now(sql, &requester_id)?;
+    let acknowledged = public_ack_on_record(sql, task_id, row["merge_requested_at"].as_i64())?;
     let requester = Requester {
         caller: &caller,
         person: requester_person.as_deref(),
         controller_holds: reads.controller.holds,
+        public_acknowledged: acknowledged,
     };
     let submission_no = u32::try_from(int(&row["submission_no"])).unwrap_or(0);
     let reviewed = inputs
@@ -663,6 +705,25 @@ fn authority(
             Denied::Core(refusal) => refusal,
         })
     })))
+}
+
+/// Whether the room kept a public acknowledgement for the task's current merge request: one recorded by that request,
+/// at its time. A request made in a private room kept none, so a room made public before the job runs ends the merge as
+/// one that needed it, `public_repository_unacknowledged`, with nobody having seen the public warning.
+pub(super) fn public_ack_on_record(
+    sql: &SqlStorage,
+    task_id: &str,
+    requested_at: Option<i64>,
+) -> R<bool> {
+    let Some(requested_at) = requested_at else {
+        return Ok(false);
+    };
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS kept FROM merge_public_ack WHERE task_id = ? AND requested_at = ?",
+        vec![task_id.into(), requested_at.into()],
+    )?
+    .is_empty())
 }
 
 /// The giver's standing couldn't be decided: their `Principal` couldn't say, or the grant's giver isn't the one asked about.

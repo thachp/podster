@@ -192,7 +192,7 @@ describe("linking a pull request at submission", () => {
       provider_repo_id: REPO_ID, pr_number: 7, submission_no: 1, pr_state: "open", pr_observed_at: row.pr_observed_at, observed_head_sha: HEAD, head_observed_at: row.head_observed_at,
       head_in_repository: true, base_is_default: true, observed_base_sha: BASE, reviewed_commit_sha: null, reviewed_base_sha: null, commit_changed: false,
       pr_draft: false, commit_changed_at: null, watched: true, merge_state: "not_requested", merge_reason: null, merge_sha: null, merge_observed_at: null, merge_requested_by: null, merge_requested_at: null, merge_finished_at: null,
-      merge_self_reviewed: false, self_review_for_viewer: false, viewer_merge_refusal: null,
+      merge_self_reviewed: false, self_review_for_viewer: false, public_acknowledgement_for_viewer: false, viewer_merge_refusal: null,
     });
   });
 
@@ -1250,7 +1250,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 11"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 12"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");

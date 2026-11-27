@@ -1553,6 +1553,129 @@ fn a2_today_the_controller_is_whoever_linked_the_credential_the_request_came_wit
     );
 }
 
+/// Decision 186 as revised by the owner on 2026-11-27: in a public room, the room's owner alone may self-merge their own
+/// agent's work they approved, and only with the public acknowledgement; without it, its own refusal. Every combination
+/// of what the review rests on, at the request and the job's recheck, which run the same decision.
+#[test]
+fn a_public_rooms_owner_self_merges_only_with_the_acknowledgement() {
+    let task = approved();
+    let mine = Actor {
+        id: "asg",
+        person: Some("p-sub"),
+    };
+    let me = actor("p-sub", "p-sub");
+    let merge = grant_to("p-sub", GrantAction::Merge);
+    for private in [true, false] {
+        for person in [true, false] {
+            for owner in [true, false] {
+                for acknowledged in [true, false] {
+                    for approved_by_me in [true, false] {
+                        let review = SelfReview {
+                            room_private: private,
+                            requester_is_person: person,
+                            requester_is_room_owner: owner,
+                            public_acknowledged: acknowledged,
+                            reviewer: Some(if approved_by_me {
+                                me
+                            } else {
+                                actor("agt_other", "p-sub")
+                            }),
+                        };
+                        let name = format!(
+                            "private={private} person={person} owner={owner} acknowledged={acknowledged} approved_by_me={approved_by_me}"
+                        );
+                        let expected = if !person || !approved_by_me {
+                            SelfReviewStanding::No
+                        } else if private || (owner && acknowledged) {
+                            SelfReviewStanding::Allowed
+                        } else if owner {
+                            SelfReviewStanding::NeedsAcknowledgement
+                        } else {
+                            SelfReviewStanding::No
+                        };
+                        assert_eq!(
+                            self_review_standing(&me, &mine, &review),
+                            expected,
+                            "{name}"
+                        );
+                        assert_eq!(
+                            is_self_reviewed(&me, &mine, &review),
+                            expected == SelfReviewStanding::Allowed,
+                            "{name}"
+                        );
+                        let authority = MergeAuthority {
+                            requester: me,
+                            submitter: mine,
+                            self_review: review,
+                            ..passing(&task, &merge)
+                        };
+                        let got =
+                            check_merge_authority(&authority).map(|proof| proof.self_reviewed());
+                        let want = match expected {
+                            SelfReviewStanding::Allowed => Ok(true),
+                            SelfReviewStanding::NeedsAcknowledgement => {
+                                Err(MergeRefusal::PublicUnacknowledged)
+                            }
+                            SelfReviewStanding::No => Err(MergeRefusal::SelfMerge),
+                        };
+                        assert_eq!(got, want, "{name}");
+                        assert_eq!(
+                            decide_merge_request(&authority, Some(&FRESH)),
+                            want.map(|_| MergeState::Requested),
+                            "{name}, as a request"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // The acknowledgement and the owner's role grant nothing to someone independent, who merges as before, and the
+    // acknowledgement doesn't turn an ordinary merge into a self-reviewed one.
+    let other = grant(GrantAction::Merge);
+    let ordinary = MergeAuthority {
+        self_review: SelfReview {
+            requester_is_person: true,
+            requester_is_room_owner: true,
+            public_acknowledged: true,
+            ..SelfReview::default()
+        },
+        ..passing(&task, &other)
+    };
+    assert!(!check_merge_authority(&ordinary).unwrap().self_reviewed());
+    // A public room's owner with the acknowledgement still needs the grant and the reviewed commit.
+    let public_owner = SelfReview {
+        room_private: false,
+        requester_is_person: true,
+        requester_is_room_owner: true,
+        public_acknowledged: true,
+        reviewer: Some(me),
+    };
+    let owner_merge = MergeAuthority {
+        requester: me,
+        submitter: mine,
+        self_review: public_owner,
+        ..passing(&task, &merge)
+    };
+    assert_eq!(
+        check_merge_authority(&MergeAuthority {
+            grant: None,
+            ..owner_merge
+        }),
+        Err(MergeRefusal::Grant(GrantRefusal::GrantRequired))
+    );
+    assert_eq!(
+        check_merge_authority(&MergeAuthority {
+            commit_sha: DEF,
+            ..owner_merge
+        }),
+        Err(MergeRefusal::CommitChanged)
+    );
+    assert_eq!(
+        MergeRefusal::PublicUnacknowledged.code(),
+        "public_repository_unacknowledged"
+    );
+}
+
 /// Decision 186 as amended by the owner on 2026-11-20 ("Yes, as recommended"): in a private room, the person who controls
 /// the submitting agent may merge its reviewed commit if they approved it themselves, with a live merge grant. Each
 /// guardrail on its own, at the request and at the job's recheck, which run the same decision.
@@ -1569,6 +1692,7 @@ fn a_self_reviewed_merge_needs_a_private_room_the_approver_a_person_a_grant_and_
         room_private: true,
         requester_is_person: true,
         reviewer: Some(me),
+        ..SelfReview::default()
     };
     let merge = grant_to("p-sub", GrantAction::Merge);
     let self_reviewed = MergeAuthority {

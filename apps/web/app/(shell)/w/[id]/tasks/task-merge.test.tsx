@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-change";
-import { APPROVING_DOESNT_MERGE, explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, SELF_MERGE_REASON, SELF_REVIEWED_WARNING } from "./task-merge";
+import { APPROVING_DOESNT_MERGE, explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, PUBLIC_SELF_MERGE_ACKNOWLEDGE, PUBLIC_SELF_MERGE_WARNING, SELF_MERGE_REASON, SELF_REVIEWED_WARNING } from "./task-merge";
 import { verbFor } from "./task-model";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
@@ -217,7 +217,7 @@ describe("a refused merge, beside its button", () => {
     const alert = await within(control()).findByRole("alert");
     expect(alert).toHaveTextContent(/You control the agent that did this work/);
     expect(alert).toHaveTextContent(/Someone who doesn't control that agent and holds a merge grant can merge it/);
-    expect(alert).toHaveTextContent(/only in a private workroom, and only if they approved this commit themselves/);
+    expect(alert).toHaveTextContent(/only in a private workroom, or in a public one if they're its owner, and only if they approved this commit themselves/);
     expect(alert).toHaveTextContent(/Nothing was asked for/);
   });
 
@@ -284,6 +284,37 @@ describe("a self-reviewed merge", () => {
     await open("per_o");
     await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
     expect(within(await screen.findByRole("alertdialog")).getByRole("note")).toHaveTextContent(SELF_REVIEWED_WARNING);
+  });
+
+  it("asks a public workroom's owner to acknowledge the public repository first, and sends the acknowledgement (2026-11-27)", async () => {
+    reads.task = () => json(200, detail({ self_review_for_viewer: true, public_acknowledgement_for_viewer: true, viewer_merge_refusal: null }));
+    reads.grants = () => json(200, { grants: [{ ...MERGE_GRANT, principal_id: "per_o", delegated_by: "per_o" }] });
+    await open("per_o");
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByRole("note")).toHaveTextContent(PUBLIC_SELF_MERGE_WARNING);
+    expect(PUBLIC_SELF_MERGE_WARNING).toBe("This repository is public. Merging puts your own agent's work on main without anyone else reviewing it.");
+    expect(within(dialog).queryByText(SELF_REVIEWED_WARNING)).toBeNull();
+    const merge = within(dialog).getByRole("button", { name: "Merge" });
+    expect(merge).toBeDisabled();
+    await userEvent.click(within(dialog).getByRole("checkbox", { name: PUBLIC_SELF_MERGE_ACKNOWLEDGE }));
+    expect(merge).toBeEnabled();
+    const results = await axe.run(document.body, { rules: { "color-contrast": { enabled: false }, region: { enabled: false } } });
+    expect(results.violations.map((v) => v.id)).toEqual([]);
+    await userEvent.click(merge);
+    await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));
+    expect(calls.find((call) => call.method === "POST")!.body).toEqual({ submission_no: 2, commit_sha: REVIEWED, public_repository_acknowledged: true });
+  });
+
+  it("sends no acknowledgement for any other merge", async () => {
+    reads.task = () => json(200, detail({ self_review_for_viewer: true }));
+    await open();
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).queryByRole("checkbox")).toBeNull();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));
+    expect(calls.find((call) => call.method === "POST")!.body).toEqual({ submission_no: 2, commit_sha: REVIEWED });
   });
 
   it("says nothing of it to anyone else, and hides the control exactly as before", async () => {
@@ -359,7 +390,7 @@ describe("each merge state, with its times", () => {
 describe("every code as a sentence", () => {
   it("names every refusal mergeTask lists", () => {
     const generic = explainMergeRefusal("something_new");
-    const codes = ["task_not_found", "grant_required", "grant_expired", "grant_stale", "public_participant", "self_merge", "self_review", REVIEW_AGAIN, REVIEWER_UNKNOWN, "controller_departed", "task_not_linked", "repo_not_ready", "not_approved", "submission_mismatch", "commit_changed", "review_required", "change_unwatched", "change_not_found", "merge_already_requested", "already_merged", "standing_unknown", "rate_limited", "merge_request_limit", "merge_unavailable", "invalid_argument", "access_revoked", "agent_disconnected", "workspace_archived", "not_found", "unknown"];
+    const codes = ["task_not_found", "grant_required", "grant_expired", "grant_stale", "public_participant", "self_merge", "public_repository_unacknowledged", "self_review", REVIEW_AGAIN, REVIEWER_UNKNOWN, "controller_departed", "task_not_linked", "repo_not_ready", "not_approved", "submission_mismatch", "commit_changed", "review_required", "change_unwatched", "change_not_found", "merge_already_requested", "already_merged", "standing_unknown", "rate_limited", "merge_request_limit", "merge_unavailable", "invalid_argument", "access_revoked", "agent_disconnected", "workspace_archived", "not_found", "unknown"];
     const sentences = codes.map((code) => explainMergeRefusal(code));
     for (const [index, text] of sentences.entries()) expect(text, codes[index]).not.toBe(generic);
     expect(new Set(sentences).size).toBe(codes.length);
@@ -394,7 +425,7 @@ describe("every code as a sentence", () => {
   it("names every reason a merge ended without merging", () => {
     const codes = ["commit_changed", "base_changed", "head_repo_changed", "pull_request_closed", "pull_request_draft", "merged_elsewhere", "repo_not_ready", "provider_refused", "merge_attempts_exhausted", "workspace_archived", "room_suspended", "default_branch_changed", "unrequested_merge", "unreviewed_merge"];
     // And every refusal the job's recheck of the requester's authority can end a request with (core's MergeRefusal and GrantRefusal).
-    codes.push("access_revoked", "agent_disconnected", "self_merge", "self_review", "controller_departed", "task_not_found", "grant_required", "grant_expired", "grant_stale", "grant_not_found", "public_participant", "repo_not_linked", "task_not_linked", "not_approved", "submission_mismatch", "change_not_found", "review_required", "change_unwatched", "already_merged", "merge_already_requested", "invalid_argument");
+    codes.push("access_revoked", "agent_disconnected", "self_merge", "public_repository_unacknowledged", "self_review", "controller_departed", "task_not_found", "grant_required", "grant_expired", "grant_stale", "grant_not_found", "public_participant", "repo_not_linked", "task_not_linked", "not_approved", "submission_mismatch", "change_not_found", "review_required", "change_unwatched", "already_merged", "merge_already_requested", "invalid_argument");
     for (const code of codes) expect(failureSentence(code), code).not.toContain("(");
     expect(failureSentence("new_reason")).toBe("the merge stopped (new_reason)");
   });

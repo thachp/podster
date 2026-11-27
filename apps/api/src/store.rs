@@ -579,6 +579,14 @@ CREATE TABLE IF NOT EXISTS custom_marker (host TEXT PRIMARY KEY,
 CREATE TABLE IF NOT EXISTS invitation_invitee (invitation_id TEXT PRIMARY KEY REFERENCES invitation (id),
   kind TEXT NOT NULL CHECK (kind = 'person'),
   email TEXT CHECK (email IS NULL OR length(email) BETWEEN 3 AND 254)) WITHOUT ROWID;
+",
+// Step 58 (decision 186 as revised 2026-11-27): a public room's owner may self-merge only with the request's public
+// acknowledgement, and the merge job decides again on every pass, so the room keeps that acknowledgement, one row a task,
+// at the time of the request it came with. A request without one deletes the row. A table, not a column, so the step
+// runs again safely. Forward-only: nothing existing gets a row, so a request already under way rests on none.
+"
+CREATE TABLE IF NOT EXISTS merge_public_ack (task_id TEXT PRIMARY KEY,
+  requested_at INTEGER NOT NULL CHECK (typeof(requested_at) = 'integer')) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

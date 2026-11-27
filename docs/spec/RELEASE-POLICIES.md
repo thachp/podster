@@ -203,7 +203,7 @@ Decided, for the owner to review: [decision 207](PRODUCT.md#decisions-needed), a
 - **Self-approval is allowed.**
   - A person who may approve may approve their own request: decided by the architect on the review of PR #309.
   - **Accepted:** they may also approve a release that their own agent asked for. The owner decided this on 2026-11-16 ("Yes, allow it"), as recorded in the [M6 step 6 plan](../m6-step6-plan.md) and in the code's header (`crates/policy/src/release.rs:11`, `:392-395`).
-  - This is a one-person release. The merge's own independent review under [decision 195](PRODUCT.md#decisions-needed) is unchanged.
+  - This is a one-person release. The merge's own independent review under [decision 195](PRODUCT.md#decisions-needed) is unchanged, except a self-reviewed merge under [decision 186](PRODUCT.md#decisions-needed): in a private room, and since 2026-11-27 in a public room by its owner alone with the public-repository acknowledgement (`public_repository_acknowledged`). That merge approves no release: the release still needs its own request and a person's approval, as above.
   - Shown by `apps/api/test/release-agent.spec.ts` ("may be approved by the person who controls the agent"). **Not shown on staging:** M6-R10's agent request was declined, not approved.
 - **Declining** is open to the same people wherever the room still exists (`:408-427`).
 - **A rollback is asked for by a person only** (`:627-635`), and approved like any release.

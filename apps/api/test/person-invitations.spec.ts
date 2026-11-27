@@ -391,7 +391,7 @@ describe("room schema step 57", () => {
   it("adds the addressee's record to a room made before it, runs again safely, and keeps a pending invitation whole", async () => {
     const id = await room();
     const latest = await inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
-    await inRoom(id, (sql) => { sql.exec("DROP TABLE invitation_invitee"); sql.exec("UPDATE schema_version SET version = version - 1"); });
+    await inRoom(id, (sql) => { sql.exec("DROP TABLE invitation_invitee"); sql.exec("UPDATE schema_version SET version = version - 2"); });
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     // An organization's invitation from before the step is still one: it has no addressee row.

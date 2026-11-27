@@ -42,7 +42,7 @@ import { markHidden, type ResultView } from "../core/results.js";
 import { QuestionInterrupted, type RolePrompter, type RoleView } from "../core/roles.js";
 import type { RoomChangePrompter, RoomChangeView } from "../core/room-facts.js";
 import { changeScreen } from "../core/setup.js";
-import { trustPointer } from "../core/trust.js";
+import { sharePointer, trustPointer } from "../core/trust.js";
 
 /** The most code points of all the inputs shown together. Past this, the prompt can't be approved here. */
 export const SHOWN_CHARS = 16_000;
@@ -133,6 +133,7 @@ export function askScreen(view: AskView, width = 80): { screen: string; cut: boo
     `  room ${view.workspace_id} (${view.room_visibility}), task ${view.task_id}`,
     `  why it asks: ${view.reason}`,
     ...(view.reason === "trust_statement_not_accepted" ? trustPointer(view.workspace_id).map((l) => `  ${l}`) : []),
+    ...(view.public_share_held === true ? sharePointer(view.workspace_id).map((l) => `  ${l}`) : []),
     `  requester: ${view.requester}`,
     ...view.authors.map((a) => `  ${a.input} written by: ${a.authors.join(", ")}`),
     `  tools: ${view.tools.join(", ") || "none"}; network: ${view.network.join(", ") || "none"}`,

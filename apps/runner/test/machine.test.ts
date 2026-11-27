@@ -527,7 +527,13 @@ describe("Runner's own source", () => {
       'node scripts/toolchain-files.mjs fetch "$RUNNER_TEMP/runner-toolchain-files"',
       'npx vitest run --config vitest.linux.config.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/linux-docker.json"',
       "|",
+      // F-1: step 12's escape suite on this runner's Docker, no key; gated on eight passed and only the four R-19 runs skipped.
+      'npx vitest run --config vitest.real.config.ts test/hostile-real.test.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/hostile-real.json"',
+      "|",
     ]);
+    expect(job).toContain('RUNNER_HOSTILE_DOCKER: "1"');
+    expect(job).toMatch(/r\.numPassedTests === 8 && r\.numFailedTests === 0 && r\.numPendingTests === 4/);
+    expect(job).not.toMatch(/RUNNER_REAL_RUN|RUNNER_REAL_KEY_FILE/);
     expect(job).toContain('RUNNER_LINUX_DOCKER: "1"');
     expect(job).toContain("run: node scripts/toolchain-files.mjs key >> \"$GITHUB_OUTPUT\"");
     expect(job).toContain("key: runner-toolchain-files-${{ steps.toolchain-files-key.outputs.key }}");

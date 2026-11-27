@@ -1257,11 +1257,16 @@ describe("a stop that never confirms", () => {
 });
 
 describe("the harness's real half is opt-in", () => {
-  it("needs RUNNER_REAL_RUN=1 and a key file, is outside the default config, and caps its spend", async () => {
+  it("spends only with RUNNER_REAL_RUN=1 and a key file, is outside the default config, and caps its spend", async () => {
     const real = await readFile(new URL("hostile-real.test.ts", import.meta.url), "utf8");
     expect(real).toMatch(/const OPTED_IN = process\.env\.RUNNER_REAL_RUN === "1" && !!process\.env\.RUNNER_REAL_KEY_FILE;/);
     expect(real).toMatch(/describe\.runIf\(OPTED_IN && DOCKER !== null\)/);
     expect(real).toMatch(/expect\(HOSTILE_REAL_CEILING_MICRO_USD\)\.toBe\(60_000\)/);
+    // The escape suite (F-1) needs no key: RUNNER_HOSTILE_DOCKER=1, as CI's runner job sets, and it never builds a provider transport.
+    expect(real).toMatch(/const ESCAPE_ON = process\.env\.RUNNER_HOSTILE_DOCKER === "1" \|\| OPTED_IN;/);
+    const escapeHalf = real.slice(real.indexOf("describe.runIf(ESCAPE_ON"), real.indexOf("describe.runIf(OPTED_IN"));
+    expect(escapeHalf.length).toBeGreaterThan(1000);
+    expect(escapeHalf).not.toMatch(/ProviderKeyTransport|ClaudeDriver|SupervisedAdapter/);
     const config = await readFile(new URL("../vitest.config.ts", import.meta.url), "utf8");
     expect(config).toMatch(/exclude: \[[^\]]*"test\/hostile-real\.test\.ts"/);
   });

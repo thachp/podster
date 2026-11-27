@@ -1361,7 +1361,7 @@ describe("step 10: the repository path in the lifecycle", () => {
   });
 
   describe("F-2 (S-34, RUNNER.md lifecycle step 9): the push and the pull request are outputs, held for the owner's review", () => {
-    const shareRepoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE, outputs: "share" }] });
+    const shareRepoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, repository: SCOPE, outputs: "share" }] });
     async function held(config: unknown = repoConfig()) {
       const t = await repoSetup(config);
       t.prompter.publicationDefault = "later";

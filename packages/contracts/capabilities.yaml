@@ -110,6 +110,8 @@ person_only:
   - getAppHostname
   - requestAppHostname
   - removeAppHostname
+  # 2026-11-27: "Check now" on a pending custom hostname, people only, as the room's domain is managed.
+  - checkAppHostname
   # S4 of the store plan: deleting an app's data, the room's owner's as a person, and an operator's.
   - deleteAppData
   - createAppReport

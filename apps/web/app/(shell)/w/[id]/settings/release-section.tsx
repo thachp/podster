@@ -9,7 +9,7 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
-import { CUSTOM_DOMAIN_UNAVAILABLE, dayOf, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
+import { type AppHostname, CUSTOM_DOMAIN_UNAVAILABLE, dayOf, DEPLOY_GRANTS_UNAVAILABLE, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, timeOf, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
 import { StateBadge } from "./state-badge";
 
 /** A day, and who, only where they can be named. */
@@ -227,12 +227,22 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
   const ids = { name: useId(), problem: useId() };
   const [name, setName] = useState("");
   const [touched, setTouched] = useState(false);
+  // What the last "Check now" found, shown beside the button until another command is sent.
+  const [found, setFound] = useState<ReturnType<typeof describeCheck> | null>(null);
+  const [checking, setChecking] = useState(false);
   const base = `/api/v1/workspaces/${encodeURIComponent(roomId)}/app-hostname`;
   const problem = hostnameProblem(name);
   const held = holdsName(request);
   const shown = request ? describeHostname(request) : null;
 
   const ask = () => send(base, { hostname: name.trim() }, "Asked for the name. Publish the two records shown here; nothing is held until Podster reads the TXT record.", { method: "PUT", explain: explainReleaseRefusal, onOk: () => setName("") });
+  const checkNow = async () => {
+    clear();
+    setFound(null);
+    setChecking(true);
+    await send<AppHostname>(`${base}/check`, {}, () => null, { explain: explainReleaseRefusal, onOk: (data) => setFound(describeCheck(data.request)) });
+    setChecking(false);
+  };
   const remove = () => send(base, {}, request?.state === "pending" ? "The request is dropped." : "This workroom has stopped using the name. Podster is removing it.", { method: "DELETE", explain: explainReleaseRefusal });
 
   return (
@@ -252,11 +262,24 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
               {visibleText(request.hostname)}
             </Row>
             {request.state === "pending" ? <Row term="Ends">{`${new Date(request.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC, if the TXT record isn't read by then`}</Row> : null}
+            {request.state === "pending" ? <Row term="Last checked">{request.checked_at === null ? "Not yet" : timeOf(request.checked_at)}</Row> : null}
+            {request.state === "pending" && request.next_check_at !== null ? <Row term="Next check">{timeOf(request.next_check_at)}</Row> : null}
             <Row term="Asked on">{byWhom(dayOf(request.requested_at), requestedByName)}</Row>
           </dl>
           {request.state === "pending" || request.state === "claimed" ? <DnsRecords request={request} /> : null}
         </>
       ) : null}
+
+      {controls && request?.state === "pending" ? (
+        <Button type="button" variant="outline" size="sm" className={MOBILE_TARGET} disabled={retrying || checking} onClick={() => void checkNow()}>
+          {checking ? "Checking…" : "Check now"}
+        </Button>
+      ) : null}
+      {/* What the last check found stays when the answer moves the request on, and the button goes. */}
+      <div role="status" className="space-y-1 text-sm empty:hidden">
+        {found ? <p>{found.text}</p> : null}
+        {found?.notFound ? <p className="text-muted-foreground">{DNS_DELAY_NOTE}</p> : null}
+      </div>
 
       {controls && request && (request.state === "pending" || request.state === "claimed") ? (
         <ConfirmAction
@@ -295,6 +318,7 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
               disabled={retrying}
               onChange={(event) => {
                 clear();
+                setFound(null);
                 setName(event.target.value);
               }}
               onBlur={() => setTouched(true)}

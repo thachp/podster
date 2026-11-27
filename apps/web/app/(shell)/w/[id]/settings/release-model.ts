@@ -49,6 +49,10 @@ export type HostnameRequest = {
   requested_at: number;
   expires_at: number;
   end_reason: string | null;
+  /** When Podster last looked at the request: its TXT record, or an ask for the claim. Null before the first look. */
+  checked_at: number | null;
+  /** While pending with no proof read, when the job next looks for the TXT record; otherwise null. Display only. */
+  next_check_at: number | null;
 };
 
 export type AppHostname = { request: HostnameRequest | null };
@@ -215,6 +219,32 @@ const HOSTNAME_REASONS: Record<string, string> = {
   hostname_unpublished: "This workroom's app was unpublished.",
 };
 
+/** **Proposed** wording (RELEASE-POLICIES.md, 2026-11-27): shown when "Check now" didn't find the TXT record yet. */
+export const DNS_DELAY_NOTE = "DNS can take up to about 30 minutes to show a new record if it was added after you asked.";
+
+/** A moment to the second, in UTC, as the server gave it. */
+export const timeOf = (at: number) => `${new Date(at).toISOString().slice(0, 19).replace("T", " ")} UTC`;
+
+/**
+ * What "Check now" found, from the room's hostname as the server answered it after its look (2026-11-27). `notFound` is
+ * true while the request is still waiting for proof, which is when the note on DNS delay is shown. Display only: the
+ * server decided, and the page refreshes from its reads.
+ */
+export function describeCheck(after: HostnameRequest | null): { text: string; notFound: boolean } {
+  switch (after?.state) {
+    case "pending":
+      return { text: "Podster didn't find your TXT record yet. It keeps checking until the request ends.", notFound: true };
+    case "claimed":
+      return { text: "Podster read your TXT record. This workroom holds the name.", notFound: false };
+    case "refused":
+      return { text: `Podster read your TXT record, but the name couldn't be claimed. ${hostnameReason(after.end_reason)}`.trim(), notFound: false };
+    case undefined:
+      return { text: "This workroom has no hostname request open now. Reload to see where it stands.", notFound: false };
+    default:
+      return { text: `The request is no longer waiting for proof. ${hostnameReason(after?.end_reason ?? null)}`.trim(), notFound: false };
+  }
+}
+
 export const hostnameReason = (code: string | null) => (code ? (HOSTNAME_REASONS[code] ?? `Reason code: ${code}.`) : "");
 
 /** Requests that still count as the room's one hostname. A new name can be asked for only once none does. */
@@ -292,6 +322,10 @@ export function explainReleaseRefusal(code: string, status = 400) {
       return "This workroom already has its one custom hostname. Remove it first. Nothing changed.";
     case "hostname_unavailable":
       return "Podster can't use that name. Nothing changed.";
+    case "hostname_not_pending":
+      return "This request isn't waiting for proof any more. Reload to see where it stands. Nothing changed.";
+    case "hostname_check_too_soon":
+      return "Podster checked this request less than 30 seconds ago. Wait a moment and try again. Nothing changed.";
     default:
       return explainRefusal(code, status);
   }

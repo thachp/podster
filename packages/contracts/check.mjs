@@ -163,7 +163,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 // agent's list (AC-17).
 const AGENT_RELEASE = { capability: "deploy_release", operation: "requestRelease" };
 const releaseOperations = {
-  getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
+  getReleaseConfig: "ws", setReleaseConfig: "ws", listReleaseApprovals: "ws", requestRelease: "ws", approveRelease: "ws,release", declineRelease: "ws,release", rollbackRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws", checkAppHostname: "ws",
   deleteAppData: "ws,label", deleteAppDataAsOperator: "label", retireAppLabel: "label",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
   getReleaseDelegation: "org", setReleaseDelegation: "org",
@@ -182,11 +182,12 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // Step 6 built the room's release configuration, read and set, which the room itself answers.
     // Step 8's first PR built the room's custom hostname, read, asked for and removed, which the room itself answers.
     // Step 10(b) built the room's list of releases awaiting approval, which the room itself answers.
+    // "Check now" on a pending custom hostname (2026-11-27), which the room itself answers.
     // Step 6 built a person's request for a release, which the room itself answers.
     // Step 6's 6f built approving and declining one, and 6h asking to roll back, which the room itself answers.
     // S4 of the store plan built deleting an app's data, the owner's (which the room itself answers) and an operator's.
     // Step 6's 6f built an operator's retirement of a room's label another room's lookup row holds, behind the gate.
-    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "deleteAppData", "deleteAppDataAsOperator", "retireAppLabel"].includes(id);
+    const built = ["requestRelease", "approveRelease", "declineRelease", "rollbackRelease", "listReleaseApprovals", "suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation", "getReleaseConfig", "setReleaseConfig", "getAppHostname", "requestAppHostname", "removeAppHostname", "checkAppHostname", "deleteAppData", "deleteAppDataAsOperator", "retireAppLabel"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     // Asking for a custom hostname is built but gated: while the release path isn't complete, a deployment with release
     // and a content provider answers it `release_not_available`, and its summary must say exactly when. So is asking for a

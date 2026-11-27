@@ -5,6 +5,7 @@
 //! | --- | --- |
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
 //! | Map a custom hostname, or remove one (M6 step 8) | The same people; asking only where release may happen at all, release switched on in the room among them; removing always ([`authorize_custom_hostname`]) |
+//! | Check a pending custom hostname's proof now (2026-11-27) | The same people, wherever asking may happen ([`HostnameChange::Check`]). Never an agent |
 //! | Give a `deploy` grant, or take one back (M6 step 6) | Giving: a person who is the room's owner or a room admin, with that authority holding, in a public room ([`authorize_deploy_grant`]), to a current participant who isn't there through a public claim (decision 209) and isn't a person from another organization (`podster_policy::repositories::may_receive_grant`). An agent never gives one, and may hold one. Taking back: whoever may take back any grant on the room's repository (`podster_policy::repositories::authorize_revoke`) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
 //! | Ask for a release (`requestRelease`, M6 step 6; an agent through `deploy_release`, 6g) | The same, the requester's controlling person still in their organization: a person themselves, an agent the person who linked its credential, whose link must be the one recorded at the request ([`authorize_release_request`], [`controller_unchanged`]). A rollback is a person's alone ([`may_ask_for_release`]) |
@@ -286,6 +287,9 @@ pub enum HostnameChange {
     Request,
     /// Remove the mapping, or drop a pending request. It only takes down.
     Remove,
+    /// Look for a pending request's challenge now, rather than at the job's next turn (2026-11-27). It is the room asking
+    /// outside itself on the request's behalf, so it needs everything asking for one needs.
+    Check,
 }
 
 /// Who may map a custom hostname to the room's app, or remove one, and where (M6 step 8; decisions 201, 207 and 215):
@@ -299,7 +303,7 @@ pub fn authorize_custom_hostname(
     change: HostnameChange,
 ) -> Result<(), ReleaseDenial> {
     let config = match change {
-        HostnameChange::Request => ConfigChange::Change,
+        HostnameChange::Request | HostnameChange::Check => ConfigChange::Change,
         HostnameChange::Remove => ConfigChange::TurnOff,
     };
     authorize_release_config(caller, authority_holds, room, config)

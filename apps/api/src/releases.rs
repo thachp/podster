@@ -51,6 +51,8 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
             Some(Audience::Person)
         }
         ["v1", "workspaces", _, "app-hostname"] if get || put || delete => Some(Audience::Person),
+        // "Check now" on the room's pending custom hostname (2026-11-27).
+        ["v1", "workspaces", _, "app-hostname", "check"] if post => Some(Audience::Person),
         ["v1", "workspaces", _, "apps", _, "delete-data"] if post => Some(Audience::Person),
         ["v1", "app-reports"] if post => Some(Audience::Person),
         ["v1", "moderation", "apps", _, "suspend" | "lift" | "delete-data" | "retire"] if post => {
@@ -71,7 +73,8 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
 }
 
 /// Whether an M6 route is built in the room that it names, and so goes to that room like any other room route: the room's
-/// release configuration, read and set (step 6), its custom hostname, read, asked for and removed (step 8), and its
+/// release configuration, read and set (step 6), its custom hostname, read, asked for, removed and checked now (step 8;
+/// 2026-11-27), and its
 /// releases awaiting approval, read (step 10(b)), and asking for a release, approving and declining one (step 6). The
 /// room answers each only while release is switched on.
 pub(crate) fn room_route(parts: &[&str]) -> bool {
@@ -90,6 +93,7 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
             _,
             "approve" | "decline" | "rollback"
         ] | ["v1", "workspaces", _, "apps", _, "delete-data"]
+            | ["v1", "workspaces", _, "app-hostname", "check"]
     )
 }
 

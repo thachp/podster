@@ -38,7 +38,7 @@ async function api(who: Who, method: string, path: string, body?: unknown, opts:
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
-  return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined };
+  return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined, retryAfter: res.headers.get("retry-after") };
 }
 
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
@@ -267,6 +267,126 @@ describe("a room's custom hostname: the request and its challenge (M6 step 8)", 
     expect(wrangler.match(/"HOSTNAME_RESOLVER_URL"\s*:/g)).toHaveLength(1);
     // The Public Suffix List is compiled in from its dated snapshot, never a setting: no environment binds the old name.
     expect(wrangler.includes("PUBLIC_SUFFIX_RULES")).toBe(false);
+  });
+});
+
+describe("Check now: a pending request's proof looked for at once (2026-11-27)", () => {
+  const checkPath = (r: Room) => `${path(r)}/check`;
+  const check = (r: Room, who = r.owner, opts: { key?: string } = {}) => switchedOn(() => api(who, "POST", checkPath(r), {}, opts));
+  const looksAt = async (name: string) => (await asked()).filter((line) => line.includes(name)).length;
+  const checksAsked = (r: Room) => all(r.room, "SELECT actor_id, new_json FROM audit_event WHERE action = 'app_hostname.check_asked'");
+
+  it("looks at once, by the job's own rule, so a proven request comes back claimed", async () => {
+    const r = await room("org_ah_check_claim");
+    const name = newName();
+    const request = await askFor(r, name);
+    expect(request).toMatchObject({ checked_at: null, next_check_at: request.requested_at });
+    // Another value proves nothing: the request stays pending, and the look is recorded.
+    await answerWith(name, "0".repeat(64));
+    const first = await check(r);
+    expect(first.status).toBe(200);
+    expect(first.body.request).toMatchObject({ id: request.id, state: "pending", setup_status: "proof_pending" });
+    expect(first.body.request.checked_at).toBeGreaterThanOrEqual(request.requested_at);
+    expect(first.body.request.next_check_at).toBe(first.body.request.checked_at + 60_000);
+    expect(await looksAt(name)).toBe(1);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", proved_at: null });
+    // The room's own value: the check proves it, asks the object, and answers claimed.
+    await answerWith(name, request.challenge_value);
+    await rewindLook(r, 30_000);
+    const second = await check(r);
+    expect(second.status).toBe(200);
+    expect(second.body.request).toMatchObject({ id: request.id, state: "claimed", setup_status: "provider_pending", next_check_at: null });
+    expect(await looksAt(name)).toBe(2);
+    const row = await requestRow(r);
+    expect(row).toMatchObject({ state: "claimed", open: 1, end_reason: null });
+    expect(row.proved_at).not.toBeNull();
+    expect((await claimState(name)).claim).toMatchObject({ workspace_id: r.room, request_id: request.id, state: "live" });
+    expect(await events(r)).toEqual([
+      { type: "app_hostname.requested", actor_id: r.owner.id },
+      { type: "app_hostname.claimed", actor_id: "podster" },
+    ]);
+    expect(await checksAsked(r)).toEqual([0, 1].map(() => ({ actor_id: r.owner.id, new_json: JSON.stringify({ request_id: request.id, state: "pending" }) })));
+    // Claimed, there is no proof left to look for.
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+  });
+
+  it("is refused for 30 seconds after the request's last look, the job's or a check's, with Retry-After, and writes nothing", async () => {
+    const r = await room("org_ah_check_rate");
+    const name = newName();
+    const request = await askFor(r, name);
+    const key = "ah-check-replayed";
+    const first = await check(r, r.owner, { key });
+    expect(first.status).toBe(200);
+    const looked = (await requestRow(r)).checked_at;
+    const refused = await check(r);
+    expect(refusedBy(refused)).toEqual([429, "hostname_check_too_soon"]);
+    expect(Number(refused.retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(Number(refused.retryAfter)).toBeLessThanOrEqual(30);
+    // An admin is held by the same rate: it is the request's, not the caller's.
+    expect(refusedBy(await check(r, r.admin))).toEqual([429, "hostname_check_too_soon"]);
+    // A replay of the first check gets the answer its command stored, and looks at nothing.
+    const replay = await check(r, r.owner, { key });
+    expect(replay.status).toBe(200);
+    expect(replay.body.request).toMatchObject({ id: request.id, state: "pending" });
+    expect(await looksAt(name)).toBe(1);
+    expect((await requestRow(r)).checked_at).toBe(looked);
+    expect(await checksAsked(r)).toHaveLength(1);
+    // Thirty seconds after the last look, it goes again.
+    await rewindLook(r, 30_000);
+    expect((await check(r, r.admin)).status).toBe(200);
+    expect(await looksAt(name)).toBe(2);
+    // The job's own look holds it too: a look a moment ago isn't made again.
+    await rewindLook(r);
+    await pass(r);
+    expect(await looksAt(name)).toBe(3);
+    expect(refusedBy(await check(r))).toEqual([429, "hostname_check_too_soon"]);
+    expect(await looksAt(name)).toBe(3);
+    expect(await requestRow(r)).toMatchObject({ id: request.id, state: "pending", proved_at: null });
+  });
+
+  it("checks only a pending request: none, removed, refused or expired is refused by its code", async () => {
+    const r = await room("org_ah_check_states");
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+    const name = newName();
+    await askFor(r, name);
+    await removed(r);
+    expect(await requestRow(r)).toMatchObject({ state: "ended" });
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+    // Past its 72 hours, a request no proof was taken for is expired, not checked.
+    await askFor(r, newName());
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET requested_at = requested_at - ?, expires_at = expires_at - ? WHERE open = 1", 72 * 3600_000, 72 * 3600_000));
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+    // A refused request is over.
+    const [a, b] = [await room("org_ah_check_ref_a"), await room("org_ah_check_ref_b")];
+    const shared = newName();
+    const [ra, rb] = [await askFor(a, shared), await askFor(b, shared)];
+    await answerWith(shared, ra.challenge_value, rb.challenge_value);
+    expect((await check(a)).body.request).toMatchObject({ state: "claimed" });
+    expect((await check(b)).body.request).toMatchObject({ state: "refused", end_reason: "hostname_claimed" });
+    expect(refusedBy(await check(b))).toEqual([409, "hostname_not_pending"]);
+    expect(await looksAt(name)).toBe(0);
+  });
+
+  it("is only for whoever may ask for the room's hostname, where asking may happen", async () => {
+    const r = await room("org_ah_check_who");
+    const name = newName();
+    await askFor(r, name);
+    // A member, and an agent, by its kind: refused before anything is looked up.
+    expect(refusedBy(await check(r, r.member))).toEqual([403, "not_allowed"]);
+    expect(refusedBy(await check(r, AGENT))).toEqual([403, "not_allowed"]);
+    // An operator isn't in the room.
+    expect(refusedBy(await check(r, OPERATOR))).toEqual([404, "workspace_not_found"]);
+    // Where asking can't happen, checking can't either.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
+    expect(refusedBy(await check(r))).toEqual([409, "release_off"]);
+    await inRoom(r.room, (sql) => sql.exec("UPDATE release_config SET enabled = 1"));
+    // With release switched off for the deployment, the route can't be told from a path nobody defined.
+    const [real, unknown] = [await api(r.owner, "POST", checkPath(r), {}), await api(r.owner, "POST", `${checkPath(r)}x`, {})];
+    expect(refusedBy(real)).toEqual(refusedBy(unknown));
+    expect(real.code).toBe("not_found");
+    expect(await looksAt(name)).toBe(0);
+    expect(await requestRow(r)).toMatchObject({ state: "pending", checked_at: null });
+    expect(await checksAsked(r)).toEqual([]);
   });
 });
 

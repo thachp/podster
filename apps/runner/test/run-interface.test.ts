@@ -25,6 +25,7 @@ import {
   LIMITS_GUIDANCE,
   NO_REPOSITORY_GUIDANCE,
   REPOSITORY_GUIDANCE,
+  RESULT_SCHEMA,
   runFrame,
   type AgentDriver,
   type ContainerSpec,
@@ -120,6 +121,13 @@ class FakeSandbox implements TaskSandbox {
   openThrows: string | null = null;
   output = "ran";
   breach: ((code: string) => void) | null = null;
+  /** The counts `scratch` answers, and the runs it was asked about. */
+  scratchCounts: { home_files: number; tmp_files: number } | null = null;
+  scratched: string[] = [];
+  async scratch(ref: string) {
+    this.scratched.push(ref);
+    return this.scratchCounts;
+  }
   async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
     this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
@@ -382,6 +390,10 @@ describe("the run's frame says what happens to the repository (2026-11-22, 0.0.1
     expect(REPOSITORY_GUIDANCE).toContain("don't run git, clone, push, open a pull request or try to reach GitHub");
     expect(REPOSITORY_GUIDANCE).toContain("Runner itself commits what changed in /work, pushes the task's branch and opens the pull request");
     expect(REPOSITORY_GUIDANCE).toContain("Write the summary as the description of that change");
+    // 2026-11-27: a run of about 18 turns ended succeeded with nothing to commit. Say where work isn't kept.
+    expect(REPOSITORY_GUIDANCE).toContain("Runner commits only files inside /work");
+    expect(REPOSITORY_GUIDANCE).toContain("Your home folder, ~, is /work/.cache/home");
+    for (const folder of ["/tmp", "node_modules", ".cache", "/.wrangler", "/.tmp", "/target"]) expect(REPOSITORY_GUIDANCE).toContain(folder);
     // Only whether there is a checkout is read: the repository's name and branch never reach the model's frame.
     expect(frame).not.toContain(REPO.full_name);
     expect(frame).not.toContain(REPO.branch);
@@ -404,6 +416,12 @@ describe("the run's frame says what happens to the repository (2026-11-22, 0.0.1
     expect(MAX_SUMMARY_CHARS).toBe(2000);
     expect(UNTRUSTED_FRAME).toContain(`The result's summary is at most ${MAX_SUMMARY_CHARS} characters; a longer one is refused`);
     for (const repository of [null, REPO]) expect(runFrame({ ...FACTS, repository }).startsWith(UNTRUSTED_FRAME)).toBe(true);
+  });
+
+  it("puts the summary's limit in the result schema itself, as a bound and in words (2026-11-27)", () => {
+    expect(RESULT_SCHEMA.properties.summary.maxLength).toBe(MAX_SUMMARY_CHARS);
+    expect(RESULT_SCHEMA.properties.summary.description).toContain(`At most ${MAX_SUMMARY_CHARS} characters`);
+    expect(RESULT_SCHEMA.properties.summary.description).toContain("control characters");
   });
 
   it("is fixed: the task's words never enter it, and the driver gets the frame for the run's facts", async () => {
@@ -828,6 +846,26 @@ describe("the run-time timer starts with the run (L4 on #459)", () => {
   });
 });
 
+describe("a succeeded run's scratch count (2026-11-27)", () => {
+  it("hands the counts of files in HOME and /tmp over with a succeeded run's report, while its container is still there", async () => {
+    const t = setup(async () => RESULT);
+    t.sandbox.scratchCounts = { home_files: 41, tmp_files: 2 };
+    const report = await (await t.start()).done;
+    expect(report).toMatchObject({ status: "succeeded", scratch: { home_files: 41, tmp_files: 2 } });
+    expect(t.sandbox.scratched).toEqual(["run_1"]);
+    expect(t.sandbox.killed).toEqual([]);
+  });
+
+  it("doesn't count for a run that didn't succeed", async () => {
+    const t = setup(async () => null);
+    t.sandbox.scratchCounts = { home_files: 1, tmp_files: 1 };
+    const report = await (await t.start()).done;
+    expect(report.status).toBe("failed");
+    expect(report.scratch).toBeUndefined();
+    expect(t.sandbox.scratched).toEqual([]);
+  });
+});
+
 describe("a refused result names the rule it broke (the owner's report of 2026-11-20)", () => {
   const base = { status: "completed", summary: "Done.", files: ["src/a.ts"] };
   const cases: [string, unknown, ResultRule, string][] = [
@@ -836,7 +874,7 @@ describe("a refused result names the rule it broke (the owner's report of 2026-1
     ["an unknown field", { ...base, notes: "x" }, "result_unknown_field", "unknown field"],
     ["a bad status", { ...base, status: "done" }, "result_status_invalid", "status must be completed or blocked"],
     ["an empty summary", { ...base, summary: "" }, "result_summary_empty", "summary must not be empty"],
-    ["a long summary", { ...base, summary: "x".repeat(MAX_SUMMARY_CHARS + 1) }, "result_summary_too_long", `summary is longer than ${MAX_SUMMARY_CHARS} characters`],
+    ["a long summary", { ...base, summary: "x".repeat(MAX_SUMMARY_CHARS + 1) }, "result_summary_too_long", `summary must be at most ${MAX_SUMMARY_CHARS} characters`],
     ["a control character", { ...base, summary: "bell\u0007" }, "result_summary_control_char", "control character"],
     ["files not a list", { ...base, files: "src/a.ts" }, "result_files_not_list", "files must be a list"],
     ["too many files", { ...base, files: Array.from({ length: 101 }, (_, i) => `f${i}`) }, "result_too_many_files", "more than 100 paths"],
@@ -851,6 +889,21 @@ describe("a refused result names the rule it broke (the owner's report of 2026-1
     const text = refusalText("result_invalid", rule);
     expect(text).toContain(words);
     expect(text).toContain("give the structured result again");
+  });
+
+  it("tells the agent the limit and its summary's actual length when the summary is too long (2026-11-27)", () => {
+    const summary = "x".repeat(MAX_SUMMARY_CHARS + 345);
+    const input = { ...base, summary };
+    const decision = decideToolCall(FACTS, { call_id: "c1", tool: "StructuredOutput", input });
+    expect(decision).toEqual({ allow: false, reason: "result_invalid", rule: "result_summary_too_long" });
+    const text = refusalText("result_invalid", "result_summary_too_long", input);
+    expect(text).toContain(`at most ${MAX_SUMMARY_CHARS} characters`);
+    expect(text).toBe(`Runner refused this result: summary must be at most ${MAX_SUMMARY_CHARS} characters; shorten it. Yours is ${MAX_SUMMARY_CHARS + 345}, so cut at least 345. Fix that and give the structured result again.`);
+    expect(text).toContain("give the structured result again");
+    expect(text).not.toContain("xxx");
+    // Without the input, or with an input that isn't the result's shape, the fixed words alone.
+    expect(refusalText("result_invalid", "result_summary_too_long")).toContain(`at most ${MAX_SUMMARY_CHARS} characters`);
+    expect(refusalText("result_invalid", "result_summary_too_long", "not an object")).toBe(`Runner refused this result: summary must be at most ${MAX_SUMMARY_CHARS} characters; shorten it. Fix that and give the structured result again.`);
   });
 
   it("covers every rule, and the words name no part of what the agent wrote", () => {

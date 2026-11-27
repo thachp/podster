@@ -127,10 +127,15 @@ export function taskPath(raw: unknown, folderAllowed = false): { ok: true; path:
 
 /**
  * What a refusal tells the model: fixed text for each code, so a model that named a path its own way can name it again
- * the folder's way. Nothing of the call's input is in it.
+ * the folder's way. Nothing of the call's input is in it but, for a summary refused as too long, its length as a number
+ * (2026-11-27: the same refusal twice in a row), given the call's input, so the next try can be cut to fit.
  */
-export function refusalText(reason: ToolRefusal, rule?: ResultRule): string {
-  if (reason === "result_invalid" && rule) return `Runner refused this result: ${RESULT_RULE_TEXT[rule]} Fix that and give the structured result again.`;
+export function refusalText(reason: ToolRefusal, rule?: ResultRule, input?: unknown): string {
+  if (reason === "result_invalid" && rule) {
+    const summary = rule === "result_summary_too_long" && isObj(input) && typeof input.summary === "string" ? input.summary : null;
+    const length = summary === null ? "" : ` Yours is ${summary.length}, so cut at least ${summary.length - MAX_SUMMARY_CHARS}.`;
+    return `Runner refused this result: ${RESULT_RULE_TEXT[rule]}${length} Fix that and give the structured result again.`;
+  }
   switch (reason) {
     case "path_outside_folder":
       return `Runner refused this call: the path is outside the task's folder. Give a path relative to the task's folder, such as notes.txt or src/a.ts; the folder is also ${TASK_FOLDER_IN_CONTAINER}, your working folder.`;
@@ -148,7 +153,7 @@ export const RESULT_RULE_TEXT: Record<ResultRule, string> = {
   result_unknown_field: "it has an unknown field: only status, summary, files and change_type are allowed.",
   result_status_invalid: "status must be completed or blocked.",
   result_summary_empty: "summary must not be empty.",
-  result_summary_too_long: `summary is longer than ${MAX_SUMMARY_CHARS} characters; shorten it.`,
+  result_summary_too_long: `summary must be at most ${MAX_SUMMARY_CHARS} characters; shorten it.`,
   result_summary_control_char: "summary holds a control character; only tabs and line breaks are allowed.",
   result_files_not_list: "files must be a list of paths.",
   result_too_many_files: `files lists more than ${MAX_RESULT_FILES} paths.`,

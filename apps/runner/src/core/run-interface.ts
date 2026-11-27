@@ -30,7 +30,7 @@
  * In core, so machine-free: the container, the driver and the transport are interfaces step 9(b) implements. Nothing
  * here reaches the keychain or D-Bus (L1 on #458); logs carry IDs and codes only.
  */
-import type { RunAdapter, RunHandle, RunReport, RunStart, RunStatus, StopResult } from "./adapter.js";
+import type { RunAdapter, RunHandle, RunReport, RunStart, RunStatus, ScratchCounts, StopResult } from "./adapter.js";
 import { RunBroker, type BrokerRefusal, type BrokerRequest, type Forward, type HardStop, type ProviderProfile } from "./broker.js";
 import type { Adapter, RunFacts } from "./policy.js";
 import { CHANGE_TYPES } from "./pull-text.js";
@@ -74,6 +74,7 @@ export const REPOSITORY_GUIDANCE = [
   "Repository: the room's repository is already checked out in /work, at the task's start branch. Make your change by editing its files there.",
   "Runner keeps Git outside your container, so this run has no .git folder, no git or gh, and no access to GitHub. That is expected and is not a reason to stop: don't run git, clone, push, open a pull request or try to reach GitHub.",
   "After you give the structured result with status completed, Runner itself commits what changed in /work, pushes the task's branch and opens the pull request. Write the summary as the description of that change: what you changed and why, in plain words.",
+  "Runner commits only files inside /work, and never those under node_modules, .cache, .npm, .venv, /target, /.wrangler or /.tmp, or .env files. Your home folder, ~, is /work/.cache/home and /tmp is discarded, so nothing written in either is kept: make the change in the repository's own files in /work, not in a new project created under ~ or /tmp.",
 ].join("\n");
 
 /** Runner's fixed words for a run without a repository: a room with none, or a task Podster says isn't linked (#539). */
@@ -114,6 +115,12 @@ export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network"> & 
   ].join("\n");
 }
 
+/**
+ * The summary's limit in words, on the schema's field as well as its bound (2026-11-27: `result_summary_too_long` twice
+ * in a row on 0.0.1-test.19, and on 2026-11-22), so a model that reads the field's description sees it where it writes.
+ */
+export const SUMMARY_FIELD_DESCRIPTION = `At most ${MAX_SUMMARY_CHARS} characters; a longer one is refused. No control characters but tabs and line breaks.`;
+
 /** The structured result's JSON schema, for a driver to hand its SDK; Runner checks the result itself either way. */
 export const RESULT_SCHEMA = {
   type: "object",
@@ -121,7 +128,7 @@ export const RESULT_SCHEMA = {
   required: ["status", "summary", "files"],
   properties: {
     status: { enum: ["completed", "blocked"] },
-    summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_CHARS },
+    summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_CHARS, description: SUMMARY_FIELD_DESCRIPTION },
     files: { type: "array", maxItems: MAX_RESULT_FILES, items: { type: "string" } },
     change_type: { enum: CHANGE_TYPES },
   },
@@ -251,6 +258,8 @@ export interface TaskSandbox {
   kill(run_ref: string): Promise<void>;
   /** Whether nothing of the run's container is left. */
   gone(run_ref: string): Promise<boolean>;
+  /** How many files the run left in its HOME and /tmp, counts only; null if the container isn't open. Asked at a succeeded run's end. */
+  scratch?(run_ref: string, signal: AbortSignal): Promise<ScratchCounts | null>;
 }
 
 // ---- The provider ----
@@ -630,7 +639,15 @@ class LiveRun {
       result = parsed.ok ? parsed.value : null;
     }
     this.emit("ended", code ?? status);
-    this.resolveDone({ status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code, stop_detail: this.detail });
+    const report: RunReport = { status, spent_micro_usd: this.broker.totals.spent_micro_usd, result, stop_reason: code, stop_detail: this.detail };
+    const sandbox = this.deps.sandbox;
+    if (status !== "succeeded" || !sandbox.scratch) return this.resolveDone(report);
+    // Counted while the container is still there (it's stopped only once `done` settles), bounded; a failure counts nothing.
+    const counting = new AbortController();
+    void this.within(() => (sandbox.scratch as NonNullable<TaskSandbox["scratch"]>)(this.run.run_ref, counting.signal)).then((counted) => {
+      counting.abort();
+      this.resolveDone(counted.ok && counted.value ? { ...report, scratch: counted.value } : report);
+    });
   }
 
   private check(call: ToolCall): ToolDecision {

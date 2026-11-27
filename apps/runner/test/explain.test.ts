@@ -94,6 +94,30 @@ describe("the fixed table", () => {
   });
 });
 
+describe("a refused tool call says which kind (2026-11-27, 0.0.1-test.19)", () => {
+  it("explains path_outside_folder as a path outside the task's folder, never as a missing shell", () => {
+    const e = explain("path_outside_folder");
+    expect(e.what).toContain("outside the task's folder");
+    expect(`${e.what} ${e.todo}`).not.toContain("shell");
+    expect(e.todo).toContain("/work");
+  });
+
+  it("gives each refusal its own words: only shell_not_allowed names the shell setting", () => {
+    expect(explain("shell_not_allowed").todo).toContain("rooms[].tools");
+    expect(explain("shell_not_allowed").todo).toContain("shell");
+    expect(explain("path_not_allowed").what).toContain("Git's own folder");
+    expect(explain("tool_not_allowed").todo).toContain("rooms[].tools");
+    // The broker's own refusal of a model request's URL path has its own code, so path_not_allowed only ever means a tool's path.
+    expect(explain("request_path_not_allowed").what).toContain("model requests");
+    expect(explain("request_path_not_allowed").what).not.toContain("Git");
+    // run_stopped comes from the tool check and from the broker and its listener: its words cover both.
+    expect(explain("run_stopped").what).toContain("tool call or model request");
+    for (const code of ["path_outside_folder", "path_not_allowed", "tool_not_allowed", "call_invalid", "input_invalid", "run_stopped"]) {
+      expect([code, `${explain(code).what} ${explain(code).todo}`]).not.toEqual([code, expect.stringContaining("shell needs")]);
+    }
+  });
+});
+
 describe("the terminal's line", () => {
   it("follows a failure's JSON line with its explanation and the diagnostics file; other lines get none", () => {
     const lines: string[] = [];

@@ -53,6 +53,9 @@ export type LogFields = {
   prefix?: string;
   /** The JSON type name of a refused value. */
   type?: string;
+  /** How many files a succeeded run left in its HOME and in /tmp, where nothing is kept (counts only). */
+  home_files?: number;
+  tmp_files?: number;
 };
 export type Logger = (at: string, outcome: string, fields?: LogFields) => void;
 
@@ -65,7 +68,7 @@ const PREFIX_VALUE = /^(yes|no)$/;
 const HOST_VALUE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const STAGE_VALUE = /^[a-z]{1,16}$/;
 const TYPE_VALUE = /^(null|array|object|string|number|boolean|undefined|bigint|symbol|function)$/;
-const NUMBER_FIELDS = new Set(["seq", "count", "status", "length"]);
+const NUMBER_FIELDS = new Set(["seq", "count", "status", "length", "home_files", "tmp_files"]);
 const ID_FIELDS = new Set(["agent", "plugin_agent", "workspace", "task", "attempt_id", "run"]);
 
 /** The line a logger writes, with everything that isn't allowed dropped. */

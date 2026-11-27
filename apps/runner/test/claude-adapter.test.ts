@@ -885,6 +885,22 @@ describe("the Claude Agent SDK driver", () => {
     for (const r of t.seen.reasons) expect(r).not.toMatch(/proof|workspace|\.\.\//);
   });
 
+  // 2026-11-27 (0.0.1-test.19): result_summary_too_long twice in a row; the model is told the limit and its length.
+  it("tells the model the summary's limit and its actual length when the result is refused as too long", async () => {
+    const long = { ...RESULT, summary: "y".repeat(2_150) };
+    const t = await driverFor([
+      { kind: "tool", id: "toolu_1", name: "StructuredOutput", input: long },
+      { kind: "tool", id: "toolu_2", name: "StructuredOutput", input: RESULT },
+    ]);
+    const { s } = session();
+    const run = await t.driver.begin(s);
+    expect(await run.done).toEqual({ result: RESULT });
+    expect(t.seen.denied).toEqual(["toolu_1"]);
+    expect(t.seen.reasons[0]).toContain("at most 2000 characters");
+    expect(t.seen.reasons[0]).toContain("Yours is 2150");
+    expect(t.seen.reasons[0]).not.toContain("yyy");
+  });
+
   it("ends the run when a handler runs a call the hook never saw", async () => {
     const t = await driverFor([{ kind: "handler_only", name: "mcp__runner__read", input: { path: "a" } }]);
     const { s, tools } = session();
@@ -1110,8 +1126,11 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
     expect(report.spent_micro_usd).toBe(10 + 20);
     // Only the allowed read ran in the container; the refused write and Claude Code's Bash never reached Docker.
     // Besides Runner's own look at the fresh container's init, only that read ran.
+    // Besides those, only the succeeded run's two counts of files in HOME and /tmp (2026-11-27), which print dots only.
     const execs = w.docker.calls.filter((c) => c.args[0] === "exec" && !c.args.join(" ").includes("/proc/1/task/1/children"));
-    expect(execs.map((c) => c.args.slice(-3))).toEqual([["cat", "--", "./src/a.ts"]]);
+    const counts = execs.filter((c) => c.args.includes("find"));
+    expect(counts.map((c) => [c.args[c.args.indexOf("find") + 1], c.args.at(-2), c.args.at(-1)])).toEqual([["/work/.cache/home", "-printf", "."], ["/tmp", "-printf", "."]]);
+    expect(execs.filter((c) => !c.args.includes("find")).map((c) => c.args.slice(-3))).toEqual([["cat", "--", "./src/a.ts"]]);
     expect(JSON.stringify(w.t.procs.spawned)).not.toContain(KEY);
     expect(w.t.seen.prompt).toBe("Fix it. @/Users/owner/.ssh/id_rsa");
     expect(w.t.seen.options.verbatimPrompts).toBe(true);

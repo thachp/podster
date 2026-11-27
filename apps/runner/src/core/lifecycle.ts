@@ -71,7 +71,7 @@
  * Agent content is data: a task's words are read only to build and hash the prompt and to show the owner on an ask, and a
  * result's only to show the owner and to submit. Logs carry IDs and codes only.
  */
-import type { RunAdapter, RunHandle, RunReport, StopResult } from "./adapter.js";
+import type { RunAdapter, RunHandle, RunReport, ScratchCounts, StopResult } from "./adapter.js";
 import { GatewayError, meaningOf } from "./errors.js";
 import { acceptedRooms } from "./trust.js";
 import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, policyProblem, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
@@ -327,6 +327,14 @@ function orAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typeo
 }
 const ABORTED = Symbol("aborted");
 
+/** A report's scratch counts, only as two whole numbers; anything else is none. */
+function scratchOf(v: unknown): ScratchCounts | null {
+  if (typeof v !== "object" || v === null) return null;
+  const { home_files, tmp_files } = v as Record<string, unknown>;
+  const count = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+  return count(home_files) && count(tmp_files) ? { home_files, tmp_files } : null;
+}
+
 export class Lifecycle {
   private readonly deps: LifecycleDeps;
   private readonly policy: PolicyCalls;
@@ -338,6 +346,8 @@ export class Lifecycle {
   private readonly approvals = new Map<string, { hash: string; version: number; facts: string }>();
   /** Each finished run's structured result, by task, until it's submitted: in memory only, never stored or logged. */
   private readonly results = new Map<string, { run_ref: string; result: RunResult }>();
+  /** A succeeded run's counts of files left in HOME and /tmp, for the publish's `no_changes` line; in memory only. */
+  private readonly scratch = new Map<string, { run_ref: string; counts: ScratchCounts }>();
   /** Each repository run's task title, as its inputs had it, by task, for its pull request: in memory only, never stored or logged. */
   private readonly titles = new Map<string, { run_ref: string; title: string }>();
   /** The agent's own organization, checked at open: a policy reread later must still name it. */
@@ -388,7 +398,7 @@ export class Lifecycle {
     await this.save({ ...this.state, ledger, next_reservation: nextReservation, entries: { ...this.state.entries, [key]: { ...entry, updated_at: this.now() } } });
   }
 
-  private log(at: string, outcome: string, entry: { workspace_id: string; task_id: string }, extra: { code?: string; status?: number; count?: number; stage?: string } = {}) {
+  private log(at: string, outcome: string, entry: { workspace_id: string; task_id: string }, extra: { code?: string; status?: number; count?: number; stage?: string; home_files?: number; tmp_files?: number } = {}) {
     this.deps.log(at, outcome, { agent: this.deps.poller.agentId, workspace: entry.workspace_id, task: entry.task_id, ...extra });
   }
 
@@ -1032,8 +1042,11 @@ export class Lifecycle {
       const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit, reviewed: approved && review?.public_ok === true, ...words }, signal ?? new AbortController().signal);
       // Published or not, the title has done its work; the result stays held for the submission.
       this.titles.delete(key);
+      const left = this.scratch.get(key);
+      this.scratch.delete(key);
       if (publication.kind === "no_changes") {
-        this.log("lifecycle.publish", "no_changes", entry);
+        // Counts only (2026-11-27): files the run left where nothing is kept, so a "no changes" run can be read later.
+        this.log("lifecycle.publish", "no_changes", entry, left && left.run_ref === entry.run_ref ? left.counts : {});
         return { published: entry.published ?? null, outcome: "no_changes" };
       }
       this.log("lifecycle.publish", "published", entry, { count: publication.pr_number });
@@ -1238,6 +1251,8 @@ export class Lifecycle {
     const parsed = report.result ? parseRunResult(report.result) : null;
     if (parsed?.ok && parsed.value.status === "completed") {
       this.results.set(keyOf(entry.workspace_id, entry.task_id), { run_ref: entry.run_ref as string, result: parsed.value });
+      const counts = scratchOf(report.scratch);
+      if (counts) this.scratch.set(keyOf(entry.workspace_id, entry.task_id), { run_ref: entry.run_ref as string, counts });
       await this.stopped(entry, result, spent, "succeeded", { kind: "finish" });
     } else if (parsed?.ok && parsed.value.status === "blocked") {
       this.results.set(keyOf(entry.workspace_id, entry.task_id), { run_ref: entry.run_ref as string, result: parsed.value });

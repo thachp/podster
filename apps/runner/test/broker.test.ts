@@ -42,7 +42,7 @@ describe("the broker's fixed upstream", () => {
     const broker = new RunBroker(PROFILE, CAPS, ["model-small"]);
     expect(broker.admit({ ...ask(), method: "GET" })).toMatchObject({ ok: false, reason: "method_not_allowed" });
     for (const path of ["/api/messages/", "/api/other", "//evil.test/api/messages", "/api/messages/../keys", "https://evil.test/api/messages"])
-      expect([path, broker.admit({ ...ask(), path })]).toMatchObject([path, { ok: false, reason: "path_not_allowed" }]);
+      expect([path, broker.admit({ ...ask(), path })]).toMatchObject([path, { ok: false, reason: "request_path_not_allowed" }]);
     expect(broker.admit({ ...ask(), query: "beta=true" })).toMatchObject({ ok: false, reason: "query_not_allowed" });
     expect(broker.totals.turns).toBe(0);
   });

@@ -21,7 +21,12 @@ export type RunStatus = "succeeded" | "failed" | "budget_stopped" | "timed_out";
  * content: data, never logged. `stop_reason` is Runner's own code for why the run ended, when Runner ended it.
  */
 /** `stop_detail`: when the driver failed, its own fixed code (`plugins_unexpected`, `exec_exited`, `sdk_error`…), never text. */
-export type RunReport = { status: RunStatus; spent_micro_usd: number | null; result?: RunResult | null; stop_reason?: string | null; stop_detail?: string | null };
+/**
+ * How many files a succeeded run left where nothing is kept: the task's HOME (`.cache/home`, written since the run opened,
+ * npm's pinned cache left out) and /tmp. Counts only, never a name (2026-11-27: a run ended succeeded with nothing to commit).
+ */
+export type ScratchCounts = { home_files: number; tmp_files: number };
+export type RunReport = { status: RunStatus; spent_micro_usd: number | null; result?: RunResult | null; stop_reason?: string | null; stop_detail?: string | null; scratch?: ScratchCounts | null };
 export type StopResult = "stopped" | "unknown";
 
 export interface RunHandle {

@@ -487,3 +487,35 @@ describe("the sandbox with a room that lists hosts", () => {
     expect([...d.networks.keys()].sort()).toEqual(["other-home", "podster-net-run-2"]);
   });
 });
+
+// 2026-11-27: a run of about 18 turns ended succeeded with nothing to commit. At a succeeded run's end the sandbox counts
+// the files written in the task's HOME (leaving out npm's pinned cache) and in /tmp, the two places nothing is kept.
+describe("the sandbox's scratch count", () => {
+  it("counts files in HOME since the run opened, leaving out npm's cache, and in /tmp, as numbers only", async () => {
+    const d = fakeDocker();
+    const docker: DockerCli = async (args, opts) => {
+      if (args[0] === "exec" && args.includes("find")) {
+        d.calls.push(args);
+        return { code: 0, stdout: args.includes("/tmp") ? "..." : "............", stderr: "", cut: false };
+      }
+      return d.docker(args, opts);
+    };
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: async () => undefined, now: () => 1_700_000_123_456 });
+    await sandbox.open(containerSpec("run-1", facts(await temp())), new AbortController().signal);
+    expect(await sandbox.scratch("run-1", new AbortController().signal)).toEqual({ home_files: 12, tmp_files: 3 });
+    const finds = d.calls.filter((c) => c[0] === "exec" && c.includes("find"));
+    expect(finds.map((c) => c.slice(c.indexOf("find")))).toEqual([
+      ["find", "/work/.cache/home", "-xdev", "-path", "/work/.cache/home/.npm", "-prune", "-o", "-type", "f", "-newermt", "@1700000123", "-printf", "."],
+      ["find", "/tmp", "-xdev", "-type", "f", "-printf", "."],
+    ]);
+  });
+
+  it("answers null for a run it didn't open, and caps a count whose output was cut", async () => {
+    const d = fakeDocker();
+    const docker: DockerCli = async (args, opts) => (args[0] === "exec" && args.includes("find") ? { code: 1, stdout: ".".repeat(10), stderr: "", cut: true } : d.docker(args, opts));
+    const sandbox = new DockerSandbox({ docker, image: IMAGE, uid: 501, gid: 20, home: "/h", every: () => () => undefined, wait: async () => undefined });
+    expect(await sandbox.scratch("run-none", new AbortController().signal)).toBeNull();
+    await sandbox.open(containerSpec("run-2", facts(await temp())), new AbortController().signal);
+    expect(await sandbox.scratch("run-2", new AbortController().signal)).toEqual({ home_files: 10, tmp_files: 10 });
+  });
+});

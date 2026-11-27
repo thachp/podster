@@ -188,8 +188,8 @@ export function explainGrantRefusal(code: string, status = 400) {
   }
 }
 
-// `deploy` (M6 step 6) is listed only while release is switched on. The form here doesn't offer it: it is given through
-// the API, and this only names one that is listed.
+// `deploy` (M6 step 6) is listed only while release is switched on. Team's form offers push and merge; a deploy grant is
+// given under Release in Settings (2026-11-27), and this names one wherever it's listed.
 export const ACTION_LABELS: Record<RepoGrant["action"], string> = { push: "Push", merge: "Merge", deploy: "Deploy" };
 
 /** Display only, labelled as such where it's shown. */

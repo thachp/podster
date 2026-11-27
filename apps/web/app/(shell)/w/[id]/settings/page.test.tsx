@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { boundaryProblems, clientComponents } from "@/test/client-boundary";
 
-const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown, adminOrgs: [] as string[], releaseSwitch: { ok: false, status: 404, code: "not_found" } as unknown }));
+const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown, adminOrgs: [] as string[], releaseSwitch: { ok: false, status: 404, code: "not_found" } as unknown, grants: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
@@ -21,6 +21,7 @@ vi.mock("@/lib/gateway/server", () => ({
       return state.hostname;
     }
     if (path === "/api/v1/workspaces/ws_1/visibility") return state.visibility;
+    if (path === "/api/v1/workspaces/ws_1/repository/grants") return state.grants;
     if (path === "/api/v1/orgs/org_a/release-delegation") return state.releaseSwitch;
     if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
     return { ok: false, status: 404, code: "not_found" };
@@ -150,6 +151,33 @@ describe("workroom settings' release section", () => {
     state.visibility = visibilityRead("private");
     state.adminOrgs = [];
     state.releaseSwitch = { ok: false, status: 404, code: "not_found" };
+    state.grants = { ok: false, status: 404, code: "not_found" };
+  });
+
+  it("with release on, lists the room's deploy grants from the grants read and offers the form to the owner", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig({ enabled: true }) };
+    (state.room as { members: unknown[] }).members = [{ principal_id: "agt_1", kind: "agent", role: "member", org_id: "org_a" }];
+    state.grants = { ok: true, data: { grants: [{ id: "pg_d", principal_id: "agt_1", action: "deploy", delegated_by: "per_owner", created_at: Date.UTC(2026, 10, 26), expires_at: null, revoked_at: null, state: "live" }, { id: "pg_p", principal_id: "agt_1", action: "push", delegated_by: "per_owner", created_at: 1, expires_at: null, revoked_at: null, state: "live" }] } };
+    await show();
+    expect(state.asked).toContain("/api/v1/workspaces/ws_1/repository/grants");
+    const grants = screen.getByRole("region", { name: "Deployment grants" });
+    expect(within(grants).getAllByRole("listitem")).toHaveLength(1);
+    expect(grants).toHaveTextContent("Given by You on 2026-11-26 · No expiry");
+    expect(within(grants).getByRole("form", { name: "Give a deployment grant" })).toBeInTheDocument();
+    expect(grants).not.toHaveTextContent("Nobody can be given a deployment grant on this Podster deployment yet");
+  });
+
+  it("with release off in the room, reads no grants and says none can be given", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig() };
+    await show();
+    expect(state.asked).not.toContain("/api/v1/workspaces/ws_1/repository/grants");
+    const grants = screen.getByRole("region", { name: "Deployment grants" });
+    expect(grants).toHaveTextContent("Release is off in this workroom, so nobody can be given a deployment grant.");
+    expect(within(grants).queryByRole("form")).toBeNull();
   });
 
   it("while custom domains aren't built, shows them as not yet available with no field, as their routes answer", async () => {

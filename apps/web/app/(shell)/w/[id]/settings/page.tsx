@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { auditAction, auditTarget, pageAfter } from "../activity/model";
-import { loadPeopleNames } from "../tasks/load-tasks";
+import { loadNames, loadPeopleNames } from "../tasks/load-tasks";
 import { Time } from "../activity/time";
 import { membersOf, type AuditRow } from "../team/model";
 import { BriefControls } from "./brief-controls";
@@ -15,9 +15,9 @@ import { RoomControls } from "./room-controls";
 import { TransferOwnership } from "./transfer-ownership";
 import { VisibilityControls } from "./visibility-controls";
 import { RepositorySection } from "./repository-section";
-import { availability, type RoomRepository } from "./repository-model";
+import { availability, type RepoGrant, type RoomRepository } from "./repository-model";
 import { ReleaseSection } from "./release-section";
-import { hostnameAvailability, releaseAvailability, releaseView, switchGranted, type AppHostname, type ReleaseConfig, type ReleaseSwitch } from "./release-model";
+import { deployGrants, hostnameAvailability, releaseAvailability, releaseView, switchGranted, type AppHostname, type ReleaseConfig, type ReleaseSwitch } from "./release-model";
 import { plainName } from "@/components/agent-content/text";
 import type { GatewayResult } from "@/lib/gateway/result";
 import type { RoomVisibility } from "./visibility-model";
@@ -66,15 +66,20 @@ export default async function Settings({ params, searchParams }: { params: Promi
     delegated: switchGranted(switchRead),
   });
   const hostname = hostnameRead === null ? null : hostnameAvailability(hostnameRead);
+  // Deploy grants (M6 step 6) are listed only while release is on, so the grants read is spent only then. That the
+  // release configuration answered this viewer at all is the API's word that they're the owner or an admin, as a person.
+  const grantsRead = release.state === "ready" && repository.kind === "on" ? await settled(gatewayQuery<{ grants: RepoGrant[] }>(`/api/v1/workspaces/${id}/repository/grants`)) : null;
+  const grants = deployGrants(release, grantsRead, { linked: repository.kind === "on" ? repository.data.repository !== null : null, policyVersion: room.policy_version, archived: isArchived(room) });
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
   const heirs = membersOf(room).filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org);
   // Names are only worth a read for someone choosing one. A failure leaves IDs.
   // Release names who last changed it and who asked for a hostname; only then is a read of names worth it.
-  const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && typeof hostname === "object" && hostname.request !== null));
+  const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && typeof hostname === "object" && hostname.request !== null) || grants.kind === "on");
   const organizations = (isOwner && heirs.length > 0) || releaseNamed ? await getOrganizations() : null;
-  const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
+  // Deployment grants name agents too, so only then are agents' names read as well.
+  const names = organizations?.ok ? await (grants.kind === "on" ? loadNames : loadPeopleNames)(gatewayQuery, organizations.data.organizations) : {};
   // Resolved here, on the server: a client component takes only serializable props, so the names cross as strings.
   const nameOf = (person: string | null) => (person === null ? null : identity.ok && person === identity.data.id ? "you" : names[person] ? plainName(names[person]) : null);
   // Who may configure release, as this page knows it: the owner, unless they've left the room's organization, or an admin who is a person. Display only: Rust decides.
@@ -168,6 +173,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
               archived={isArchived(room)}
               setByName={release.state === "unavailable" || release.state === "failed" ? null : nameOf(release.config.set_by)}
               requestedByName={hostname !== null && typeof hostname === "object" && hostname.request ? nameOf(hostname.request.requested_by) : null}
+              grants={release.state === "unavailable" || release.state === "failed" ? null : { read: grants, policyVersion: room.policy_version, viewerId: identity.ok ? identity.data.id : null, members: membersOf(room), names }}
             />
           </Section>
         </>

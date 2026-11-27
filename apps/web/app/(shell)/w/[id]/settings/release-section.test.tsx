@@ -3,7 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { ReleaseSection } from "./release-section";
-import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
+import type { DeployGrantsProps } from "./deploy-grants";
+import type { RepoGrant } from "./repository-model";
+import { CUSTOM_DOMAIN_UNAVAILABLE, deployGrants, describeCheck, describeHostname, DNS_DELAY_NOTE, explainDeployGrantRefusal, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
 
 const config = (over: Partial<ReleaseConfig> = {}): ReleaseConfig => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 4, set_by: null, updated_at: null, ...over });
 const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
@@ -351,21 +353,123 @@ describe("the custom domain", () => {
 });
 
 describe("what isn't available yet", () => {
-  it("shows deployment grants as Unavailable wherever release answers, and offers none", () => {
-    for (const enabled of [false, true]) {
-      const { unmount } = show(releaseView({ kind: "on", data: config({ enabled }) }, ready));
-      expect(screen.getByText("Deployment grants")).toBeInTheDocument();
-      expect(screen.getByText(DEPLOY_GRANTS_UNAVAILABLE)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /grant/i })).toBeNull();
-      // Nothing says a deployment grant can be given.
-      expect(document.body.textContent).not.toMatch(/give a deployment grant/);
-      unmount();
-    }
-  });
-
   it("while release is off for the deployment, says nothing of grants, addresses or serving", () => {
     show(releaseView({ kind: "off" }, ready));
     expect(document.body.textContent).not.toMatch(/Deployment grants|App address|Live|served at|is live/);
+  });
+});
+
+const deployGrant = (over: Partial<RepoGrant> = {}): RepoGrant => ({ id: "pg_d1", principal_id: "agt_1", action: "deploy", delegated_by: "per_owner", created_at: Date.UTC(2026, 10, 20), expires_at: Date.UTC(2027, 0, 31), revoked_at: null, state: "live", ...over });
+const grantsProps = (over: Partial<Omit<DeployGrantsProps, "roomId">> = {}): Omit<DeployGrantsProps, "roomId"> => ({
+  read: { kind: "on", grants: [deployGrant()], mayGive: true },
+  policyVersion: 9,
+  viewerId: "per_owner",
+  members: [
+    { principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" },
+    { principal_id: "agt_pub", kind: "agent", org_id: "org_b", role: "guest", public_claim: true },
+    { principal_id: "per_m", kind: "person", org_id: "org_a", role: "member" },
+    { principal_id: "agt_2", kind: "agent", org_id: "org_a", role: "member" },
+  ],
+  names: { agt_1: "Code Agent", agt_2: "Deploy Agent" },
+  ...over,
+});
+const showGrants = (view: ReturnType<typeof releaseView>, grants: Omit<DeployGrantsProps, "roomId"> | null) =>
+  render(<ReleaseSection roomId="ws_1" view={view} hostname={{ request: null }} mayConfigure archived={false} grants={grants} />);
+const readyView = () => releaseView({ kind: "on", data: config({ enabled: true }) }, ready);
+
+describe("deployment grants, from the server's reads", () => {
+  const listed = { ok: true as const, data: { grants: [deployGrant(), deployGrant({ id: "pg_p", action: "push" }), deployGrant({ id: "pg_m", action: "merge" })] } };
+  const where = { linked: true, policyVersion: 9, archived: false };
+
+  it("reads no grants while release is off in the room, and offers none", () => {
+    expect(deployGrants(releaseView({ kind: "on", data: config() }, ready), listed, where)).toEqual({ kind: "off" });
+    expect(deployGrants(releaseView({ kind: "on", data: config() }, { isPublic: false, repositoryReady: false }), listed, where)).toEqual({ kind: "off" });
+  });
+
+  it("is unavailable where the grants read answers as a missing route or there's no linked repository, and a failed read is a failure", () => {
+    expect(deployGrants(readyView(), { ok: false, status: 404, code: "not_found" }, where)).toEqual({ kind: "unavailable" });
+    expect(deployGrants(readyView(), null, where)).toEqual({ kind: "unavailable" });
+    expect(deployGrants(readyView(), listed, { ...where, linked: false })).toEqual({ kind: "unavailable" });
+    for (const failure of [{ status: 403, code: "not_allowed" }, { status: 0, code: "read_failed" }, { status: 404, code: "workspace_not_found" }]) expect(deployGrants(readyView(), { ok: false, ...failure }, where)).toEqual({ kind: "failed" });
+  });
+
+  it("lists only deploy grants, and offers the form only where the API sent the policy version, to an unarchived room with a linked repository", () => {
+    expect(deployGrants(readyView(), listed, where)).toEqual({ kind: "on", grants: [deployGrant()], mayGive: true });
+    expect(deployGrants(readyView(), listed, { ...where, policyVersion: null })).toMatchObject({ mayGive: false });
+    expect(deployGrants(readyView(), listed, { ...where, archived: true })).toMatchObject({ mayGive: false });
+    expect(deployGrants(readyView(), listed, { ...where, linked: null })).toMatchObject({ mayGive: false });
+  });
+
+  it("explains each refusal of a deploy grant in words that say nothing changed", () => {
+    for (const code of ["invalid_argument", "release_needs_public_room", "grantee_public", "grantee_not_participant", "not_allowed", "repo_not_linked", "grant_not_found"]) {
+      const text = explainDeployGrantRefusal(code, 400);
+      expect(text).not.toContain(code);
+      expect(text).toMatch(/Nothing changed|Reload/);
+    }
+    expect(explainDeployGrantRefusal("release_needs_public_room")).toMatch(/Only a public workroom can release/);
+    expect(explainDeployGrantRefusal("not_allowed")).toMatch(/owner and admins, as people/);
+  });
+});
+
+describe("deployment grants in the section", () => {
+  it("the old fixed Unavailable text is gone, and with release off in the room says why none can be given", () => {
+    showGrants(releaseView({ kind: "on", data: config() }, ready), grantsProps({ read: { kind: "off" } }));
+    const grants = screen.getByRole("region", { name: "Deployment grants" });
+    expect(grants).toHaveTextContent("Off");
+    expect(grants).toHaveTextContent("Release is off in this workroom, so nobody can be given a deployment grant.");
+    expect(document.body.textContent).not.toMatch(/Nobody can be given a deployment grant on this Podster deployment yet/);
+    expect(screen.queryByRole("form", { name: "Give a deployment grant" })).toBeNull();
+  });
+
+  it("says when the grants read answers as unavailable, or failed, and offers nothing", () => {
+    const { unmount } = showGrants(readyView(), grantsProps({ read: { kind: "unavailable" } }));
+    expect(screen.getByRole("region", { name: "Deployment grants" })).toHaveTextContent("Unavailable");
+    expect(screen.queryByRole("form", { name: "Give a deployment grant" })).toBeNull();
+    unmount();
+    showGrants(readyView(), grantsProps({ read: { kind: "failed" } }));
+    expect(screen.getByRole("region", { name: "Deployment grants" })).toHaveTextContent("Couldn't refresh.");
+    expect(screen.queryByRole("form", { name: "Give a deployment grant" })).toBeNull();
+  });
+
+  it("lists a live deploy grant: who holds it, who gave it, when, and its expiry", () => {
+    showGrants(readyView(), grantsProps());
+    const row = within(screen.getByRole("list", { name: "Deployment grants" })).getByRole("listitem");
+    expect(row).toHaveTextContent("Code Agent");
+    expect(row).toHaveTextContent("Given by You on 2026-11-20 · Expires 2027-01-31");
+    expect(row).toHaveTextContent("As last read: Live");
+  });
+
+  it("offers the form only where the API allows, and then only agents not there through a public claim", () => {
+    const { unmount } = showGrants(readyView(), grantsProps({ read: { kind: "on", grants: [], mayGive: false } }));
+    expect(screen.getByText("Nobody holds a deployment grant here.")).toBeInTheDocument();
+    expect(screen.queryByRole("form", { name: "Give a deployment grant" })).toBeNull();
+    unmount();
+    showGrants(readyView(), grantsProps());
+    const form = screen.getByRole("form", { name: "Give a deployment grant" });
+    expect(within(form).getAllByRole("option").map((option) => option.textContent)).toEqual(["Choose an agent", "agt_1 · Code Agent", "agt_2 · Deploy Agent"]);
+  });
+
+  it("gives a deploy grant with the room's policy version, and explains a refusal", async () => {
+    showGrants(readyView(), grantsProps());
+    const form = screen.getByRole("form", { name: "Give a deployment grant" });
+    await userEvent.selectOptions(within(form).getByLabelText("Agent"), "agt_2");
+    await userEvent.click(within(form).getByRole("button", { name: "Give the grant" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ method: "POST", url: "/api/v1/workspaces/ws_1/repository/grants", body: { policy_version: 9, principal_id: "agt_2", action: "deploy" } });
+    expect(await screen.findByText(/Gave Deploy Agent a deployment grant/)).toBeInTheDocument();
+
+    reply = { status: 409, body: { error: { code: "release_needs_public_room" } } };
+    await userEvent.selectOptions(within(form).getByLabelText("Agent"), "agt_1");
+    await userEvent.click(within(form).getByRole("button", { name: "Give the grant" }));
+    expect(await screen.findByText(explainDeployGrantRefusal("release_needs_public_room"))).toBeInTheDocument();
+  });
+
+  it("takes a deploy grant back like any other", async () => {
+    reply = { status: 200, body: deployGrant({ state: "revoked", revoked_at: 1 }) };
+    showGrants(readyView(), grantsProps());
+    await confirm("Take back", "Take back");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ method: "DELETE", url: "/api/v1/workspaces/ws_1/repository/grants/pg_d1", body: { policy_version: 9 } });
   });
 });
 

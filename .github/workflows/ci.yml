@@ -549,6 +549,23 @@ jobs:
       # A run whose tests were all skipped would exit 0: this passes only when all sixteen ran and passed.
       - run: |
           node -e 'const r = require(process.argv[1]); const ok = r.numPassedTests === 16 && r.numFailedTests === 0 && r.numPendingTests === 0 && r.numTodoTests === 0; console.log(`linux docker proof - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/linux-docker.json"
+      # F-1 and S-47's Linux part: step 12's subprocess escape suite (test/hostile-real.test.ts, R-08 and R-30) on this
+      # runner's Docker Engine, with no provider key and no provider called. It builds Runner's task image, the egress
+      # proxy's and the Python toolchain image (cache hits after the step above), and from inside real task containers
+      # proves no credential (a fake provider key file, fake Agent Auth keys in Runner's file store), Runner's home, host
+      # file, other task's or room's folder, or socket is reachable; the proxy refuses unlisted hosts, IP literals, other
+      # ports, plain HTTP and a listed name answering a LAN address; there's no route past it; uv and npm fetch only from
+      # listed hosts; and another run at the same time is out of reach. Runs even when the step above failed.
+      - run: npx vitest run --config vitest.real.config.ts test/hostile-real.test.ts --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/hostile-real.json"
+        if: ${{ !cancelled() }}
+        working-directory: apps/runner
+        env:
+          RUNNER_HOSTILE_DOCKER: "1"
+      # Passes only when all eight escape tests ran and passed, and the only skipped tests are the four R-19 injection
+      # runs, which need the owner's provider key; each skipped test is printed by name.
+      - run: |
+          node -e 'const r = require(process.argv[1]); const all = r.testResults.flatMap((f) => f.assertionResults); const skipped = all.filter((t) => t.status === "pending" || t.status === "skipped"); for (const t of skipped) console.log(`skipped (needs the provider key): ${t.title}`); const ok = r.numPassedTests === 8 && r.numFailedTests === 0 && r.numPendingTests === 4 && r.numTodoTests === 0 && skipped.length === 4 && skipped.every((t) => t.title.startsWith("R-19 ")); console.log(`hostile escape suite - ${r.numPassedTests} passed, ${r.numFailedTests} failed, ${r.numPendingTests} skipped`); process.exit(ok ? 0 : 1);' "$RUNNER_TEMP/hostile-real.json"
+        if: ${{ !cancelled() }}
 
   # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
   e2e:

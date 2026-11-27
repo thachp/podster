@@ -4,7 +4,7 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type PublicationView, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
@@ -115,6 +115,14 @@ class FakePrompter {
   review: ((view: ResultView, signal?: AbortSignal) => Promise<OwnerAnswer>) | undefined = async (view) => {
     this.reviewed.push(view);
     return this.reviewAnswers.shift() ?? "later";
+  };
+  /** F-2: the owner's review of a held push and pull request. No answer is `publicationDefault`, `later` unless a test sets it. */
+  publicationAnswers: OwnerAnswer[] = [];
+  publicationDefault: OwnerAnswer = "later";
+  publications: PublicationView[] = [];
+  publication: ((view: PublicationView, signal?: AbortSignal) => Promise<OwnerAnswer>) | undefined = async (view) => {
+    this.publications.push(view);
+    return this.publicationAnswers.shift() ?? this.publicationDefault;
   };
 }
 
@@ -969,7 +977,10 @@ describe("step 10: the repository path in the lifecycle", () => {
 
   class FakeRepository implements RepositoryPath {
     prepared: (RepoTask & { continue_from: string | null })[] = [];
-    published: (RepoTask & { base_commit: string })[] = [];
+    published: (RepoTask & { base_commit: string; reviewed?: boolean })[] = [];
+    /** GitHub's `private` field read false: as the real path does, a publish not reviewed by the owner refuses before any push. */
+    public = false;
+    refusedUnreviewed = 0;
     forgotten = 0;
     prepareError: RepoPathError | null = null;
     publishError: RepoPathError | null = null;
@@ -984,7 +995,16 @@ describe("step 10: the repository path in the lifecycle", () => {
       this.onPrepare?.();
       return { repository_id: "9001", base_commit: task.continue_from ?? BASE };
     }
-    async publish(task: RepoTask & { base_commit: string }): Promise<Publication> {
+    visibilityReads = 0;
+    async isPublic() {
+      this.visibilityReads++;
+      return this.public;
+    }
+    async publish(task: RepoTask & { base_commit: string; reviewed?: boolean }): Promise<Publication> {
+      if (this.public && task.reviewed !== true) {
+        this.refusedUnreviewed++;
+        throw new RepoPathError("repository_public_unreviewed");
+      }
       this.timeline.push("repo:publish");
       this.published.push(task);
       if (this.publishError) throw this.publishError;
@@ -1006,6 +1026,8 @@ describe("step 10: the repository path in the lifecycle", () => {
     const repo = new FakeRepository();
     const t = await setup(config, { repository: repo });
     repo.timeline = t.timeline;
+    // These tests are about the path once the owner said yes to the push (F-2); F-2's own tests below set no default.
+    t.prompter.publicationDefault = "approve";
     return { ...t, repo };
   }
 
@@ -1335,6 +1357,145 @@ describe("step 10: the repository path in the lifecycle", () => {
     await t.pass();
     expect(t.commands("submit_task")).toHaveLength(0);
     expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_same", reason: "run_no_changes" });
+  });
+
+  describe("F-2 (S-34, RUNNER.md lifecycle step 9): the push and the pull request are outputs, held for the owner's review", () => {
+    const shareRepoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE, outputs: "share" }] });
+    async function held(config: unknown = repoConfig()) {
+      const t = await repoSetup(config);
+      t.prompter.publicationDefault = "later";
+      return t;
+    }
+
+    it("in a room whose outputs are held, nothing is pushed or opened until the owner's yes, and it's asked again later", async () => {
+      const t = await held();
+      t.offer(detail("tsk_hold"));
+      await t.pass();
+      expect(t.repo.published).toHaveLength(0);
+      expect(t.timeline).not.toContain("repo:publish");
+      expect(t.prompter.publications).toEqual([{ workspace_id: ROOM, task_id: "tsk_hold", reason: "outputs_held", full_name: SCOPE.full_name, branch: "podster/tsk_hold", task_folder: `/work/podster/${ROOM}/tsk_hold`, repository_public: false }]);
+      expect(t.entry("tsk_hold")).toMatchObject({ phase: "held", outcome: "publish_held", after_stop: { kind: "finish" } });
+      expect(t.commands("submit_task")).toHaveLength(0);
+      expect(t.commands("release_task")).toHaveLength(0);
+      // Not asked again before its wait is over.
+      await t.pass();
+      expect(t.prompter.publications).toHaveLength(1);
+      t.clock.at += ASK_AGAIN_MS;
+      t.prompter.publicationAnswers = ["approve"];
+      await t.pass();
+      expect(t.prompter.publications).toHaveLength(2);
+      expect(t.repo.published).toHaveLength(1);
+      // The yes was given while the repository read private, so the path isn't told it may push to a public one.
+      expect(t.repo.published[0]).toMatchObject({ reviewed: false, title: "Fix the build" });
+      expect(t.entry("tsk_hold")).toMatchObject({ phase: "finished", outcome: "published", published: { pr_number: 12 } });
+      // The words are still the submission's own review, after the push.
+      expect(t.commands("release_task")).toHaveLength(0);
+    });
+
+    it("a decline pushes nothing and releases the task, telling Podster only `runner_unavailable`", async () => {
+      const t = await held();
+      t.prompter.publicationAnswers = ["decline"];
+      t.offer(detail("tsk_no"));
+      await t.pass();
+      await t.pass();
+      expect(t.repo.published).toHaveLength(0);
+      expect(t.commands("submit_task")).toHaveLength(0);
+      expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_no", reason: "runner_unavailable" });
+      expect(t.entry("tsk_no").outcome).toBe("publish_declined");
+    });
+
+    it("with no answer within the hold, nothing is pushed and the task is released", async () => {
+      const t = await held();
+      t.offer(detail("tsk_quiet"));
+      await t.pass();
+      t.clock.at += REVIEW_HOLD_MS;
+      await t.pass();
+      await t.pass();
+      expect(t.repo.published).toHaveLength(0);
+      expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_quiet", reason: "runner_unavailable" });
+      expect(t.entry("tsk_quiet").outcome).toBe("publish_review_expired");
+    });
+
+    it("with no way to ask, the push stays held: silence is never approval", async () => {
+      const t = await held();
+      t.prompter.publication = undefined;
+      t.offer(detail("tsk_mute"));
+      await t.pass();
+      t.clock.at += ASK_AGAIN_MS;
+      await t.pass();
+      expect(t.repo.published).toHaveLength(0);
+      expect(t.entry("tsk_mute")).toMatchObject({ phase: "held", outcome: "publish_held" });
+    });
+
+    it("in a room set to share, a public repository still holds the push for the owner's yes; a private one doesn't ask", async () => {
+      const t = await held(shareRepoConfig());
+      t.repo.public = true;
+      t.offer(detail("tsk_pub"));
+      await t.pass();
+      expect(t.repo.refusedUnreviewed).toBe(1);
+      expect(t.repo.published).toHaveLength(0);
+      expect(t.prompter.publications).toEqual([{ workspace_id: ROOM, task_id: "tsk_pub", reason: "repository_public", full_name: SCOPE.full_name, branch: "podster/tsk_pub", task_folder: `/work/podster/${ROOM}/tsk_pub`, repository_public: true }]);
+      expect(t.entry("tsk_pub")).toMatchObject({ phase: "held", outcome: "publish_held" });
+      t.clock.at += ASK_AGAIN_MS;
+      t.prompter.publicationAnswers = ["approve"];
+      await t.pass();
+      expect(t.repo.published).toHaveLength(1);
+      expect(t.repo.published[0].reviewed).toBe(true);
+      // A room set to share submits in the same pass, once the push went.
+      expect(t.entry("tsk_pub")).toMatchObject({ phase: "finished", published: { pr_number: 12 } });
+
+      const u = await held(shareRepoConfig());
+      u.offer(detail("tsk_priv"));
+      await u.pass();
+      expect(u.prompter.publications).toHaveLength(0);
+      expect(u.repo.published).toHaveLength(1);
+      expect(u.repo.published[0].reviewed).toBe(false);
+    });
+
+    it("review nit: in a held-outputs room with a public repository, the one question says it's public, and its yes publishes", async () => {
+      const t = await held();
+      t.repo.public = true;
+      t.prompter.publicationAnswers = ["approve"];
+      t.offer(detail("tsk_both"));
+      await t.pass();
+      expect(t.prompter.publications).toEqual([{ workspace_id: ROOM, task_id: "tsk_both", reason: "outputs_held", full_name: SCOPE.full_name, branch: "podster/tsk_both", task_folder: `/work/podster/${ROOM}/tsk_both`, repository_public: true }]);
+      expect(t.repo.refusedUnreviewed).toBe(0);
+      expect(t.repo.published).toHaveLength(1);
+      expect(t.repo.published[0].reviewed).toBe(true);
+    });
+
+    it("review nit: a yes given while the repository read private never covers a push after it turned public; it's asked again, saying so", async () => {
+      const t = await held();
+      t.prompter.publicationAnswers = ["approve", "approve"];
+      const ask = t.prompter.publication!;
+      t.prompter.publication = async (view, signal) => {
+        const answer = await ask(view, signal);
+        // Made public between the owner's yes and the push.
+        t.repo.public = true;
+        return answer;
+      };
+      t.offer(detail("tsk_flip"));
+      await t.pass();
+      expect(t.prompter.publications.map((v) => [v.reason, v.repository_public])).toEqual([["outputs_held", false], ["repository_public", true]]);
+      expect(t.repo.refusedUnreviewed).toBe(1);
+      expect(t.repo.published).toHaveLength(1);
+      expect(t.repo.published[0].reviewed).toBe(true);
+    });
+
+    it("a yes covers only that run: a rerun's push is asked again", async () => {
+      const t = await held();
+      t.prompter.publicationAnswers = ["approve"];
+      t.offer(detail("tsk_twice"));
+      await t.pass();
+      expect(t.repo.published).toHaveLength(1);
+      const d = detail("tsk_twice", { changeRequest: { event_id: "evt_cr", text: "Tighten it" } });
+      d.task.status = "accepted";
+      d.task.version = 3;
+      t.offer(d, "task.changes_requested");
+      await t.pass();
+      expect(t.prompter.publications).toHaveLength(2);
+      expect(t.repo.published).toHaveLength(1);
+    });
   });
 });
 

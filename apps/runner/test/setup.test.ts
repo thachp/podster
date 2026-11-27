@@ -72,7 +72,7 @@ describe("first-time setup", () => {
     expect(p.config).toMatchObject({ version: 1, revision: 1, owner_org: OWNER, adapter: "claude_agent_sdk", workspace_root: ROOT, caps: STARTER_CAPS });
     expect(roomOf(p.config)).toEqual({
       room_id: ROOM, mode: "ask", outputs: "hold", tools: ["read", "search", "write", "edit"], network: [], repository: REPO, allowed_orgs: [],
-      acknowledged: { trust_statement: false, public_room_warning: false },
+      acknowledged: { public_room_warning: false },
     });
   });
 
@@ -111,7 +111,7 @@ const OWNERS = {
   version: 1, revision: 7, owner_org: OWNER, adapter: "claude_agent_sdk", workspace_root: "/Users/owner/elsewhere", max_active_tasks: 2,
   caps: { spend_micro_usd: 3_000_000, run_time_ms: 3_600_000, turns: 80, output_tokens: 60_000, max_tokens: 8_000 },
   day_caps: { spend_micro_usd: 20_000_000 },
-  rooms: [{ room_id: ROOM_TWO, mode: "unattended", allowed_orgs: ["org_guest"], tools: ["read", "shell"], network: ["registry.npmjs.org"], toolchains: ["rust"], roles: "accept", acknowledged: { trust_statement: true, public_room_warning: true } }],
+  rooms: [{ room_id: ROOM_TWO, mode: "unattended", allowed_orgs: ["org_guest"], tools: ["read", "shell"], network: ["registry.npmjs.org"], toolchains: ["rust"], roles: "accept", acknowledged: { public_room_warning: true } }],
 };
 const ownersText = (over: Record<string, unknown> = {}) => `${JSON.stringify({ ...OWNERS, ...over }, null, 2)}\n`;
 
@@ -141,7 +141,7 @@ describe("setup with a policy already there", () => {
 
 const roomPolicy = (repository: RoomPolicy["repository"]): RoomPolicy => ({
   room_id: ROOM, mode: "ask", allowed_orgs: [], tools: ["read"], network: [], toolchains: [], outputs: "hold", roles: "ask",
-  acknowledged: { trust_statement: false, public_room_warning: false }, repository,
+  acknowledged: { public_room_warning: false }, repository,
 });
 
 describe("a room's repository changing after setup", () => {
@@ -157,7 +157,7 @@ describe("a room's repository changing after setup", () => {
   });
 
   it("changes only the room's repository and the revision, and nothing once the owner has edited that room", () => {
-    const text = ownersText({ rooms: [...OWNERS.rooms, { room_id: ROOM, allowed_orgs: [], acknowledged: { trust_statement: true, public_room_warning: false }, repository: null }] });
+    const text = ownersText({ rooms: [...OWNERS.rooms, { room_id: ROOM, allowed_orgs: [], acknowledged: { public_room_warning: false }, repository: null }] });
     const next = applyRoomChange(text, { kind: "repository_added", room_id: ROOM, to: REPO }, HOME);
     expect(next).not.toBeNull();
     const before = JSON.parse(text);
@@ -249,7 +249,7 @@ class FakePrompter {
 }
 
 const policyWith = (repository: unknown, over: Record<string, unknown> = {}) =>
-  ownersText({ rooms: [...OWNERS.rooms, { room_id: ROOM, mode: "unattended", allowed_orgs: [], tools: ["read", "write"], acknowledged: { trust_statement: true, public_room_warning: false }, repository, ...over }] });
+  ownersText({ rooms: [...OWNERS.rooms, { room_id: ROOM, mode: "unattended", allowed_orgs: [], tools: ["read", "write"], acknowledged: { public_room_warning: false }, repository, ...over }] });
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function watcher(text: string, prompter: object = new FakePrompter()) {

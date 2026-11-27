@@ -126,6 +126,7 @@ export function askScreen(view: AskView, width = 80): { screen: string; cut: boo
     "Runner's policy asks before running this task.",
     `  room ${view.workspace_id} (${view.room_visibility}), task ${view.task_id}`,
     `  why it asks: ${view.reason}`,
+    ...(view.reason === "trust_statement_not_accepted" ? [`  to let this room run unattended, read and accept the trust statement in another terminal: podster trust ${view.workspace_id}`] : []),
     `  requester: ${view.requester}`,
     ...view.authors.map((a) => `  ${a.input} written by: ${a.authors.join(", ")}`),
     `  tools: ${view.tools.join(", ") || "none"}; network: ${view.network.join(", ") || "none"}`,

@@ -65,6 +65,7 @@
  */
 import type { RunAdapter, RunHandle, RunReport, StopResult } from "./adapter.js";
 import { GatewayError, meaningOf } from "./errors.js";
+import { acceptedRooms } from "./trust.js";
 import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, policyProblem, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
 import { pullRequestUrl, RepoPathError } from "./repository.js";
 import { readTaskDetail, sha256Hex, type TaskDetail } from "./prompt.js";
@@ -210,6 +211,11 @@ export type LifecycleDeps = {
    * used as it is, for tests. A read that throws reads as no policy, which refuses.
    */
   config: unknown | (() => unknown | Promise<unknown>);
+  /**
+   * The owner's trust-statement acceptances (F-3): Runner's own `trust.json`, read afresh on every evaluation like the
+   * policy. Missing, or a read that throws, is none, so every unattended room asks.
+   */
+  trust?: unknown | (() => unknown | Promise<unknown>);
   adapter: RunAdapter;
   /**
    * Runner's home: a policy whose workspace root overlaps it is refused (ruling 4 on #462). `run` always gives it; tests
@@ -547,6 +553,7 @@ export class Lifecycle {
       task: { id: entry.task_id, workspace_id: entry.workspace_id },
       authority_fresh: authorityFresh,
       budget: this.budget(ownReservation),
+      trusted_rooms: acceptedRooms(this.deps.trust === undefined ? null : await readConfig(this.deps.trust), this.now()),
       ...homeOf(this.deps),
       now: this.now(),
     });

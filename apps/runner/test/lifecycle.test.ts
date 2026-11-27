@@ -17,6 +17,7 @@ import { ROLE_CAPABILITIES, RoleInvites } from "../src/core/roles.js";
 import type { FailureRecord } from "../src/core/runtime.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock, type Detail } from "./fake-gateway.js";
+import { TRUST_STATEMENT_SHA256, TRUST_STATEMENT_VERSION } from "../src/core/trust.js";
 
 const ROOM = "ws_room_one";
 const ORG = "org_one";
@@ -34,7 +35,7 @@ function policyConfig(mode: "ask" | "unattended" = "unattended", over: Record<st
     workspace_root: "/work/podster",
     caps: { ...CAPS },
     day_caps: { spend_micro_usd: 10_000_000 },
-    rooms: [{ room_id: ROOM, mode, allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false } }],
+    rooms: [{ room_id: ROOM, mode, allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false } }],
     ...over,
   };
 }
@@ -161,7 +162,7 @@ async function setup(config: unknown | (() => unknown) = policyConfig(), extra: 
   let ids = 0;
   const diagnosed: FailureRecord[] = [];
   const diagnostics = { file: "/home/logs/errors.jsonl", record: (f: FailureRecord) => void diagnosed.push(f) };
-  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, diagnostics, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
+  const lifecycleDeps = { poller, runs, config, adapter, prompter, clock, log, policy, diagnostics, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, trust: { version: 1, rooms: [ROOM].map((room_id) => ({ room_id, statement_version: TRUST_STATEMENT_VERSION, statement_sha256: TRUST_STATEMENT_SHA256, accepted_at: 0 })) }, ...extra };
   const lifecycle = await Lifecycle.open(lifecycleDeps);
   const stop = new AbortController();
   /** Offers a task: its record in the gateway and its inbox event. */
@@ -965,7 +966,7 @@ describe("the rulings on #458's review", () => {
 describe("step 10: the repository path in the lifecycle", () => {
   const SCOPE = { full_name: "podsterdev/todo-app", provider_repo_id: 9001 };
   const BASE = "b".repeat(40);
-  const repoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE }] });
+  const repoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, repository: SCOPE }] });
 
   class FakeRepository implements RepositoryPath {
     prepared: (RepoTask & { continue_from: string | null })[] = [];
@@ -1124,7 +1125,7 @@ describe("step 10: the repository path in the lifecycle", () => {
   });
 
   it("asks the owner again in an ask-first room after `task_not_linked`, since the facts changed", async () => {
-    const askConfig = policyConfig("ask", { rooms: [{ room_id: ROOM, mode: "ask", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE }] });
+    const askConfig = policyConfig("ask", { rooms: [{ room_id: ROOM, mode: "ask", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, repository: SCOPE }] });
     const t = await repoSetup(askConfig);
     t.prompter.answers = ["approve", "approve"];
     t.repo.prepareError = new RepoPathError("task_not_linked", false, { stage: "access" });
@@ -1339,7 +1340,7 @@ describe("step 10: the repository path in the lifecycle", () => {
 });
 
 describe("step 11: results", () => {
-  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, outputs: "share", ...over }] });
+  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, outputs: "share", ...over }] });
 
   it("submits a shared result at the next pass, with the accepted version, a key stored first, Runner's note and nothing in the record or logs", async () => {
     const t = await setup(shareConfig());
@@ -1584,7 +1585,7 @@ async function poller(t: Awaited<ReturnType<typeof setup>>) {
 describe("a blocked run (the architect's ruling of 2026-11-20)", () => {
   const REASON = "Needs shell to run tests (rooms[].tools: shell). Wrote the tests in test/health.test.ts.";
   const BLOCKED: RunReport = { status: "succeeded", spent_micro_usd: 300_000, result: { status: "blocked", summary: REASON, files: ["test/health.test.ts"] } };
-  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, outputs: "share", ...over }] });
+  const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, outputs: "share", ...over }] });
   /** A task in a change-request round: submitted once, then sent back, so it's accepted by the agent again. */
   const changeRequest = (id: string, event_id = "evt_cr1") => {
     const d = detail(id, { changeRequest: { event_id, text: "Add and run the tests" } });
@@ -1750,13 +1751,13 @@ describe("a blocked run (the architect's ruling of 2026-11-20)", () => {
 
 describe("a run that never started, and a policy listing network hosts", () => {
   it("opens with a policy whose room lists exact hosts, and refuses at open one whose entry isn't a host name, naming network_host_invalid", async () => {
-    const room = (network: unknown[]) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, network }] });
+    const room = (network: unknown[]) => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, network }] });
     await expect(setup(room(["registry.npmjs.org"]))).resolves.toBeDefined();
     await expect(setup(room(["registry.npmjs.org", "https://evil.example.com"]))).rejects.toThrow(new RegExp(`entry 1 of the room ${ROOM}'s rooms\\[\\]\\.network isn't a host name Runner can allow \\(network_host_invalid\\)`));
   });
 
   it("logs the start's cause code, tells the room in Runner's fixed words, then releases", async () => {
-    const t = await setup(policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false } }] }));
+    const t = await setup(policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false } }] }));
     t.adapter.start = async () => {
       throw new Error("start_failed:container_failed");
     };
@@ -1793,7 +1794,7 @@ describe("a run that never started, and a policy listing network hosts", () => {
 
 describe("a blocked run's report, review of #488", () => {
   const BLOCKED: RunReport = { status: "succeeded", spent_micro_usd: 300_000, result: { status: "blocked", summary: "Needs a shell to run the tests.", files: [] } };
-  const room = (over: Record<string, unknown> = {}) => ({ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { trust_statement: true, public_room_warning: false }, outputs: "share", ...over });
+  const room = (over: Record<string, unknown> = {}) => ({ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, outputs: "share", ...over });
   const shareConfig = (over: Record<string, unknown> = {}) => policyConfig("unattended", { rooms: [room(over)] });
   const lines = (t: Awaited<ReturnType<typeof setup>>) => t.logged.map((l) => JSON.parse(l) as Record<string, unknown>);
   const changeRequest = (id: string) => {

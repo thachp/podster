@@ -15,6 +15,7 @@ import { MemoryStateStore } from "../src/core/state.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { FileRunStore } from "../src/node/file-runs.js";
 import { POLICY_FILE } from "../src/node/policy-file.js";
+import { TRUST_FILE, TRUST_STATEMENT_SHA256, TRUST_STATEMENT_VERSION } from "../src/core/trust.js";
 import type { Terminal } from "../src/node/prompter.js";
 import { NO_ENGINE, runInbox, type RunEngine } from "../src/node/run-command.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock, type Detail } from "./fake-gateway.js";
@@ -61,8 +62,15 @@ const policy = {
   workspace_root: "/work/podster",
   caps: { spend_micro_usd: 2_000_000, run_time_ms: 30 * 60_000, turns: 40, output_tokens: 50_000, max_tokens: 4_096 },
   day_caps: { spend_micro_usd: 10_000_000 },
-  rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: [], acknowledged: { trust_statement: true, public_room_warning: false } }],
+  rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: [], acknowledged: { public_room_warning: false } }],
 };
+
+/** The owner's acceptance of the current trust statement for ROOM, as `podster trust` records it (F-3). */
+const ACCEPTED = { version: 1, rooms: [{ room_id: ROOM, statement_version: TRUST_STATEMENT_VERSION, statement_sha256: TRUST_STATEMENT_SHA256, accepted_at: 0 }] };
+async function writePolicy(home: string, trusted = true) {
+  await writeFile(join(home, POLICY_FILE), JSON.stringify(policy));
+  if (trusted) await writeFile(join(home, TRUST_FILE), JSON.stringify(ACCEPTED));
+}
 
 /** Time that moves only when the test says: the loop's own wait ends the loop, every other wait holds until aborted. */
 class HoldClock implements Clock {
@@ -179,7 +187,7 @@ describe("run, with no run engine (this build)", () => {
 describe("run, with a run engine", () => {
   it("opens the lifecycle on the home's run record and policy file, accepts, and runs through the supervised interface", async () => {
     const t = await setup();
-    await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+    await writePolicy(t.home);
     const e = engine();
     const outcome = await runInbox({ home: t.home, poller: t.poller, clock: t.clock, log: t.log, signal: t.stop.signal, terminal: notATerminal(), engine: e.run });
     expect(outcome).toBe("stopped");
@@ -192,6 +200,15 @@ describe("run, with a run engine", () => {
     expect(record.entries[`${ROOM}/tsk_one`]).toMatchObject({ phase: "finished", outcome: "succeeded" });
   });
 
+  it("asks, and runs nothing unattended, until the owner's acceptance of the trust statement is in trust.json (F-3)", async () => {
+    const t = await setup();
+    await writePolicy(t.home, false);
+    const e = engine();
+    expect(await runInbox({ home: t.home, poller: t.poller, clock: t.clock, log: t.log, signal: t.stop.signal, terminal: notATerminal(), engine: e.run })).toBe("stopped");
+    expect(t.commands("accept_task")).toEqual([]);
+    expect(e.sessions).toEqual([]);
+  });
+
   it("refuses to open with no policy file, and starts nothing", async () => {
     const t = await setup();
     const e = engine();
@@ -202,7 +219,7 @@ describe("run, with a run engine", () => {
 
   it("waits out fetch throwing on its first requests at start, then opens and runs (the 2026-11-21 report)", async () => {
     const t = await setup();
-    await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+    await writePolicy(t.home);
     const lines: string[] = [];
     const waits: number[] = [];
     // The startup's three waits pass at once; every wait after them is the test's usual clock's.
@@ -228,7 +245,7 @@ describe("run, with a run engine", () => {
   it("still ends at start on an authority error or a refusal, asking only once", async () => {
     for (const fail of [(t: Awaited<ReturnType<typeof setup>>) => void (t.gateway.session = "revoked"), (t: Awaited<ReturnType<typeof setup>>) => void (t.gateway.executeScript = [403])]) {
       const t = await setup();
-      await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+      await writePolicy(t.home);
       fail(t);
       const asked = t.commands("get_identity").length;
       const e = engine();
@@ -241,7 +258,7 @@ describe("run, with a run engine", () => {
 
   it("stops at start without opening when the owner stops it while it waits", async () => {
     const t = await setup();
-    await writeFile(join(t.home, POLICY_FILE), JSON.stringify(policy));
+    await writePolicy(t.home);
     t.gateway.executeScript = Array(10).fill("network");
     const stop = new AbortController();
     const clock: Clock = { now: () => t.clock.now(), idle: async () => stop.abort() };
@@ -249,7 +266,7 @@ describe("run, with a run engine", () => {
     expect(await runInbox({ home: t.home, poller: t.poller, clock, log: t.log, signal: stop.signal, terminal: notATerminal(), engine: e.run, random: () => 0 })).toBe("stopped");
     expect(t.commands("accept_task")).toEqual([]);
     // No run record: the lifecycle never opened. (`git-home` is the repository path's, made before it.)
-    expect((await readdir(t.home)).filter((name) => name !== "git-home")).toEqual([POLICY_FILE]);
+    expect((await readdir(t.home)).filter((name) => name !== "git-home")).toEqual([POLICY_FILE, TRUST_FILE].sort());
   });
 
   it("builds the interface the lifecycle is given from the engine", async () => {

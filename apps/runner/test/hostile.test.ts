@@ -43,6 +43,7 @@ import type { AllowedCall, ToolCall, ToolDecision } from "../src/core/tool-polic
 import { TerminalPrompter, type Terminal } from "../src/node/prompter.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, type Detail } from "./fake-gateway.js";
 import { leaksIn } from "./leaks.js";
+import { TRUST_STATEMENT_SHA256, TRUST_STATEMENT_VERSION } from "../src/core/trust.js";
 
 const enc = new TextEncoder();
 const ROOM = "ws_room_one";
@@ -410,9 +411,9 @@ function policyConfig(over: Record<string, unknown> = {}) {
     caps: { ...CAPS },
     day_caps: { spend_micro_usd: DAY_CAP },
     rooms: [
-      { room_id: ROOM, mode: "unattended", allowed_orgs: [GUEST], acknowledged: { trust_statement: true, public_room_warning: false } },
-      { room_id: ASK_ROOM, mode: "ask", allowed_orgs: [GUEST], acknowledged: { trust_statement: true, public_room_warning: false } },
-      { room_id: REPO_ROOM, mode: "unattended", allowed_orgs: [GUEST], acknowledged: { trust_statement: true, public_room_warning: false }, repository: SCOPE },
+      { room_id: ROOM, mode: "unattended", allowed_orgs: [GUEST], acknowledged: { public_room_warning: false } },
+      { room_id: ASK_ROOM, mode: "ask", allowed_orgs: [GUEST], acknowledged: { public_room_warning: false } },
+      { room_id: REPO_ROOM, mode: "unattended", allowed_orgs: [GUEST], acknowledged: { public_room_warning: false }, repository: SCOPE },
     ],
     ...over,
   };
@@ -535,7 +536,7 @@ async function harness(behaviour: Behaviour = obeys, config: unknown = policyCon
     request: (capability, args) => busy.track(() => poller.request(capability, args)),
   };
   let ids = 0;
-  const lifecycleDeps = { poller: lifecyclePoller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, ...extra };
+  const lifecycleDeps = { poller: lifecyclePoller, runs, config, adapter, prompter, clock, log, policy, newId: () => `id_${++ids}`, checkInMs: CHECK_IN_MS, trust: { version: 1, rooms: [ROOM, ASK_ROOM, REPO_ROOM].map((room_id) => ({ room_id, statement_version: TRUST_STATEMENT_VERSION, statement_sha256: TRUST_STATEMENT_SHA256, accepted_at: 0 })) }, ...extra };
   const lifecycle = await Lifecycle.open(lifecycleDeps);
   const stop = new AbortController();
 

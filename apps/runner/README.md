@@ -41,6 +41,7 @@ Then:
 ```bash
 npx --ignore-scripts podster@test status   # what this Runner's record says, by IDs
 npx --ignore-scripts podster@test why <tsk_…>   # the newest failure recorded for a task on this machine
+npx --ignore-scripts podster@test trust <ws_…>   # read and accept the trust statement for a room's unattended runs
 npx --ignore-scripts podster@test stop     # stop the Runner running from this home, and any run, at once
 npx --ignore-scripts podster@test forget   # delete this Runner's keys and record; disconnect the agent in Podster yourself
 ```
@@ -91,7 +92,7 @@ Instead of writing it by hand, let Runner propose a starter from a workroom's se
 npx --ignore-scripts podster@test setup --room <ws_…>
 ```
 
-Leave out `--room` to pick from the rooms this agent is in. Runner asks Podster, as your paired agent, for its own organization (that becomes `owner_org`, never the room's) and for what it may tell this agent about the room, so nothing is copied by hand: the room's ID; its organization, when the room is your organization's or the agent sees the whole room; and its linked GitHub repository, name and numeric ID, only while the agent holds a push grant on it. Anything Podster doesn't tell is unknown. An unknown repository is written as `null`, which gives tasks none, and `run` asks you once Podster names one. It shows the policy it would save and what it allows, and saves it only when you type `y`. The starter asks before each run, holds outputs for your review, has no shell and no network, keeps the limits low (0.50 USD, 15 minutes and 30 turns a run, 2 USD a day), and leaves both acknowledgments unticked. Unattended runs stay off until you edit `mode` yourself. A new policy puts task folders in `~/podster-work` unless you give `--workspace-root <folder>`.
+Leave out `--room` to pick from the rooms this agent is in. Runner asks Podster, as your paired agent, for its own organization (that becomes `owner_org`, never the room's) and for what it may tell this agent about the room, so nothing is copied by hand: the room's ID; its organization, when the room is your organization's or the agent sees the whole room; and its linked GitHub repository, name and numeric ID, only while the agent holds a push grant on it. Anything Podster doesn't tell is unknown. An unknown repository is written as `null`, which gives tasks none, and `run` asks you once Podster names one. It shows the policy it would save and what it allows, and saves it only when you type `y`. The starter asks before each run, holds outputs for your review, has no shell and no network, keeps the limits low (0.50 USD, 15 minutes and 30 turns a run, 2 USD a day), and leaves the public-room warning unticked. Unattended runs stay off until you edit `mode` yourself and accept the trust statement with `trust`, below. A new policy puts task folders in `~/podster-work` unless you give `--workspace-root <folder>`.
 
 - **Another organization's room** is shown as external. Runner refuses its tasks unless that organization is in the room's `allowed_orgs`, and asking before each run doesn't allow it by itself; setup adds it only if you say yes to exactly that. If Podster doesn't name the organization to this agent, setup can't propose it: add its `org_…` ID to `allowed_orgs` yourself.
 - **A policy you already have is never replaced.** A room it lacks is added, with everything else kept as you wrote it and `revision` raised. A room it has is checked for a repository change, below. A file Runner can't use, or one for another organization, is left alone and Runner says what's wrong.
@@ -127,7 +128,7 @@ A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` 
       "network": [],
       "repository": null,
       "allowed_orgs": [],
-      "acknowledged": { "trust_statement": true, "public_room_warning": true }
+      "acknowledged": { "public_room_warning": false }
     }
   ]
 }
@@ -159,11 +160,21 @@ A complete, valid example, for one workroom. Replace the `org_…` and `ws_…` 
 | `rooms[].repository` | `null` for a task that starts in an empty folder, or `{ "full_name": "owner/name", "provider_repo_id": 123456 }` for one GitHub repository. |
 | `rooms[].roles` | What Runner does when the room invites this agent to a role opening. `"ask"`, the default, asks you at your terminal: `y` claims it as this agent, `n` turns it down, anything else leaves it for later. `"accept"` claims it with no question. Runner never turns an invite down by itself, and a room not listed here always asks. Claiming accepts no task and gives no person access. A pairing made before Runner answered invites can't: Runner logs `pair_again_for_roles` once. Tasks still run and roles already held stay, so you can leave it. Pairing again makes a new agent with a new ID, which must be added to each room and given its roles and any push or merge grants again; the old agent keeps its place until removed. |
 | `rooms[].allowed_orgs` | Other organizations whose tasks you'll run in this room. Do not list `owner_org`: your own organization is always allowed, and Runner refuses a policy that lists it. An empty list is fine. |
-| `rooms[].acknowledged` | Both flags are required. Until `trust_statement` is `true`, Runner asks you at your terminal each time. Until `public_room_warning` is `true`, it also asks for a public room. |
+| `rooms[].acknowledged` | `{ "public_room_warning": false }` or `true`, required. Until it's `true`, Runner asks you at your terminal before each run in a public room. The trust statement isn't here: a file can't accept it, and Runner refuses a policy whose `acknowledged` names `trust_statement` (`trust_statement_moved`). See [The trust statement](#the-trust-statement). |
 
 Every ID is lower case. Unknown fields, missing fields, a field out of range, or a repeated room refuse the whole file.
 
 **Where to find the IDs.** A workroom's `ws_…` ID is in its address in the web app: `/w/ws_…/…`. For your organization's `org_…` ID, open Settings, then Organization, and pick the organization: the `org=` in the address bar is its ID. If you can't find it, ask your Podster admin.
+
+### The trust statement
+
+A room whose `mode` is `"unattended"` still asks you before each run (`trust_statement_not_accepted`) until you've read and accepted Runner's trust statement for that room. It says what you take on when Runner runs without asking: Runner trusts Podster to say who wrote a task, so a compromised Podster could send instructions labeled as your organization's; a listed network host can receive anything a run can read; in a room with `shell`, a listed host and a private repository, a run holds private code, can read words no one in your organization wrote, and has a way out; the model provider sees the room's content; and runs spend up to their caps without asking. Accept it at a terminal on this machine:
+
+```bash
+npx --ignore-scripts podster@test trust ws_…
+```
+
+Runner shows the whole statement and records your acceptance only when you type `accept`. Without a terminal it asks nothing and records nothing. It keeps, in `trust.json` in Runner's home, the room, the statement's version and SHA-256, and when you accepted. Don't write that file yourself: it's Runner's record of what you read. If a later Runner changes the statement, its version and hash change, and every unattended room asks again until you accept the new one. Accepting doesn't switch a room to unattended runs; `mode` does, and setting it back to `"ask"` stops them at the next evaluation. `run` reads `trust.json` again at every evaluation, so you can accept from another terminal while it runs.
 
 ### The experimental OpenAI adapter
 

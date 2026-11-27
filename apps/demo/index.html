@@ -2093,8 +2093,9 @@ function repo() {
 /* ---------- Creator: One agent ---------- */
 function agent() {
   const t = S.tasks.filter((x) => x.who === 'Coding Agent');
+  const live = t.find((x) => x.stage === 'building' || x.stage === 'review');
   if (S.agentRemoved) return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Removed from Customer order tracker just now. Its open tasks went back to Planned.</p></div><button class="btn" data-act="agent-undo">Undo</button></div>';
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Frontend engineer \u00b7 run by Sam Rivera on Sam\'s own machine</p></div><button class="btn" data-act="toast" data-msg="Message sent to Sam Rivera.">Message Sam</button></div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Frontend engineer \u00b7 run by Sam Rivera on Sam\'s own machine</p></div>' + (live ? '<button class="btn" data-act="discuss" data-id="' + live.id + '" title="Messages stay with the work they\'re about">Discuss on #' + live.id + '</button>' : '<button class="btn" data-act="toast" data-msg="Pick a task on the board, then assign it to Coding Agent.">Invite to a task</button>') + '</div>' +
     '<p style="font-size:16px;max-width:680px">You\'ve approved 2 of its tasks here; one needed a second try. It usually submits within a day.</p>' +
     '<div class="grid2"><section><span class="label">Its work for you</span><div class="panel" style="margin-top:10px">' +
     t.map((x) => '<button class="row" data-act="open" data-id="' + x.id + '" style="width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left;cursor:pointer"><span style="flex:1;min-width:0">' + x.title + '<br><span class="faint" style="font-size:12.5px">' + x.when + '</span></span>' + stageLabel(x.stage) + '</button>').join('') +
@@ -2171,7 +2172,7 @@ function overlays() {
   let h = '';
   if (S.drawer) {
     const t = T(S.drawer);
-    const act = t.blocked ? '<button class="btn primary" data-act="take-back" data-id="' + t.id + '">Take the task back</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Sam Rivera.">Message Sam</button>'
+    const act = t.blocked ? '<button class="btn primary" data-act="take-back" data-id="' + t.id + '">Take the task back</button><button class="btn ghost" data-act="discuss" data-id="' + t.id + '">Ask Sam in the discussion</button>'
       : t.stage === 'review' ? '<a class="btn need" href="#review">Review it</a>'
       : t.stage === 'planned' && t.id !== 20 ? '<button class="btn primary" data-act="send" data-id="' + t.id + '">Assign to Coding Agent</button>'
       : t.id === 20 ? '<a class="btn primary" href="#team">Invite a tester</a>'
@@ -2416,6 +2417,7 @@ document.addEventListener('click', (e) => {
     case 'palette': S.palette = true; S.pq = ''; S.psel = 0; break;
     case 'close': S.drawer = null; S.modal = null; S.palette = false; break;
     case 'open': openTask(id); break;
+    case 'discuss': openTask(id); S.dtab = 'discussion'; S.draft = '@Sam Rivera '; setTimeout(() => { const ta = document.getElementById('msg-draft'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }, 0); break;
     case 'next-need': { const q = needQueue(); if (!q.length) break; const i = q.indexOf(S.taskId); const nx = q[(i + 1) % q.length]; S.taskId = nx; S.drawer = nx; S.assignOpen = false; S.reviewOpen = false; S.editTask = false; S.draft = ''; break; }
     case 'edit-task': S.editTask = true; break;
     case 'edit-cancel': S.editTask = false; break;

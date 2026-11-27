@@ -29,7 +29,8 @@ export async function writeTrustRecord(home: string, record: TrustRecord): Promi
   await mkdir(home, { recursive: true, mode: 0o700 });
   await chmod(home, 0o700);
   const temporary = `${path}.${process.pid}.tmp`;
-  const file = await open(temporary, "w", 0o600);
+  // Made new, never opened if anything is there: a link planted at this name fails the write instead of being followed.
+  const file = await open(temporary, "wx", 0o600);
   try {
     await file.writeFile(`${JSON.stringify(record, null, 2)}\n`);
     await file.sync();

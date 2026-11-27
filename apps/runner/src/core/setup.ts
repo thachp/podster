@@ -23,6 +23,7 @@
  *   writes is one Runner would load: no unknown or missing field, IDs in lower case, and `owner_org` never in
  *   `allowed_orgs`.
  */
+import { trustPointer } from "./trust.js";
 import { DEFAULT_TOOLS, isFullName, isPolicyId, parsePolicyConfig, policyProblem, type PolicyConfig, type RepoScope, type RoomPolicy } from "./policy.js";
 
 /** What Podster says about a room, checked. A part left out (`undefined`) is unknown: Podster didn't tell this agent. */
@@ -253,6 +254,8 @@ export function previewScreen(plan: Extract<SetupPlan, { kind: "new" | "add_room
     `  - per run at most ${(STARTER_CAPS.spend_micro_usd / 1_000_000).toFixed(2)} USD, ${STARTER_CAPS.run_time_ms / 60_000} minutes and ${STARTER_CAPS.turns} turns; ${(STARTER_DAY_SPEND_MICRO_USD / 1_000_000).toFixed(2)} USD a day${plan.kind === "add_room" ? " (your policy's own limits stay)" : ""}`,
     `  - the trust statement isn't accepted: an unattended run here asks each time until you read and accept it with \`podster trust ${facts.room_id}\` at a terminal`,
     "  - the public-room warning isn't accepted: in a public room Runner also asks each time until you set it in the file",
+    "",
+    ...trustPointer(facts.room_id),
   ];
   if (external && facts.org_id === undefined) {
     lines.push("  - this room's tasks are refused: Runner can't propose its organization for allowed_orgs, so add that organization's org_… ID to the room's allowed_orgs yourself if you want them");

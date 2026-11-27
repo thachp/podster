@@ -66,6 +66,22 @@ every run at once; or disconnect the machine in Podster, which stops it at its n
 is for this room and this version of the statement only. If the statement changes, Runner asks again.
 `;
 
+/**
+ * The statement's short form, shown where Runner points the owner to it: in `setup`'s preview, and on the ask screen of
+ * an unattended room whose owner hasn't accepted it, which is before its first unattended run, since none starts until
+ * they do. Only `trust` shows the whole statement, and only the whole statement is accepted.
+ */
+export function trustPointer(room_id: string): string[] {
+  return [
+    "Runner's trust statement, which this room needs before it runs anything unattended, says, in short:",
+    "  Runner trusts Podster to say who wrote a task, so a compromised Podster could send instructions labeled as your",
+    "  organization's; a listed network host can receive anything a run reads; with shell, a listed host and a private",
+    "  repository, a run holds private code, reads words no one in your organization wrote, and has a way out; the model",
+    "  provider sees the room's content; and runs spend up to their caps without asking.",
+    `Read all of it and accept it at a terminal with: podster trust ${room_id}`,
+  ];
+}
+
 /** SHA-256 of `TRUST_STATEMENT`'s UTF-8 bytes, lower-case hex. */
 export const TRUST_STATEMENT_SHA256 = "d4d11d20eb18b3c2c34ce83f37e7defa6d0977740f53139631c1475a164c7c01";
 

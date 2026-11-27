@@ -3,13 +3,13 @@
 // bound to its version and hash and when it was accepted, and an unattended room without a current acceptance asks.
 // A policy file, or the README's example, can't set it.
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluate, parsePolicyConfig, policyProblem } from "../src/core/policy.js";
-import { starterRoom } from "../src/core/setup.js";
+import { planSetup, previewScreen, starterRoom } from "../src/core/setup.js";
 import {
   ACCEPT_WORD,
   acceptedRooms,
@@ -18,6 +18,7 @@ import {
   TRUST_STATEMENT,
   TRUST_STATEMENT_SHA256,
   TRUST_STATEMENT_VERSION,
+  trustPointer,
   trustScreen,
   withAcceptance,
 } from "../src/core/trust.js";
@@ -144,7 +145,20 @@ describe("unattended runs need a current acceptance", () => {
 
   it("tells the owner on the ask screen how to accept it", () => {
     const view = { workspace_id: ROOM, task_id: "tsk_one", room_visibility: "private" as const, reason: "trust_statement_not_accepted" as const, requester: "per_Person1@org_owner", authors: [], inputs: [], tools: [], network: [], repository: null, caps: CAPS };
-    expect(askScreen(view as never).screen).toContain(`podster trust ${ROOM}`);
+    const screen = askScreen(view as never).screen;
+    // Before a room's first unattended run, which can't start until it's accepted: the short form and the exact command.
+    for (const line of trustPointer(ROOM)) expect(screen).toContain(line);
+    expect(screen).toContain(`podster trust ${ROOM}`);
+    // Not on a screen that asks for another reason.
+    expect(askScreen({ ...view, reason: "room_ask_first" } as never).screen).not.toContain("podster trust");
+  });
+
+  it("is shown in setup's preview, in short, with the exact command", () => {
+    const plan = planSetup({ existing: null, owner_org: OWNER, facts: { room_id: ROOM, org_id: OWNER }, workspace_root: "/Users/owner/podster-work", allow_room_org: false, runner_home: "/Users/owner/.podster-runner" });
+    expect(plan.kind).toBe("new");
+    const screen = previewScreen(plan as never, { room_id: ROOM, org_id: OWNER }, OWNER, "/Users/owner/.podster-runner/policy.json");
+    for (const line of trustPointer(ROOM)) expect(screen).toContain(line);
+    expect(screen).toContain(`podster trust ${ROOM}`);
   });
 });
 
@@ -236,6 +250,16 @@ describe("`podster trust`: accepted only by the owner's typed word, at a termina
     expect(t.asked).toEqual([]);
     expect(await readFile(join(h, TRUST_FILE), "utf8")).toBe("{ not json");
     expect(s.lines.join("\n")).toMatch(new RegExp(TRUST_FILE.replace(".", "\\.")));
+  });
+
+  it("never writes through a link planted at its temporary file's name", async () => {
+    const h = await home();
+    const target = join(await home(), "elsewhere.json");
+    await writeFile(target, "kept");
+    await symlink(target, join(h, `${TRUST_FILE}.${process.pid}.tmp`));
+    await expect(runTrust({ home: h, room: ROOM, terminal: terminal([ACCEPT_WORD]), now: () => NOW, say: said().say })).rejects.toMatchObject({ code: "EEXIST" });
+    expect(await readFile(target, "utf8")).toBe("kept");
+    await expect(stat(join(h, TRUST_FILE))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("reads a missing record as none", async () => {

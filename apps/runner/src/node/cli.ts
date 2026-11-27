@@ -17,6 +17,8 @@
  *   setup   [--room <ws_…>] [--workspace-root <folder>]
  *                                                     Preview a starter run policy from a room's settings (issue 523),
  *                                                     and save it only on the owner's typed yes. Never replaces one.
+ *   trust   <ws_…>                                    Show Runner's trust statement for a room and record the owner's
+ *                                                     acceptance only on the typed word, at a terminal (F-3).
  *   stop                                              Stop the Runner running from this home, and any run, at once.
  *   status                                            Show what this Runner's record says, by IDs.
  *   forget                                            Delete this Runner's keys and record. The agent stays connected in Podster.
@@ -56,6 +58,7 @@ import { alongsidePolling, nudgeOptions, openNudge } from "./nudge-command.js";
 import { processTerminal, runInbox } from "./run-command.js";
 import { policyText } from "./policy-file.js";
 import { runSetup } from "./setup-command.js";
+import { runTrust } from "./trust-command.js";
 
 const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through the Claude Agent SDK)
 
@@ -84,6 +87,9 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
                                                    or network, low limits. Never replaces a policy: adds a room to
                                                    it, or updates a room's repository once you say yes. Default
                                                    workspace root for a new policy: ~/podster-work
+  trust   <ws_…>                                   Read Runner's trust statement for a room and accept it by typing
+                                                   the word. An unattended room asks before each run until you do.
+                                                   Only at a terminal; a file can't set it.
   stop                                             Stop the Runner running from this home at once, and any run.
                                                    It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
@@ -137,6 +143,12 @@ async function main(argv: string[]) {
   if (command === "why") {
     // The newest failure recorded for a task on this machine, from the local diagnostics file. Nothing is sent anywhere.
     return whyCommand(home, args[args.indexOf("why") + 1], say);
+  }
+
+  if (command === "trust") {
+    // No lock: the owner may accept while `run` goes on, which reads the record afresh at its next evaluation.
+    const room = args[0] !== undefined && !args[0].startsWith("--") ? args[0] : undefined;
+    return runTrust({ home, room, terminal: processTerminal(), now: () => systemClock.now(), say });
   }
 
   if (command === "stop") {

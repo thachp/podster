@@ -20,7 +20,10 @@
  *   can't be scoped, so it asks.
  * - **The room split.** Every unattended room needs the owner to have accepted the trust statement for it, the residual
  *   risk RUNNER.md asks every unattended setup to disclose (L3 on #455's review). A public room also needs the
- *   public-room warning (decision 232).
+ *   public-room warning (decision 232). The statement's text, version and hash live in `trust.ts`; the owner accepts it
+ *   only through `podster trust` at a terminal, and the caller passes the rooms with a current acceptance as
+ *   `trusted_rooms` (F-3 of the M7 security review). The policy file has no field for it: one naming `trust_statement`
+ *   is refused whole, so a copied example can't switch it on.
  * - **The prompt's inputs** must be exactly those `provenance` lists, in its order, and a change request exactly the one
  *   whose `event_id` provenance names (M2 on #455's review). Steps 8 and 9 build the prompt from those inputs only, and
  *   the change request from that event only.
@@ -150,7 +153,8 @@ export type RoomPolicy = {
   /** Optional toolchains, as the owner listed them; `[]` for none. */
   toolchains: Toolchain[];
   outputs: "hold" | "share";
-  acknowledged: { trust_statement: boolean; public_room_warning: boolean };
+  /** The trust statement isn't here: it's accepted through `podster trust` and passed in as `trusted_rooms` (F-3). */
+  acknowledged: { public_room_warning: boolean };
   /** Null: the room has no repository, and a run starts in an empty folder. */
   repository: RepoScope | null;
   /**
@@ -241,6 +245,12 @@ export type EvaluateInput = {
   /** `Poller.authorityFresh()`. Only `true` passes. */
   authority_fresh: unknown;
   /**
+   * The rooms whose owner accepted the current trust statement on this machine (`acceptedRooms` in `trust.ts`, read from
+   * Runner's own `trust.json`, never from the policy file or Podster). Missing or malformed is none: an unattended room
+   * not listed asks (F-3 of the M7 security review).
+   */
+  trusted_rooms?: unknown;
+  /**
    * Spend counted today and budget reserved by runs not yet settled, in micro-USD; at consume, also this decision's own
    * reservation as `own_reservation_micro_usd`, which is left out of the count.
    */
@@ -260,6 +270,8 @@ export const TOOLCHAIN_UNKNOWN = "toolchain_unknown";
 export const TOOLCHAIN_DUPLICATE = "toolchain_duplicate";
 /** A room naming toolchains without the `shell` tool, which is the only way to run them. */
 export const TOOLCHAIN_NEEDS_SHELL = "toolchain_needs_shell";
+/** A room's `acknowledged` naming `trust_statement`, which only `podster trust` records now (F-3). */
+export const TRUST_STATEMENT_MOVED = "trust_statement_moved";
 /** What's wrong with a policy that failed to parse, for the owner, by where it failed. */
 export function policyProblem(at: string): string {
   const host = at.match(/^rooms\[\]\.network:(network_host_invalid|network_host_duplicate):([A-Za-z0-9_-]{1,128}):(\d{1,3})$/);
@@ -272,6 +284,9 @@ export function policyProblem(at: string): string {
   if (chain) return `entry ${chain[3]} of the room ${chain[2]}'s rooms[].toolchains repeats a toolchain already listed (${TOOLCHAIN_DUPLICATE})`;
   const shell = at.match(/^rooms\[\]\.toolchains:toolchain_needs_shell:([A-Za-z0-9_-]{1,128})$/);
   if (shell) return `the room ${shell[1]} lists rooms[].toolchains without "shell" in rooms[].tools, and only the shell can run a toolchain (${TOOLCHAIN_NEEDS_SHELL})`;
+  if (at === `rooms[].acknowledged:${TRUST_STATEMENT_MOVED}`) {
+    return `rooms[].acknowledged names trust_statement, which a policy file can't set (${TRUST_STATEMENT_MOVED}): remove it, leaving only public_room_warning, and accept the trust statement for a room with \`podster trust <ws_…>\` at a terminal`;
+  }
   if (at === OPENAI_OPT_IN) return `adapter "openai_agents" is experimental and off by default: it needs "${OPENAI_OPT_IN}": true beside it in the policy file, and ${OPENAI_OPT_IN} must be true or false`;
   if (at === "caps.max_tokens:openai_floor") return `caps.max_tokens is below ${OPENAI_MIN_MAX_TOKENS}, the least the "openai_agents" adapter takes, since OpenAI counts reasoning inside each request's output bound`;
   return `${at} is missing or out of range`;
@@ -456,16 +471,17 @@ function parseRoom(v: unknown, ownerOrg: string): Parsed<RoomPolicy> {
   const outputs = Object.hasOwn(v, "outputs") ? v.outputs : "hold";
   if (outputs !== "hold" && outputs !== "share") return fail("rooms[].outputs");
   const ack = own(v, "acknowledged");
-  if (!isObj(ack) || !keysAre(ack, ["trust_statement", "public_room_warning"])) return fail("rooms[].acknowledged");
-  const trust = own(ack, "trust_statement");
+  // The trust statement is accepted only through `podster trust`, never by a file (F-3): a policy naming it is refused.
+  if (isObj(ack) && Object.hasOwn(ack, "trust_statement")) return fail(`rooms[].acknowledged:${TRUST_STATEMENT_MOVED}`);
+  if (!isObj(ack) || !keysAre(ack, ["public_room_warning"])) return fail("rooms[].acknowledged");
   const warning = own(ack, "public_room_warning");
-  if (typeof trust !== "boolean" || typeof warning !== "boolean") return fail("rooms[].acknowledged");
+  if (typeof warning !== "boolean") return fail("rooms[].acknowledged");
   const given = Object.hasOwn(v, "repository") ? v.repository : null;
   const repository = given === null ? null : parseRepoScope(given);
   if (given !== null && repository === null) return fail("rooms[].repository");
   const roles = Object.hasOwn(v, "roles") ? v.roles : "ask";
   if (roles !== "ask" && roles !== "accept") return fail("rooms[].roles");
-  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, toolchains, outputs, acknowledged: { trust_statement: trust, public_room_warning: warning }, repository, roles } };
+  return { ok: true, value: { room_id: roomId, mode, allowed_orgs: allowed, tools, network, toolchains, outputs, acknowledged: { public_room_warning: warning }, repository, roles } };
 }
 
 /**
@@ -645,6 +661,8 @@ function decide(input: EvaluateInput): Decision {
   const authorStandings = prov.inputs.flatMap((i) => i.authors.map((a) => standing(a, config.owner_org)));
   const allInternal = requesterStanding === "internal" && authorStandings.every((s) => s === "internal") && prov.inputs.every((i) => !i.external);
   const isPublic = prov.room_visibility === "public";
+  const trustedRooms = own(given, "trusted_rooms");
+  const trusted = Array.isArray(trustedRooms) && trustedRooms.every(isId) && trustedRooms.includes(room.room_id);
 
   const facts: RunFacts = {
     adapter: config.adapter,
@@ -679,7 +697,7 @@ function decide(input: EvaluateInput): Decision {
   }
   // Every author reads as internal here, so only the server's own flag on an input is left: it wins too.
   if (!allInternal) return ask("author_external");
-  if (!room.acknowledged.trust_statement) return ask("trust_statement_not_accepted");
+  if (!trusted) return ask("trust_statement_not_accepted");
   if (isPublic && !room.acknowledged.public_room_warning) return ask("public_warning_not_accepted");
   return { outcome: "run", reason: "unattended_eligible", ...ids, facts, ...excluded };
 }

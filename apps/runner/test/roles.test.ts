@@ -17,7 +17,7 @@ const config = (rooms: { room_id: string; roles?: string }[]) => ({
   version: 1, revision: 1, owner_org: ORG, adapter: "claude_agent_sdk", workspace_root: "/work/podster",
   caps: { spend_micro_usd: 2_000_000, run_time_ms: 30 * 60_000, turns: 40, output_tokens: 50_000, max_tokens: 4_096 },
   day_caps: { spend_micro_usd: 10_000_000 },
-  rooms: rooms.map((r) => ({ room_id: r.room_id, allowed_orgs: [], acknowledged: { trust_statement: false, public_room_warning: false }, ...(r.roles ? { roles: r.roles } : {}) })),
+  rooms: rooms.map((r) => ({ room_id: r.room_id, allowed_orgs: [], acknowledged: { public_room_warning: false }, ...(r.roles ? { roles: r.roles } : {}) })),
 });
 
 type Opening = { id: string; mine: "invited" | "claimed" | null; title?: string };

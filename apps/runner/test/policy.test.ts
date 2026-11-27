@@ -38,15 +38,28 @@ const NOW = 1_800_000_000_000;
 const CAPS = { spend_micro_usd: 2_000_000, run_time_ms: 30 * 60_000, turns: 40, output_tokens: 50_000, max_tokens: 4_096 };
 
 type RoomOpts = { mode?: "ask" | "unattended"; allowed_orgs?: string[]; trust?: boolean; warning?: boolean; extra?: Record<string, unknown> };
+/** Room entries whose owner accepted the trust statement: it's no longer in the file (F-3), so the helper keeps it here. */
+const TRUSTED = new WeakSet<object>();
 function room(opts: RoomOpts = {}) {
-  return {
+  const entry = {
     room_id: ROOM,
     mode: opts.mode ?? "unattended",
     allowed_orgs: opts.allowed_orgs ?? [],
-    // Every unattended room needs the trust statement (L3 on #455), so the helper accepts it unless a test says not.
-    acknowledged: { trust_statement: opts.trust ?? true, public_room_warning: opts.warning ?? false },
+    acknowledged: { public_room_warning: opts.warning ?? false },
     ...opts.extra,
   };
+  // Every unattended room needs the trust statement (L3 on #455), so the helper accepts it unless a test says not.
+  if (opts.trust ?? true) TRUSTED.add(entry);
+  return entry;
+}
+/** What the lifecycle would pass as `trusted_rooms` for this configuration: the rooms the helper accepted it for. */
+function trustedOf(cfg: unknown): string[] {
+  try {
+    const rooms = (cfg as { rooms?: unknown } | null)?.rooms;
+    return Array.isArray(rooms) ? rooms.filter((r) => typeof r === "object" && r !== null && TRUSTED.has(r)).map((r) => (r as { room_id: string }).room_id) : [];
+  } catch {
+    return [];
+  }
 }
 function config(rooms: unknown[] = [room()], extra: Record<string, unknown> = {}) {
   return {
@@ -113,12 +126,13 @@ function promptOf(p: unknown) {
 }
 function decide(over: Partial<Parameters<typeof evaluate>[0]> = {}): Decision {
   const prov = "provenance" in over ? over.provenance : provenance();
-  return evaluate({ config: config(), provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW, ...over });
+  const cfg = "config" in over ? over.config : config();
+  return evaluate({ config: cfg, provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW, trusted_rooms: trustedOf(cfg), ...over });
 }
 
 describe("the default: ask first", () => {
   it("asks in a room the owner configured without switching unattended runs on", () => {
-    const d = decide({ config: config([{ room_id: ROOM, allowed_orgs: [], acknowledged: { trust_statement: false, public_room_warning: false } }]) });
+    const d = decide({ config: config([{ room_id: ROOM, allowed_orgs: [], acknowledged: { public_room_warning: false } }]) });
     expect([d.outcome, d.reason]).toEqual(["ask", "room_ask_first"]);
   });
 
@@ -295,7 +309,7 @@ describe("malformed configuration fails closed", () => {
     ["a network address with a port", config([room({ extra: { network: ["example.com:443"] } })])],
     ["a network IP literal", config([room({ extra: { network: ["127.0.0.1"] } })])],
     ["an unknown output setting", config([room({ extra: { outputs: "publish" } })])],
-    ["acknowledgements that aren't booleans", config([{ ...room(), acknowledged: { trust_statement: "yes", public_room_warning: false } }])],
+    ["acknowledgements that aren't booleans", config([{ ...room(), acknowledged: { public_room_warning: "yes" } }])],
     ["no acknowledged block", config([{ room_id: ROOM, mode: "unattended", allowed_orgs: [] }])],
   ];
 
@@ -449,7 +463,7 @@ describe("property: no external, unknown or inactive author or requester ever yi
       }
       const cfg = config([room({ mode: pick(["ask", "unattended"] as const), allowed_orgs: rand() < 0.5 ? [GUEST, STRANGER] : [], trust: rand() < 0.8, warning: rand() < 0.8 })], { owner_org: rand() < 0.95 ? OWNER : pick(anyOrg.filter((o) => o !== null) as string[]) });
       const prov = { room_visibility: pick(["private", "public"] as const), requester: req, inputs };
-      const d = evaluate({ config: cfg, provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: rand() < 0.9, budget: BUDGET, now: NOW });
+      const d = evaluate({ config: cfg, provenance: prov, prompt: promptOf(prov), task: TASK_REF, authority_fresh: rand() < 0.9, budget: BUDGET, now: NOW, trusted_rooms: trustedOf(cfg) });
       if (d.outcome === "run") runs++;
       const actors = [req, ...inputs.flatMap((x) => x.authors as { id: string | null; org: string | null; active: boolean }[])];
       const hasUntrusted = actors.some((a) => a.id === null || a.org !== cfg.owner_org || !a.active) || inputs.some((x) => x.external) || req.external;
@@ -531,7 +545,7 @@ describe("a room's network: exact host names, for Runner's egress proxy", () => 
   });
 
   it("keeps each room's list to that room", () => {
-    const other = { ...room({ extra: { network: [] } }), room_id: "room_2" };
+    const other = room({ extra: { network: [], room_id: "room_2" } });
     const cfg = config([room({ extra: { network: ["registry.npmjs.org"] } }), other]);
     expect(decide({ config: cfg }).facts?.network).toEqual(["registry.npmjs.org"]);
     const second = decide({ config: cfg, task: { id: TASK, workspace_id: "room_2" } });
@@ -785,7 +799,7 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
 
   it("L1: optional fields are read as own properties only, whatever Object.prototype holds", () => {
     const proto = Object.prototype as Record<string, unknown>;
-    const asked = { room_id: ROOM, allowed_orgs: [], acknowledged: { trust_statement: true, public_room_warning: true } };
+    const asked = { room_id: ROOM, allowed_orgs: [], acknowledged: { public_room_warning: true } };
     const askDecision = decide({ config: config([room({ mode: "ask" })]) });
     let results: unknown[];
     try {
@@ -913,7 +927,8 @@ describe("the deep review of #455, ruled 2026-11-18", () => {
     Object.defineProperty(flip, "active", { enumerable: true, get() { reads++; return reads === 1; } });
     // Built by hand: the `input` helper would read the getter itself.
     const prov = provenance({ inputs: [{ input: "title", external: false, authors: [flip] }, input("instructions", [author("internal")])] });
-    const d = evaluate({ config: config(), provenance: prov, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW });
+    const cfg = config();
+    const d = evaluate({ config: cfg, provenance: prov, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: TASK_REF, authority_fresh: true, budget: BUDGET, now: NOW, trusted_rooms: trustedOf(cfg) });
     expect(reads).toBe(1);
     expect(d.outcome).toBe("run");
   });

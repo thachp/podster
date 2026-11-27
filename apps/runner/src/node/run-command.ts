@@ -17,6 +17,7 @@ import { SupervisedAdapter, type ProgressEvent, type SupervisedDeps } from "../c
 import type { Clock, Diagnostics, Logger } from "../core/runtime.js";
 import { FileRunStore } from "./file-runs.js";
 import { policyFile, policyText } from "./policy-file.js";
+import { trustFile } from "./trust-file.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
 import { appOriginFor } from "../core/pull-text.js";
 import { hostRepositoryPath } from "./repo-path.js";
@@ -80,6 +81,7 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
         poller: deps.poller,
         runs: new FileRunStore(deps.home),
         config: policyFile(deps.home),
+        trust: trustFile(deps.home),
         adapter,
         home: deps.home,
         ...(repository ? { repository } : {}),

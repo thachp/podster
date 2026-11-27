@@ -78,14 +78,14 @@ function config(repository: unknown = SCOPE, extra: Record<string, unknown> = {}
     workspace_root: "/Users/owner/podster-runner/work",
     caps: { ...CAPS },
     day_caps: { spend_micro_usd: 10_000_000 },
-    rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: [], acknowledged: { trust_statement: true, public_room_warning: false }, ...(repository === "omit" ? {} : { repository }) }],
+    rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: [], acknowledged: { public_room_warning: false }, ...(repository === "omit" ? {} : { repository }) }],
     ...extra,
   };
 }
 const internal = { id: "per_In", org: OWNER, external: false, active: true, written_at: 1 };
 const PROVENANCE = { room_visibility: "private", requester: { id: "per_In", org: OWNER, external: false, active: true }, inputs: [{ input: "title", external: false, authors: [internal] }, { input: "instructions", external: false, authors: [internal] }] };
 function decide(cfg: unknown = config()): Decision {
-  return evaluate({ config: cfg, provenance: PROVENANCE, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: { id: TASK, workspace_id: ROOM }, authority_fresh: true, budget: { spent_today_micro_usd: 0, reserved_micro_usd: 0 }, now: NOW });
+  return evaluate({ config: cfg, provenance: PROVENANCE, prompt: { inputs: ["title", "instructions"], change_request_event_id: null }, task: { id: TASK, workspace_id: ROOM }, authority_fresh: true, budget: { spent_today_micro_usd: 0, reserved_micro_usd: 0 }, trusted_rooms: [ROOM], now: NOW });
 }
 const BINDING: RunBinding = { task_id: TASK, workspace_id: ROOM, task_version: 2, input_hash: "a".repeat(64), repository_id: "9001", base_commit: null };
 const BASE = "b".repeat(40);

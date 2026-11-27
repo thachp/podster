@@ -858,6 +858,17 @@ The architect proposes the gate call, for the owner to review.
 - Real people. The gate's runs used test people, as [decision 79](spec/PRODUCT.md#decisions-needed) allows.
 - X14-6, X26-2 and X26-3 on a deployment.
 
+### Check now for a custom domain, 2026-11-27
+
+**The owner asked on 2026-11-27 for a way to check a custom domain's proof by hand.** A pending request was looked for only on the proof job's schedule: every minute for its first hour, then every 15 minutes until it expires (`next_proof_check`). Built after M6 was called met, for staging only; nothing in the gate changes.
+
+- **The command:** `checkAppHostname`, `POST /v1/workspaces/{ws}/app-hostname/check`. It runs the proof job's own pass for the room's pending request at once, and answers the room's hostname after it, so a proven request comes back `claimed` or `refused`. The match rule, the request's states and the claim object's decisions are unchanged.
+- **Who:** whoever may ask for the room's hostname, where asking may happen (`podster_policy::release::HostnameChange::Check`, which reads as asking does). People only. No capability reaches it, matching how a room's domain is managed.
+- **Only `pending`:** anything else is `hostname_not_pending` (409).
+- **The rate (Proposed):** at most once every 30 seconds a request, counted from its last look, the job's or a check's (`podster_core::hostname_requests::check_now`). Sooner is `hostname_check_too_soon` (429) with `Retry-After`; the gateway's passthrough keeps that one header on a 429. The check records its look before it looks, so two at once can't both go. No Durable Object schema step: the rate reads the request's existing `checked_at`.
+- **The answer shows** `checked_at` and `next_check_at`. Workroom Settings shows them as "Last checked" and "Next check", a **Check now** button on "Waiting for proof", and what the check found. When the TXT record isn't found yet, it adds the **Proposed** note in [Release policies](spec/RELEASE-POLICIES.md#what-a-customer-should-expect): "DNS can take up to about 30 minutes to show a new record if it was added after you asked."
+- **Not shown on a deployment yet.** The API's `app-hostname.spec.ts` covers a proven request claimed by a check, the rate, the states refused and who is refused.
+
 ### Security review, 2026-11-26
 
 **The gate's security review is done: [M6 security review](security/m6-review.md),** of `main` at `505ab312`, read-only, against [the threat model](#threat-model) row by row and six threats it misses. Nothing is fixed by it.

@@ -88,7 +88,7 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
 const REL = `rel_${"a1".repeat(16)}`;
 /** Every M6 operation the contract lists, with whose it is. */
 const M6: Record<string, "person" | "operator"> = {
-  getReleaseConfig: "person", setReleaseConfig: "person", listReleaseApprovals: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
+  getReleaseConfig: "person", setReleaseConfig: "person", listReleaseApprovals: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person", checkAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
   stopContentDomain: "operator", resumeContentDomain: "operator", listTakedownFindings: "operator",
   // Step 6's 6f: an operator retires a room's label another room's lookup row holds.
@@ -173,7 +173,7 @@ describe("M6's routes, none of them built", () => {
           getReleaseConfig: [404, "workspace_not_found"], setReleaseConfig: [404, "workspace_not_found"],
           // Step 8's first PR built the room's custom hostname, which the room answers the same way: the owner reads
           // none, sends a body that isn't `{ hostname }`, and removes nothing.
-          getAppHostname: [404, "workspace_not_found"], requestAppHostname: [404, "workspace_not_found"], removeAppHostname: [404, "workspace_not_found"],
+          getAppHostname: [404, "workspace_not_found"], requestAppHostname: [404, "workspace_not_found"], removeAppHostname: [404, "workspace_not_found"], checkAppHostname: [404, "workspace_not_found"],
           // Step 10(b) built the room's list of releases awaiting approval, which the room answers the same way: the
           // owner reads an empty one.
           listReleaseApprovals: [404, "workspace_not_found"],
@@ -185,6 +185,8 @@ describe("M6's routes, none of them built", () => {
         const ownerWant: Record<string, [number, string | undefined]> = {
           ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"],
           getAppHostname: [200, undefined], requestAppHostname: [400, "invalid_argument"], removeAppHostname: [200, undefined],
+          // Checking now reads what asking reads, so this room's provider meets the gate on the release path.
+          checkAppHostname: [409, "release_not_available"],
           listReleaseApprovals: [200, undefined],
           // The owner may decide. This room has a provider, so approving meets the gate on the release path; declining
           // passes no gate, and finds no such release.

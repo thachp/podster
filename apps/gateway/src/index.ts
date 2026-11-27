@@ -489,6 +489,15 @@ const forPublicHost = (request: Request, env: Env): Env => (env.APP_URL && new U
 export const sameOrigin = (request: Request, env: Env) => request.headers.get("origin") === new URL(env.BASE_URL).origin;
 
 /** Dashboard routes people may reach through the session. Agent registration and connection have their own handlers. */
+/**
+ * The headers a passed-through API answer keeps: its JSON type, and on a 429 the API's `Retry-After` in whole seconds
+ * (a custom hostname's "Check now"), so a person's page can say when to try again. Nothing else the API set.
+ */
+export function passthroughHeaders(response: Response): Record<string, string> {
+  const retryAfter = response.status === 429 ? response.headers.get("retry-after") : null;
+  return { "content-type": "application/json", ...(retryAfter && /^\d{1,5}$/.test(retryAfter) ? { "retry-after": retryAfter } : {}) };
+}
+
 export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
@@ -1370,7 +1379,7 @@ const appHandler = {
     if (publicRead) return publicRead;
     const named = await withInviterName(env, request.method, path, response);
     if (named) return named;
-    return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+    return new Response(response.body, { status: response.status, headers: passthroughHeaders(response) });
   },
 };
 

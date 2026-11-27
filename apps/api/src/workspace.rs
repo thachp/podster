@@ -4567,6 +4567,7 @@ impl Workspace {
             tail,
             ["release-config"]
                 | ["app-hostname"]
+                | ["app-hostname", "check"]
                 | ["release-approvals"]
                 | ["releases"]
                 | ["releases", _, "approve" | "decline" | "rollback"]
@@ -5459,6 +5460,38 @@ impl Workspace {
                             now,
                         )
                     },
+                )
+            }
+            // "Check now" (2026-11-27): who first, then the command decides and records the look; then the job's pass
+            // for that request runs at once, and the answer is the room's hostname as it stands after it. A replay of a
+            // stored answer runs no pass.
+            (Method::Post, ["app-hostname", "check"]) if release_route_on => {
+                hostname::may_change(&who)?;
+                let reads = self.config_reads(&identity.id, true).await?;
+                let domain = crate::content_provider::content_domain(&self.env);
+                let go = Rc::new(RefCell::new(None));
+                let slot = go.clone();
+                let answer = self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| hostname::may_change(who),
+                    move |sql, who, now| {
+                        hostname::handle_check(sql, who, &reads, domain.as_deref(), now, &slot)
+                    },
+                )?;
+                let Some(id) = go.borrow_mut().take() else {
+                    return Ok(answer);
+                };
+                if let Err(error) = self.hostname_check_now(&id).await {
+                    console_error!("hostname check failed: {:?}", error.code());
+                }
+                hostname::after_check(
+                    &sql,
+                    now_ms(),
+                    crate::content_provider::content_domain(&self.env).as_deref(),
                 )
             }
             (Method::Delete, ["app-hostname"]) if release_route_on => {

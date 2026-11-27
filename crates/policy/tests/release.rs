@@ -204,7 +204,11 @@ fn only_those_who_configure_release_map_a_custom_hostname_and_only_where_release
                 } else {
                     Err(ReleaseDenial::NotAllowed)
                 };
-                for change in [HostnameChange::Request, HostnameChange::Remove] {
+                for change in [
+                    HostnameChange::Request,
+                    HostnameChange::Remove,
+                    HostnameChange::Check,
+                ] {
                     assert_eq!(
                         authorize_custom_hostname(&c, holds, &ReleaseRoom::OPEN, change),
                         expected,
@@ -226,6 +230,12 @@ fn only_those_who_configure_release_map_a_custom_hostname_and_only_where_release
         assert_eq!(
             authorize_custom_hostname(&owner, true, &room, HostnameChange::Remove),
             Ok(()),
+            "{denial:?}"
+        );
+        // Checking now asks outside the room as asking does, so it is refused where asking is.
+        assert_eq!(
+            authorize_custom_hostname(&owner, true, &room, HostnameChange::Check),
+            Err(denial),
             "{denial:?}"
         );
     }

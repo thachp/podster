@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { ReleaseSection } from "./release-section";
-import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeHostname, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
+import { CUSTOM_DOMAIN_UNAVAILABLE, DEPLOY_GRANTS_UNAVAILABLE, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameAvailability, hostnameProblem, releaseAvailability, releaseView, setupRelease, switchGranted, UNAVAILABLE, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
 
 const config = (over: Partial<ReleaseConfig> = {}): ReleaseConfig => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 4, set_by: null, updated_at: null, ...over });
 const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
@@ -18,6 +18,8 @@ const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
   requested_at: Date.UTC(2026, 10, 12),
   expires_at: Date.UTC(2026, 10, 15),
   end_reason: null,
+  checked_at: null,
+  next_check_at: Date.UTC(2026, 10, 12),
   ...over,
 });
 const ready: Prerequisites = { isPublic: true, repositoryReady: true };
@@ -237,6 +239,56 @@ describe("the custom domain", () => {
     await user.click(screen.getByRole("button", { name: "Copy TXT record value" }));
     expect(await screen.findByText("Couldn't copy. Select it and copy it yourself.")).toBeInTheDocument();
     expect(screen.queryByText("Copied.")).toBeNull();
+  });
+
+  it("pending: shows when Podster last checked and next will, and Check now sends a keyed command and says what it found", async () => {
+    const checked = Date.UTC(2026, 10, 12, 9, 30, 5);
+    show(on(), { hostname: { request: request({ checked_at: checked, next_check_at: checked + 60_000 }) } });
+    expect(screen.getByText("2026-11-12 09:30:05 UTC")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-12 09:31:05 UTC")).toBeInTheDocument();
+    reply = { status: 200, body: { request: request({ checked_at: checked + 40_000, next_check_at: checked + 100_000 }) } };
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText(/didn't find your TXT record yet/)).toBeInTheDocument();
+    expect(screen.getByText(DNS_DELAY_NOTE)).toBeInTheDocument();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ method: "POST", url: "/api/v1/workspaces/ws_1/app-hostname/check", body: {} });
+    expect(sent[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    // Found: the request comes back claimed, and the note on DNS delay goes.
+    reply = { status: 200, body: { request: request({ state: "claimed", setup_status: "provider_pending", next_check_at: null }) } };
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText("Podster read your TXT record. This workroom holds the name.")).toBeInTheDocument();
+    expect(screen.queryByText(DNS_DELAY_NOTE)).toBeNull();
+    expect(sent[1]?.key).not.toBe(sent[0]?.key);
+  });
+
+  it("before the first look says Not yet, and Check now's refusals are explained, saying nothing changed", async () => {
+    show(on(), { hostname: { request: request() } });
+    expect(screen.getByText("Not yet")).toBeInTheDocument();
+    reply = { status: 429, body: { error: { code: "hostname_check_too_soon", message: "x" } } };
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Podster checked this request less than 30 seconds ago. Wait a moment and try again. Nothing changed.");
+    expect(screen.queryByText(DNS_DELAY_NOTE)).toBeNull();
+  });
+
+  it("offers Check now only on a pending request, and only to who may change release", () => {
+    const first = show(on(), { hostname: { request: request() }, mayConfigure: false });
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
+    first.unmount();
+    const second = show(on(), { hostname: { request: request({ state: "claimed", setup_status: "active", next_check_at: null }) } });
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
+    expect(screen.queryByText("Last checked")).toBeNull();
+    second.unmount();
+    show(on(), { hostname: { request: request() }, archived: true });
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
+  });
+
+  it("says what a check found in words, from the request as the server answered it", () => {
+    expect(describeCheck(request())).toMatchObject({ notFound: true });
+    expect(describeCheck(request({ state: "claimed" }))).toEqual({ text: "Podster read your TXT record. This workroom holds the name.", notFound: false });
+    expect(describeCheck(request({ state: "refused", end_reason: "hostname_claimed" }))).toEqual({ text: "Podster read your TXT record, but the name couldn't be claimed. Another workroom holds this name.", notFound: false });
+    expect(describeCheck(request({ state: "expired", end_reason: "hostname_request_expired" })).notFound).toBe(false);
+    expect(describeCheck(null).notFound).toBe(false);
+    expect(explainReleaseRefusal("hostname_not_pending")).toMatch(/Nothing changed\.$/);
   });
 
   it("with no CNAME target from the server, says so and invents none", () => {

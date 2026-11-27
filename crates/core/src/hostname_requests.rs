@@ -340,6 +340,49 @@ pub fn request_rate_allows(made_in_last_hour: usize) -> bool {
     made_in_last_hour < MAX_REQUESTS_PER_HOUR
 }
 
+/// **Proposed.** How long after a request's last look "Check now" is refused (2026-11-27).
+pub const CHECK_NOW_INTERVAL_MS: i64 = 30 * 1000;
+
+/// Whether a person's "Check now" on the room's request goes ahead (2026-11-27). It only moves the request's next look
+/// for its challenge, or its next ask of the hostname's object, to now; the request's states and the proof's rule are
+/// unchanged. The rate is held on the request's last look, the job's or a "Check now", which "Check now" records before
+/// it looks: so two at once can't both go, and a look the job made a moment ago isn't made again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckNow {
+    /// The request's next look is due now.
+    Go,
+    /// The room has no open request, or it isn't `pending`: there is no proof left to look for.
+    NotPending,
+    /// The request was last looked at less than [`CHECK_NOW_INTERVAL_MS`] ago. The wait is in whole seconds,
+    /// at least one, and never more than the interval, so a clock that ran backwards can't hold it longer.
+    TooSoon { retry_after_secs: i64 },
+}
+
+/// The decision for "Check now": `state` is the room's open request's, if it has one, and `last_checked_at` when that
+/// request was last looked at.
+pub fn check_now(
+    state: Option<HostnameRequestState>,
+    last_checked_at: Option<i64>,
+    now: i64,
+) -> CheckNow {
+    if state != Some(HostnameRequestState::Pending) {
+        return CheckNow::NotPending;
+    }
+    let Some(last) = last_checked_at else {
+        return CheckNow::Go;
+    };
+    let wait = last
+        .saturating_add(CHECK_NOW_INTERVAL_MS)
+        .saturating_sub(now)
+        .min(CHECK_NOW_INTERVAL_MS);
+    if wait <= 0 {
+        return CheckNow::Go;
+    }
+    CheckNow::TooSoon {
+        retry_after_secs: (wait + 999) / 1000,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The custom hostname at Cloudflare, and the long end of a committed claim (M6 step 8b)
 // ---------------------------------------------------------------------------------------------------------------------
@@ -558,5 +601,78 @@ mod tests {
         for state in HostnameRequestState::ALL {
             assert_ne!(state.is_open(), state.is_final());
         }
+    }
+
+    #[test]
+    fn check_now_goes_only_for_a_pending_request() {
+        use super::{check_now, CheckNow};
+        assert_eq!(check_now(None, None, 1_000), CheckNow::NotPending);
+        for state in HostnameRequestState::ALL {
+            let expected = if state == HostnameRequestState::Pending {
+                CheckNow::Go
+            } else {
+                CheckNow::NotPending
+            };
+            assert_eq!(
+                check_now(Some(state), None, 1_000),
+                expected,
+                "{}",
+                state.name()
+            );
+            // Not pending is the answer whatever the rate says.
+            if state != HostnameRequestState::Pending {
+                assert_eq!(
+                    check_now(Some(state), Some(1_000), 1_000),
+                    CheckNow::NotPending
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_now_is_refused_for_thirty_seconds_after_the_last() {
+        use super::{check_now, CheckNow, CHECK_NOW_INTERVAL_MS};
+        let pending = Some(HostnameRequestState::Pending);
+        let last = 1_000_000;
+        assert_eq!(CHECK_NOW_INTERVAL_MS, 30_000);
+        assert_eq!(
+            check_now(pending, Some(last), last),
+            CheckNow::TooSoon {
+                retry_after_secs: 30
+            }
+        );
+        assert_eq!(
+            check_now(pending, Some(last), last + 1),
+            CheckNow::TooSoon {
+                retry_after_secs: 30
+            }
+        );
+        assert_eq!(
+            check_now(pending, Some(last), last + 29_001),
+            CheckNow::TooSoon {
+                retry_after_secs: 1
+            }
+        );
+        assert_eq!(
+            check_now(pending, Some(last), last + 29_999),
+            CheckNow::TooSoon {
+                retry_after_secs: 1
+            }
+        );
+        assert_eq!(check_now(pending, Some(last), last + 30_000), CheckNow::Go);
+        assert_eq!(check_now(pending, Some(last), last + 90_000), CheckNow::Go);
+        // A clock that ran backwards holds it no longer than the interval.
+        assert_eq!(
+            check_now(pending, Some(last), last - 3_600_000),
+            CheckNow::TooSoon {
+                retry_after_secs: 30
+            }
+        );
+        assert_eq!(
+            check_now(pending, Some(i64::MAX), i64::MIN),
+            CheckNow::TooSoon {
+                retry_after_secs: 30
+            }
+        );
     }
 }

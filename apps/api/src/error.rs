@@ -15,6 +15,12 @@ pub enum ApiError {
         code: &'static str,
         message: &'static str,
     },
+    /// A refusal that may be asked again after a wait: it carries `Retry-After`, in whole seconds.
+    Later {
+        status: u16,
+        code: &'static str,
+        retry_after_secs: i64,
+    },
     Internal(String),
 }
 
@@ -27,6 +33,20 @@ impl ApiError {
             status,
             code,
             message,
+        }
+    }
+    /// The same refusal, to be asked again no sooner than `seconds` from now (`Retry-After`). Only a refusal with a code
+    /// carries it.
+    pub fn retry_after(self, seconds: i64) -> ApiError {
+        match self {
+            ApiError::Api { status, code } | ApiError::Explained { status, code, .. } => {
+                ApiError::Later {
+                    status,
+                    code,
+                    retry_after_secs: seconds.max(1),
+                }
+            }
+            other => other,
         }
     }
     pub fn invalid_assertion() -> ApiError {
@@ -148,9 +168,9 @@ impl ApiError {
 
     pub fn status_and_code(&self) -> (u16, &'static str) {
         match self {
-            ApiError::Api { status, code } | ApiError::Explained { status, code, .. } => {
-                (*status, code)
-            }
+            ApiError::Api { status, code }
+            | ApiError::Explained { status, code, .. }
+            | ApiError::Later { status, code, .. } => (*status, code),
             ApiError::Internal(_) => (500, "internal_error"),
         }
     }
@@ -159,7 +179,9 @@ impl ApiError {
     // codes: errors
     pub fn code(&self) -> Option<&'static str> {
         match self {
-            ApiError::Api { code, .. } | ApiError::Explained { code, .. } => Some(code),
+            ApiError::Api { code, .. }
+            | ApiError::Explained { code, .. }
+            | ApiError::Later { code, .. } => Some(code),
             ApiError::Internal(_) => None,
         }
     }
@@ -173,10 +195,19 @@ impl ApiError {
             ApiError::Explained { message, .. } => message,
             _ => code,
         };
-        Ok(Response::from_json(
+        let mut response = Response::from_json(
             &serde_json::json!({ "error": { "code": code, "message": message } }),
         )?
-        .with_status(status))
+        .with_status(status);
+        if let ApiError::Later {
+            retry_after_secs, ..
+        } = &self
+        {
+            response
+                .headers_mut()
+                .set("retry-after", &retry_after_secs.to_string())?;
+        }
+        Ok(response)
     }
 }
 

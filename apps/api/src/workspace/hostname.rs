@@ -1,6 +1,7 @@
 //! The room's custom hostname: its request, its challenge, and the claim (M6 step 8's first PR; ADR 0010's "Custom
 //! domains", steps 0 to 4; decisions 201 and 207). `getAppHostname`, `requestAppHostname` and `removeAppHostname`,
-//! and the room's proof job.
+//! and the room's proof job. `checkAppHostname`, "Check now" (2026-11-27), looks for a pending request's challenge at
+//! once rather than at the job's next turn.
 //!
 //! **Who and where** are `podster_policy::release::authorize_custom_hostname`: the room's owner or an admin, as a
 //! person, with that authority holding, and never an agent. Asking needs everything a change to the release
@@ -52,7 +53,7 @@
 use super::*;
 use crate::hostname_proof::Resolver;
 use podster_core::hostname_requests::{
-    after_ask, claimed_read_wait_ms, request_rate_allows, setup_status, unmap,
+    after_ask, check_now, claimed_read_wait_ms, request_rate_allows, setup_status, unmap, CheckNow,
     HostnameRequestState, Unmap,
 };
 use podster_core::hostnames::{
@@ -212,6 +213,13 @@ fn request_view(sql: &SqlStorage, row: &Value, now: i64, domain: Option<&str>) -
     let read_state = HostnameRequestState::parse(&state)
         .ok_or_else(|| ApiError::internal("a request in no known state"))?;
     let id = text(&row["id"]).unwrap_or_default();
+    // When the job last looked, and when it next will for a pending request whose proof isn't recorded: its schedule,
+    // never past its expiry. Display only, as `setup_status` is; with no resolver configured the job doesn't look.
+    let checked_at = (!row["checked_at"].is_null()).then(|| int(&row["checked_at"]));
+    let next_check_at = (read_state == HostnameRequestState::Pending && row["proved_at"].is_null())
+        .then(|| {
+            next_proof_check(int(&row["requested_at"]), checked_at).min(int(&row["expires_at"]))
+        });
     let provider_active = read_state == HostnameRequestState::Claimed
         && !rows(
             sql,
@@ -231,6 +239,8 @@ fn request_view(sql: &SqlStorage, row: &Value, now: i64, domain: Option<&str>) -
         "requested_at": row["requested_at"],
         "expires_at": row["expires_at"],
         "end_reason": end_reason,
+        "checked_at": checked_at,
+        "next_check_at": next_check_at,
     }))
 }
 
@@ -484,6 +494,64 @@ pub(super) fn handle_remove(
     open_view(sql, now, domain)
 }
 
+/// `POST app-hostname/check`, "Check now" (2026-11-27), in the room's transaction: for whoever may ask for a hostname,
+/// where asking may happen (`HostnameChange::Check`), and only for a pending request
+/// (`podster_core::hostname_requests::check_now`). It records the look as made now, which holds the rate for any other
+/// "Check now" until this one is done, and names the request in `go`, so the route then makes the job's pass for it at
+/// once. Nothing else about the request changes here: the pass looks and asks exactly as the job does, by the same rule.
+pub(super) fn handle_check(
+    sql: &SqlStorage,
+    who: &Participant,
+    reads: &ConfigReads,
+    domain: Option<&str>,
+    now: i64,
+    go: &RefCell<Option<String>>,
+) -> R<Value> {
+    may_change(who)?;
+    let holds = release_config::caller_holds(sql, reads, &who.caller.id)?;
+    let room = release_config::on_room(sql, reads)?;
+    authorize_custom_hostname(&who.caller, holds, &room, HostnameChange::Check)
+        .map_err(release_config::denial)?;
+    sweep_expired(sql, now)?;
+    let row = open_request(sql)?;
+    let state = row
+        .as_ref()
+        .and_then(|row| row["state"].as_str())
+        .and_then(HostnameRequestState::parse);
+    let last = row
+        .as_ref()
+        .filter(|row| !row["checked_at"].is_null())
+        .map(|row| int(&row["checked_at"]));
+    match check_now(state, last, now) {
+        CheckNow::Go => {}
+        CheckNow::NotPending => return Err(ApiError::api(409, "hostname_not_pending")),
+        CheckNow::TooSoon { retry_after_secs } => {
+            return Err(ApiError::api(429, "hostname_check_too_soon").retry_after(retry_after_secs))
+        }
+    }
+    let id = row
+        .as_ref()
+        .and_then(|row| text(&row["id"]))
+        .ok_or_else(|| ApiError::internal("a pending request with no ID"))?;
+    checked(sql, &id, now)?;
+    audit(
+        sql,
+        &who.caller,
+        "app_hostname.check_asked",
+        "app_hostname",
+        None,
+        Some(json!({ "request_id": id, "state": "pending" }).to_string()),
+        now,
+    )?;
+    *go.borrow_mut() = Some(id);
+    open_view(sql, now, domain)
+}
+
+/// The room's hostname as "Check now" answers it, after its pass: the open request, or the latest if the pass ended it.
+pub(super) fn after_check(sql: &SqlStorage, now: i64, domain: Option<&str>) -> R<Value> {
+    view(sql, now, domain)
+}
+
 /// The deployment's resolver, if one is configured. Only staging has one. Test builds can also take it away from one
 /// room, while the room holds a table named `test_hostname_resolver_off`, so the unconfigured case can be shown beside
 /// the configured one.
@@ -635,6 +703,16 @@ impl Workspace {
     /// has come, is looked for in DNS, taken to the object, or withdrawn there. Each outcome commits in a transaction
     /// of its own; nothing is held across a call.
     pub(super) async fn hostname_upkeep(&self) -> R<()> {
+        self.hostname_pass(None).await
+    }
+
+    /// "Check now"'s pass (2026-11-27): the job's own, made at once for the request `id` while it is still the room's
+    /// open, pending request, whatever its turn. Everything else the pass reads and decides is the job's.
+    pub(super) async fn hostname_check_now(&self, id: &str) -> R<()> {
+        self.hostname_pass(Some(id)).await
+    }
+
+    async fn hostname_pass(&self, now_for: Option<&str>) -> R<()> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
@@ -645,10 +723,14 @@ impl Workspace {
         let Some(row) = open_request(&sql)? else {
             return Ok(());
         };
-        if next_due(&sql, &self.env)?.is_none_or(|due| due > now) {
+        let id = text(&row["id"]).unwrap_or_default();
+        let checking_now = now_for == Some(id.as_str()) && row["state"].as_str() == Some("pending");
+        if now_for.is_some() && !checking_now {
             return Ok(());
         }
-        let id = text(&row["id"]).unwrap_or_default();
+        if !checking_now && next_due(&sql, &self.env)?.is_none_or(|due| due > now) {
+            return Ok(());
+        }
         let hostname = text(&row["hostname"]).unwrap_or_default();
         let state = row["state"].as_str().and_then(HostnameRequestState::parse);
         // A committed claim: its custom hostname at Cloudflare, and its long end (8b).

@@ -70,6 +70,9 @@ Podster's own challenge is the proof. Cloudflare's validation also runs, but it 
 3. **Looking for the proof.** The job looks at once, then every minute for the first hour, then every 15 minutes until expiry (`:450-468`; the intervals are marked **Proposed** in the code).
    - It reads TXT through one DNS-over-HTTPS resolver, `cloudflare-dns.com` (`apps/api/src/hostname_proof.rs:41-47`). That one resolver is the review's nit F-7.
    - Any one value in the record equal to the request's value is a match (`hostnames.rs:426-428`). So two rooms proving at once don't overwrite each other.
+   - **Check now** (the owner's request of 2026-11-27): whoever may ask for the name, where asking may happen, can make the job look at once (`checkAppHostname`, `POST …/app-hostname/check`; `podster_policy::release::HostnameChange::Check`). It applies only to a `pending` request (`hostname_not_pending`, 409, otherwise). It is the job's own look, by the same match rule, so a proven request comes back `claimed` or `refused` in the answer. People only: no agent capability reaches it.
+     - **At most once every 30 seconds a request**, counted from its last look, the job's or a check's (`hostname_requests.rs`, `check_now`, `CHECK_NOW_INTERVAL_MS`, **Proposed**). Sooner is `hostname_check_too_soon` (429) with `Retry-After`.
+     - The room's answer shows when it last looked (`checked_at`) and when the job next will (`next_check_at`). Workroom Settings shows both, a **Check now** button, and what the check found.
 4. **One hostname, one room.** Once the proof matches, the room asks the hostname's own Durable Object for the claim (`apps/api/src/hostname_claim.rs`). The object decides by `decide_ask` and `decide_claim` (`hostnames.rs:652-726`):
    - **Suspended** comes first: `hostname_suspended`.
    - **A live claim held by another room or request:** `hostname_claimed`. Asking again for the same room and request gets `granted` again.
@@ -147,6 +150,7 @@ Decided, for the owner to review: [decision 207](PRODUCT.md#decisions-needed), a
   - Cloudflare reads the hostname `active` about two minutes after the claim: 119.1 s and 120.1 s in the X14-2 runs.
   - The app answers on the name within seconds after that: 10.4 s in the `war3.org` run.
 - **Publishing the TXT after asking can add up to about 30 minutes.** The proof job may have looked already, and its resolver can cache "no such record" for the zone's negative-caching time. That was 300 s for the staging zones, and some DNS hosts set it longer. After the first hour, the job also looks only every 15 minutes.
+  - **Check now** doesn't get past that cache. When it doesn't find the record, Workroom Settings says: "DNS can take up to about 30 minutes to show a new record if it was added after you asked." (**Proposed** wording, 2026-11-27.)
   - The first custom-domains run's X15-2 timed out exactly this way, and PR #607 fixed the run.
 - **Keep the TXT record in place.** The daily recheck needs it, as above.
 - **Expect the hostname in certificate-transparency logs.** Mapping a subdomain makes the app same-site with its parent domain.

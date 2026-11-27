@@ -350,8 +350,9 @@ describe.runIf(ESCAPE_ON && DOCKER !== null)("R-08, R-30: the subprocess escape 
         dns: await client(REF, "dns example.com"),
       };
       escape.direct = direct;
-      expect(direct.tcp_public).toMatch(/^(error:(ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)|timeout)$/);
-      expect(direct.tcp_metadata).toMatch(/^(error:(ENETUNREACH|EHOSTUNREACH|ECONNREFUSED)|timeout)$/);
+      // Only errors that prove there is no route: a refusal (ECONNREFUSED) means a packet reached a host, a route out.
+      expect(direct.tcp_public).toMatch(/^(error:(ENETUNREACH|EHOSTUNREACH)|timeout)$/);
+      expect(direct.tcp_metadata).toMatch(/^(error:(ENETUNREACH|EHOSTUNREACH)|timeout)$/);
       expect(direct.udp_dns).toMatch(/^(error:\w+|timeout)$/);
       expect(direct.dns).toMatch(/^error:/);
       const unset = "env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy";

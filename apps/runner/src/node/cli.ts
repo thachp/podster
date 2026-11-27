@@ -19,6 +19,8 @@
  *                                                     and save it only on the owner's typed yes. Never replaces one.
  *   trust   <ws_…>                                    Show Runner's trust statement for a room and record the owner's
  *                                                     acceptance only on the typed word, at a terminal (F-3).
+ *   trust   <ws_…> --share                            The same for the public-sharing acknowledgement, which lets a public
+ *                                                     room's outputs "share" count (the owner's ruling of 2026-11-27).
  *   stop                                              Stop the Runner running from this home, and any run, at once.
  *   status                                            Show what this Runner's record says, by IDs.
  *   forget                                            Delete this Runner's keys and record. The agent stays connected in Podster.
@@ -90,6 +92,9 @@ const USAGE = `Podster Runner (M7: pairing, the inbox loop, and tasks through th
   trust   <ws_…>                                   Read Runner's trust statement for a room and accept it by typing
                                                    the word. An unattended room asks before each run until you do.
                                                    Only at a terminal; a file can't set it.
+  trust   <ws_…> --share                           Read the public-sharing acknowledgement for a public room and
+                                                   accept it by typing share. Until you do, a public room set to
+                                                   outputs "share" still holds the agent's words for you.
   stop                                             Stop the Runner running from this home at once, and any run.
                                                    It polls nothing until you start it again.
   status                                           Show this Runner's record, by IDs.
@@ -148,7 +153,7 @@ async function main(argv: string[]) {
   if (command === "trust") {
     // No lock: the owner may accept while `run` goes on, which reads the record afresh at its next evaluation.
     const room = args[0] !== undefined && !args[0].startsWith("--") ? args[0] : undefined;
-    return runTrust({ home, room, terminal: processTerminal(), now: () => systemClock.now(), say });
+    return runTrust({ home, room, share: args.includes("--share"), terminal: processTerminal(), now: () => systemClock.now(), say });
   }
 
   if (command === "stop") {

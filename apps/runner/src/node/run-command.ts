@@ -17,7 +17,8 @@ import { SupervisedAdapter, type ProgressEvent, type SupervisedDeps } from "../c
 import type { Clock, Diagnostics, Logger } from "../core/runtime.js";
 import { FileRunStore } from "./file-runs.js";
 import { policyFile, policyText } from "./policy-file.js";
-import { trustFile } from "./trust-file.js";
+import { trustFile, writeTrustRecord } from "./trust-file.js";
+import { SHARE_FILE, SIGHTINGS_FILE } from "../core/trust.js";
 import { TerminalPrompter, type Terminal } from "./prompter.js";
 import { appOriginFor } from "../core/pull-text.js";
 import { hostRepositoryPath } from "./repo-path.js";
@@ -82,6 +83,8 @@ export async function runInbox(deps: RunInboxDeps): Promise<LoopOutcome> {
         runs: new FileRunStore(deps.home),
         config: policyFile(deps.home),
         trust: trustFile(deps.home),
+        publicShare: trustFile(deps.home, SHARE_FILE),
+        sightings: { read: trustFile(deps.home, SIGHTINGS_FILE), write: (record) => writeTrustRecord(deps.home, record, SIGHTINGS_FILE) },
         adapter,
         home: deps.home,
         ...(repository ? { repository } : {}),

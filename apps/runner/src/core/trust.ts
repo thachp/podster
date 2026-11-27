@@ -159,3 +159,191 @@ export function trustScreen(room_id: string): string {
     "",
   ].join("\n");
 }
+
+/*
+ * The public-sharing acknowledgement (the owner's ruling of 2026-11-27, a narrowing of S-34).
+ *
+ * Until it, Runner held the agent's words for the owner's review in every public room, whatever the room's `outputs`
+ * said. Now a room's `outputs: "share"` is honoured in a public room only when the owner has accepted this
+ * acknowledgement for that room, by the same machinery as the trust statement: the text, its version and the SHA-256 of
+ * its exact bytes live here; it's accepted only through `podster trust <ws_…> --share` at a terminal, by typing `share`;
+ * Runner alone writes the record (`public-share.json`); and a malformed or foreign record holds no acknowledgement. No
+ * policy field, flag, environment variable or example can make one.
+ *
+ * **It's bound to the room being public.** Runner learns a room's visibility only from Podster's provenance on a task,
+ * so `run` keeps what it last saw of each room in `room-visibility.json`: public or private, and since when it has seen
+ * the room public without a break (`public_since`). An acknowledgement records the room's visibility and that start when
+ * accepted, and `podster trust --share` refuses a room Runner hasn't last seen public. It counts only while Runner's
+ * sighting still says public with the same start, so a room seen private and then public again asks again, as does a
+ * changed statement. A flip Runner never sees, because no task of the room was read while it was private, can't be told
+ * apart from no flip; the docs say so.
+ *
+ * Unchanged: an input authored outside the owner's organization still holds; a private room behaves as before; the push
+ * to a public repository still asks (PR 622); and this isn't the trust statement, which unattended runs still need.
+ */
+
+export const SHARE_STATEMENT_VERSION = 1;
+
+/** The word the owner types to accept the acknowledgement, and only it: not the trust statement's `accept`. */
+export const SHARE_WORD = "share";
+
+/** Runner's own record of public-sharing acknowledgements, written only for `podster trust --share`. */
+export const SHARE_FILE = "public-share.json";
+
+/** What `run` last saw of each room's visibility, written only by `run`. */
+export const SIGHTINGS_FILE = "room-visibility.json";
+
+/** The acknowledgement, exactly as shown and hashed. Changing a word changes the hash, and the version must go up with it. */
+export const SHARE_STATEMENT = `Podster Runner public-sharing acknowledgement, version 1
+
+In this public room, Runner will send the agent's own words (its result note and summary)
+to Podster without asking you first, while the room's "outputs" in policy.json is "share".
+Anyone who can see the room can read them. Runner redacts secrets it recognises, but not all.
+
+Runner will also commit, push the task branch and open its pull request without asking.
+A push to a public repository still asks you each time.
+
+A task with any words written outside your organization is still held for you. This
+acknowledgement is for this room, while it stays public, and this version of the statement
+only. If Runner sees the room go private and then public again, or the statement changes,
+it holds the words and asks again. To stop, set the room's "outputs" to "hold", which
+counts at Runner's next evaluation.
+`;
+
+/** SHA-256 of `SHARE_STATEMENT`'s UTF-8 bytes, lower-case hex. */
+export const SHARE_STATEMENT_SHA256 = "b258e9a86cc6e1d6c0fb9327ee7d6e9ad22abf0b4383e18b6cdadedfab48c393";
+
+/** Where Runner points the owner to it: the ask screen, setup's preview and the README. */
+export function sharePointer(room_id: string): string[] {
+  return [
+    `This room is public and its outputs are "share", but Runner holds the agent's words and its push for you until you`,
+    "accept the public-sharing acknowledgement for it: anyone who can see the room can read what's shared.",
+    `Read it and accept it at a terminal with: podster trust ${room_id} --share`,
+  ];
+}
+
+export type Visibility = "public" | "private";
+export type ShareAcknowledgement = {
+  room_id: string;
+  statement_version: number;
+  statement_sha256: string;
+  /** The room's visibility when accepted, as Runner last saw it. Only `public` counts. */
+  room_visibility: Visibility;
+  /** When Runner's sighting of the room's current public stretch began. */
+  public_since: number;
+  accepted_at: number;
+};
+export type ShareRecord = { version: 1; rooms: ShareAcknowledgement[] };
+export type RoomSighting = { room_id: string; visibility: Visibility; public_since: number | null; seen_at: number };
+export type SightingRecord = { version: 1; rooms: RoomSighting[] };
+
+const isVisibility = (v: unknown): v is Visibility => v === "public" || v === "private";
+
+function parseRooms<T>(raw: unknown, keys: readonly string[], one: (r: Obj) => T | null): T[] | null {
+  try {
+    if (!isObj(raw) || !keysAre(raw, ["version", "rooms"]) || raw.version !== 1) return null;
+    const rooms = raw.rooms;
+    if (!Array.isArray(rooms) || rooms.length > MAX_RECORDED) return null;
+    const out: T[] = [];
+    const seen = new Set<unknown>();
+    for (const r of rooms as unknown[]) {
+      if (!isObj(r) || !keysAre(r, keys) || seen.has(r.room_id)) return null;
+      seen.add(r.room_id);
+      const item = one(r);
+      if (item === null) return null;
+      out.push(item);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** The acknowledgements as Runner wrote them, or null for anything else. */
+export function parseShareRecord(raw: unknown): ShareRecord | null {
+  const rooms = parseRooms(raw, ["room_id", "statement_version", "statement_sha256", "room_visibility", "public_since", "accepted_at"], (r) => {
+    const { room_id, statement_version, statement_sha256, room_visibility, public_since, accepted_at } = r;
+    if (!isTrustRoomId(room_id) || !isCount(statement_version) || statement_version < 1) return null;
+    if (typeof statement_sha256 !== "string" || !HEX64.test(statement_sha256) || !isVisibility(room_visibility)) return null;
+    if (!isCount(public_since) || !isCount(accepted_at) || public_since > accepted_at) return null;
+    return { room_id, statement_version, statement_sha256, room_visibility, public_since, accepted_at };
+  });
+  return rooms === null ? null : { version: 1, rooms };
+}
+
+/** What `run` saw, as it wrote it, or null for anything else: public always with a start no later than the sighting, private never. */
+export function parseSightings(raw: unknown): SightingRecord | null {
+  const rooms = parseRooms(raw, ["room_id", "visibility", "public_since", "seen_at"], (r) => {
+    const { room_id, visibility, public_since, seen_at } = r;
+    if (!isTrustRoomId(room_id) || !isVisibility(visibility) || !isCount(seen_at)) return null;
+    if (visibility === "private" ? public_since !== null : !isCount(public_since) || public_since > seen_at) return null;
+    return { room_id, visibility, public_since: public_since as number | null, seen_at };
+  });
+  return rooms === null ? null : { version: 1, rooms };
+}
+
+/**
+ * The record with `room` seen at `now`: a public sighting keeps the current public stretch's start, or starts one; a
+ * private one ends it. `changed` says whether anything but the time moved, so the caller writes only then.
+ */
+export function sighted(record: SightingRecord | null, room_id: string, visibility: Visibility, now: number): { record: SightingRecord; changed: boolean } {
+  const before = record?.rooms.find((r) => r.room_id === room_id);
+  const public_since = visibility === "private" ? null : before?.visibility === "public" && before.public_since !== null ? before.public_since : now;
+  const changed = before === undefined || before.visibility !== visibility || before.public_since !== public_since;
+  const others = (record?.rooms ?? []).filter((r) => r.room_id !== room_id);
+  return { record: { version: 1, rooms: [...others, { room_id, visibility, public_since, seen_at: changed ? now : before.seen_at }] }, changed };
+}
+
+/**
+ * The rooms whose words may be shared while public: a current acknowledgement (this version, this exact text, accepted
+ * while public, no later than `now`) whose public stretch is the one Runner still sees. Anything else is none.
+ */
+export function sharedPublicRooms(shareRaw: unknown, sightingsRaw: unknown, now: number): string[] {
+  const record = parseShareRecord(shareRaw);
+  const sightings = parseSightings(sightingsRaw);
+  if (record === null || sightings === null || !isCount(now)) return [];
+  return record.rooms
+    .filter((a) => {
+      const s = sightings.rooms.find((r) => r.room_id === a.room_id);
+      return (
+        a.statement_version === SHARE_STATEMENT_VERSION &&
+        a.statement_sha256 === SHARE_STATEMENT_SHA256 &&
+        a.room_visibility === "public" &&
+        a.accepted_at <= now &&
+        s !== undefined &&
+        s.visibility === "public" &&
+        s.public_since === a.public_since
+      );
+    })
+    .map((a) => a.room_id)
+    .sort();
+}
+
+/**
+ * The record with this room's acknowledgement of the current statement at `now`, in place of any earlier one, or null
+ * when Runner's sighting of the room isn't public: an acknowledgement is never recorded for a room not seen public.
+ */
+export function withShareAcknowledgement(record: ShareRecord | null, room_id: string, sighting: RoomSighting | undefined, now: number): ShareRecord | null {
+  if (sighting === undefined || sighting.room_id !== room_id || sighting.visibility !== "public" || sighting.public_since === null || sighting.public_since > now) return null;
+  const others = (record?.rooms ?? []).filter((a) => a.room_id !== room_id);
+  return {
+    version: 1,
+    rooms: [...others, { room_id, statement_version: SHARE_STATEMENT_VERSION, statement_sha256: SHARE_STATEMENT_SHA256, room_visibility: "public", public_since: sighting.public_since, accepted_at: now }],
+  };
+}
+
+/** The screen `trust --share` shows before asking: the room, what Runner saw of it, the whole statement, and what's recorded. */
+export function shareScreen(room_id: string, sighting: RoomSighting): string {
+  return [
+    "",
+    `Runner's public-sharing acknowledgement, for the room ${room_id}. Read all of it before you answer.`,
+    `Runner last saw this room public, without a break since ${new Date(sighting.public_since ?? 0).toISOString()}.`,
+    "",
+    ...SHARE_STATEMENT.trimEnd().split("\n").map((l) => (l === "" ? "" : `  ${l}`)),
+    "",
+    `Typing ${SHARE_WORD} records, in ${SHARE_FILE} on this machine only, that you accepted version ${SHARE_STATEMENT_VERSION} of this`,
+    `statement (SHA-256 ${SHARE_STATEMENT_SHA256}) for ${room_id} while it was public, and when. It doesn't set the`,
+    `room's outputs to share: that's the room's "outputs" in policy.json. Anything else records nothing.`,
+    "",
+  ].join("\n");
+}

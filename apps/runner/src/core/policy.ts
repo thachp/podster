@@ -24,6 +24,10 @@
  *   only through `podster trust` at a terminal, and the caller passes the rooms with a current acceptance as
  *   `trusted_rooms` (F-3 of the M7 security review). The policy file has no field for it: one naming `trust_statement`
  *   is refused whole, so a copied example can't switch it on.
+ * - **Outputs** (S-34): a room's words and its push are shared without the owner's review only when the room says
+ *   `outputs: "share"` and every author is internal. A public room also needs the owner's public-sharing acknowledgement
+ *   for it (the owner's ruling of 2026-11-27), passed in as `shared_public_rooms` from Runner's own records, like
+ *   `trusted_rooms`; without one its words are held, as every public room's were before.
  * - **The prompt's inputs** must be exactly those `provenance` lists, in its order, and a change request exactly the one
  *   whose `event_id` provenance names (M2 on #455's review). Steps 8 and 9 build the prompt from those inputs only, and
  *   the change request from that event only.
@@ -250,6 +254,13 @@ export type EvaluateInput = {
    * not listed asks (F-3 of the M7 security review).
    */
   trusted_rooms?: unknown;
+  /**
+   * The rooms whose owner accepted the current public-sharing acknowledgement on this machine while the room was public,
+   * and which Runner still sees public since then (`sharedPublicRooms` in `trust.ts`, from Runner's own records, never
+   * from the policy file or Podster). Only these public rooms honour `outputs: "share"` (the owner's ruling of 2026-11-27,
+   * narrowing S-34). Missing or malformed is none: a public room's words are held.
+   */
+  shared_public_rooms?: unknown;
   /**
    * Spend counted today and budget reserved by runs not yet settled, in micro-USD; at consume, also this decision's own
    * reservation as `own_reservation_micro_usd`, which is left out of the count.
@@ -663,6 +674,9 @@ function decide(input: EvaluateInput): Decision {
   const isPublic = prov.room_visibility === "public";
   const trustedRooms = own(given, "trusted_rooms");
   const trusted = Array.isArray(trustedRooms) && trustedRooms.every(isId) && trustedRooms.includes(room.room_id);
+  // S-34 as the owner narrowed it on 2026-11-27: a public room shares only with a current public-sharing acknowledgement.
+  const sharedRooms = own(given, "shared_public_rooms");
+  const publicShare = Array.isArray(sharedRooms) && sharedRooms.every(isId) && sharedRooms.includes(room.room_id);
 
   const facts: RunFacts = {
     adapter: config.adapter,
@@ -674,7 +688,7 @@ function decide(input: EvaluateInput): Decision {
     workspace_root: config.workspace_root,
     task_folder: `${config.workspace_root}/${ids.workspace_id}/${ids.task_id}`,
     caps: { ...config.caps },
-    outputs: room.outputs === "share" && allInternal && !isPublic ? "share" : "hold",
+    outputs: room.outputs === "share" && allInternal && (!isPublic || publicShare) ? "share" : "hold",
     policy_revision: config.revision,
     room_visibility: prov.room_visibility,
     prompt_inputs: prompt.inputs,
@@ -913,8 +927,8 @@ export function repositoryOf(stored: RunDecisionRecord): { repository: NonNullab
 
 /**
  * The output policy a stored decision was made on (M7 step 11): `share` only when the record is whole and its facts say
- * so, which they do only for a room the owner set to share, every author internal and the room private. Anything else,
- * a record that doesn't read included, is `hold`.
+ * so, which they do only for a room the owner set to share, every author internal, and the room private or publicly
+ * acknowledged (2026-11-27). Anything else, a record that doesn't read included, is `hold`.
  */
 export function outputsOf(stored: RunDecisionRecord): "share" | "hold" {
   try {
@@ -924,5 +938,17 @@ export function outputsOf(stored: RunDecisionRecord): "share" | "hold" {
     return isObj(facts) && facts.outputs === "share" ? "share" : "hold";
   } catch {
     return "hold";
+  }
+}
+
+/** The room's visibility a stored decision was made on; anything that doesn't read is `public`, the stricter. */
+export function visibilityOf(stored: RunDecisionRecord): "public" | "private" {
+  try {
+    const record = parseRecord(stored);
+    if (!record) return "public";
+    const facts = copy(JSON.parse(record.facts_key));
+    return isObj(facts) && facts.room_visibility === "private" ? "private" : "public";
+  } catch {
+    return "public";
   }
 }

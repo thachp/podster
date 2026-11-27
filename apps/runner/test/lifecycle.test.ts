@@ -4,7 +4,7 @@
 // evaluation for every rerun, re-offer and change request.
 import { describe, expect, it } from "vitest";
 import type { RunAdapter, RunHandle, RunReport, RunStart, StopResult } from "../src/core/adapter.js";
-import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type PublicationView, type RepositoryPath, type RepoTask } from "../src/core/lifecycle.js";
+import { ASK_AGAIN_MS, CHECK_IN_MS, HELD_STATUS, Lifecycle, MAX_NOTE_SCANS, REVIEW_HOLD_MS, MAX_ATTEMPTS_PER_DAY, PUBLISH_RETRY_MS, runWithLifecycle, WAIT_MS, type AskView, type OwnerAnswer, type PolicyCalls, type Publication, type PublicationView, type RepositoryPath, type RepoTask, type LifecycleDeps } from "../src/core/lifecycle.js";
 import { RepoPathError } from "../src/core/repository.js";
 import { pair } from "../src/core/pairing.js";
 import { consumeRunDecision, evaluate, issueRunDecision, parsePolicyConfig, type RunDecisionRecord } from "../src/core/policy.js";
@@ -17,7 +17,7 @@ import { ROLE_CAPABILITIES, RoleInvites } from "../src/core/roles.js";
 import type { FailureRecord } from "../src/core/runtime.js";
 import { MemorySecretStore } from "../src/core/storage.js";
 import { AGENT, CODE, FakeGateway, ORIGIN, TestClock, type Detail } from "./fake-gateway.js";
-import { TRUST_STATEMENT_SHA256, TRUST_STATEMENT_VERSION } from "../src/core/trust.js";
+import { SHARE_STATEMENT_SHA256, SHARE_STATEMENT_VERSION, TRUST_STATEMENT_SHA256, TRUST_STATEMENT_VERSION } from "../src/core/trust.js";
 
 const ROOM = "ws_room_one";
 const ORG = "org_one";
@@ -127,7 +127,7 @@ class FakePrompter {
   };
 }
 
-async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath; roles?: { pass(signal: AbortSignal): Promise<void> } } = {}) {
+async function setup(config: unknown | (() => unknown) = policyConfig(), extra: { repository?: RepositoryPath; roles?: { pass(signal: AbortSignal): Promise<void> }; publicShare?: unknown; sightings?: LifecycleDeps["sightings"] } = {}) {
   const clock = new TestClock();
   const gateway = new FakeGateway(clock);
   const secrets = new MemorySecretStore();
@@ -2198,5 +2198,88 @@ describe("a failure's specific cause (the owner's request of 2026-11-20)", () =>
     await t.pass();
     expect(lines(t).find((l) => l.at === "lifecycle.give_up" && l.outcome === "refused")).toMatchObject({ code: "version_conflict", status: 409 });
     expect(t.diagnosed.find((f) => f.at === "lifecycle.give_up")).toMatchObject({ code: "version_conflict", task: "tsk_one" });
+  });
+});
+
+describe("the owner's ruling of 2026-11-27: a public room shares only with the public-sharing acknowledgement", () => {
+  const room = (over: Record<string, unknown> = {}) => ({ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: true }, outputs: "share", ...over });
+  const publicDetail = (id: string) => {
+    const d = detail(id);
+    (d.provenance as { room_visibility: string }).room_visibility = "public";
+    return d;
+  };
+  const store = (record: unknown = null) => {
+    const s = { record, writes: 0, read: async () => s.record, write: async (r: unknown) => void ((s.record = r), s.writes++) };
+    return s;
+  };
+  const acknowledged = (public_since: number, accepted_at = public_since) => ({ version: 1, rooms: [{ room_id: ROOM, statement_version: SHARE_STATEMENT_VERSION, statement_sha256: SHARE_STATEMENT_SHA256, room_visibility: "public", public_since, accepted_at }] });
+  const codes = (t: Awaited<ReturnType<typeof setup>>) => t.logged.map((l) => JSON.parse(l)).filter((l) => l.code === "public_share_not_acknowledged");
+
+  it("without it, holds the words for the owner, logs why once, and records that it saw the room public", async () => {
+    const sightings = store();
+    const t = await setup(policyConfig("unattended", { rooms: [room()] }), { sightings, publicShare: null });
+    const first = t.clock.now();
+    t.offer(publicDetail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    expect(t.commands("submit_task")).toHaveLength(0);
+    expect(t.prompter.reviewed).toHaveLength(1);
+    expect(codes(t)).toHaveLength(1);
+    // Seen public from the first evaluation on, and written only when that changed.
+    expect(sightings.record).toEqual({ version: 1, rooms: [{ room_id: ROOM, visibility: "public", public_since: first, seen_at: first }] });
+    expect(sightings.writes).toBe(1);
+  });
+
+  it("with a current one for the room's public stretch, shares the words as a private room does", async () => {
+    const sightings = store();
+    const t = await setup(policyConfig("unattended", { rooms: [room()] }), { sightings, publicShare: () => acknowledged(t0) });
+    const t0 = t.clock.now();
+    t.offer(publicDetail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    expect(t.commands("submit_task")).toHaveLength(1);
+    expect(String(t.commands("submit_task")[0].arguments.note)).toContain(RESULT.summary);
+    expect(t.prompter.reviewed).toHaveLength(0);
+    expect(codes(t)).toHaveLength(0);
+  });
+
+  it("holds once Runner sees the room private and then public again, and when inputs come from outside", async () => {
+    const t0 = 1_700_000_000_000;
+    const sightings = store({ version: 1, rooms: [{ room_id: ROOM, visibility: "public", public_since: t0, seen_at: t0 }] });
+    const t = await setup(policyConfig("unattended", { rooms: [room()] }), { sightings, publicShare: acknowledged(t0) });
+    const priv = detail("tsk_private");
+    t.offer(priv);
+    await t.pass();
+    await t.pass();
+    expect(sightings.record).toMatchObject({ rooms: [{ visibility: "private", public_since: null }] });
+    t.offer(publicDetail("tsk_one"));
+    await t.pass();
+    await t.pass();
+    expect(t.commands("submit_task").map((c) => c.arguments.task_id)).toEqual(["tsk_private"]);
+    expect(t.entry("tsk_one").submission).toMatchObject({ sharing: "review" });
+  });
+
+  it("holds words whose acknowledgement stopped counting between the run and the submission", async () => {
+    let share: unknown = null;
+    const sightings = store();
+    const t = await setup(policyConfig("unattended", { rooms: [room()] }), { sightings, publicShare: () => share });
+    share = acknowledged(t.clock.now());
+    t.offer(publicDetail("tsk_one"));
+    await t.pass();
+    share = { version: 1, rooms: [] };
+    await t.pass();
+    expect(t.commands("submit_task")).toHaveLength(0);
+    expect(t.entry("tsk_one").submission).toMatchObject({ sharing: "review" });
+  });
+
+  it("tells the owner on the ask screen, and only when the acknowledgement alone holds the words", async () => {
+    const t = await setup(policyConfig("ask", { rooms: [room({ mode: "ask" })] }), { sightings: store(), publicShare: null });
+    t.offer(publicDetail("tsk_one"));
+    await t.pass();
+    expect(t.prompter.asked.at(-1)).toMatchObject({ room_visibility: "public", public_share_held: true });
+    const held = await setup(policyConfig("ask", { rooms: [room({ mode: "ask", outputs: "hold" })] }), { sightings: store(), publicShare: null });
+    held.offer(publicDetail("tsk_one"));
+    await held.pass();
+    expect(held.prompter.asked.at(-1)?.public_share_held).toBeUndefined();
   });
 });

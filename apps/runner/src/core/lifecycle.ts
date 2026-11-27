@@ -73,8 +73,8 @@
  */
 import type { RunAdapter, RunHandle, RunReport, ScratchCounts, StopResult } from "./adapter.js";
 import { GatewayError, meaningOf } from "./errors.js";
-import { acceptedRooms } from "./trust.js";
-import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, parsePolicyConfig, pinRunBase, policyProblem, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
+import { acceptedRooms, isTrustRoomId, parseSightings, sharedPublicRooms, sighted, type SightingRecord } from "./trust.js";
+import { consumeRunDecision, evaluate, factsKey, issueRunDecision, outputsOf, visibilityOf, parsePolicyConfig, pinRunBase, policyProblem, repositoryOf, type AskReason, type Decision, type RunBinding, type RunFacts } from "./policy.js";
 import { pullRequestUrl, RepoPathError } from "./repository.js";
 import { readTaskDetail, sha256Hex, type TaskDetail } from "./prompt.js";
 import { cleanResult, composeBlockedNote, composeNote, type NotePullRequest, type NoteWords, type ResultView } from "./results.js";
@@ -157,6 +157,11 @@ export type AskView = {
   task_id: string;
   reason: AskReason;
   room_visibility: RunFacts["room_visibility"];
+  /**
+   * The room is public, its outputs are "share" in the owner's policy, and Runner holds them only for want of the
+   * public-sharing acknowledgement, so the screen says how to accept it (2026-11-27).
+   */
+  public_share_held?: boolean;
   requester: string;
   authors: RunFacts["authors"];
   tools: RunFacts["tools"];
@@ -254,6 +259,17 @@ export type LifecycleDeps = {
    * policy. Missing, or a read that throws, is none, so every unattended room asks.
    */
   trust?: unknown | (() => unknown | Promise<unknown>);
+  /**
+   * The owner's public-sharing acknowledgements (the owner's ruling of 2026-11-27): Runner's own `public-share.json`,
+   * read afresh on every evaluation. Missing, or a read that throws, is none, so every public room's words are held.
+   */
+  publicShare?: unknown | (() => unknown | Promise<unknown>);
+  /**
+   * What Runner last saw of each room's visibility (`room-visibility.json`), which binds a public-sharing acknowledgement
+   * to the room's current public stretch. Read and written on each evaluation that sees a room; without it, or when a
+   * write fails, no public room's words are shared.
+   */
+  sightings?: { read(): Promise<unknown>; write(record: SightingRecord): Promise<void> };
   adapter: RunAdapter;
   /**
    * Runner's home: a policy whose workspace root overlaps it is refused (ruling 4 on #462). `run` always gives it; tests
@@ -343,6 +359,8 @@ export class Lifecycle {
   readonly checkInMs: number;
   private state: RunsState;
   /** What the owner approved on an ask, by task, until it's issued: it holds only while a fresh read still matches. */
+  /** Public rooms set to share whose words the last evaluation held for want of the public-sharing acknowledgement. */
+  private readonly shareHeld = new Set<string>();
   private readonly approvals = new Map<string, { hash: string; version: number; facts: string }>();
   /** Each finished run's structured result, by task, until it's submitted: in memory only, never stored or logged. */
   private readonly results = new Map<string, { run_ref: string; result: RunResult }>();
@@ -594,7 +612,7 @@ export class Lifecycle {
     const config = await readConfig(this.deps.config);
     const parsed = parsePolicyConfig(config, homeOf(this.deps));
     if (parsed.ok && parsed.value.owner_org !== this.ownerOrg) return { outcome: "refuse", reason: "config_invalid", ...ids };
-    const decision = this.policy.evaluate({
+    const evaluation = {
       config,
       provenance: detail.provenance,
       prompt: detail.prompt?.shape ?? null,
@@ -602,9 +620,20 @@ export class Lifecycle {
       authority_fresh: authorityFresh,
       budget: this.budget(ownReservation),
       trusted_rooms: acceptedRooms(this.deps.trust === undefined ? null : await readConfig(this.deps.trust), this.now()),
+      shared_public_rooms: await this.sharedPublic(entry.workspace_id, detail.provenance),
       ...homeOf(this.deps),
       now: this.now(),
-    });
+    };
+    const decision = this.policy.evaluate(evaluation);
+    // Said on the ask screen and logged once: a public room whose words are held for want of the public-sharing
+    // acknowledgement alone, which the same evaluation with it would share (2026-11-27). Any other hold isn't this.
+    const held =
+      decision.facts?.room_visibility === "public" &&
+      decision.facts.outputs === "hold" &&
+      this.policy.evaluate({ ...evaluation, shared_public_rooms: [entry.workspace_id] }).facts?.outputs === "share";
+    if (held && !this.shareHeld.has(entry.workspace_id)) this.log("lifecycle.decision", "held", entry, { code: "public_share_not_acknowledged" });
+    if (held) this.shareHeld.add(entry.workspace_id);
+    else this.shareHeld.delete(entry.workspace_id);
     // Podster said this task has no linked repository (`task_not_linked`, the owner's ruling of 2026-11-22): it runs as a
     // task in a room without one, in an empty folder, with no token, commit, push or pull request. Only a server answer
     // sets this, never the task's words; everything else the room's policy says is unchanged.
@@ -713,7 +742,7 @@ export class Lifecycle {
       const held = this.approvals.get(key);
       approved = !!held && held.hash === detail.prompt.hash && held.version === task.version && held.facts === factsKey(decision);
       this.approvals.delete(key);
-      if (!approved) return { view: askView(entry, decision, detail), decision };
+      if (!approved) return { view: { ...askView(entry, decision, detail), ...(this.shareHeld.has(entry.workspace_id) ? { public_share_held: true } : {}) }, decision };
     }
     // The owner's repository for the room, if any; its base is pinned after the accept, against a fresh checkout.
     const repository = decision.facts.repository;
@@ -1631,7 +1660,46 @@ export class Lifecycle {
   private async sharingAllowed(workspace_id: string, consumed: NonNullable<RunEntry["consumed"]>): Promise<boolean> {
     if (outputsOf(consumed) !== "share") return false;
     const parsed = parsePolicyConfig(await readConfig(this.deps.config), homeOf(this.deps));
-    return parsed.ok && parsed.value.owner_org === this.ownerOrg && parsed.value.rooms.some((r) => r.room_id === workspace_id && r.outputs === "share");
+    if (!(parsed.ok && parsed.value.owner_org === this.ownerOrg && parsed.value.rooms.some((r) => r.room_id === workspace_id && r.outputs === "share"))) return false;
+    // A public room's acknowledgement must still count now, not only when the run was decided (2026-11-27).
+    if (visibilityOf(consumed) === "private") return true;
+    return sharedPublicRooms(await this.readShares(), this.deps.sightings ? await readConfig(() => this.deps.sightings?.read()) : null, this.now()).includes(workspace_id);
+  }
+
+  private async readShares(): Promise<unknown> {
+    return this.deps.publicShare === undefined ? null : readConfig(this.deps.publicShare);
+  }
+
+  /**
+   * Records what this task's provenance says of its room's visibility, and answers the public rooms whose words may be
+   * shared (2026-11-27). Only a visibility of exactly "public" or "private", for a room ID the record can hold, is
+   * recorded. A record that isn't Runner's, or a sighting that can't be saved, counts as none, so the words are held.
+   */
+  private async sharedPublic(workspace_id: string, provenance: unknown): Promise<string[]> {
+    const store = this.deps.sightings;
+    if (store === undefined) return [];
+    const visibility = typeof provenance === "object" && provenance !== null && Object.hasOwn(provenance, "room_visibility") ? (provenance as { room_visibility: unknown }).room_visibility : undefined;
+    let raw: unknown;
+    try {
+      raw = await store.read();
+    } catch {
+      return [];
+    }
+    const record = parseSightings(raw);
+    if (raw !== null && record === null) return [];
+    let current = record;
+    if ((visibility === "public" || visibility === "private") && isTrustRoomId(workspace_id)) {
+      const next = sighted(record, workspace_id, visibility, this.now());
+      if (next.changed) {
+        try {
+          await store.write(next.record);
+        } catch {
+          return [];
+        }
+      }
+      current = next.record;
+    }
+    return sharedPublicRooms(await this.readShares(), current, this.now());
   }
 
   /** The fixed progress message for a held result, sent once, with a key stored first; a failure is tried at a later review. */

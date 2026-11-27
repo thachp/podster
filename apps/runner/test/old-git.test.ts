@@ -101,7 +101,7 @@ describe.skipIf(!ON || docker === null || hostGit === null)("Runner on Git 2.25 
     const github: GitHubCall = async (request) => {
       calls.push(`${request.method} ${request.path}`);
       const p = request.path;
-      if (p === "/repos/podsterdev/todo-app") return { status: 200, body: { id: 9001, full_name: "podsterdev/todo-app", archived: false, default_branch: "main" } };
+      if (p === "/repos/podsterdev/todo-app") return { status: 200, body: { id: 9001, full_name: "podsterdev/todo-app", archived: false, private: true, default_branch: "main" } };
       if (p === "/repos/podsterdev/todo-app/rules/branches/main") return { status: 200, body: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] };
       const ref = /^\/repos\/podsterdev\/todo-app\/git\/ref\/heads\/(.+)$/.exec(p);
       if (ref) {

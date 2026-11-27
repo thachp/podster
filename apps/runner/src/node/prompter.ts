@@ -22,6 +22,11 @@
  *   records. Only a typed `y` or `yes` shares them; anything else submits the result without them. Words too long to show
  *   whole can't be shared from here: the owner may only withhold them, or leave them held.
  *
+ * - **A held publication is reviewed here too** (F-2 of M7's security review, S-34). Runner's commit, the push of the
+ *   task branch and its pull request wait here when the room's outputs aren't shared or GitHub reads the repository as
+ *   public. The owner sees the room, task, repository, branch and the task's folder to look at the work, all Runner's
+ *   own facts. `y` or `yes` publishes it, `n` or `no` publishes nothing and releases the task, anything else leaves it.
+ *
  * - **A role invite is answered here too** (issue 522), when the owner's policy for that room doesn't claim invites by
  *   itself. The owner sees the room, the opening's ID, the access preset a claim copies and whether it's a lead opening,
  *   with the opening's title and responsibilities fenced as untrusted text. `y` or `yes` claims it as this agent, `n` or
@@ -32,7 +37,7 @@
  *
  * The words are written to this terminal only, never to a log.
  */
-import type { AskView, OwnerAnswer, OwnerPrompter } from "../core/lifecycle.js";
+import type { AskView, OwnerAnswer, OwnerPrompter, PublicationView } from "../core/lifecycle.js";
 import { markHidden, type ResultView } from "../core/results.js";
 import { QuestionInterrupted, type RolePrompter, type RoleView } from "../core/roles.js";
 import type { RoomChangePrompter, RoomChangeView } from "../core/room-facts.js";
@@ -163,6 +168,21 @@ export function reviewScreen(view: ResultView, width = 80): { screen: string; cu
   return { screen: lines.join("\n"), cut };
 }
 
+/** The screen for a held publication, as printed: Runner's own facts only (F-2). */
+export function publicationScreen(view: PublicationView): string {
+  return [
+    "",
+    view.reason === "repository_public"
+      ? "A run finished, and its repository is public on GitHub: pushing the task branch would publish the work to anyone before review."
+      : "A run finished, and its room holds outputs for your review: the commit, the pushed branch and the pull request are outputs too.",
+    `  room ${view.workspace_id}, task ${view.task_id}`,
+    `  repository ${view.full_name}, branch ${view.branch}`,
+    `  the work is in ${view.task_folder}, for you to look at first`,
+    "  nothing has been committed, pushed or opened yet",
+    "",
+  ].join("\n");
+}
+
 /** The screen for a role invite, as printed, and whether its words were too long to show whole. */
 export function roleScreen(view: RoleView, width = 80): { screen: string; cut: boolean } {
   const total = [...view.title].length + [...view.responsibilities].length;
@@ -225,6 +245,24 @@ export class TerminalPrompter implements OwnerPrompter, RolePrompter, RoomChange
     const yes = /^y(es)?$/i.test(answer);
     if (cut) return yes ? "decline" : "later";
     return yes ? "approve" : "decline";
+  }
+
+  async publication(view: PublicationView, signal?: AbortSignal): Promise<OwnerAnswer> {
+    if (!this.terminal.inputIsTTY || !this.terminal.outputIsTTY || signal?.aborted) return "later";
+    if (this.roleQuestion) {
+      await this.takeTerminal();
+      if (signal?.aborted) return "later";
+    }
+    this.terminal.write(`${publicationScreen(view)}\n`);
+    let answer: string;
+    try {
+      answer = (await this.terminal.question("Push the task branch and open its pull request? [y = publish, n = release the task, anything else = later] ", signal)).trim();
+    } catch {
+      return "later";
+    }
+    if (signal?.aborted) return "later";
+    if (/^y(es)?$/i.test(answer)) return "approve";
+    return /^no?$/i.test(answer) ? "decline" : "later";
   }
 
   async role(view: RoleView, signal?: AbortSignal): Promise<OwnerAnswer> {

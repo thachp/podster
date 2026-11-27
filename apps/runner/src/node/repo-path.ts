@@ -201,7 +201,7 @@ export class GitRepositoryPath implements RepositoryPath {
   }
 
   /** The repository as GitHub has it, held to the scope, with its default branch under ADR 0009's rules. */
-  private async checked(task: RepoTask, access: RepoAccess, signal: AbortSignal): Promise<{ default_branch: string }> {
+  private async checked(task: RepoTask, access: RepoAccess, signal: AbortSignal): Promise<{ default_branch: string; public: boolean }> {
     const scope = scopeOf(task);
     const repo = readRepository(await this.read(task, access, GITHUB.repository(scope.full_name), signal, "repository_gone"), scope, task.task_id);
     // A branch with no rules is answered as an empty list, or not at all where rules aren't available: both refuse.
@@ -367,7 +367,7 @@ export class GitRepositoryPath implements RepositoryPath {
     return { repository_id: String(scope.provider_repo_id), base_commit: start };
   }
 
-  async publish(task: RepoTask & { base_commit: string } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication> {
+  async publish(task: RepoTask & { base_commit: string; reviewed?: boolean } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication> {
     const scope = scopeOf(task);
     const branch = task.repository.branch;
     // The task's ID is checked before the words name it.
@@ -375,7 +375,11 @@ export class GitRepositoryPath implements RepositoryPath {
     const text = pullText({ workspace_id: task.workspace_id, task_id: task.task_id, title: task.title ?? null, change_type: task.change_type ?? null, app_origin: this.deps.app_origin ?? null });
     // Renewed after a full server recheck when it's due: a run can outlast the hour a token lives.
     const access = await this.deps.broker.access(task.workspace_id, task.task_id, scope);
-    const { default_branch } = await this.checked(task, access, signal);
+    const { default_branch, public: open } = await this.checked(task, access, signal);
+    // F-2 (S-34; RUNNER.md lifecycle step 9): a pushed branch and a pull request are outputs, and a public repository is a
+    // public destination, so they default to the owner's review. Refused on GitHub's fresh read, before any Git command,
+    // unless the owner said yes to this run's publication: nothing is committed, pushed or opened.
+    if (open && task.reviewed !== true) throw new RepoPathError("repository_public_unreviewed");
     await this.apart(task);
     await this.excludeCaches(task);
     await checkWorkTree(task.task_folder, MAX_FOLDER_ENTRIES, await this.ignoredFolders(task, signal));

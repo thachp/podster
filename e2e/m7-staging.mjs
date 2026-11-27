@@ -29,13 +29,14 @@
 // both or the two try it out first; it is still a rehearsal's report. A gate run needs a terminal, so its answers can't
 // come from a pipe.
 import { createHash, randomBytes } from "node:crypto";
+import dns from "node:dns";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import {
   CRITERIA, criteriaFor, defaultReportName, EXIT, exitCode, findTagged, gateProblem, GIT_CONFIG_CHECK, judgeAcceptedFirst, judgeAnswer, judgeCanceled, judgeChange, judgeClosed, judgeCompletedByReviewer, judgeIssuanceScoped,
-  judgeLinked, judgeLongRun, judgeNoAdminAudit, judgeNoMergeByAgent, judgeNoSubmission, judgeNotRun, judgeNothingAfterEnd, judgeNudgeConsent, judgeOfflineThenAccepted, judgeOneAccept, judgePlainRoles, judgeRefused, judgeSubmissions, judgeZero,
+  judgeLinked, judgeLongRun, judgeNoAdminAudit, judgeNoMergeByAgent, judgeNoSubmission, judgeNotRun, judgeNothingAfterEnd, judgeNudgeConsent, judgeOfflineThenAccepted, judgeOneAccept, judgePairing, judgePlainRoles, judgeRefused, judgeWrongCode, addressProblem, sameEndpoint, SHOWN_ELSEWHERE, judgeSubmissions, judgeZero,
   LOCAL_SCAN, makeTag, NPX, NUDGE_HALF_INTERVAL_S, NUDGE_PICKUP_MS, OVERSIZED_BYTES, parseArgs, POLL_MS, PORT_CHECK, readAnswer, reportProblems, Results, secretHits, STAGING, TEARDOWN_COUNT, taskText, USAGE, WHO, WSL2,
 } from "./m7-staging-lib.mjs";
 
@@ -59,6 +60,7 @@ if (options.dryRun) {
     console.log(`      left to local tests: ${c.local}`);
   }
   console.log(`\nThe second machine's WSL2 record: ${Object.values(WSL2).join("; ")}.`);
+  console.log(`\nShown elsewhere, per the gate's map:\n${Object.entries(SHOWN_ELSEWHERE).map(([id, why]) => `${id}  ${why}`).join("\n")}`);
   process.exit(0);
 }
 
@@ -363,11 +365,27 @@ async function setup() {
     results.facts[`runner_version_${m}`] = version;
     const refused = await ask(m, `Before pairing, run: ${NPX} run --home ~/podster-m7-empty   (an empty folder). Did it refuse to run, with no pairing, and run nothing? Then delete that folder.`, "yn");
     note("R-01", "unpaired", judgeAnswer(refused), m);
-    await ask(m, `In the web app, open your own agents, add an agent for this machine and start its pairing. Then run: ${NPX} pair --agent <agt_…>   and paste the code when asked. Approve the key and check the fingerprint matches.`);
+    await ask(m, `In the web app, open your own agents, add an agent for this machine and start its pairing. Then run: ${NPX} pair --agent <agt_…>${m === "first" ? "\n  When it asks for the code, first paste a WRONG one (change one character), for R-26; if Runner stops, run pair again and paste the right one." : "   and paste the code when asked."} Approve the key and confirm in Podster.`);
+    note("R-25", "fingerprint", judgeAnswer(await ask(m, "Did the fingerprint Runner showed match the one Podster showed, before you confirmed?", "yn")), m);
     agents[m] = await ask(m, `Run: ${NPX} status   and type the agent ID it prints.`, "agent");
     if (!agents[m]) throw new Stop(`no agent for the ${m} machine`);
     results.ids.agents[m] = agents[m];
   }
+  // The pairing as its starter reads it, through the gateway's own pairing route; the other person's isn't readable.
+  const pairing = await api(`/pairing/${agents.first}`);
+  note("R-25", "activated", pairing.ok ? judgePairing(pairing.body) : { status: "NOT SHOWN", detail: `HTTP ${pairing.status}` });
+  note("R-26", "wrongCode", pairing.ok ? judgeWrongCode(pairing.body) : { status: "NOT SHOWN", detail: `HTTP ${pairing.status}` });
+  note("R-27", "proofs", { status: "NOT SHOWN", detail: "a forged or replayed proof needs a hostile client, which this run doesn't run" });
+  if (solo) rehearsalOnly("R-28", "otherAccount");
+  else {
+    const theirs = await api(`/pairing/${agents.second}`);
+    note("R-28", "otherAccount", theirs.status === 404 ? { status: "PASS", detail: "not found" } : { status: "FAIL", detail: `HTTP ${theirs.status}` });
+  }
+  const before = (await must(`/v1/workspaces/${room}`)).members ?? [];
+  const early = machines().filter((m) => before.some((x) => x.principal_id === agents[m]));
+  const admitted = early.length ? { status: "FAIL", detail: `the ${early.join(" and ")} agent was in the room before anyone added it` } : { status: "PASS", detail: "neither agent in the room" };
+  note("R-25", "notInRoomYet", admitted);
+  note("R-28", "admitsNothing", admitted);
   if (!solo && agents.first === agents.second) throw new Error("both machines named the same agent: each person pairs their own");
   await ask("first", `Add each agent to the room with a member role${solo ? "" : ": invite the second person's organization, so its agent joins"}. Once each agent is in, give each a push grant on the room's repository (Settings, then Repository).`);
   if (!solo) await ask("second", "Accept the room's invitation for your organization, adding your Runner's agent. Tell the first person when it's done, for the push grant.");
@@ -376,12 +394,17 @@ async function setup() {
     return machines().every((m) => listed.some((x) => x.principal_id === agents[m])) ? listed : null;
   }, 15 * 60_000);
   if (!members) throw new Error("an agent isn't a member of the room after 15 minutes");
-  if (!solo) results.facts.agents_in_distinct_orgs = members.find((x) => x.principal_id === agents.first)?.org_id !== members.find((x) => x.principal_id === agents.second)?.org_id;
+  if (!solo) {
+    const orgOf = (m) => members.find((x) => x.principal_id === agents[m])?.org_id;
+    results.facts.agents_in_distinct_orgs = Boolean(orgOf("first") && orgOf("second") && orgOf("first") !== orgOf("second"));
+    // Two people bring two organizations: one person with two agents, or two accounts in one organization, isn't the gate.
+    if (!rehearsal && !results.facts.agents_in_distinct_orgs) throw new Error("both agents are in one organization: the gate's run needs each person's agent from their own organization");
+  }
   note("R-04", "plainRole", solo ? { status: "NOT SHOWN", detail: "one agent only (rehearsal)" } : judgePlainRoles(members, agentList()));
 
   section("Run policy");
   for (const m of machines()) {
-    await ask(m, `Run: ${NPX} setup --room ${room}   Keep mode "ask" and outputs "hold" for now.${solo ? "" : m === "second" ? " Leave the first person's organization OUT of allowed_orgs for now: the scope check comes first." : " Say yes to adding the second person's organization to allowed_orgs."}\n  Then start: ${NPX} run --provider-key-file <your key file>   (no nudge flags).`);
+    await ask(m, `Run: ${NPX} setup --room ${room}   Keep mode "ask" and outputs "hold" for now, and set day_caps.spend_micro_usd to 8000000 (8 USD; day caps cover the whole machine, so the run isn't stopped partway).${solo ? "" : m === "second" ? " Leave the first person's organization OUT of allowed_orgs for now: the scope check comes first." : " Say yes to adding the second person's organization to allowed_orgs."}\n  Then start: ${NPX} run --provider-key-file <your key file>   (no nudge flags).`);
   }
   if (!solo) {
     const checked = await ask("second", "Did Runner's log show `adapter.platform` `linux_checked` before it ran anything (its Linux checks passed)?", "yn");
@@ -458,6 +481,7 @@ async function offHalf() {
     const accepted = await until(`task ${task} accepted`, hasEvent(task, "task.accepted", agents[offRunner]), 10 * 60_000);
     note("R-15", "durable", judgeOfflineThenAccepted(await taskEvents(task), agents[offRunner], { stoppedSeq, restartedSeq }));
     note("R-22", "offline", judgeOfflineThenAccepted(await taskEvents(task), agents[offRunner], { stoppedSeq, restartedSeq }));
+    note("R-29", "sameIdentity", accepted ? { status: "PASS", detail: `accepted after the restart by ${agents[offRunner]}, the agent paired at the start` } : { status: "FAIL", detail: "not accepted by the paired agent after the restart" });
     if (accepted) {
       await ask(other(offRunner), `While task ${task} is running (before Runner asks to push), cancel it in the web app.`);
       await until(`task ${task} canceled`, statusIs(task, ["canceled"]), 5 * 60_000, 5_000);
@@ -480,7 +504,7 @@ async function offHalf() {
 
   section("A run over its cap (R-20, R-24)");
   const capRunner = "first";
-  await ask(capRunner, `In policy.json, set this room's caps.turns to 2 (raise revision). Runner reads it at the next task.`);
+  await ask(capRunner, `In policy.json, set caps.turns to 2 (raise revision). Caps cover the whole machine, every room. Runner reads it at the next task.`);
   if (await offer("budget", capRunner)) {
     const task = tasks.budget;
     await ask(capRunner, `Approve the run of task ${task} at Runner's ask screen.`);
@@ -542,7 +566,7 @@ async function offHalf() {
 
   section("A run longer than an hour (R-40, R-41, R-42)");
   const longRunner = solo ? "first" : await ask("first", "Which machine runs the long task? (second shows it under WSL2 too.)", "machine") ?? "first";
-  await ask(longRunner, `In policy.json, for this room only: add "shell" to tools, set caps.run_time_ms to 5400000, caps.turns to 150, caps.spend_micro_usd to 5000000 and day_caps.spend_micro_usd to at least 6000000 (raise revision).`);
+  await ask(longRunner, `In policy.json: add "shell" to this room's tools, and set caps.run_time_ms to 5400000, caps.turns to 150 and caps.spend_micro_usd to 5000000 (raise revision). Caps cover the whole machine; leave day_caps.spend_micro_usd at 8000000.`);
   if (await offer("long", longRunner)) {
     const task = tasks.long;
     const first = await until(`task ${task} accepted`, statusIs(task, ["accepted"]), 10 * 60_000);
@@ -602,15 +626,45 @@ async function onHalf() {
   if (solo) rehearsalOnly("R-01", "consentSecond");
   else note("R-01", "consentSecond", judgeAnswer(await ask("second", "On your agent's page, does the nudge show verified and on, switched on by you?", "yn")));
 
+  // A probe goes only to the address Podster holds as that agent's endpoint, and only if its name resolves to public
+  // addresses. The first agent's endpoint is read here; the second's isn't readable by this session, so its person checks.
+  const allowed = {};
   for (const m of machines()) {
     if (!urls[m]) continue;
+    let registered = false;
+    if (m === "first") {
+      const endpoint = await api(`/v1/agents/${agents.first}/a2a-endpoint`);
+      registered = endpoint.ok && sameEndpoint(urls[m], endpoint.body?.url);
+    } else registered = (await ask(m, `On your agent's page, is its endpoint address exactly ${urls[m]} ?`, "yn")) === true;
+    if (!registered) {
+      say(`  Not probing the ${m} machine's address: it isn't the agent's registered endpoint.`);
+      continue;
+    }
+    let addresses = [];
+    try {
+      addresses = await dns.promises.lookup(new URL(urls[m]).hostname, { all: true });
+    } catch {
+      addresses = [];
+    }
+    const bad = addresses.length ? addresses.map((a) => addressProblem(a.address)).filter(Boolean) : ["the name doesn't resolve"];
+    if (bad.length) {
+      say(`  Not probing the ${m} machine's address: ${bad.join("; ")}.`);
+      continue;
+    }
+    allowed[m] = urls[m];
+  }
+  for (const m of machines()) {
+    if (!allowed[m]) continue;
     const nudge = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: {} });
     const t = Math.floor(Date.now() / 1000);
-    note("R-03", "unsigned", judgeRefused(await probe(urls[m], { body: nudge })), m);
-    note("R-03", "badSignature", judgeRefused(await probe(urls[m], { body: nudge, headers: { "x-podster-signature": `t=${t},v1=${"0".repeat(64)}` } })), m);
-    note("R-16", "oversized", judgeRefused(await probe(urls[m], { body: JSON.stringify({ pad: "x".repeat(OVERSIZED_BYTES) }), headers: { "x-podster-signature": `t=${t},v1=${"0".repeat(64)}` } })), m);
-    note("R-16", "malformed", judgeRefused(await probe(urls[m], { body: "{not json", headers: { "x-podster-signature": `t=${t},v1=${"0".repeat(64)}` } })), m);
-    note("R-03", "noSpawn", judgeAnswer(await ask(m, "The conductor just sent four requests to your nudge address. Did Runner refuse each, and start no run?", "yn")), m);
+    const wrong = { "x-podster-signature": `t=${t},v1=${"0".repeat(64)}` };
+    note("R-03", "unsigned", judgeRefused(await probe(allowed[m], { body: nudge }), 401), m);
+    note("R-03", "badSignature", judgeRefused(await probe(allowed[m], { body: nudge, headers: wrong }), 401), m);
+    note("R-16", "oversized", judgeRefused(await probe(allowed[m], { body: JSON.stringify({ pad: "x".repeat(OVERSIZED_BYTES) }), headers: wrong }), 413), m);
+    // Runner checks the signature before it parses, so a malformed body from us is refused 401 for its signature, which
+    // says nothing about parsing. It isn't sent.
+    note("R-16", "malformed", { status: "NOT SHOWN", detail: "Runner checks the signature first, and this run holds no signing secret" }, m);
+    note("R-03", "noSpawn", judgeAnswer(await ask(m, "The conductor just sent three requests to your nudge address. Did Runner refuse each, and start no run?", "yn")), m);
   }
 
   say("\n  Waiting a minute, so the probes are past Runner's rate limit before Podster's nudges.");
@@ -639,7 +693,7 @@ async function onHalf() {
 
   for (const m of machines()) {
     note("R-15", "endpointStopSeen", judgeAnswer(await ask(m, "Stop Runner with Ctrl-C, and leave your forward running. Did Runner say its nudge port closed?", "yn")), m);
-    if (urls[m]) note("R-15", "endpointClosed", judgeClosed(await probe(urls[m], { body: "{}" })), m);
+    if (allowed[m]) note("R-15", "endpointClosed", judgeClosed(await probe(allowed[m], { body: "{}" })), m);
   }
 }
 
@@ -649,6 +703,7 @@ async function teardown() {
     await ask(m, `Switch the nudge off on your agent's page if it's on, stop your forward, and run: ${NPX} stop`);
     const count = await ask(m, `Run: ${TEARDOWN_COUNT}   What number did it print?`, "count");
     results.facts[`teardown_left_${m}`] = count;
+    note("R-29", "noDuplicate", judgeAnswer(await ask(m, "In the web app, does your agent list show one agent for this machine, the one paired at the start?", "yn")), m);
     if (m === "second") results.wsl2.teardown_left = count;
   }
   const view = await api(`/v1/agents/${agents.first}/a2a-endpoint/nudge`);

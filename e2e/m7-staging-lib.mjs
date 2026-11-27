@@ -86,8 +86,8 @@ export const CRITERIA = {
     half: "on",
     title: "(Inbound) Unauthenticated, replayed or substituted requests rejected; an inbound request alone spawns no CLI",
     clauses: {
-      unsigned: { half: "on", how: "probe", text: "an unsigned request to each Runner's public nudge address is refused" },
-      badSignature: { half: "on", how: "probe", text: "a request with a signature from the wrong secret is refused" },
+      unsigned: { half: "on", how: "probe", text: "an unsigned request to each Runner's registered nudge address is refused 401" },
+      badSignature: { half: "on", how: "probe", text: "a request with a signature from the wrong secret is refused 401" },
       noSpawn: { half: "on", how: "person", text: "no run started on either machine from the refused requests" },
     },
     local: "replay and wrong-room or wrong-task substitution (steps 13 and 14's tests): this run holds no signing secret",
@@ -173,8 +173,8 @@ export const CRITERIA = {
     half: "on",
     title: "(Inbound) SSRF, redirects, rebinding, malformed and oversized payloads rejected",
     clauses: {
-      oversized: { half: "on", how: "probe", text: "a 16 KiB body to each nudge address is refused" },
-      malformed: { half: "on", how: "probe", text: "a body that isn't JSON is refused" },
+      oversized: { half: "on", how: "probe", text: "a 16 KiB body to each registered nudge address is refused 413, before its signature is read" },
+      malformed: { half: "on", how: "probe", text: "a signed body that isn't JSON is refused: not shown here, since Runner checks the signature first and this run holds no secret" },
     },
     local: "card-fetch SSRF, redirects and rebinding (step 13's egress tests); no route to the private API (staging-probes)",
   },
@@ -229,6 +229,46 @@ export const CRITERIA = {
       budget: { half: "off", how: "server", text: "the budget-stopped run left no submission" },
     },
     local: "an old process Runner can't confirm stopped (step 8)",
+  },
+  "R-25": {
+    half: "off",
+    title: "(Pairing) Started in Podster, code in Runner, local key, matching fingerprint; one key and agent bound, no private key sent",
+    clauses: {
+      activated: { half: "off", how: "server", text: "the first machine's pairing, read by its starter, is activated with a key thumbprint, started by a person and redeemed by a key" },
+      fingerprint: { half: "off", how: "person", text: "each person checked that Runner's fingerprint matched Podster's before confirming" },
+      notInRoomYet: { half: "off", how: "server", text: "right after pairing, neither agent is in the room: no capabilities come with the pairing" },
+    },
+    local: "the proof's binding and that no private key is sent (step 5's tests)",
+  },
+  "R-26": {
+    half: "off",
+    title: "(Pairing) Expired, reused or wrong codes and exhausted attempts can't activate a binding",
+    clauses: { wrongCode: { half: "off", how: "server", text: "a wrong code typed first was refused, counted against the attempts, and the right one then activated one binding" } },
+    local: "expired, reused, canceled and replaced codes, concurrent redemption and limiter failure (step 5's tests)",
+  },
+  "R-27": {
+    half: "off",
+    title: "(Pairing) Missing, wrong or replayed proofs and a substituted fingerprint fail",
+    clauses: { proofs: { half: "off", how: "server", text: "not shown on staging: forging a proof needs a hostile client, which this run doesn't run" } },
+    local: "every forged or replayed proof (step 5's tests)",
+  },
+  "R-28": {
+    half: "off",
+    title: "(Pairing) Another account, forged fields or lost authority can't bind; pairing alone admits nothing",
+    clauses: {
+      otherAccount: { half: "off", how: "server", text: "the first person's session can't read the second person's pairing (not found)" },
+      admitsNothing: { half: "off", how: "server", text: "pairing alone didn't put either agent in the room (as R-25's notInRoomYet)" },
+    },
+    local: "forged owner, organization and agent fields, CSRF and lost authority (step 5's tests)",
+  },
+  "R-29": {
+    half: "off",
+    title: "(Pairing) Restart reconciles the same identity with no duplicate agent",
+    clauses: {
+      sameIdentity: { half: "off", how: "server", text: "after the restarts, the Runner acted as the same agent, with no new pairing" },
+      noDuplicate: { half: "off", how: "person", text: "each person's agent list shows one agent for their machine after the restarts" },
+    },
+    local: "lost pairing responses, revoked credentials and completed disconnects (step 5's tests)",
   },
   "R-31": {
     half: "off",
@@ -316,6 +356,12 @@ export const CRITERIA = {
     clauses: { revokedLogged: { half: "off", how: "person", text: "after the long run, Runner's log shows its repository access revoked, or the outcome it couldn't confirm" } },
     local: "revocation success, failure and unknown outcomes (step 10); the API's own revocation lines are in its logs, which this run doesn't read",
   },
+};
+
+/** Criteria the gate's map shows elsewhere, named in the report so their absence here isn't read as a gap. */
+export const SHOWN_ELSEWHERE = {
+  "R-36": "M5's staging runs: server-side provisioning was in M5's gate. M7 adds only that Runner never receives creation authority (local)",
+  "R-37": "M5's staging runs: provisioning's refusals and reconciliation were in M5's gate",
 };
 
 /** The second machine's own record (step 16's note of 2026-11-19): WSL2 only, never other Linux hosts. */
@@ -409,10 +455,39 @@ export function nudgeUrlProblem(text) {
   if (url.protocol !== "https:") return "an https:// address";
   if (url.username || url.password) return "an address with no user name or password in it";
   if (url.port) return "an address on the default port";
-  if (/^[\d.]+$/.test(url.hostname) || url.hostname.includes(":") || url.hostname === "localhost") return "a DNS name, not an IP address or localhost";
-  if (url.hostname === "podster.dev" || url.hostname.endsWith(".podster.dev")) return "an address of your own, not podster.dev";
+  const host = url.hostname.toLowerCase();
+  if (/^[\d.]+$/.test(host) || host.includes(":") || host.startsWith("[") || /^0x/i.test(host)) return "a DNS name, not an IP address";
+  if (!host.includes(".") || host.endsWith(".")) return "a public DNS name with a dot in it";
+  if (/(^|\.)(localhost|local|internal|lan|intranet|home\.arpa|corp|private)$/.test(host)) return "a public DNS name, not a local one";
+  if (host === "podster.dev" || host.endsWith(".podster.dev")) return "an address of your own, not podster.dev";
   if (url.search || url.hash) return "an address with no query or fragment";
   return null;
+}
+
+/** What a nudge address's name resolves to must be public: no private, loopback, link-local or shared address. */
+export function addressProblem(address) {
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(address);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127)) return `${address} isn't a public address`;
+    return null;
+  }
+  const v6 = address.toLowerCase();
+  if (!v6.includes(":")) return `${address} isn't an address`;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
+  if (mapped) return addressProblem(mapped[1]);
+  if (v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("ff")) return `${address} isn't a public address`;
+  return null;
+}
+
+/** A probe goes only to the address Podster holds as that agent's endpoint, exactly. */
+export function sameEndpoint(typed, registered) {
+  if (typeof registered !== "string" || !registered) return false;
+  try {
+    return new URL(typed).href === new URL(registered).href;
+  } catch {
+    return false;
+  }
 }
 
 // ---- secrets ----
@@ -622,11 +697,16 @@ export function judgeNudgeConsent(view) {
   return pass(`version ${endpoint.version}: verified, then switched on by a person`);
 }
 
-/** A probe's answer: refused means a 4xx from Runner. A 2xx is a failure; anything else isn't Runner's answer. */
-export function judgeRefused(status) {
+/**
+ * A probe's answer, which must be Runner's own refusal for that probe (apps/runner/src/core/nudge.ts): 401 for a missing
+ * or wrong signature, 413 for a body over the limit, checked before the signature. A 2xx is taken; another 4xx is a
+ * refusal for the wrong reason; a 5xx or no answer isn't Runner's.
+ */
+export function judgeRefused(status, expected) {
   if (status === null) return notShown("no answer: the tunnel or Runner isn't reachable");
-  if (status >= 400 && status < 500) return pass(`HTTP ${status}`);
+  if (status === expected) return pass(`HTTP ${status}`);
   if (status >= 200 && status < 300) return fail(`HTTP ${status}: taken`);
+  if (status >= 400 && status < 500) return fail(`HTTP ${status}, not ${expected}`);
   return notShown(`HTTP ${status}, not Runner's own answer`);
 }
 
@@ -635,6 +715,33 @@ export function judgeClosed(status) {
   if (status === null || status >= 500) return pass(status === null ? "no connection" : `HTTP ${status} from the tunnel`);
   if (status >= 200 && status < 300) return fail(`HTTP ${status}: something still answers`);
   return fail(`HTTP ${status}: something still answers with Runner's refusal`);
+}
+
+/** R-25: the pairing as its starter reads it: activated, one key, started by a person and redeemed by a key. */
+export function judgePairing(session) {
+  if (!session) return fail("no pairing session");
+  if (session.status !== "activated") return fail(`status ${session.status ?? "unknown"}`);
+  if (!session.key_thumbprint) return fail("no key thumbprint");
+  const history = session.history ?? [];
+  const started = history.find((h) => h.type === "pairing.started");
+  const redeemed = history.filter((h) => h.type === "pairing.redeemed");
+  const activated = history.filter((h) => h.type === "pairing.activated");
+  if (!started || String(started.actor_id ?? "").startsWith("key:") || isAgent(started.actor_id)) return fail("not started by a person");
+  if (redeemed.length !== 1 || !String(redeemed[0].actor_id ?? "").startsWith("key:")) return fail(`${redeemed.length} redemption(s) by a key`);
+  if (activated.length !== 1) return fail(`${activated.length} activation(s)`);
+  return pass("started by a person, redeemed by one key, activated once");
+}
+
+/** R-26: a wrong code refused before the right one, counted against the attempts, and one binding. */
+export function judgeWrongCode(session) {
+  const history = session?.history ?? [];
+  const refused = history.findIndex((h) => h.type === "pairing.refused");
+  const redeemed = history.findIndex((h) => h.type === "pairing.redeemed");
+  if (refused === -1) return notShown("no refused code on record: the wrong code wasn't typed");
+  if (redeemed !== -1 && refused > redeemed) return fail("the refusal came after the redemption");
+  if (history.filter((h) => h.type === "pairing.activated").length > 1) return fail("more than one activation");
+  if (typeof session.attempts_left === "number" && session.attempts_left >= 5) return fail(`attempts left ${session.attempts_left}: the wrong code wasn't counted`);
+  return pass(`wrong code refused (${history[refused].reason ?? "no reason"}), then one activation`);
 }
 
 /** A person's y/n, as a clause. */
@@ -706,7 +813,8 @@ export class Results {
   report(extra = {}) {
     return {
       kind: this.kind,
-      counts_as_gate: this.kind === "gate",
+      // A gate's run is two people: two agents of two organizations, so one person with two accounts can't make one.
+      counts_as_gate: this.kind === "gate" && this.facts.agents_in_distinct_orgs === true,
       half: this.half,
       target: STAGING,
       ids: this.ids,
@@ -714,6 +822,7 @@ export class Results {
       wsl2: this.wsl2,
       counts: this.counts(),
       criteria: this.criteria(),
+      shown_elsewhere: SHOWN_ELSEWHERE,
       ...extra,
     };
   }
@@ -728,7 +837,7 @@ export function exitCode(results, { stopped }) {
 /** A report must carry IDs only: no person ID, no credential, nothing held in memory. Returns what's wrong. */
 export function reportProblems(text, { exact = [], personIds = [] } = {}) {
   const problems = secretHits(text, exact).map((name) => `credential pattern ${name}`);
-  if (personIds.some((id) => id && text.includes(id))) problems.push("a person ID");
+  if (personIds.some((id) => id && text.includes(id)) || /\bper_[A-Za-z0-9]/.test(text)) problems.push("a person ID");
   if (/@[a-z0-9-]+\.[a-z]{2,}/i.test(text)) problems.push("an email-like string");
   return problems;
 }

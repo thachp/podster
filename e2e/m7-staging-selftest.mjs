@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CRITERIA, criteriaFor, EXIT, exitCode, findTagged, gateProblem, judgeAcceptedFirst, judgeAnswer, judgeCanceled, judgeChange, judgeClosed, judgeCompletedByReviewer, judgeIssuanceScoped, judgeLinked, judgeLongRun, judgeNoAdminAudit,
-  judgeNoMergeByAgent, judgeNoSubmission, judgeNotRun, judgeNothingAfterEnd, judgeNudgeConsent, judgeOfflineThenAccepted, judgeOneAccept, judgePlainRoles, judgeRefused, judgeSubmissions, judgeZero, makeTag, nudgeUrlProblem, parseArgs, readAnswer,
+  judgeNoMergeByAgent, judgeNoSubmission, judgeNotRun, judgeNothingAfterEnd, judgeNudgeConsent, judgeOfflineThenAccepted, judgeOneAccept, judgePairing, judgePlainRoles, judgeRefused, judgeWrongCode, addressProblem, sameEndpoint, SHOWN_ELSEWHERE, judgeSubmissions, judgeZero, makeTag, nudgeUrlProblem, parseArgs, readAnswer,
   reportProblems, Results, secretHits, taskText,
 } from "./m7-staging-lib.mjs";
 
@@ -117,9 +117,23 @@ check(status(judgeNudgeConsent(nudgeView([], { control: "unverified" }))) === "F
 check(status(judgeNudgeConsent(nudgeView([], { nudge_on: false }))) === "FAIL" && status(judgeNudgeConsent(null)) === "FAIL", "off or none fails");
 check(status(judgeNudgeConsent(nudgeView([{ type: "nudge_on", actor_id: P1, version: 1 }, { type: "verified", actor_id: A, version: 2 }]))) === "FAIL", "on at another version fails");
 
-check(status(judgeRefused(401)) === "PASS" && status(judgeRefused(413)) === "PASS", "a 4xx is a refusal");
-check(status(judgeRefused(200)) === "FAIL" && status(judgeRefused(202)) === "FAIL", "a 2xx is taken");
-check(status(judgeRefused(502)) === "NOT SHOWN" && status(judgeRefused(null)) === "NOT SHOWN", "a tunnel's error or no answer isn't Runner's");
+check(status(judgeRefused(401, 401)) === "PASS" && status(judgeRefused(413, 413)) === "PASS", "Runner's own refusal for the probe passes");
+check(status(judgeRefused(400, 401)) === "FAIL" && status(judgeRefused(403, 401)) === "FAIL" && status(judgeRefused(401, 413)) === "FAIL", "another 4xx is a refusal for the wrong reason");
+check(status(judgeRefused(200, 401)) === "FAIL" && status(judgeRefused(202, 413)) === "FAIL", "a 2xx is taken");
+check(status(judgeRefused(502, 401)) === "NOT SHOWN" && status(judgeRefused(null, 401)) === "NOT SHOWN", "a tunnel's error or no answer isn't Runner's");
+for (const ip of ["10.1.2.3", "127.0.0.1", "172.20.0.1", "192.168.1.5", "169.254.1.1", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"]) check(addressProblem(ip) !== null, `a private or loopback address is refused: ${ip}`);
+check(addressProblem("93.184.215.14") === null && addressProblem("2606:4700::1") === null, "public addresses pass");
+check(sameEndpoint("https://r.example.org/n", "https://r.example.org/n") && !sameEndpoint("https://r.example.org/n", "https://r.example.org/m") && !sameEndpoint("https://r.example.org/n", null), "a probe goes only to the registered endpoint");
+const session = (history, extra = {}) => ({ status: "activated", key_thumbprint: "t", attempts_left: 4, history, ...extra });
+const paired = [{ type: "pairing.started", actor_id: P1 }, { type: "pairing.refused", actor_id: "key:t", reason: "wrong_code" }, { type: "pairing.redeemed", actor_id: "key:t" }, { type: "pairing.activated", actor_id: P1 }];
+check(status(judgePairing(session(paired))) === "PASS", "an activated pairing passes");
+check(status(judgePairing(session(paired, { status: "redeemed" }))) === "FAIL" && status(judgePairing(session(paired, { key_thumbprint: null }))) === "FAIL", "a pairing not activated, or with no key, fails");
+check(status(judgePairing(session([...paired, { type: "pairing.redeemed", actor_id: "key:u" }]))) === "FAIL", "two redemptions fail");
+check(status(judgePairing(session([{ type: "pairing.started", actor_id: "key:t" }, ...paired.slice(2)]))) === "FAIL", "a pairing started by a key fails");
+check(status(judgeWrongCode(session(paired))) === "PASS", "a wrong code refused before the right one passes");
+check(status(judgeWrongCode(session(paired.filter((h) => h.type !== "pairing.refused")))) === "NOT SHOWN", "no wrong code typed isn't shown");
+check(status(judgeWrongCode(session(paired, { attempts_left: 5 }))) === "FAIL", "a wrong code not counted fails");
+check(Object.keys(SHOWN_ELSEWHERE).join() === "R-36,R-37", "R-36 and R-37 are named as M5's");
 check(status(judgeClosed(null)) === "PASS" && status(judgeClosed(502)) === "PASS" && status(judgeClosed(200)) === "FAIL" && status(judgeClosed(401)) === "FAIL", "closed means no answer from Runner");
 check(status(judgeAnswer(true)) === "PASS" && status(judgeAnswer(false)) === "FAIL" && status(judgeAnswer(null)) === "NOT SHOWN", "y, n and skip");
 check(status(judgeAnswer(true, { yes: "FAIL" })) === "FAIL" && status(judgeAnswer(false, { yes: "FAIL" })) === "PASS", "a question whose yes is a failure");
@@ -135,7 +149,7 @@ check(readAnswer("version", "0.0.9-test.3").value && readAnswer("version", "1.0.
 check(readAnswer("count", "0").value === 0 && readAnswer("count", "-1").again, "counts are whole numbers");
 check(readAnswer("keystore", "file").value === "file" && readAnswer("keystore", "vault").again, "key stores");
 check(nudgeUrlProblem("https://runner.example.org/podster/nudge") === null, "a nudge address");
-for (const bad of ["http://runner.example.org/x", "https://1.2.3.4/x", "https://u:p@runner.example.org/x", "https://runner.example.org:8443/x", "https://gateway-staging.podster.dev/x", "https://localhost/x", "https://runner.example.org/x?token=1"]) check(nudgeUrlProblem(bad) !== null, `nudge address refused: ${bad}`);
+for (const bad of ["https://runner/x", "https://box.local/x", "https://svc.internal/x", "https://[::1]/x", "https://0x7f000001/x", "http://runner.example.org/x", "https://1.2.3.4/x", "https://u:p@runner.example.org/x", "https://runner.example.org:8443/x", "https://gateway-staging.podster.dev/x", "https://localhost/x", "https://runner.example.org/x?token=1"]) check(nudgeUrlProblem(bad) !== null, `nudge address refused: ${bad}`);
 
 check(parseArgs([], { PODSTER_E2E_COOKIE_A: "s=1" }).options?.half === "both", "defaults");
 check(parseArgs(["--half", "off", "--rehearsal"], { PODSTER_E2E_COOKIE_A: "s=1" }).options?.rehearsal === true, "rehearsal and half");
@@ -157,6 +171,11 @@ check(secretHits({ ok: "agt_abc tsk_def ws_ghi" }).length === 0, "IDs are not se
 check(secretHits("cookie=sessionvalue123", ["sessionvalue123"]).includes("held_secret"), "a held string is found");
 check(reportProblems('{"x":"per_Owner01"}', { personIds: ["per_Owner01"] }).length === 1, "a person ID in the report is refused");
 check(reportProblems('{"x":"someone@example.com"}').length === 1, "an email in the report is refused");
+check(reportProblems('{"x":"per_AnyoneElse9"}').length === 1, "any person ID in the report is refused, not only the conductor's");
+const g = new Results({ kind: "gate", half: "off" });
+check(g.report().counts_as_gate === false, "a gate report without two organizations doesn't count");
+g.facts.agents_in_distinct_orgs = true;
+check(g.report().counts_as_gate === true, "a gate report with two organizations counts");
 
 const r = new Results({ kind: "gate", half: "off" });
 r.record("R-05", "acceptedFirst", { status: "PASS" }, "a");
@@ -178,7 +197,7 @@ try {
 check(threw, "an unknown clause throws");
 
 // The gate's map's staging criteria, all recorded: R-04 to R-42 there, and the inbound ones in the nudge half.
-const mapped = ["R-01", "R-02", "R-03", "R-04", "R-05", "R-06", "R-07", "R-12", "R-13", "R-14", "R-15", "R-16", "R-17", "R-18", "R-20", "R-22", "R-24", "R-31", "R-32", "R-33", "R-34", "R-35", "R-38", "R-39", "R-40", "R-41", "R-42"];
+const mapped = ["R-01", "R-02", "R-03", "R-04", "R-05", "R-06", "R-07", "R-12", "R-25", "R-26", "R-27", "R-28", "R-29", "R-13", "R-14", "R-15", "R-16", "R-17", "R-18", "R-20", "R-22", "R-24", "R-31", "R-32", "R-33", "R-34", "R-35", "R-38", "R-39", "R-40", "R-41", "R-42"];
 check(mapped.every((id) => id in CRITERIA) && Object.keys(CRITERIA).every((id) => mapped.includes(id)), "every staging criterion of the map, and no other");
 check(["R-01", "R-02", "R-03", "R-16", "R-17"].every((id) => criteriaFor("on").includes(id)), "the inbound criteria are in the nudge half");
 check(Object.values(CRITERIA).every((c) => c.local && Object.values(c.clauses).every((k) => ["server", "person", "probe"].includes(k.how) && ["off", "on"].includes(k.half))), "each clause says how and when, and each criterion what's left to local tests");
@@ -281,7 +300,8 @@ const two = await rehearse({ two: true });
 check(two.code === EXIT.ok && two.report?.kind === "rehearsal" && two.report?.counts_as_gate === false, `a two-machine rehearsal exits 0 and is still a rehearsal (got ${two.code}: ${JSON.stringify(Object.entries(two.report?.criteria ?? {}).filter(([, c]) => c.status !== "PASS").map(([id, c]) => [id, Object.fromEntries(Object.entries(c.clauses).filter(([, v]) => v.status !== "PASS"))]))})`);
 check(two.report?.criteria?.["R-14"]?.clauses?.["otherReviewer.ask-first"]?.status === "PASS" && two.report?.criteria?.["R-14"]?.clauses?.["otherReviewer.ask-second"]?.status === "PASS", "with two machines, each direction's reviewer is the other person");
 check(two.report?.criteria?.["R-20"]?.clauses?.outOfScope?.status === "PASS" && two.report?.wsl2?.key_store === "file" && two.report?.wsl2?.teardown_left === 0, "the scope check and the second machine's WSL2 record");
-check(two.report && Object.values(two.report.criteria).every((c) => c.status === "PASS"), "with two machines, the stand-in shows every criterion");
+check(two.report && Object.entries(two.report.criteria).every(([id, c]) => c.status === (["R-16", "R-27"].includes(id) ? "NOT SHOWN" : "PASS")), "with two machines, the stand-in shows every criterion but R-16's malformed body and R-27's forged proofs");
+check(two.report?.criteria?.["R-26"]?.status === "PASS" && two.report?.criteria?.["R-28"]?.clauses?.otherAccount?.status === "PASS", "the pairing's wrong code and the other account's refusal are judged");
 check(!two.text.includes("per_StandIn") && !two.out.includes("per_StandIn"), "no person ID with two machines either");
 const dup = await rehearse({ brk: "duplicate-accept", half: "off" });
 check(dup.code === EXIT.failed && dup.report?.criteria?.["R-06"]?.status === "FAIL", "a duplicate accept fails R-06 and the run");

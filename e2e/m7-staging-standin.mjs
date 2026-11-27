@@ -8,6 +8,10 @@
 // room's events or of the task, as a real room moves while the conductor waits. STANDIN_BREAK names a story to break,
 // so the self-test can see a failure judged as one.
 globalThis.__podsterM7Standin = true;
+import dns from "node:dns";
+
+// A nudge address's name resolves to a public documentation-free address here, with no lookup made.
+dns.promises.lookup = async () => [{ address: "93.184.215.14", family: 4 }];
 
 const STAGING = "https://gateway-staging.podster.dev";
 const ME = "per_StandInOwner01";
@@ -23,6 +27,9 @@ let pendingTitle = null;
 let pendingAgent = null;
 /** Who the conductor last asked: the maker of a task is its reviewer. */
 let speaker = "first";
+/** What the conductor has asked for so far: agents join the room only once added, and endpoints exist only in the nudge half. */
+let added = false;
+let nudgeHalf = false;
 
 /** Each story's steps after creation: [type, actor ("agent" or "reviewer"), new status, minutes later]. */
 const STORIES = {
@@ -68,6 +75,8 @@ process.stdout.write = (chunk, ...rest) => {
   for (const lineText of String(chunk).split("\n")) {
     const who = /^\[(First|Second) person/.exec(lineText);
     if (who) speaker = who[1].toLowerCase();
+    if (lineText.includes("Add each agent to the room")) added = true;
+    if (lineText.startsWith("## The nudge on")) nudgeHalf = true;
     const title = /^\s+title:\s+(.+)$/.exec(lineText);
     if (title) pendingTitle = title[1];
     const assignee = /^\s+assignee:\s+.*?(agt_[A-Za-z0-9_-]+)/.exec(lineText);
@@ -87,12 +96,16 @@ globalThis.fetch = async (input, init = {}) => {
   const method = (init.method ?? "GET").toUpperCase();
   if (url.origin !== STAGING) {
     if (method === "POST" && init.body === "{}") throw new TypeError("fetch failed: no connection (stand-in: Runner stopped)");
-    return json(401, { error: "unauthorized" });
+    return json(String(init.body ?? "").length > 8 * 1024 ? 413 : 401, { error: "refused" });
   }
   if (method !== "GET") throw new Error(`stand-in: the conductor sent ${method} to staging, and it must write nothing`);
   if (!String(init.headers?.cookie ?? "").length) return json(401, { error: { code: "unauthenticated" } });
   const path = url.pathname.replace(/^\/api/, "");
-  const agentsInRoom = [...new Set([...tasks.values()].map((t) => t.agent).concat(process.env.STANDIN_AGENTS?.split(",") ?? []))];
+  if (path.startsWith("/pairing/")) {
+    if (path !== "/pairing/agt_standinfirst") return json(404, { error: { code: "not_found" } });
+    return json(200, { status: "activated", key_thumbprint: "thumb", attempts_left: 4, history: [{ type: "pairing.started", actor_id: ME }, { type: "pairing.refused", actor_id: "key:thumb", reason: "wrong_code" }, { type: "pairing.redeemed", actor_id: "key:thumb" }, { type: "pairing.activated", actor_id: ME }] });
+  }
+  const agentsInRoom = !added ? [] : [...new Set([...tasks.values()].map((t) => t.agent).concat(process.env.STANDIN_AGENTS?.split(",") ?? []))];
   if (path === "/v1/me") return json(200, { id: ME });
   if (path === `/v1/workspaces/${ROOM}`) {
     return json(200, { id: ROOM, policy_version: 3, owner: ME, members: [{ principal_id: ME, kind: "person", org_id: "org_a", role: "owner" }, { principal_id: OTHER_PERSON, kind: "person", org_id: "org_b", role: "member" }, ...agentsInRoom.map((id, i) => ({ principal_id: id, kind: "agent", org_id: i ? "org_b" : "org_a", role: "member" }))] });
@@ -117,7 +130,7 @@ globalThis.fetch = async (input, init = {}) => {
   }
   const endpoint = /^\/v1\/agents\/(agt_[A-Za-z0-9_-]+)\/a2a-endpoint(\/nudge)?$/.exec(path);
   if (endpoint) {
-    if (!endpoint[2]) return json(200, null);
+    if (!endpoint[2]) return json(200, nudgeHalf ? { url: "https://nudge.example.org/podster/nudge", version: 2, enabled: true } : null);
     return json(200, { endpoint: { url: "https://nudge.example.org/podster/nudge", version: 2, control: "verified", nudge_on: true, consecutive_failures: 0 }, history: [{ type: "nudge_on", actor_id: ME, version: 2 }, { type: "verified", actor_id: endpoint[1], version: 2 }, { type: "challenge_sent", actor_id: endpoint[1], version: 2 }] });
   }
   return json(404, { error: { code: "not_found" } });

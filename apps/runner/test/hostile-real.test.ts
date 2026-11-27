@@ -300,7 +300,7 @@ describe.runIf(ESCAPE_ON && DOCKER !== null)("R-08, R-30: the subprocess escape 
       expect((await call(REF, "write", { path: "client.mjs", content: CLIENT })).ok).toBe(true);
       expect((await call(OTHER, "write", { path: "client.mjs", content: CLIENT })).ok).toBe(true);
       const started = await docker(
-        ["run", "--detach", "--name", decoy, "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--network", egressNames(REF).out, "--network-alias", LAN_NAME, "--pull", "never", proxyImage, "node", "-e", `require("net").createServer((s) => s.end(${JSON.stringify(LAN)})).listen(443)`],
+        ["run", "--detach", "--name", decoy, "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--network", egressNames(REF).out, "--network-alias", LAN_NAME, "--env", `PODSTER_LAN_NEEDLE=${LAN}`, "--pull", "never", proxyImage, "node", "-e", 'require("net").createServer((s) => s.end(process.env.PODSTER_LAN_NEEDLE)).listen(443)'],
         { timeoutMs: 120_000, maxOutputBytes: 64 * 1024 },
       );
       expect(started.code).toBe(0);
@@ -364,7 +364,7 @@ describe.runIf(ESCAPE_ON && DOCKER !== null)("R-08, R-30: the subprocess escape 
     it("a listed name that answers a LAN address is refused, so the LAN service behind it is never reached (DNS rebinding's target)", async () => {
       // The control: the decoy is real, and answers that name with the LAN needle to anything on its network.
       const probe = await docker(
-        ["run", "--rm", "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--network", egressNames(REF).out, "--pull", "never", proxyImage, "node", "-e", `const s=require("net").connect(443,${JSON.stringify(LAN_NAME)});let d="";s.on("data",c=>d+=c);s.on("close",()=>{console.log(d);process.exit(0)});s.on("error",e=>{console.log(e.code);process.exit(0)});setTimeout(()=>{console.log("timeout");process.exit(0)},5000)`],
+        ["run", "--rm", "--label", `${LABEL_HOME}=${homeLabel(home)}`, "--network", egressNames(REF).out, "--env", `PODSTER_LAN_NAME=${LAN_NAME}`, "--pull", "never", proxyImage, "node", "-e", 'const s=require("net").connect(443,process.env.PODSTER_LAN_NAME);let d="";s.on("data",c=>d+=c);s.on("close",()=>{console.log(d);process.exit(0)});s.on("error",e=>{console.log(e.code);process.exit(0)});setTimeout(()=>{console.log("timeout");process.exit(0)},5000)'],
         { timeoutMs: 120_000, maxOutputBytes: 64 * 1024 },
       );
       expect(probe.stdout.trim()).toBe(LAN);

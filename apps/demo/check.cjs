@@ -109,8 +109,8 @@ if (html.indexOf('<script>bad') >= 0) throw new Error('md raw html');
 if (html.indexOf('href="https://example.com"') < 0) throw new Error('md link');
 __t.S.inl = { w: 'task', f: 'title', mode: 'write', val: 'New title' }; __t.render(); if (html.indexOf('id="inl-in"') < 0) throw new Error('title editor');
 __t.S.inl = null; __t.S.taskId = 18; location.hash = '#task'; __t.fromHash(); if (html.indexOf('inl locked') < 0) throw new Error('locked task');
-location.hash = '#brief'; __t.fromHash(); if ((html.match(/data-act="inl-open"/g) || []).length !== 3 || html.indexOf('<table>') < 0) throw new Error('brief inline');
-__t.S.inl = { w: 'brief', f: 'bdone', mode: 'preview', val: '- one\n- [ ] two' }; __t.render(); if (html.indexOf('<li>two</li>') < 0) throw new Error('lines preview');
+location.hash = '#brief'; __t.fromHash(); if ((html.match(/data-act="inl-open"/g) || []).length !== 2 || html.indexOf('<table>') < 0) throw new Error('brief inline');
+__t.S.inl = { w: 'brief', f: 'context', mode: 'preview', val: '- one\n- [ ] two' }; __t.render(); if (html.indexOf('<li>one</li>') < 0 || html.indexOf('type="checkbox"') < 0) throw new Error('brief md preview');
 __t.S.inl = null;
 console.log('INL-OK');
 __t.S.taskId = 18; location.hash = '#task'; __t.fromHash();
@@ -145,5 +145,6 @@ location.hash = '#org-new'; __t.fromHash(); if (html.indexOf('data-form="org-new
 __t.S.rvPanel = true; location.hash = '#review'; __t.fromHash(); if (html.indexOf('review float') < 0 || html.indexOf('aria-label="Hide review panel"') < 0) throw new Error('rv panel shown'); __t.S.rvPanel = false; __t.render(); if (html.indexOf('review float full') < 0) throw new Error('rv panel hidden'); __t.S.rvPanel = true;
 location.hash = '#review'; __t.fromHash(); if (html.indexOf('rvbtn donly" data-act="rv-panel" aria-expanded="true"') < 0 || html.indexOf('data-act="rv-mode" data-m="confirm"') < 0) throw new Error('rv header toggles panel'); __t.S.rvPanel = false; __t.render(); if (html.indexOf('aria-expanded="false" aria-controls="rv-side"') < 0) throw new Error('rv header closed'); __t.S.rvPanel = true;
 location.hash = '#agent'; __t.fromHash(); if (html.indexOf('Message Sam') >= 0 || html.indexOf('data-act="discuss"') < 0) throw new Error('agent discuss'); __t.S.drawer = 19; __t.S.dtab = 'discussion'; __t.S.draft = '@Sam Rivera '; __t.render(); if (html.indexOf('Message Sam') >= 0) throw new Error('sheet message sam'); __t.S.drawer = null; __t.S.draft = '';
+__t.S.inl = null; location.hash = '#brief'; __t.fromHash(); if (html.indexOf('Done means') < 0 || html.indexOf('data-f="bdone"') >= 0 || html.indexOf('>Goal<') < 0) throw new Error('brief one body'); __t.S.brief.context = ''; __t.render(); if (html.indexOf('start with an outline') < 0) throw new Error('brief empty');
 console.log('AUTH-OK');
 process.exit(0);

@@ -791,7 +791,7 @@ const S = {
   teams: [], orgNew: { name: '', made: '' },
   org: { name: 'Bakery on Elm', slug: 'bakeryonelm', site: 'bakeryonelm.example', edit: false, draft: null, delAsk: false, members: [['Elena Lopez', 'elena@bakeryonelm.example', 'Admin'], ['Marco Diaz', 'marco@bakeryonelm.example', 'Member']], inviteOpen: false },
   scope: 'room',
-  brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', done: 'I can add an order and see whether it is New, In progress or Ready.\nIt works on my phone at the counter.', context: 'Small bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
+  brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', context: '## What we\'re building\nA page where staff add each order as it comes in and move it through **New**, **In progress** and **Ready**.\n\n## Done means\n- [ ] I can add an order and see whether it is New, In progress or Ready\n- [ ] It works on my phone at the counter\n\n## Notes and links\nSmall bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
   hist: { tab: 'list', f: 'all', link: 'ca' },
   perm: { saved: { take: true, push: true, discuss: true, propose: false }, draft: null },
   kFresh: false,
@@ -938,7 +938,7 @@ function md(src, inert) {
 /* ---------- Inline editing (Jira-style): click the text to edit it in place ---------- */
 function inlRaw(w, f) {
   if (w === 'task') { const t = T(S.taskId) || T(18); return f === 'title' ? t.title : f === 'ask' ? t.ask : t.done.join('\n'); }
-  const b = S.brief; return f === 'goal' ? b.goal : f === 'context' ? b.context : b.done;
+  const b = S.brief; return f === 'goal' ? b.goal : (b.context || BRIEF_OUTLINE);
 }
 function inl(w, f, display, o) {
   const ed = S.inl && S.inl.w === w && S.inl.f === f;
@@ -966,7 +966,7 @@ function saveInl() {
     toast('Saved. Planner is told.');
   } else {
     const b = S.brief;
-    if (x.f === 'goal') b.goal = v.trim() || b.goal; else if (x.f === 'context') b.context = v; else b.done = v;
+    if (x.f === 'goal') { const g = v.replace(/\s+/g, ' ').trim(); if (!g) { toast('The goal can\'t be empty.'); return; } b.goal = g; } else b.context = v.trim() === BRIEF_OUTLINE.trim() ? '' : v;
     toast('Saved. Planner is told and may suggest new tasks.');
   }
   S.inl = null;
@@ -1710,13 +1710,13 @@ function permPanel() {
 }
 
 /* ---------- Creator: Brief ---------- */
+const BRIEF_OUTLINE = '## What we\'re building\n\n\n## Done means\n- [ ] \n\n## Notes and links\n';
 function brief() {
   const b = S.brief;
   const view = '<div class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:20px">' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">What you want built</span>' + inl('brief', 'goal', '<div style="font-size:16px">' + md(b.goal) + '</div>', { label: 'what you want built', rows: 3 }) + '</div>' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Done means</span>' + inl('brief', 'bdone', linesView(b.done), { lines: true, label: 'done means', rows: 4 }) + '</div>' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Good to know</span>' + inl('brief', 'context', '<div class="muted">' + md(b.context) + '</div>', { label: 'good to know', rows: 6 }) + '</div>' +
-    '<p class="faint" style="font-size:13px;margin:0">Click any part to edit. Markdown works. Planner is told when the brief changes.</p></div>';
+    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Goal</span>' + inl('brief', 'goal', '<div style="font-size:18px;font-weight:600;letter-spacing:-0.01em">' + esc(b.goal) + '</div>', { single: true, size: '18px', label: 'goal' }) + '<span class="faint" style="font-size:12.5px">One line. It names the workroom in lists, Explore and the public page.</span></div>' +
+    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Brief</span>' + inl('brief', 'context', b.context ? '<div class="md-body">' + md(b.context) + '</div>' : '<div class="faint">Write the brief: what you\'re building, what done means, and anything agents should know. Click to start with an outline.</div>', { label: 'brief', rows: 14 }) + '</div>' +
+    '<p class="faint" style="font-size:13px;margin:0">Click either part to edit. Markdown works. Planner is told when the brief changes.</p></div>';
   return '<div class="head"><div><h1>Brief</h1><p>What this workroom is for. Every agent reads it before it starts a task.</p></div></div>' +
     '<div class="grid2"><section style="display:flex;flex-direction:column;gap:18px">' + view + '</section>' +
     '<section style="display:flex;flex-direction:column;gap:22px">' +

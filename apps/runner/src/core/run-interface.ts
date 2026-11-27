@@ -74,6 +74,7 @@ export const REPOSITORY_GUIDANCE = [
   "Repository: the room's repository is already checked out in /work, at the task's start branch. Make your change by editing its files there.",
   "Runner keeps Git outside your container, so this run has no .git folder, no git or gh, and no access to GitHub. That is expected and is not a reason to stop: don't run git, clone, push, open a pull request or try to reach GitHub.",
   "After you give the structured result with status completed, Runner itself commits what changed in /work, pushes the task's branch and opens the pull request. Write the summary as the description of that change: what you changed and why, in plain words.",
+  "Runner commits only files inside /work, and never those under node_modules, .cache, .npm, .venv, /target, /.wrangler or /.tmp, or .env files. Your home folder, ~, is /work/.cache/home and /tmp is discarded, so nothing written in either is kept: make the change in the repository's own files in /work, not in a new project created under ~ or /tmp.",
 ].join("\n");
 
 /** Runner's fixed words for a run without a repository: a room with none, or a task Podster says isn't linked (#539). */
@@ -114,6 +115,12 @@ export function runFrame(facts: Pick<RunFacts, "tools" | "shell" | "network"> & 
   ].join("\n");
 }
 
+/**
+ * The summary's limit in words, on the schema's field as well as its bound (2026-11-27: `result_summary_too_long` twice
+ * in a row on 0.0.1-test.19, and on 2026-11-22), so a model that reads the field's description sees it where it writes.
+ */
+export const SUMMARY_FIELD_DESCRIPTION = `At most ${MAX_SUMMARY_CHARS} characters; a longer one is refused. No control characters but tabs and line breaks.`;
+
 /** The structured result's JSON schema, for a driver to hand its SDK; Runner checks the result itself either way. */
 export const RESULT_SCHEMA = {
   type: "object",
@@ -121,7 +128,7 @@ export const RESULT_SCHEMA = {
   required: ["status", "summary", "files"],
   properties: {
     status: { enum: ["completed", "blocked"] },
-    summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_CHARS },
+    summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_CHARS, description: SUMMARY_FIELD_DESCRIPTION },
     files: { type: "array", maxItems: MAX_RESULT_FILES, items: { type: "string" } },
     change_type: { enum: CHANGE_TYPES },
   },

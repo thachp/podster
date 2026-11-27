@@ -885,6 +885,22 @@ describe("the Claude Agent SDK driver", () => {
     for (const r of t.seen.reasons) expect(r).not.toMatch(/proof|workspace|\.\.\//);
   });
 
+  // 2026-11-27 (0.0.1-test.19): result_summary_too_long twice in a row; the model is told the limit and its length.
+  it("tells the model the summary's limit and its actual length when the result is refused as too long", async () => {
+    const long = { ...RESULT, summary: "y".repeat(2_150) };
+    const t = await driverFor([
+      { kind: "tool", id: "toolu_1", name: "StructuredOutput", input: long },
+      { kind: "tool", id: "toolu_2", name: "StructuredOutput", input: RESULT },
+    ]);
+    const { s } = session();
+    const run = await t.driver.begin(s);
+    expect(await run.done).toEqual({ result: RESULT });
+    expect(t.seen.denied).toEqual(["toolu_1"]);
+    expect(t.seen.reasons[0]).toContain("at most 2000 characters");
+    expect(t.seen.reasons[0]).toContain("Yours is 2150");
+    expect(t.seen.reasons[0]).not.toContain("yyy");
+  });
+
   it("ends the run when a handler runs a call the hook never saw", async () => {
     const t = await driverFor([{ kind: "handler_only", name: "mcp__runner__read", input: { path: "a" } }]);
     const { s, tools } = session();

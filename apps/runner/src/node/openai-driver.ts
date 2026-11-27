@@ -38,10 +38,10 @@ import { upstreamUrl } from "../core/broker.js";
 import { OPENAI_MODEL, OPENAI_MODELS, OPENAI_PROFILE, OPENAI_REASONING_EFFORT, openaiBaseUrl, openaiVersionRefusal } from "../core/openai-profile.js";
 import { RESULT_TOOL } from "../core/policy.js";
 import { CHANGE_TYPES } from "../core/pull-text.js";
-import type { AgentDriver, DriverOutcome, DriverRun, DriverSession } from "../core/run-interface.js";
+import { SUMMARY_FIELD_DESCRIPTION, type AgentDriver, type DriverOutcome, type DriverRun, type DriverSession } from "../core/run-interface.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { shellDescription } from "../core/toolchains.js";
-import { refusalText } from "../core/tool-policy.js";
+import { MAX_SUMMARY_CHARS, refusalText } from "../core/tool-policy.js";
 
 const REF = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -63,15 +63,16 @@ export const OPENAI_TOOL_SHAPES: Readonly<Record<"read" | "search" | "write" | "
 
 /**
  * The structured result's strict schema: Runner's `RESULT_SCHEMA` in the shape strict mode takes (every property
- * required, `change_type` nullable). Its bounds aren't repeated here: Runner checks the result itself either way.
+ * required, `change_type` nullable). Its bounds aren't repeated here, but the summary's limit is named in words (2026-11-27):
+ * Runner checks the result itself either way.
  */
 export const OPENAI_RESULT_PARAMETERS: Schema = strictSchema({
   status: { type: "string", enum: ["completed", "blocked"] },
-  summary: STRING,
+  summary: { type: "string", description: SUMMARY_FIELD_DESCRIPTION },
   files: { type: "array", items: STRING },
   change_type: { type: ["string", "null"], enum: [...CHANGE_TYPES, null] },
 });
-export const RESULT_DESCRIPTION = "Give the task's structured result: call it once, when you are done or can't go on.";
+export const RESULT_DESCRIPTION = `Give the task's structured result: call it once, when you are done or can't go on. Its summary is at most ${MAX_SUMMARY_CHARS} characters.`;
 
 /** The tool's input with its nulls dropped, as Runner's policy reads it; anything not an object is passed as it is. */
 function withoutNulls(input: unknown): unknown {
@@ -224,7 +225,7 @@ export class OpenAIDriver implements AgentDriver {
         const input = withoutNulls(parsedInput(raw));
         const call = { call_id: callIdOf(details), tool: RESULT_TOOL, input };
         const decision = session.check(call);
-        if (!decision.allow) return refusalText(decision.reason, decision.rule);
+        if (!decision.allow) return refusalText(decision.reason, decision.rule, input);
         const output = await session.tool(call);
         if (!output.ok) return refusalText("run_stopped");
         result = input;

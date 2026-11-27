@@ -16,7 +16,7 @@ import { adapterAtStart, OPENAI_MIN_MAX_TOKENS, OPENAI_OPT_IN, parsePolicyConfig
 import { PLACEHOLDER_KEY, runFrame, SupervisedAdapter, type ContainerSpec, type DriverSession, type ProgressEvent, type TaskSandbox } from "../src/core/run-interface.js";
 import { systemClock, type FailureRecord } from "../src/core/runtime.js";
 import type { AllowedCall } from "../src/core/tool-policy.js";
-import { brokerFetch, OpenAIDriver, sdkLockedDown } from "../src/node/openai-driver.js";
+import { brokerFetch, OPENAI_RESULT_PARAMETERS, OpenAIDriver, RESULT_DESCRIPTION, sdkLockedDown } from "../src/node/openai-driver.js";
 import { installedOpenAIVersions, openaiEngine, openaiEnvRefusal } from "../src/node/openai-engine.js";
 import { keyProviderRefusal, ProviderKeyTransport, responsesAnswerUsage, responsesStreamUsage } from "../src/node/provider-transport.js";
 
@@ -163,6 +163,20 @@ describe("a run through the OpenAI adapter, offline", () => {
     const { handle, upstream } = await runOnce([call(1, "StructuredOutput", { ...RESULT, status: "done" }), call(2, "StructuredOutput", RESULT)]);
     expect((await handle.done).status).toBe("succeeded");
     expect(outputOf(upstream.seen[1].body, "call_1")).toMatch(/^Runner refused this result: status must be completed or blocked\./);
+  });
+
+  it("tells the model the summary's limit and its actual length when the result is refused as too long (2026-11-27)", async () => {
+    const { handle, upstream } = await runOnce([call(1, "StructuredOutput", { ...RESULT, summary: "y".repeat(2_150) }), call(2, "StructuredOutput", RESULT)]);
+    expect((await handle.done).status).toBe("succeeded");
+    const told = outputOf(upstream.seen[1].body, "call_1");
+    expect(told).toContain("at most 2000 characters");
+    expect(told).toContain("Yours is 2150");
+    expect(told).not.toContain("yyy");
+  });
+
+  it("names the summary's limit in the result tool's description and its summary field (2026-11-27)", () => {
+    expect(RESULT_DESCRIPTION).toContain("at most 2000 characters");
+    expect((OPENAI_RESULT_PARAMETERS.properties.summary as { description: string }).description).toContain("At most 2000 characters");
   });
 
   it("stops on the turn cap, as Runner's broker counts it", async () => {

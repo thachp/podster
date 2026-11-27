@@ -94,6 +94,25 @@ describe("the fixed table", () => {
   });
 });
 
+describe("a refused tool call says which kind (2026-11-27, 0.0.1-test.19)", () => {
+  it("explains path_outside_folder as a path outside the task's folder, never as a missing shell", () => {
+    const e = explain("path_outside_folder");
+    expect(e.what).toContain("outside the task's folder");
+    expect(`${e.what} ${e.todo}`).not.toContain("shell");
+    expect(e.todo).toContain("/work");
+  });
+
+  it("gives each refusal its own words: only shell_not_allowed names the shell setting", () => {
+    expect(explain("shell_not_allowed").todo).toContain("rooms[].tools");
+    expect(explain("shell_not_allowed").todo).toContain("shell");
+    expect(explain("path_not_allowed").what).toContain("Git's own folder");
+    expect(explain("tool_not_allowed").todo).toContain("rooms[].tools");
+    for (const code of ["path_outside_folder", "path_not_allowed", "tool_not_allowed", "call_invalid", "input_invalid", "run_stopped"]) {
+      expect([code, `${explain(code).what} ${explain(code).todo}`]).not.toEqual([code, expect.stringContaining("shell needs")]);
+    }
+  });
+});
+
 describe("the terminal's line", () => {
   it("follows a failure's JSON line with its explanation and the diagnostics file; other lines get none", () => {
     const lines: string[] = [];

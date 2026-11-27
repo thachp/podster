@@ -516,8 +516,8 @@ describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11
   it("lets the person who controls the submitting agent merge what they approved in a private room, recorded as self-reviewed", async () => {
     const r = await approvedBy(LINKER, [LINKER, MERGER]);
     // The dialog's hint is for the controller who approved it, and nobody else; it decides nothing.
-    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: true, merge_self_reviewed: false });
-    expect(await read(MERGER, r)).toMatchObject({ self_review_for_viewer: false });
+    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: true, merge_self_reviewed: false, viewer_merge_refusal: null });
+    expect(await read(MERGER, r)).toMatchObject({ self_review_for_viewer: false, viewer_merge_refusal: null });
     const asked = await merge(LINKER, r.id, r.task);
     expect(asked.status, asked.text).toBe(200);
     expect(asked.body).toMatchObject({ merge_state: "requested", self_reviewed: true });
@@ -533,17 +533,29 @@ describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11
   it("refuses it in a public room, where the second-person rule stands", async () => {
     const r = await approvedBy(LINKER);
     await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
-    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: false });
+    // The read's hint (2026-11-27) says what the merge then answers, by the same policy rule; the merge still decides.
+    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: false, viewer_merge_refusal: "self_merge" });
     const refused = await merge(LINKER, r.id, r.task);
     expect([refused.status, refused.code]).toEqual([403, "self_merge"]);
     expect(await events(r.id)).toEqual([]);
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
   });
 
+  it("hints a submitter whose controlling person isn't on record as unconfirmed to everyone, and still refuses the merge", async () => {
+    const r = await approvedBy(MERGER, [LINKER, MERGER]);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET submitter_person = NULL"));
+    for (const who of [LINKER, MERGER]) {
+      expect(await read(who, r), who.id).toMatchObject({ viewer_merge_refusal: "self_merge_controller_unknown" });
+      const refused = await merge(who, r.id, r.task);
+      expect([refused.status, refused.code], who.id).toEqual([403, "self_merge"]);
+    }
+  });
+
   it("refuses a controller who didn't approve it, another of their agents, and a controller with no grant", async () => {
     // The owner approved: the agent's controller, with a grant, still may not merge it.
     const byOwner = await approvedBy(OWNER);
-    expect(await read(LINKER, byOwner)).toMatchObject({ self_review_for_viewer: false });
+    expect(await read(LINKER, byOwner)).toMatchObject({ self_review_for_viewer: false, viewer_merge_refusal: "self_merge" });
+    expect(await read(OWNER, byOwner)).toMatchObject({ viewer_merge_refusal: null });
     const notApprover = await merge(LINKER, byOwner.id, byOwner.task);
     expect([notApprover.status, notApprover.code]).toEqual([403, "self_merge"]);
     // Another agent of the same person approved it: neither that agent nor the person may merge it.

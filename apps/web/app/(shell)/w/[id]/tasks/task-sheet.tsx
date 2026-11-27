@@ -174,12 +174,16 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
           ...api,
           data: held.current,
           // A person can close the Sheet before the read after a command finishes, so the list takes the command's own answer.
-          run: (command, explain) =>
-            api.run(async (binding) => {
-              const result = await command(binding);
-              if (result.ok && isThisTask(result.data, task.id)) onTaskRead?.(result.data);
-              return result;
-            }, explain),
+          run: (command, explain, at) =>
+            api.run(
+              async (binding) => {
+                const result = await command(binding);
+                if (result.ok && isThisTask(result.data, task.id)) onTaskRead?.(result.data);
+                return result;
+              },
+              explain,
+              at,
+            ),
         }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} savedNote={savedNote} />
     </div>
   );

@@ -5,7 +5,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { visibleText } from "@/lib/public/visible-text";
-import { shownCode, type SheetApi } from "@/components/sheet/target-sheet";
+import { SheetFailureSlot, shownCode, type SheetApi } from "@/components/sheet/target-sheet";
 import type { RepoGrant, RoomRepository } from "../settings/repository-model";
 import type { LoadedTask } from "./task-sheet";
 import type { PullRequestChange } from "./task-change";
@@ -29,7 +29,7 @@ export function explainMergeRefusal(code: string, status = 400): string {
     case "public_participant":
       return "You joined this workroom from its public page, so you can't merge its work. Nothing was asked for.";
     case "self_merge":
-      return "You can't merge this task: you, or the person who controls you, also control whoever submitted it. Someone else with a merge grant can. Nothing was asked for.";
+      return SELF_MERGE_REFUSAL;
     case "self_review":
       return "This commit can't be merged yet: it needs an approving review from someone other than the person who controls its submitter, or one of their agents. Nothing was asked for.";
     case REVIEWER_UNKNOWN:
@@ -78,6 +78,31 @@ export function explainMergeRefusal(code: string, status = 400): string {
       return status >= 500 ? "We can't tell whether the merge was asked for. Reload the task: if it was, it shows as requested." : `The merge wasn't asked for. You may no longer be allowed to do this. Podster refused this: ${shownCode(code)}.`;
   }
 }
+
+/**
+ * `self_merge`, by `core::repo_merge::check_merge_authority` and `is_self_reviewed`: the caller is the submitter, or is
+ * controlled by the same person as the submitter, or has no known controlling person. Decision 186 as amended on
+ * 2026-11-20 lets the person who controls the submitting agent merge it only in a private workroom, and only when the
+ * approval of its reviewed commit is on record as their own; in a public workroom someone else has to.
+ */
+// Decision 186 as revised on 2026-11-20 is the rule these sentences state; the page names no decision numbers.
+const WHO_ELSE_MERGES =
+  "Someone who doesn't control that agent and holds a merge grant can merge it. The person who controls the agent may merge it only in a private workroom, and only if they approved this commit themselves.";
+/** The read's `self_merge` hint: this person controls the agent that did the work, or is it. */
+export const SELF_MERGE_REASON = `You control the agent that did this work, or are it, so you can't merge it here. ${WHO_ELSE_MERGES}`;
+/**
+ * The read's `self_merge_controller_unknown` hint: the room didn't record who controls the submitting agent, so the API
+ * refuses every merge, fail-closed. Nobody is told they control it.
+ */
+export const CONTROLLER_UNKNOWN_REASON = "Podster can't confirm who controls the agent that did this work, so it can't be merged here.";
+/** The merge's own `self_merge`, which answers both cases alike, so it names both. */
+export const SELF_MERGE_REFUSAL = `You can't merge this here: you control the agent that did this work, or are it, or Podster can't confirm who controls that agent. ${WHO_ELSE_MERGES} Nothing was asked for.`;
+
+/** What the Release panel says in place of the merge's explanation when the read's hint says this viewer can't merge. */
+const HINTED_REASONS: Record<string, string> = { self_merge: SELF_MERGE_REASON, self_merge_controller_unknown: CONTROLLER_UNKNOWN_REASON };
+
+/** Said wherever merging is offered: approving a task and merging its commit are two separate steps. */
+export const APPROVING_DOESNT_MERGE = "Approving doesn't merge. Merging is a separate step.";
 
 /** Why a requested merge ended without merging, from `merge_reason`. Never the provider's own text. */
 const FAILURES: Record<string, string> = {
@@ -170,6 +195,9 @@ export const holdsMergeGrant = (grants: RepoGrant[], me: string) => grants.some(
  * The merge control (M5 step 9(b), step 7b's route). It reads the viewer's grants and the repository only for a task with
  * an approved, linked change, and asks nothing while managed repositories are off, since such a task read has no `change`.
  */
+/** Where the merge's refusal shows: beside its button, kept after the confirmation closes. */
+const MERGE_FAILURE_SLOT = "merge";
+
 export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: string }) {
   const { data, run, saving } = api;
   const change = data.change;
@@ -200,12 +228,25 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   }, [candidate, data.workspace, me]);
 
   if (!change || !mergeOffered(data.task, change, me, holds)) return null;
+  // The read's hint, from the API's own policy: this viewer would be refused, so say why and who can, not offer a button
+  // that can only be refused. A hint only: the merge decides again, and its refusal still shows below if it's stale.
+  const hinted = change.viewer_merge_refusal ? (HINTED_REASONS[change.viewer_merge_refusal] ?? null) : null;
+  if (hinted) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm">{hinted}</p>
+        <p className="text-sm text-muted-foreground">{APPROVING_DOESNT_MERGE}</p>
+        <SheetFailureSlot api={api} at={MERGE_FAILURE_SLOT} />
+      </div>
+    );
+  }
   const target = branch ? `the repository's default branch, ${branch}` : "the repository's default branch";
 
   const merge = async () => {
     await run(
       async () => reviewAgainRefusal(definiteMergeRefusal(await clientCommand(`/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/merge`, { submission_no: data.task.approved_submission_no, commit_sha: change.reviewed_commit_sha }, { idempotencyKey: key.current.value }))),
       explainMergeRefusal,
+      MERGE_FAILURE_SLOT,
     );
     setOpen(false);
   };
@@ -213,7 +254,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   return (
     <div className="space-y-2">
       <p id="merge-what" className="text-sm text-muted-foreground">
-        Merging asks Podster to merge reviewed commit {commit} into {target}. Approval alone never merges. {MERGE_RELEASES_NOTHING}
+        Merging asks Podster to merge reviewed commit {commit} into {target}. {APPROVING_DOESNT_MERGE} {MERGE_RELEASES_NOTHING}
       </p>
       <AlertDialog open={open} onOpenChange={(next) => !saving && setOpen(next)}>
         <AlertDialogTrigger asChild>
@@ -247,6 +288,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <SheetFailureSlot api={api} at={MERGE_FAILURE_SLOT} />
     </div>
   );
 }

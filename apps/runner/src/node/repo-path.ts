@@ -435,6 +435,11 @@ export class GitRepositoryPath implements RepositoryPath {
     return { kind: "published", branch, commit, pr_number: pr };
   }
 
+  async isPublic(task: RepoTask, signal: AbortSignal): Promise<boolean> {
+    const access = await this.deps.broker.access(task.workspace_id, task.task_id, scopeOf(task));
+    return (await this.checked(task, access, signal)).public;
+  }
+
   forget(workspace_id: string, task_id: string): void {
     this.deps.broker.forget(workspace_id, task_id);
   }

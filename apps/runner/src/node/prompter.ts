@@ -177,6 +177,11 @@ export function publicationScreen(view: PublicationView): string {
       : "A run finished, and its room holds outputs for your review: the commit, the pushed branch and the pull request are outputs too.",
     `  room ${view.workspace_id}, task ${view.task_id}`,
     `  repository ${view.full_name}, branch ${view.branch}`,
+    view.repository_public === true
+      ? "  this repository is public: pushing publishes the work"
+      : view.repository_public === false
+        ? "  this repository is private on GitHub; if it turns public before the push, Runner asks again"
+        : "  Runner couldn't read whether this repository is public; if it is, Runner asks again before pushing",
     `  the work is in ${view.task_folder}, for you to look at first`,
     "  nothing has been committed, pushed or opened yet",
     "",

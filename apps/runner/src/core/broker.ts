@@ -69,7 +69,7 @@ export type Forward = { request_id: string; url: string; headers: Record<string,
 
 export type BrokerRefusal =
   | "method_not_allowed"
-  | "path_not_allowed"
+  | "request_path_not_allowed"
   | "query_not_allowed"
   | "body_too_large"
   | "body_invalid"
@@ -605,7 +605,7 @@ export class RunBroker {
     const refuse = (reason: BrokerRefusal): Admission => ({ ok: false, reason, hard_stop: HARD.has(reason) });
     if (this.closed) return refuse("run_stopped");
     if (request.method !== "POST") return refuse("method_not_allowed");
-    if (request.path !== this.profile.path) return refuse("path_not_allowed");
+    if (request.path !== this.profile.path) return refuse("request_path_not_allowed");
     if (request.query !== "") return refuse("query_not_allowed");
     if (request.body.byteLength > MAX_BODY_BYTES) return refuse("body_too_large");
     let body: unknown;

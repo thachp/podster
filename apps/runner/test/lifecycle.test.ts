@@ -1360,6 +1360,18 @@ describe("step 10: the repository path in the lifecycle", () => {
     expect(t.commands("release_task")[0]?.arguments).toMatchObject({ task_id: "tsk_same", reason: "run_no_changes" });
   });
 
+  it("2026-11-27: a succeeded run with nothing to commit logs how many files it left in HOME and /tmp, as counts only", async () => {
+    const t = await repoSetup();
+    t.repo.publish = async () => ({ kind: "no_changes" });
+    t.adapter.finishWith = { status: "succeeded", spent_micro_usd: 1, result: RESULT, scratch: { home_files: 37, tmp_files: 4 } };
+    t.offer(detail("tsk_same"));
+    await t.pass();
+    await t.pass();
+    const line = t.logged.map((l) => JSON.parse(l)).find((l) => l.at === "lifecycle.publish" && l.outcome === "no_changes");
+    expect(line).toMatchObject({ task: "tsk_same", home_files: 37, tmp_files: 4 });
+    expect(Object.keys(line).every((k) => ["at", "outcome", "agent", "workspace", "task", "home_files", "tmp_files"].includes(k))).toBe(true);
+  });
+
   describe("F-2 (S-34, RUNNER.md lifecycle step 9): the push and the pull request are outputs, held for the owner's review", () => {
     const shareRepoConfig = () => policyConfig("unattended", { rooms: [{ room_id: ROOM, mode: "unattended", allowed_orgs: ["org_guest"], acknowledged: { public_room_warning: false }, repository: SCOPE, outputs: "share" }] });
     async function held(config: unknown = repoConfig()) {

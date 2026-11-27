@@ -121,6 +121,13 @@ class FakeSandbox implements TaskSandbox {
   openThrows: string | null = null;
   output = "ran";
   breach: ((code: string) => void) | null = null;
+  /** The counts `scratch` answers, and the runs it was asked about. */
+  scratchCounts: { home_files: number; tmp_files: number } | null = null;
+  scratched: string[] = [];
+  async scratch(ref: string) {
+    this.scratched.push(ref);
+    return this.scratchCounts;
+  }
   async open(spec: ContainerSpec, signal: AbortSignal, events?: { breach(code: string): void }) {
     this.breach = events?.breach ?? null;
     this.specs.push(structuredClone(spec));
@@ -839,6 +846,26 @@ describe("the run-time timer starts with the run (L4 on #459)", () => {
   });
 });
 
+describe("a succeeded run's scratch count (2026-11-27)", () => {
+  it("hands the counts of files in HOME and /tmp over with a succeeded run's report, while its container is still there", async () => {
+    const t = setup(async () => RESULT);
+    t.sandbox.scratchCounts = { home_files: 41, tmp_files: 2 };
+    const report = await (await t.start()).done;
+    expect(report).toMatchObject({ status: "succeeded", scratch: { home_files: 41, tmp_files: 2 } });
+    expect(t.sandbox.scratched).toEqual(["run_1"]);
+    expect(t.sandbox.killed).toEqual([]);
+  });
+
+  it("doesn't count for a run that didn't succeed", async () => {
+    const t = setup(async () => null);
+    t.sandbox.scratchCounts = { home_files: 1, tmp_files: 1 };
+    const report = await (await t.start()).done;
+    expect(report.status).toBe("failed");
+    expect(report.scratch).toBeUndefined();
+    expect(t.sandbox.scratched).toEqual([]);
+  });
+});
+
 describe("a refused result names the rule it broke (the owner's report of 2026-11-20)", () => {
   const base = { status: "completed", summary: "Done.", files: ["src/a.ts"] };
   const cases: [string, unknown, ResultRule, string][] = [
@@ -871,12 +898,12 @@ describe("a refused result names the rule it broke (the owner's report of 2026-1
     expect(decision).toEqual({ allow: false, reason: "result_invalid", rule: "result_summary_too_long" });
     const text = refusalText("result_invalid", "result_summary_too_long", input);
     expect(text).toContain(`at most ${MAX_SUMMARY_CHARS} characters`);
-    expect(text).toContain(`Yours is ${MAX_SUMMARY_CHARS + 345}`);
+    expect(text).toBe(`Runner refused this result: summary must be at most ${MAX_SUMMARY_CHARS} characters; shorten it. Yours is ${MAX_SUMMARY_CHARS + 345}, so cut at least 345. Fix that and give the structured result again.`);
     expect(text).toContain("give the structured result again");
     expect(text).not.toContain("xxx");
     // Without the input, or with an input that isn't the result's shape, the fixed words alone.
     expect(refusalText("result_invalid", "result_summary_too_long")).toContain(`at most ${MAX_SUMMARY_CHARS} characters`);
-    expect(refusalText("result_invalid", "result_summary_too_long", "not an object")).not.toContain("yours is");
+    expect(refusalText("result_invalid", "result_summary_too_long", "not an object")).toBe(`Runner refused this result: summary must be at most ${MAX_SUMMARY_CHARS} characters; shorten it. Fix that and give the structured result again.`);
   });
 
   it("covers every rule, and the words name no part of what the agent wrote", () => {

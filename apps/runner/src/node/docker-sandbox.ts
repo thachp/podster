@@ -51,7 +51,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { toolchainEnv, type Toolchain } from "../core/toolchains.js";
-import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, TASK_HOME_IN_FOLDER, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import { checkContainerSpec, CONTAINER_ENV, CONTAINER_WORKDIR, EGRESS_ENV, MAX_TOOL_OUTPUT_BYTES, TASK_HOME, TASK_HOME_IN_FOLDER, TASK_NPM_CACHE, type ContainerSpec, type SandboxEvents, type TaskSandbox, type ToolOutput } from "../core/run-interface.js";
+import type { ScratchCounts } from "../core/adapter.js";
 import { silentLogger, type Logger } from "../core/runtime.js";
 import { egressNames, logProxyDecisions, openEgress, removeNetworks, ROLE_NETWORK, ROLE_PROXY, type EgressOpts } from "./egress-network.js";
 import { onWindowsDrive } from "../core/policy.js";
@@ -97,6 +98,8 @@ export const LIMITS = Object.freeze({
  * compilers' temporary files (it counts against memory), and ten minutes for one tool call, since a cold `cargo build`
  * or `uv sync` can take longer than two. Every other bound is `LIMITS`'.
  */
+/** The most files `scratch` counts in one place: its output's cap, one byte a file. **Proposed** figure. */
+export const MAX_SCRATCH_COUNT = 100_000;
 export const TOOLCHAIN_LIMITS = Object.freeze({ ...LIMITS, pids: 1024, memory: "4g", tmpfs: "256m", tool_ms: 600_000 });
 /** The bounds a container runs under. */
 export type ContainerBounds = { readonly pids: number; readonly memory: string; readonly cpus: string; readonly tmpfs: string; readonly file_bytes: number; readonly tool_ms: number };
@@ -261,7 +264,7 @@ export function engineMajor(stdout: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void; events: SandboxEvents | null };
+type Opened = { name: string; spec: ContainerSpec; sleep_pid: string | null; unwatch: () => void; events: SandboxEvents | null; opened_at_s: number };
 /** The image for a set of toolchains (sorted, never empty), built and pinned on first need. */
 export type ToolchainImages = (toolchains: readonly Toolchain[], signal: AbortSignal) => Promise<string>;
 
@@ -293,6 +296,7 @@ export class DockerSandbox implements TaskSandbox {
   private readonly toolchainImage: ToolchainImages | null;
   private engineChecked = false;
   private readonly log: Logger;
+  private readonly now: () => number;
 
   constructor(opts: {
     docker: DockerCli;
@@ -310,6 +314,8 @@ export class DockerSandbox implements TaskSandbox {
     /** The image for a room's toolchains; without it a room that names toolchains can't run. */
     toolchainImage?: ToolchainImages;
     log?: Logger;
+    /** The host's clock in milliseconds, for when a run opened (`scratch`). */
+    now?: () => number;
   }) {
     if (!IMAGE_ID.test(opts.image)) throw new Error("Runner's task image must be pinned by its sha256 image ID");
     if (opts.proxy && !IMAGE_ID.test(opts.proxy.image)) throw new Error("Runner's egress proxy image must be pinned by its sha256 image ID");
@@ -326,6 +332,7 @@ export class DockerSandbox implements TaskSandbox {
     this.mounts = opts.mounts ?? (() => null);
     this.limits = { folder_bytes: opts.limits?.folder_bytes ?? LIMITS.folder_bytes, folder_entries: opts.limits?.folder_entries ?? LIMITS.folder_entries };
     this.log = opts.log ?? silentLogger;
+    this.now = opts.now ?? Date.now;
     this.toolchainImage = opts.toolchainImage ?? null;
     this.egress = opts.proxy ? { docker: opts.docker, image: opts.proxy.image, program: opts.proxy.program, uid: opts.uid, gid: opts.gid, home_label: this.homeLabel, wait: this.wait } : null;
   }
@@ -337,6 +344,8 @@ export class DockerSandbox implements TaskSandbox {
   async open(spec: ContainerSpec, signal: AbortSignal, events?: SandboxEvents): Promise<void> {
     if (!REF.test(spec.run_ref)) throw new Error("run_ref_invalid");
     if (checkContainerSpec(spec) !== null) throw new Error("container_invalid");
+    // Before the container starts, in whole seconds, so `scratch` counts everything the run writes in HOME.
+    const openedAt = Math.floor(this.now() / 1000);
     // Never the Windows file system under WSL2, where modes aren't enforced (S-47); the run policy refuses it first.
     if (onWindowsDrive(spec.task_folder)) throw new Error("workspace_on_windows_drive");
     // No allowlist without an egress proxy to hold it: refused, never widened to the internet.
@@ -386,7 +395,7 @@ export class DockerSandbox implements TaskSandbox {
         this.engineChecked = true;
       }
       // Recorded first, so a kill reaches a network or proxy a failed step still made.
-      this.opened.set(spec.run_ref, { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null });
+      this.opened.set(spec.run_ref, { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null, opened_at_s: openedAt });
       try {
         await openEgress(this.egress, spec.run_ref, spec.network.hosts, spec.max_seconds, signal);
       } catch (error) {
@@ -396,7 +405,7 @@ export class DockerSandbox implements TaskSandbox {
     }
     const run = await this.docker(runArgs(spec, { image, uid: this.uid, gid: this.gid, home_label: this.homeLabel }), { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     // Recorded either way, so a kill reaches a container a failed or aborted `docker run` still made.
-    const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null };
+    const opened: Opened = { name: containerName(spec.run_ref), spec, sleep_pid: null, unwatch: () => undefined, events: events ?? null, opened_at_s: openedAt };
     this.opened.set(spec.run_ref, opened);
     if (run.code !== 0) throw new DetailedError("container_failed", { exit_code: run.code, stderr: run.stderr, cut: run.cut });
     // The disk bound, for the whole run, whatever runs in the container (M2).
@@ -440,6 +449,23 @@ export class DockerSandbox implements TaskSandbox {
       await this.docker(["exec", opened.name, "kill", "-KILL", "--", ...strays], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: 4096 });
     }
     throw new Error("strays_remain");
+  }
+
+  /**
+   * How many files the run left where nothing is kept (2026-11-27): in its HOME since it opened, npm's pinned cache left
+   * out, and in /tmp, a tmpfs of its own. Each is `find` printing one dot per file, so only a count comes back, never a
+   * name; a count whose output was cut is the cut length. Null for a run this sandbox hasn't open.
+   */
+  async scratch(run_ref: string, signal: AbortSignal): Promise<ScratchCounts | null> {
+    const opened = this.opened.get(run_ref);
+    if (!opened) return null;
+    const count = async (argv: string[]) => {
+      const r = await this.docker(["exec", "--workdir", CONTAINER_WORKDIR, opened.name, ...argv], { signal, timeoutMs: LIMITS.docker_ms, maxOutputBytes: MAX_SCRATCH_COUNT });
+      return r.stdout.length;
+    };
+    const home_files = await count(["find", TASK_HOME, "-xdev", "-path", TASK_NPM_CACHE, "-prune", "-o", "-type", "f", "-newermt", `@${opened.opened_at_s}`, "-printf", "."]);
+    const tmp_files = await count(["find", "/tmp", "-xdev", "-type", "f", "-printf", "."]);
+    return { home_files, tmp_files };
   }
 
   async exec(run_ref: string, call: AllowedCall, signal: AbortSignal): Promise<ToolOutput> {

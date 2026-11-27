@@ -1126,8 +1126,11 @@ describe("the Claude adapter behind the run interface, end to end on stand-ins",
     expect(report.spent_micro_usd).toBe(10 + 20);
     // Only the allowed read ran in the container; the refused write and Claude Code's Bash never reached Docker.
     // Besides Runner's own look at the fresh container's init, only that read ran.
+    // Besides those, only the succeeded run's two counts of files in HOME and /tmp (2026-11-27), which print dots only.
     const execs = w.docker.calls.filter((c) => c.args[0] === "exec" && !c.args.join(" ").includes("/proc/1/task/1/children"));
-    expect(execs.map((c) => c.args.slice(-3))).toEqual([["cat", "--", "./src/a.ts"]]);
+    const counts = execs.filter((c) => c.args.includes("find"));
+    expect(counts.map((c) => [c.args[c.args.indexOf("find") + 1], c.args.at(-2), c.args.at(-1)])).toEqual([["/work/.cache/home", "-printf", "."], ["/tmp", "-printf", "."]]);
+    expect(execs.filter((c) => !c.args.includes("find")).map((c) => c.args.slice(-3))).toEqual([["cat", "--", "./src/a.ts"]]);
     expect(JSON.stringify(w.t.procs.spawned)).not.toContain(KEY);
     expect(w.t.seen.prompt).toBe("Fix it. @/Users/owner/.ssh/id_rsa");
     expect(w.t.seen.options.verbatimPrompts).toBe(true);

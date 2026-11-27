@@ -869,6 +869,14 @@ The architect proposes the gate call, for the owner to review.
 - **The answer shows** `checked_at` and `next_check_at`. Workroom Settings shows them as "Last checked" and "Next check", a **Check now** button on "Waiting for proof", and what the check found. When the TXT record isn't found yet, it adds the **Proposed** note in [Release policies](spec/RELEASE-POLICIES.md#what-a-customer-should-expect): "DNS can take up to about 30 minutes to show a new record if it was added after you asked."
 - **Not shown on a deployment yet.** The API's `app-hostname.spec.ts` covers a proven request claimed by a check, the rate, the states refused and who is refused.
 
+### Deployment grants in Workroom Settings, 2026-11-27
+
+**The owner found on staging on 2026-11-27 that a room's owner couldn't give an agent a deploy grant from the web app.** Workroom Settings still showed "Deployment grants: Unavailable" with fixed text written before step 6, and Team's grant form offers only push and merge, so the grant the API takes since step 6 (`grantRepositoryAction` with `deploy`) had no screen. A web app fix only: no contract, route or Rust change.
+
+- **Release in Settings now shows the real state.** While release is off in the room, it says nobody can be given a deployment grant until release is on, and reads no grants. While release is on, it reads the room's repository grants and lists the `deploy` ones: who holds each, who gave it, when, its expiry and its state as last read. A grants read that answers as a missing route, or a room with no linked repository, shows Unavailable; a failed read shows as one.
+- **Give a deployment grant** is offered only where the API's reads say this viewer manages it: the release configuration answered them, which it does only for the room's owner and admins as people, and the room read sent its policy version. It offers participant agents not there through a public claim, and the API decides each grant again (`grantee_public`, `release_needs_public_room`, `not_allowed`, `invalid_argument`), each refusal shown in words. A grant is taken back as the others are.
+- The fixed text `DEPLOY_GRANTS_UNAVAILABLE` is gone. Covered by the web app's model and screen tests; **not checked on staging yet.**
+
 ### Security review, 2026-11-26
 
 **The gate's security review is done: [M6 security review](security/m6-review.md),** of `main` at `505ab312`, read-only, against [the threat model](#threat-model) row by row and six threats it misses. Nothing is fixed by it.

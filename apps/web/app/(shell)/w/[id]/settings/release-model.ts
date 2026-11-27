@@ -1,6 +1,7 @@
 import type { GatewayResult } from "@/lib/gateway/result";
 import { explainRefusal } from "../team/model";
-import { availability, type Availability } from "./repository-model";
+import type { Member } from "../team/model";
+import { availability, explainGrantRefusal, type Availability, type RepoGrant } from "./repository-model";
 
 /**
  * M6 release (ADR 0010), as the room's reads give it. Every field is what the server said, and none of it decides
@@ -109,10 +110,43 @@ export function setupRelease(result: GatewayResult<ReleaseSwitch> | null): Setup
 export const CUSTOM_DOMAIN_UNAVAILABLE = "Custom domains aren't available on this Podster deployment yet. A released app would have only the address Podster gives it.";
 
 /**
- * Deployment grants (ADR 0010): no route gives one yet, and no agent has a deploy tool until the release path exists
- * (AC-17). So nobody in a workroom holds one, and the page says so rather than offering one.
+ * The room's deployment grants (ADR 0010, M6 step 6), as the reads give them. `deploy` is an action on the room's
+ * repository grants while release is switched on for the deployment, and the grants read lists them only then:
+ * - off: release isn't on in this room, so the page reads no grants and offers none.
+ * - unavailable: the grants read answers as a route that doesn't exist, or the room has no linked repository.
+ * - failed: the read failed.
+ * - on: the room's deploy grants the read listed, and whether to offer the form. That is the API's word only: the
+ *   release configuration answered this viewer, which it does only for the room's owner and admins as people, and the
+ *   room read sent its policy version, which it sends only to those who manage access. Rust decides every grant again.
  */
-export const DEPLOY_GRANTS_UNAVAILABLE = "Nobody can be given a deployment grant on this Podster deployment yet, so nobody in this workroom can ask for a release.";
+export type DeployGrants = { kind: "off" } | { kind: "unavailable" } | { kind: "failed" } | { kind: "on"; grants: RepoGrant[]; mayGive: boolean };
+
+export function deployGrants(view: ReleaseView, read: GatewayResult<{ grants: RepoGrant[] }> | null, { linked, policyVersion, archived }: { linked: boolean | null; policyVersion: number | null; archived: boolean }): DeployGrants {
+  if (view.state !== "ready") return { kind: "off" };
+  if (read === null || linked === false) return { kind: "unavailable" };
+  if (!read.ok) return read.status === 404 && read.code === "not_found" ? { kind: "unavailable" } : { kind: "failed" };
+  const listed = Array.isArray(read.data?.grants) ? read.data.grants : [];
+  return { kind: "on", grants: listed.filter((grant) => grant.action === "deploy"), mayGive: linked === true && policyVersion !== null && !archived };
+}
+
+/** Only participant agents not there through a public claim are offered (decision 209). The API refuses anyone else. */
+export const deployCandidates = (members: Member[]) => members.filter((member) => member.kind === "agent" && member.public_claim !== true);
+
+/** Refusals of giving or taking back a deploy grant, in words. Each writes nothing. */
+export function explainDeployGrantRefusal(code: string, status = 400) {
+  switch (code) {
+    case "invalid_argument":
+      return "Podster didn't take that grant: deployment grants aren't available on this Podster deployment, or the expiry isn't after now and at most a year ahead. Nothing changed.";
+    case "release_needs_public_room":
+      return "Only a public workroom can release, so a deployment grant can be given only while this workroom is public. Nothing changed.";
+    case "grantee_public":
+      return "They joined from the public page, so they can't hold a deployment grant. Nothing changed.";
+    case "not_allowed":
+      return "Only this workroom's owner and admins, as people, can give a deployment grant, and never to a person from another organization. Nothing changed.";
+    default:
+      return explainGrantRefusal(code, status);
+  }
+}
 
 /**
  * What a released app is, said before release is switched on (decision 220, stage 1 of apps as Workers). The person who

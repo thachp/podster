@@ -777,6 +777,17 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
             },
             &review,
         );
+    // Display only, by the policy's own submitter rule: a merge this viewer asked for now would be refused `self_merge`.
+    let viewer_merge_refusal = podster_policy::repositories::self_merge_hint(
+        viewer,
+        task,
+        &podster_core::repo_merge::Actor {
+            id: &submitter_id,
+            person: submitter_person.as_deref(),
+        },
+        &review,
+    )
+    .then_some("self_merge");
     let observed = row["pr_observed_at"].as_i64();
     let head_here = row["head_repo_id"]
         .as_i64()
@@ -796,6 +807,7 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
         "merge_requested_by": row["merge_requested_by"], "merge_requested_at": row["merge_requested_at"],
         "merge_finished_at": row["merge_finished_at"],
         "merge_self_reviewed": merge_self_reviewed, "self_review_for_viewer": self_review_for_viewer,
+        "viewer_merge_refusal": viewer_merge_refusal,
     }))
 }
 

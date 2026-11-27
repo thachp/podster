@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { plainName } from "@/components/agent-content/text";
-import type { SheetApi } from "@/components/sheet/target-sheet";
+import { SheetFailureSlot, type SheetApi } from "@/components/sheet/target-sheet";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -317,6 +317,10 @@ function useIntentKey(intent: string) {
   return key.current.value;
 }
 
+/** Where a review's or a cancel's refusal shows: beside its buttons, not only at the Sheet's top, far above. */
+const REVIEW_FAILURE_SLOT = "review";
+const CANCEL_FAILURE_SLOT = "cancel";
+
 function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
   const { data, run, saving, setDirty } = api;
   const submission = data.task.submission_no;
@@ -347,14 +351,14 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
 
   const approve = async () => {
     onNotice(null);
-    const result = await run(async () => definiteRefusal(asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission, ...(commit ? { commit_sha: commit } : {}) }, { idempotencyKey: approveKey }))), verifyProblem);
+    const result = await run(async () => definiteRefusal(asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission, ...(commit ? { commit_sha: commit } : {}) }, { idempotencyKey: approveKey }))), verifyProblem, REVIEW_FAILURE_SLOT);
     if (result?.ok) onNotice(`Approved submission ${submission}. This task is completed.`);
   };
 
   const requestChanges = async () => {
     if (!trimmed) return;
     onNotice(null);
-    const result = await run(async () => asConflict(await clientCommand(taskPath(data, "request-changes"), { submission_no: submission, reason: trimmed }, { idempotencyKey: changesKey })));
+    const result = await run(async () => asConflict(await clientCommand(taskPath(data, "request-changes"), { submission_no: submission, reason: trimmed }, { idempotencyKey: changesKey })), undefined, REVIEW_FAILURE_SLOT);
     if (result?.ok) onNotice(`Requested changes to submission ${submission}.`);
   };
 
@@ -419,6 +423,7 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
           </Button>
         </div>
       )}
+      <SheetFailureSlot api={api} at={REVIEW_FAILURE_SLOT} />
     </div>
   );
 }
@@ -472,12 +477,12 @@ function CancelTask({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
 
   const cancel = async () => {
     onNotice(null);
-    const result = await run(async (binding) => asConflict(await clientCommand(taskPath(data, "cancel"), { version: binding.version, reason: trimmed }, { idempotencyKey: key })));
+    const result = await run(async (binding) => asConflict(await clientCommand(taskPath(data, "cancel"), { version: binding.version, reason: trimmed }, { idempotencyKey: key })), undefined, CANCEL_FAILURE_SLOT);
     if (result?.ok) onNotice("Canceled this task.");
   };
 
   return (
-    <>
+    <div className="space-y-2">
       <Button variant="ghost" className={`${PRIMARY} text-status-danger`} disabled={saving} onClick={() => setOpen(true)}>
         Cancel task
       </Button>
@@ -499,6 +504,7 @@ function CancelTask({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </>
+      <SheetFailureSlot api={api} at={CANCEL_FAILURE_SLOT} />
+    </div>
   );
 }

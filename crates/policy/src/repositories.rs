@@ -344,17 +344,45 @@ pub fn authorize_merge(
     if !can_see_task(caller, task) {
         return Err(RepoDenial::Hidden);
     }
+    if refuses_self_merge(caller, caller_person, task, submitter, review) {
+        return Err(RepoDenial::SelfMerge);
+    }
+    check_standing(caller, GrantAction::Merge, standing)
+}
+
+/// `authorize_merge`'s submitter rule alone: the caller is the task's assignee, or is controlled by the same person as
+/// the submitter (or either controlling person isn't known), and the merge isn't a self-reviewed one.
+fn refuses_self_merge(
+    caller: &Caller,
+    caller_person: Option<&str>,
+    task: &Task,
+    submitter: &Actor,
+    review: &SelfReview,
+) -> bool {
     let me = Actor {
         id: &caller.id,
         person: caller_person,
     };
     let exempt = self_reviewed_merge(caller, caller_person, submitter, review);
-    if (same_controller(&me, submitter) && !exempt)
+    (same_controller(&me, submitter) && !exempt)
         || task.assignee.as_deref() == Some(caller.id.as_str())
-    {
-        return Err(RepoDenial::SelfMerge);
-    }
-    check_standing(caller, GrantAction::Merge, standing)
+}
+
+/// A display hint for the task read (2026-11-27): whether a merge this person asked for now would be refused
+/// `self_merge`, by the same rule [`authorize_merge`] applies, so the web can say who may merge instead of offering a
+/// button that can only be refused. A person only, who is their own controlling person: an agent's controlling person
+/// comes from its credential at the request, which a read doesn't have, so it gets `false`, which says nothing. It reads
+/// nothing about the grant, the review, the repository or the commit, so `false` never means a merge would go through,
+/// and it never authorizes: the merge decides again from the room's rows when asked.
+pub fn self_merge_hint(
+    caller: &Caller,
+    task: &Task,
+    submitter: &Actor,
+    review: &SelfReview,
+) -> bool {
+    caller.kind == PrincipalKind::Person
+        && caller.role != Role::None
+        && refuses_self_merge(caller, Some(caller.id.as_str()), task, submitter, review)
 }
 
 /// Whether the caller's merge would be a self-reviewed one: decision 186 as amended by the owner on 2026-11-20 ("Yes, as

@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-change";
-import { explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, SELF_REVIEWED_WARNING } from "./task-merge";
+import { APPROVING_DOESNT_MERGE, explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, SELF_MERGE_REASON, SELF_REVIEWED_WARNING } from "./task-merge";
 import { verbFor } from "./task-model";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
@@ -152,7 +152,7 @@ describe("merging from the task Sheet", () => {
     await open();
     await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" }));
-    expect(await screen.findByText(/you, or the person who controls you, also control whoever submitted it/)).toBeInTheDocument();
+    expect(await screen.findByText(/You control the agent that did this work/)).toBeInTheDocument();
   });
 
   it("says a 503 that recorded nothing as a refusal, not an unknown outcome", async () => {
@@ -173,12 +173,98 @@ describe("merging from the task Sheet", () => {
   it("names the default branch generically when the viewer can't read the repository", async () => {
     reads.repository = () => refused(403, "not_allowed");
     await open();
-    expect(await screen.findByRole("button", { name: "Merge reviewed commit" })).toHaveAccessibleDescription(/into the repository's default branch\. Approval/);
+    expect(await screen.findByRole("button", { name: "Merge reviewed commit" })).toHaveAccessibleDescription(/into the repository's default branch\. Approving doesn't merge/);
   });
 });
 
 // Decision 186 as amended by the owner on 2026-11-20: in a private room, the person who controls the agent that wrote
 // the work and approved it may merge it. The Sheet says so plainly; the API decides.
+// Seen on staging 2026-11-27: a 403 `self_merge` showed at the Sheet's top, off screen, and the confirmation closed on
+// what looked like nothing. Every refusal now shows beside the button, and stays after the confirmation closes.
+describe("a refused merge, beside its button", () => {
+  const confirmMerge = async () => {
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" }));
+  };
+  const control = () => screen.getByRole("button", { name: "Merge reviewed commit" }).parentElement!;
+
+  it.each([
+    [403, "self_merge"], [404, "task_not_found"], [403, "grant_required"], [403, "grant_expired"], [403, "grant_stale"], [403, "public_participant"], [403, "self_review"], [403, "controller_departed"],
+    [409, "task_not_linked"], [409, "repo_not_ready"], [409, "not_approved"], [409, "submission_mismatch"], [409, "commit_changed"], [409, "review_required"], [409, "change_unwatched"], [409, "change_not_found"],
+    [409, "merge_already_requested"], [409, "already_merged"], [503, "standing_unknown"], [503, "merge_unavailable"], [429, "rate_limited"], [429, "merge_request_limit"], [400, "invalid_argument"],
+    [403, "access_revoked"], [403, "agent_disconnected"], [409, "workspace_archived"], [404, "not_found"],
+  ] as const)("%i %s shows its own sentence inline, and keeps it after the confirmation closes", async (status, code) => {
+    reads.merge = () => refused(status, code);
+    await open();
+    await confirmMerge();
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    const sentence = explainMergeRefusal(code, status === 503 ? 409 : status);
+    expect(await within(control()).findByRole("alert")).toHaveTextContent(sentence);
+    // Only once: not also at the Sheet's top.
+    expect(screen.getAllByRole("alert").filter((alert) => alert.textContent?.includes(sentence))).toHaveLength(1);
+    // Still there after the confirmation opens and is dismissed again, which sends nothing.
+    await userEvent.click(screen.getByRole("button", { name: "Merge reviewed commit" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(within(control()).getByRole("alert")).toHaveTextContent(sentence);
+  });
+
+  it("says self_merge plainly: who did the work, and who can merge it", async () => {
+    reads.merge = () => refused(403, "self_merge");
+    await open();
+    await confirmMerge();
+    const alert = await within(control()).findByRole("alert");
+    expect(alert).toHaveTextContent(/You control the agent that did this work/);
+    expect(alert).toHaveTextContent(/Someone who doesn't control that agent and holds a merge grant can merge it/);
+    expect(alert).toHaveTextContent(/only in a private workroom, and only if they approved this commit themselves/);
+    expect(alert).toHaveTextContent(/Nothing was asked for/);
+  });
+
+  it("names a code it doesn't know, inline", async () => {
+    reads.merge = () => refused(403, "something_new");
+    await open();
+    await confirmMerge();
+    expect(await within(control()).findByRole("alert")).toHaveTextContent("The merge wasn't asked for. You may no longer be allowed to do this. Podster refused this: something_new.");
+  });
+
+  it("clears the refusal when the merge is asked for again", async () => {
+    reads.merge = () => refused(429, "rate_limited");
+    await open();
+    await confirmMerge();
+    expect(await within(control()).findByRole("alert")).toHaveTextContent(/Too many merges/);
+    reads.merge = () => json(200, { task_id: "tsk_1", merge_state: "requested", commit_sha: REVIEWED, submission_no: 2, requested_at: 1 });
+    await confirmMerge();
+    await waitFor(() => expect(screen.queryByText(/Too many merges/)).toBeNull());
+  });
+});
+
+describe("the read's hint that this viewer can't merge", () => {
+  it("says why and who can merge in place of the button, and sends nothing", async () => {
+    reads.task = () => json(200, detail({ viewer_merge_refusal: "self_merge" }));
+    await open();
+    expect(await screen.findByText(SELF_MERGE_REASON)).toBeInTheDocument();
+    expect(screen.getByText(APPROVING_DOESNT_MERGE)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Merge reviewed commit" })).toBeNull();
+    expect(screen.queryByText(/Merging asks Podster/)).toBeNull();
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
+  it.each([["absent", {}], ["null", { viewer_merge_refusal: null }], ["a code it doesn't know", { viewer_merge_refusal: "something_new" }]] as const)("offers the merge as before when the hint is %s", async (_name, over) => {
+    reads.task = () => json(200, detail(over));
+    await open();
+    expect(await screen.findByRole("button", { name: "Merge reviewed commit" })).toBeInTheDocument();
+  });
+
+  it("says approving and merging are separate steps, not the old wording", async () => {
+    await open();
+    await screen.findByRole("button", { name: "Merge reviewed commit" });
+    expect(document.body.textContent).toContain(APPROVING_DOESNT_MERGE);
+    expect(APPROVING_DOESNT_MERGE).toBe("Approving doesn't merge. Merging is a separate step.");
+    expect(document.body.textContent).not.toMatch(/Approval alone never merges/);
+  });
+});
+
 describe("a self-reviewed merge", () => {
   it("offers the controller who approved it the merge, and the dialog says nobody else reviewed it", async () => {
     reads.task = () => json(200, detail({ self_review_for_viewer: true }));

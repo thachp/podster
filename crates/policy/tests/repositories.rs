@@ -1863,3 +1863,107 @@ fn an_agent_is_told_only_the_setup_facts_it_could_already_see() {
         None
     );
 }
+
+/// The task read's `viewer_merge_refusal` (2026-11-27): a person is told `self_merge` exactly when `authorize_merge`
+/// would refuse them `self_merge` with a live grant in hand, and an agent is never told anything.
+#[test]
+fn the_self_merge_hint_matches_the_merge_decision_for_a_person() {
+    let task = task();
+    let mine = Actor {
+        id: "asg",
+        person: Some("p-sub"),
+    };
+    let reviewed_by = |id: &'static str, private: bool| SelfReview {
+        room_private: private,
+        requester_is_person: true,
+        reviewer: Some(Actor {
+            id,
+            person: Some(id),
+        }),
+    };
+    for (name, who, submitter, review) in [
+        (
+            "the controller, public room",
+            "p-sub",
+            mine,
+            reviewed_by("p-sub", false),
+        ),
+        (
+            "the controller, private room, approved it",
+            "p-sub",
+            mine,
+            reviewed_by("p-sub", true),
+        ),
+        (
+            "the controller, private room, someone else approved",
+            "p-sub",
+            mine,
+            reviewed_by("rev", true),
+        ),
+        ("another person", "rev", mine, reviewed_by("rev", false)),
+        (
+            "anyone, when the submitter's person isn't known",
+            "rev",
+            Actor {
+                id: "asg",
+                person: None,
+            },
+            reviewed_by("rev", false),
+        ),
+        (
+            "the assignee, as a person",
+            "asg",
+            mine,
+            reviewed_by("rev", false),
+        ),
+    ] {
+        let person = caller(who, Person, Role::Member);
+        let merge = grant(
+            match who {
+                "p-sub" => "p-sub",
+                "asg" => "asg",
+                _ => "rev",
+            },
+            GrantAction::Merge,
+        );
+        let decided = authorize_merge(
+            &person,
+            Some(who),
+            &task,
+            &submitter,
+            &standing(Some(&merge)),
+            &review,
+        );
+        assert_eq!(
+            self_merge_hint(&person, &task, &submitter, &review),
+            decided == Err(RepoDenial::SelfMerge),
+            "{name}"
+        );
+    }
+    assert!(self_merge_hint(
+        &caller("p-sub", Person, Role::Member),
+        &task,
+        &mine,
+        &reviewed_by("p-sub", false)
+    ));
+    assert!(!self_merge_hint(
+        &caller("p-sub", Person, Role::Member),
+        &task,
+        &mine,
+        &reviewed_by("p-sub", true)
+    ));
+    // An agent's controlling person comes from its credential, which a read doesn't have: no hint either way.
+    assert!(!self_merge_hint(
+        &caller("sibling", Agent, Role::Member),
+        &task,
+        &mine,
+        &SelfReview::default()
+    ));
+    // Nor for someone not in the room.
+    assert!(!self_merge_hint(
+        &caller("p-sub", Person, Role::None),
+        &task,
+        &mine,
+        &SelfReview::default()
+    ));
+}

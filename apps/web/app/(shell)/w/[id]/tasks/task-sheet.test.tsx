@@ -445,6 +445,47 @@ describe("reviewing", () => {
   });
 });
 
+// Seen on staging 2026-11-27 for a merge: a refusal shown only at the Sheet's top lands far above the button pressed. The
+// review and cancel controls sit at the Sheet's foot, so their refusals show beside them too, and stay.
+describe("a refused decision, beside its buttons", () => {
+  const owner: Room = { ...ROOM, members: [{ principal_id: "per_me", kind: "person", org_id: "org_a", role: "owner" }, ...ROOM.members!.slice(1)] };
+  // The review's controls and its slot share the review block; the cancel button and its slot share theirs.
+  const nextTo = (name: string | RegExp, block = "div.space-y-3") => screen.getByRole("button", { name }).closest(block) as HTMLElement;
+
+  it("approving", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(403, "not_allowed") : json(200, detail()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Approve submission 2" }));
+    const alert = await within(nextTo("Approve submission 2")).findByRole("alert");
+    expect(alert).toHaveTextContent(/Podster refused this: not_allowed/);
+    expect(screen.getAllByRole("alert").filter((one) => one.textContent?.includes("not_allowed"))).toHaveLength(1);
+  });
+
+  it("requesting changes", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(403, "something_new") : json(200, detail()));
+    await open();
+    await user.click(screen.getByRole("button", { name: "Request changes" }));
+    await user.type(screen.getByLabelText(/What needs to change/), "Add tests");
+    await user.click(screen.getByRole("button", { name: "Request changes to submission 2" }));
+    expect(await within(nextTo("Request changes to submission 2")).findByRole("alert")).toHaveTextContent(/Podster refused this: something_new/);
+  });
+
+  it("canceling, kept after the confirmation closes", async () => {
+    const user = userEvent.setup();
+    answer = (_, method) => (method === "POST" ? refused(403, "not_allowed") : json(200, detail({ requester: "per_me", reviewer: "agt_b" })));
+    await open({ room: owner });
+    await user.click(screen.getByRole("button", { name: "Cancel task" }));
+    const dialog = screen.getByRole("alertdialog");
+    await user.type(within(dialog).getByLabelText("Reason"), "No longer needed");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel task" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(await within(nextTo("Cancel task", "div.space-y-2")).findByRole("alert")).toHaveTextContent(/Podster refused this: not_allowed/);
+    expect(screen.getAllByRole("alert").filter((one) => one.textContent?.includes("not_allowed"))).toHaveLength(1);
+  });
+});
+
 describe("offering and canceling", () => {
   const owner: Room = { ...ROOM, members: [{ principal_id: "per_me", kind: "person", org_id: "org_a", role: "owner" }, ...ROOM.members!.slice(1)] };
 

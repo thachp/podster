@@ -28,7 +28,15 @@ export type SheetApi<T> = {
    * those the Sheet reads the target again too, because the command may have gone through. It stays unsure until a command
    * succeeds, so a later refusal gets the Sheet's own "still can't tell" wording rather than `explain`.
    */
-  run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string) => Promise<GatewayResult<R> | null>;
+  run: <R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string, at?: string) => Promise<GatewayResult<R> | null>;
+  /**
+   * The last command's failure, when it was run with `at` and a `SheetFailureSlot` of that name is on screen: it shows
+   * there, beside the control that sent it, instead of at the Sheet's top, which can be far off screen. It stays until the
+   * next command, so closing a confirmation doesn't take it away. Null otherwise.
+   */
+  failure: { at: string; seq: number; node: ReactNode } | null;
+  /** Marks a slot named `at` as on screen, for `SheetFailureSlot`. Returns its release. */
+  claimFailureSlot: (at: string) => () => void;
   /** Reads the target again, for a command that doesn't go through `run`. */
   refresh: () => void;
   /** Reloads the list behind the Sheet, for a command outside `run` whose result the list can show. */
@@ -64,6 +72,27 @@ function hrefWith(pathname: string, search: URLSearchParams, param: string, targ
   else next.set(param, target);
   const query = next.toString();
   return query ? `${pathname}?${query}` : pathname;
+}
+
+/**
+ * Where a command's failure shows when it was run with `at`: inline, beside its control, and kept after a confirmation
+ * closes. If no slot of that name is on screen, as when the control went away on the read after an unknown outcome, the
+ * failure shows at the Sheet's top as before.
+ */
+export function SheetFailureSlot({ api, at }: { api: Pick<SheetApi<unknown>, "failure" | "claimFailureSlot">; at: string }) {
+  const { claimFailureSlot } = api;
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => claimFailureSlot(at), [claimFailureSlot, at]);
+  const shown = api.failure?.at === at ? api.failure : null;
+  const seq = shown?.seq;
+  useEffect(() => {
+    if (seq !== undefined) ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [seq]);
+  return (
+    <div ref={ref} className="space-y-2 empty:hidden">
+      {shown?.node}
+    </div>
+  );
 }
 
 /** The Sheet's own words for a failed command, for a command's `explain` to fall back on. */
@@ -279,11 +308,24 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
   const [failedText, setFailedText] = useState<string | null>(null);
   const [failedServerCode, setFailedServerCode] = useState<string | null>(null);
   const failureRef = useRef<HTMLDivElement>(null);
+  // Where the last failure belongs, from `run`'s `at`, and which slots are on screen to show one.
+  const [failureAt, setFailureAt] = useState<string | null>(null);
+  const [failureSeq, setFailureSeq] = useState(0);
+  const [slots, setSlots] = useState<readonly string[]>([]);
+  const claimFailureSlot = useCallback((at: string) => {
+    setSlots((current) => [...current, at]);
+    return () =>
+      setSlots((current) => {
+        const index = current.indexOf(at);
+        return index < 0 ? current : [...current.slice(0, index), ...current.slice(index + 1)];
+      });
+  }, []);
+  const inline = failureAt !== null && slots.includes(failureAt);
   // A command's controls sit at the foot of a long Sheet and its failure at the top, so the failure is brought into view.
-  // Without this, a refusal could land off screen and look like nothing happened.
+  // Without this, a refusal could land off screen and look like nothing happened. An inline failure's slot does its own.
   useEffect(() => {
-    if (failedText || failedCode || conflict) failureRef.current?.scrollIntoView?.({ block: "nearest" });
-  }, [failedText, failedCode, conflict]);
+    if (!inline && (failedText || failedCode || conflict)) failureRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [failedText, failedCode, conflict, inline]);
   // An earlier attempt here may have committed. Authority and rate limits answer before a replay, so a refusal can't rule that out.
   const outcomeUnknown = useRef(false);
   const [asking, setAsking] = useState(false);
@@ -422,7 +464,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     }
   }
 
-  async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string): Promise<GatewayResult<R> | null> {
+  async function run<R>(command: (binding: SheetBinding) => Promise<GatewayResult<R>>, explain?: (code: string, status: number) => string, at?: string): Promise<GatewayResult<R> | null> {
     // A second click can't send a second command while the first is out.
     if (savingRef.current) return null;
     savingRef.current = true;
@@ -431,6 +473,7 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     setFailedCode(null);
     setFailedText(null);
     setFailedServerCode(null);
+    setFailureAt(null);
     setHeldFailure(false);
     try {
       const result = await command(binding);
@@ -446,6 +489,8 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
         setSettling(true);
         setReloads((count) => count + 1);
       } else {
+        setFailureAt(at ?? null);
+        setFailureSeq((count) => count + 1);
         if (result.code === "version_conflict") setConflict(true);
         else {
           const kind = result.status >= 500 ? "unknown" : failureKind(result.status, result.code, outcomeUnknown.current);
@@ -463,6 +508,8 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
     } catch {
       outcomeUnknown.current = true;
       if (alive.current) {
+        setFailureAt(at ?? null);
+        setFailureSeq((count) => count + 1);
         setFailedCode("unknown");
         setFailedText(explain?.("unknown", 0) ?? null);
         rereadAfterUnknown();
@@ -474,6 +521,41 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
       if (alive.current) setSaving(false);
     }
   }
+
+  const failureBlock =
+    conflict || failedText || failedCode ? (
+      <>
+        {conflict ? (
+          <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
+            This {noun} changed while you were editing. Your changes aren't saved.{" "}
+            <Button
+              variant="link"
+              className="h-auto p-0 text-status-amber underline"
+              onClick={() => {
+                setConflict(false);
+                setDirty(false);
+                // Reviewing is the person choosing to carry on from what's there now, so a form that keeps its text answers to that.
+                ownChange.current = true;
+                setSettling(true);
+                setReloads((count) => count + 1);
+              }}
+            >
+              Review latest
+            </Button>
+          </p>
+        ) : null}
+        {failedText ? (
+          <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+            {failedText}
+          </p>
+        ) : null}
+        {failedCode && !failedText ? (
+          <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
+            {failedCode === "refused" && failedServerCode ? refusedWith(failedServerCode) : (FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused)}
+          </p>
+        ) : null}
+      </>
+    ) : null;
 
   const heading = data !== null ? title(data) : loaded.phase === "failed" ? "Couldn't load this" : "Loading";
 
@@ -517,37 +599,9 @@ function BoundSheet<T>({ param, size = "md", load, title, description, version, 
               </p>
             ) : null}
             <div ref={failureRef} className="scroll-mt-4 space-y-4 empty:hidden">
-              {conflict ? (
-                <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
-                  This {noun} changed while you were editing. Your changes aren't saved.{" "}
-                  <Button
-                    variant="link"
-                    className="h-auto p-0 text-status-amber underline"
-                    onClick={() => {
-                      setConflict(false);
-                      setDirty(false);
-                      // Reviewing is the person choosing to carry on from what's there now, so a form that keeps its text answers to that.
-                      ownChange.current = true;
-                      setSettling(true);
-                      setReloads((count) => count + 1);
-                    }}
-                  >
-                    Review latest
-                  </Button>
-                </p>
-              ) : null}
-              {failedText ? (
-                <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                  {failedText}
-                </p>
-              ) : null}
-              {failedCode && !failedText ? (
-                <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-                  {failedCode === "refused" && failedServerCode ? refusedWith(failedServerCode) : (FAILURE_COPY[failedCode] ?? FAILURE_COPY.refused)}
-                </p>
-              ) : null}
+              {inline ? null : failureBlock}
             </div>
-            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, refreshList: onRefreshList, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
+            {data !== null ? children({ data, binding, dirty, setDirty, setUnsaved, setSending, saving: inFlight || settling, run, failure: inline && failureAt !== null ? { at: failureAt, seq: failureSeq, node: failureBlock } : null, claimFailureSlot, refreshList: onRefreshList, refresh: () => setReloads((count) => count + 1), close: requestClose }) : null}
           </div>
         </SheetContent>
       </Sheet>

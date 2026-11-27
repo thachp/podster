@@ -51,8 +51,13 @@ export type HostnameRequest = {
   end_reason: string | null;
   /** When Podster last looked at the request: its TXT record, or an ask for the claim. Null before the first look. */
   checked_at: number | null;
-  /** While pending with no proof read, when the job next looks for the TXT record; otherwise null. Display only. */
+  /**
+   * While pending with no proof read, when the job next looks for the TXT record; while waiting for Cloudflare
+   * (`provider_pending`, 2026-11-27), when it next reads the custom hostname there; otherwise null. Display only.
+   */
   next_check_at: number | null;
+  /** Cloudflare's own status code from its last read of the custom hostname, after a claim; otherwise null. A code only. */
+  provider_status: string | null;
 };
 
 export type AppHostname = { request: HostnameRequest | null };
@@ -217,6 +222,7 @@ const HOSTNAME_REASONS: Record<string, string> = {
   hostname_moved: "The name was moved away from Podster.",
   hostname_unmapped: "The owner or an admin removed it.",
   hostname_unpublished: "This workroom's app was unpublished.",
+  hostname_gone_at_provider: "Cloudflare no longer has the name.",
 };
 
 /** **Proposed** wording (RELEASE-POLICIES.md, 2026-11-27): shown when "Check now" didn't find the TXT record yet. */
@@ -225,12 +231,29 @@ export const DNS_DELAY_NOTE = "DNS can take up to about 30 minutes to show a new
 /** A moment to the second, in UTC, as the server gave it. */
 export const timeOf = (at: number) => `${new Date(at).toISOString().slice(0, 19).replace("T", " ")} UTC`;
 
+/** The setups "Check now" is offered for: waiting for proof, and waiting for Cloudflare ("Waiting for DNS", 2026-11-27). */
+export const checkable = (request: HostnameRequest | null) =>
+  (request?.state === "pending" && request.setup_status === "proof_pending") || (request?.state === "claimed" && request.setup_status === "provider_pending");
+
 /**
- * What "Check now" found, from the room's hostname as the server answered it after its look (2026-11-27). `notFound` is
- * true while the request is still waiting for proof, which is when the note on DNS delay is shown. Display only: the
- * server decided, and the page refreshes from its reads.
+ * What "Check now" found, from the room's hostname as the server answered it after its look (2026-11-27). `before` is
+ * the setup the check was made from: waiting for proof, or, claimed, waiting for Cloudflare. `notFound` is true while
+ * the request is still waiting for proof, which is when the note on DNS delay is shown. Cloudflare is named only by its
+ * status code, never its text. Display only: the server decided, and the page refreshes from its reads.
  */
-export function describeCheck(after: HostnameRequest | null): { text: string; notFound: boolean } {
+export function describeCheck(after: HostnameRequest | null, before: HostnameSetup = "proof_pending"): { text: string; notFound: boolean } {
+  if (before === "provider_pending" && after) {
+    switch (after.setup_status) {
+      case "active":
+        return { text: "Cloudflare reports the name active. The app is served here while a release is served.", notFound: false };
+      case "provider_pending":
+        return { text: `Cloudflare hasn't reported the name active yet.${after.provider_status ? ` Its status: ${after.provider_status}.` : ""} Podster keeps checking.`, notFound: false };
+      case "ended":
+        return { text: `Cloudflare's answer ended this workroom's use of the name. ${hostnameReason(after.end_reason)}`.trim(), notFound: false };
+      default:
+        break;
+    }
+  }
   switch (after?.state) {
     case "pending":
       return { text: "Podster didn't find your TXT record yet. It keeps checking until the request ends.", notFound: true };
@@ -323,7 +346,7 @@ export function explainReleaseRefusal(code: string, status = 400) {
     case "hostname_unavailable":
       return "Podster can't use that name. Nothing changed.";
     case "hostname_not_pending":
-      return "This request isn't waiting for proof any more. Reload to see where it stands. Nothing changed.";
+      return "This request isn't waiting for proof or for Cloudflare any more. Reload to see where it stands. Nothing changed.";
     case "hostname_check_too_soon":
       return "Podster checked this request less than 30 seconds ago. Wait a moment and try again. Nothing changed.";
     default:

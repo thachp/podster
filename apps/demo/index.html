@@ -448,6 +448,10 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .bubble.me { background: var(--ink); color: var(--ink-text); align-self: flex-end; }
 .bubble .by { font-size: 12px; opacity: .7; margin-bottom: 4px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rolepick { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1px dashed var(--line); border-radius: 12px; }
+.rchip { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-size: 13.5px; cursor: pointer; }
+.rchip:hover { border-color: var(--muted); }
+.rchip .plus { color: var(--faint); font-size: 15px; line-height: 1; }
 .flag { display: inline-flex; align-items: center; gap: 6px; color: var(--need); font-size: 12.5px; font-weight: 500; }
 
 /* Pairing */
@@ -791,7 +795,7 @@ const S = {
   teams: [], orgNew: { name: '', made: '' },
   org: { name: 'Bakery on Elm', slug: 'bakeryonelm', site: 'bakeryonelm.example', edit: false, draft: null, delAsk: false, members: [['Elena Lopez', 'elena@bakeryonelm.example', 'Admin'], ['Marco Diaz', 'marco@bakeryonelm.example', 'Member']], inviteOpen: false },
   scope: 'room',
-  brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', done: 'I can add an order and see whether it is New, In progress or Ready.\nIt works on my phone at the counter.', context: 'Small bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
+  brief: { editing: false, goal: 'Track every customer order in one place instead of sticky notes and texts.', context: '## What we\'re building\nA page where staff add each order as it comes in and move it through **New**, **In progress** and **Ready**.\n\n## Done means\n- [ ] I can add an order and see whether it is New, In progress or Ready\n- [ ] It works on my phone at the counter\n\n## Notes and links\nSmall bakery, about **30 orders a day**, mostly phoned in.\n\n- Busiest on _Saturdays_\n- The menu changes each season; see `menu-autumn.pdf`\n\n| Day | Orders |\n| --- | --- |\n| Weekday | ~25 |\n| Saturday | 60+ |', files: [['menu-autumn.pdf', '220 KB', 'Checked'], ['shop-logo.png', '48 KB', 'Checked']], pub: false, pubAsk: false },
   hist: { tab: 'list', f: 'all', link: 'ca' },
   perm: { saved: { take: true, push: true, discuss: true, propose: false }, draft: null },
   kFresh: false,
@@ -938,7 +942,7 @@ function md(src, inert) {
 /* ---------- Inline editing (Jira-style): click the text to edit it in place ---------- */
 function inlRaw(w, f) {
   if (w === 'task') { const t = T(S.taskId) || T(18); return f === 'title' ? t.title : f === 'ask' ? t.ask : t.done.join('\n'); }
-  const b = S.brief; return f === 'goal' ? b.goal : f === 'context' ? b.context : b.done;
+  const b = S.brief; return f === 'goal' ? b.goal : (b.context || BRIEF_OUTLINE);
 }
 function inl(w, f, display, o) {
   const ed = S.inl && S.inl.w === w && S.inl.f === f;
@@ -966,7 +970,7 @@ function saveInl() {
     toast('Saved. Planner is told.');
   } else {
     const b = S.brief;
-    if (x.f === 'goal') b.goal = v.trim() || b.goal; else if (x.f === 'context') b.context = v; else b.done = v;
+    if (x.f === 'goal') { const g = v.replace(/\s+/g, ' ').trim(); if (!g) { toast('The goal can\'t be empty.'); return; } b.goal = g; } else b.context = v.trim() === BRIEF_OUTLINE.trim() ? '' : v;
     toast('Saved. Planner is told and may suggest new tasks.');
   }
   S.inl = null;
@@ -1710,13 +1714,13 @@ function permPanel() {
 }
 
 /* ---------- Creator: Brief ---------- */
+const BRIEF_OUTLINE = '## What we\'re building\n\n\n## Done means\n- [ ] \n\n## Notes and links\n';
 function brief() {
   const b = S.brief;
   const view = '<div class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:20px">' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">What you want built</span>' + inl('brief', 'goal', '<div style="font-size:16px">' + md(b.goal) + '</div>', { label: 'what you want built', rows: 3 }) + '</div>' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Done means</span>' + inl('brief', 'bdone', linesView(b.done), { lines: true, label: 'done means', rows: 4 }) + '</div>' +
-    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Good to know</span>' + inl('brief', 'context', '<div class="muted">' + md(b.context) + '</div>', { label: 'good to know', rows: 6 }) + '</div>' +
-    '<p class="faint" style="font-size:13px;margin:0">Click any part to edit. Markdown works. Planner is told when the brief changes.</p></div>';
+    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Goal</span>' + inl('brief', 'goal', '<div style="font-size:18px;font-weight:600;letter-spacing:-0.01em">' + esc(b.goal) + '</div>', { single: true, size: '18px', label: 'goal' }) + '<span class="faint" style="font-size:12.5px">One line. It names the workroom in lists, Explore and the public page.</span></div>' +
+    '<div style="display:flex;flex-direction:column;gap:6px"><span class="label">Brief</span>' + inl('brief', 'context', b.context ? '<div class="md-body">' + md(b.context) + '</div>' : '<div class="faint">Write the brief: what you\'re building, what done means, and anything agents should know. Click to start with an outline.</div>', { label: 'brief', rows: 14 }) + '</div>' +
+    '<p class="faint" style="font-size:13px;margin:0">Click either part to edit. Markdown works. Planner is told when the brief changes.</p></div>';
   return '<div class="head"><div><h1>Brief</h1><p>What this workroom is for. Every agent reads it before it starts a task.</p></div></div>' +
     '<div class="grid2"><section style="display:flex;flex-direction:column;gap:18px">' + view + '</section>' +
     '<section style="display:flex;flex-direction:column;gap:22px">' +
@@ -1863,9 +1867,11 @@ function rooms() {
 }
 
 /* ---------- Creator: Start a workroom ---------- */
+const PRESETS = { member: ['Member', 'Sees every task and thread, creates and offers tasks, and reviews when named.'], guest: ['Guest', 'Sees only its own tasks and threads, and reviews when named.'], public_participant: ['Public participant', 'Sees only its own tasks and threads, reads only what it submitted, and can\'t review.'], coordinator: ['Coordinator', 'Like Member, and can take over a task whose requester left. No admin, merge or release rights.'] };
+const ROLE_CHOICES = [['Frontend engineer', 'The pages people see', 'member'], ['Backend engineer', 'Data, payments, email', 'member'], ['Full-stack engineer', 'Builds it end to end', 'member'], ['QA', 'Tests before you review', 'member'], ['Code reviewer', 'Reads every change', 'member'], ['UI/UX designer', 'Screens, flows and wording', 'guest'], ['System designer', 'How the parts fit together', 'member'], ['Architect', 'Reviews big changes', 'member'], ['DevOps and release', 'Owns deploys', 'member'], ['Security reviewer', 'Looks for risky changes', 'guest'], ['Mobile engineer', 'Phone apps', 'member'], ['Data engineer', 'Reports and imports', 'member'], ['Technical writer', 'Docs and help text', 'guest']];
 const TEAMS = {
-  small: [['Product manager', 'Plans the work \u00b7 the lead', 1, true], ['Full-stack engineer', 'Builds it', 1, false], ['Code reviewer', 'Reads every change', 1, false]],
-  full: [['Product manager', 'Plans the work \u00b7 the lead', 1, true], ['Frontend engineer', 'The pages people see', 2, false], ['Backend engineer', 'Data, payments, email', 1, false], ['Architect', 'Reviews big changes', 1, false], ['QA', 'Tests before you review', 1, false], ['Code reviewer', 'Reads every change', 1, false]]
+  small: [['Product manager', 'Plans the work \u00b7 the lead', 1, true, 'coordinator'], ['Full-stack engineer', 'Builds it', 1, false, 'member'], ['Code reviewer', 'Reads every change', 1, false, 'member']],
+  full: [['Product manager', 'Plans the work \u00b7 the lead', 1, true, 'coordinator'], ['Frontend engineer', 'The pages people see', 2, false, 'member'], ['Backend engineer', 'Data, payments, email', 1, false, 'member'], ['Architect', 'Reviews big changes', 1, false, 'member'], ['QA', 'Tests before you review', 1, false, 'member'], ['Code reviewer', 'Reads every change', 1, false, 'member']]
 };
 function slug(s) { return (s || 'workroom').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'workroom'; }
 function start() {
@@ -1881,8 +1887,11 @@ function start() {
     '<div class="field"><label for="st-goal">What do you want built?</label><textarea class="in" id="st-goal" rows="3">A page where customers order cakes ahead and pick a pickup time.</textarea><span class="faint" style="font-size:13px">Plain words are fine. Your product manager turns this into tasks.</span></div>' +
     '<div class="field"><span class="q">Files agents should read <span class="faint" style="font-weight:400">\u00b7 optional</span></span><button type="button" class="addcard" data-act="st-file" style="padding:18px;text-align:center">' + (st.files ? st.files + ' file' + (st.files > 1 ? 's' : '') + ' added \u00b7 add another' : '+ Add specs, menus, sketches or screenshots') + '<br><span style="font-size:12.5px">Checked for viruses first. Private to this workroom.</span></button></div></section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:14px"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><span class="label">2 \u00b7 Roles \u00b7 ' + openings + ' openings</span>' + seg('team', [['small', 'Small team'], ['full', 'Full team']]) + '</div>' +
-    '<div class="kvlist">' + st.roles.map((r, i) => '<div style="align-items:center"><span style="flex:1;min-width:0;color:var(--text)">' + r[0] + '<br><small class="faint" style="font-size:12px">' + r[1] + '</small></span>' + (r[3] ? '<span class="faint" style="font-size:13px">1 \u00b7 the lead</span>' : '<span class="updown" style="align-items:center;gap:8px"><button type="button" data-act="st-open" data-i="' + i + '" data-d="-1" aria-label="Fewer"' + (r[2] <= 1 ? ' disabled' : '') + '>\u2212</button><span class="mono" style="width:70px;text-align:center">' + r[2] + ' opening' + (r[2] > 1 ? 's' : '') + '</span><button type="button" data-act="st-open" data-i="' + i + '" data-d="1" aria-label="More"' + (r[2] >= 10 ? ' disabled' : '') + '>+</button><button type="button" data-act="st-drop" data-i="' + i + '" aria-label="Remove ' + r[0] + '" style="margin-left:6px">\u00d7</button></span>') + '</div>').join('') + '</div>' +
-    '<button type="button" class="btn ghost" data-act="st-addrole" style="align-self:flex-start">+ Add a role</button></section>' +
+    '<div class="kvlist">' + st.roles.map((r, i) => '<div style="align-items:center"><span style="flex:1;min-width:0;color:var(--text)">' + esc(r[0]) + '<br><small class="faint" style="font-size:12px">' + esc(r[1]) + '</small><br>' + (r[3] ? '<small class="faint" style="font-size:12px" title="' + PRESETS.coordinator[1] + '">Coordinator access</small>' : '<select class="in" style="width:auto;height:26px;font-size:12px;padding:0 6px;margin-top:4px" data-act-change="st-preset" data-i="' + i + '" aria-label="Access for ' + esc(r[0]) + '" title="' + esc((PRESETS[r[4]] || PRESETS.member)[1]) + '">' + ['member', 'guest'].concat(st.vis === 'public' ? ['public_participant'] : []).map((p) => '<option value="' + p + '"' + ((r[4] || 'member') === p ? ' selected' : '') + '>' + PRESETS[p][0] + ' access</option>').join('') + '</select>') + '</span>' + (r[3] ? '<span class="faint" style="font-size:13px">1 \u00b7 the lead</span>' : '<span class="updown" style="align-items:center;gap:8px"><button type="button" data-act="st-open" data-i="' + i + '" data-d="-1" aria-label="Fewer"' + (r[2] <= 1 ? ' disabled' : '') + '>\u2212</button><span class="mono" style="width:70px;text-align:center">' + r[2] + ' opening' + (r[2] > 1 ? 's' : '') + '</span><button type="button" data-act="st-open" data-i="' + i + '" data-d="1" aria-label="More"' + (r[2] >= 10 ? ' disabled' : '') + '>+</button><button type="button" data-act="st-drop" data-i="' + i + '" aria-label="Remove ' + esc(r[0]) + '" style="margin-left:6px">\u00d7</button></span>') + '</div>').join('') + '</div>' +
+    (st.pick ? (() => { const have = st.roles.map((r) => r[0]); const left = ROLE_CHOICES.filter((x) => have.indexOf(x[0]) < 0); return '<div class="rolepick"><div style="display:flex;align-items:center;gap:8px"><b style="font-weight:600;flex:1">Add a role</b><button type="button" class="btn ghost" data-act="st-addrole" style="height:28px">Done</button></div>' +
+      (left.length ? '<div class="chips" role="group" aria-label="Roles to add">' + left.map((x) => '<button type="button" class="rchip" data-act="st-pickrole" data-r="' + esc(x[0]) + '" title="' + esc(x[1]) + '"><span class="plus" aria-hidden="true">+</span>' + esc(x[0]) + '<span class="faint" style="font-size:12px">\u00b7 ' + PRESETS[x[2]][0] + '</span></button>').join('') + '</div>' : '<span class="faint" style="font-size:13px">Every suggested role is added.</span>') +
+      '<span class="faint" style="font-size:12.5px">Each role comes with an access preset, which is what Podster enforces. You can change it after adding.</span><div style="display:flex;gap:8px;flex-wrap:wrap"><input class="in" id="st-custom" data-input="st-custom" placeholder="Or name your own, like Payments specialist" value="' + esc(st.custom || '') + '" style="flex:1;min-width:200px;height:34px" aria-label="Custom role name"><button type="button" class="btn" data-act="st-customrole"' + ((st.custom || '').trim() ? '' : ' disabled') + '>Add</button></div></div>'; })()
+      : '<button type="button" class="btn ghost" data-act="st-addrole" style="align-self:flex-start">+ Add a role</button>') + '</section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">3 \u00b7 Results and review</span>' +
     '<div class="kvlist"><div><span>You get</span><span>Code in a repository, and a working web app</span></div>' +
     '<div style="align-items:center"><span style="color:var(--text)">Check Planner\'s task list before agents start<br><small class="faint" style="font-size:12px">Recommended. You approve the plan, then work begins.</small></span><button type="button" class="toggle" role="switch" aria-label="Check the plan first" aria-checked="' + st.review + '" data-act="st-toggle" data-k="review"><i></i></button></div>' +
@@ -2093,8 +2102,9 @@ function repo() {
 /* ---------- Creator: One agent ---------- */
 function agent() {
   const t = S.tasks.filter((x) => x.who === 'Coding Agent');
+  const live = t.find((x) => x.stage === 'building' || x.stage === 'review');
   if (S.agentRemoved) return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Removed from Customer order tracker just now. Its open tasks went back to Planned.</p></div><button class="btn" data-act="agent-undo">Undo</button></div>';
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Frontend engineer \u00b7 run by Sam Rivera on Sam\'s own machine</p></div><button class="btn" data-act="toast" data-msg="Message sent to Sam Rivera.">Message Sam</button></div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Coding Agent</h1><p>Frontend engineer \u00b7 run by Sam Rivera on Sam\'s own machine</p></div>' + (live ? '<button class="btn" data-act="discuss" data-id="' + live.id + '" title="Messages stay with the work they\'re about">Discuss on #' + live.id + '</button>' : '<button class="btn" data-act="toast" data-msg="Pick a task on the board, then assign it to Coding Agent.">Invite to a task</button>') + '</div>' +
     '<p style="font-size:16px;max-width:680px">You\'ve approved 2 of its tasks here; one needed a second try. It usually submits within a day.</p>' +
     '<div class="grid2"><section><span class="label">Its work for you</span><div class="panel" style="margin-top:10px">' +
     t.map((x) => '<button class="row" data-act="open" data-id="' + x.id + '" style="width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left;cursor:pointer"><span style="flex:1;min-width:0">' + x.title + '<br><span class="faint" style="font-size:12.5px">' + x.when + '</span></span>' + stageLabel(x.stage) + '</button>').join('') +
@@ -2171,7 +2181,7 @@ function overlays() {
   let h = '';
   if (S.drawer) {
     const t = T(S.drawer);
-    const act = t.blocked ? '<button class="btn primary" data-act="take-back" data-id="' + t.id + '">Take the task back</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Sam Rivera.">Message Sam</button>'
+    const act = t.blocked ? '<button class="btn primary" data-act="take-back" data-id="' + t.id + '">Take the task back</button><button class="btn ghost" data-act="discuss" data-id="' + t.id + '">Ask Sam in the discussion</button>'
       : t.stage === 'review' ? '<a class="btn need" href="#review">Review it</a>'
       : t.stage === 'planned' && t.id !== 20 ? '<button class="btn primary" data-act="send" data-id="' + t.id + '">Assign to Coding Agent</button>'
       : t.id === 20 ? '<a class="btn primary" href="#team">Invite a tester</a>'
@@ -2251,7 +2261,7 @@ function overlays() {
       items.map((it, i) => '<li><button data-act="pick" data-i="' + i + '"' + (i === S.psel ? ' class="sel"' : '') + '>' + (it[4] ? '<span class="cmdmark" aria-hidden="true">\u203a</span>' : '') + it[0] + '<span class="k">' + it[1] + '</span></button></li>').join('') +
       (items.length ? '' : '<li class="faint" style="padding:12px">Nothing matches \u201c' + esc(S.pq) + '\u201d. Try a task name, a word from a message, or a file name.</li>') + '</ul>' + (S.pq ? '' : '<div class="faint" style="padding:8px 16px 12px;font-size:12px;border-top:1px solid var(--line)">' + (isK() ? 'Try \u201cphone\u201d, \u201ctime zone\u201d or \u201cmenu\u201d' : 'Search, or type a command: \u201capprove 18\u201d, \u201cassign 21 to coding agent\u201d, \u201canswer utc\u201d, \u201cwhat needs me\u201d') + '</div>') + '</div>';
   }
-  if (S.toast) h += '<div class="toast" role="status">' + S.toast + '</div>';
+  if (S.toast) h += '<div class="toast" role="status">' + esc(S.toast) + '</div>';
   return h;
 }
 function paletteItems() {
@@ -2416,6 +2426,7 @@ document.addEventListener('click', (e) => {
     case 'palette': S.palette = true; S.pq = ''; S.psel = 0; break;
     case 'close': S.drawer = null; S.modal = null; S.palette = false; break;
     case 'open': openTask(id); break;
+    case 'discuss': openTask(id); S.dtab = 'discussion'; S.draft = '@Sam Rivera '; setTimeout(() => { const ta = document.getElementById('msg-draft'); if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } }, 0); break;
     case 'next-need': { const q = needQueue(); if (!q.length) break; const i = q.indexOf(S.taskId); const nx = q[(i + 1) % q.length]; S.taskId = nx; S.drawer = nx; S.assignOpen = false; S.reviewOpen = false; S.editTask = false; S.draft = ''; break; }
     case 'edit-task': S.editTask = true; break;
     case 'edit-cancel': S.editTask = false; break;
@@ -2533,11 +2544,13 @@ document.addEventListener('click', (e) => {
     case 'pick': { const it = paletteItems()[Number(el.dataset.i)]; S.palette = false; if (it) it[2](); break; }
     case 'toast': toast(el.dataset.msg); break;
     case 'st-org': S.start.org = el.dataset.v; if (el.tagName === 'A') { S.roomMenu = false; } break;
-    case 'st-set': S.start[el.dataset.k] = el.dataset.v; if (el.dataset.k === 'team') S.start.roles = null; break;
+    case 'st-set': S.start[el.dataset.k] = el.dataset.v; if (el.dataset.k === 'team') S.start.roles = null; if (el.dataset.k === 'vis' && el.dataset.v !== 'public' && S.start.roles) S.start.roles.forEach((r) => { if (r[4] === 'public_participant') r[4] = 'guest'; }); break;
     case 'st-toggle': S.start[el.dataset.k] = !S.start[el.dataset.k]; break;
     case 'st-open': { const r = S.start.roles[Number(el.dataset.i)]; r[2] = Math.max(1, Math.min(10, r[2] + Number(el.dataset.d))); break; }
     case 'st-drop': S.start.roles.splice(Number(el.dataset.i), 1); break;
-    case 'st-addrole': { const have = S.start.roles.map((r) => r[0]); const nx = [['QA', 'Tests before you review'], ['Frontend engineer', 'The pages people see'], ['Backend engineer', 'Data, payments, email'], ['Architect', 'Reviews big changes'], ['DevOps and release', 'Owns deploys'], ['Technical writer', 'Docs and help text']].find((x) => have.indexOf(x[0]) < 0); if (nx) S.start.roles.push([nx[0], nx[1], 1, false]); else toast('Every suggested role is already added.'); break; }
+    case 'st-addrole': S.start.pick = !S.start.pick; S.start.custom = ''; break;
+    case 'st-pickrole': { const c = ROLE_CHOICES.find((x) => x[0] === el.dataset.r); if (c && !S.start.roles.some((r) => r[0] === c[0])) { S.start.roles.push([c[0], c[1], 1, false, c[2]]); toast(c[0] + ' added.'); } break; }
+    case 'st-customrole': { const n = (S.start.custom || '').replace(/\s+/g, ' ').trim().slice(0, 60); if (!n) break; if (S.start.roles.some((r) => r[0].toLowerCase() === n.toLowerCase())) { toast(n + ' is already a role.'); break; } S.start.roles.push([n, 'Your own role', 1, false, 'member']); S.start.custom = ''; toast(n + ' added.'); break; }
     case 'attach': {
       const tid = id; const names = ['order-slip-photo.jpg', 'phone-screenshot.png', 'pickup-shelf.jpg', 'notes.pdf'];
       const list = S.files[tid] = S.files[tid] || []; const nm = names[list.length % names.length];
@@ -2681,7 +2694,6 @@ document.addEventListener('submit', (e) => {
   if (k === 'org-new') { const nm = S.orgNew.name.trim(); if (!nm) { render(); return; } if (nm === S.org.name || S.teams.includes(nm)) { toast('You already have an organization called ' + nm + '.'); render(); return; } S.teams.push(nm); S.orgNew = { name: '', made: nm }; toast(nm + ' created. You\'re its admin.'); }
   if (k === 'org-save') { const o = S.org; const d = o.draft; const name = d.name.trim(); const sl = d.slug.trim().toLowerCase(); if (!name) { toast('Give it a name.'); render(); return; } if (!/^[a-z0-9][a-z0-9-]{1,38}$/.test(sl)) { toast('Use lowercase letters, numbers and dashes for the address.'); render(); return; } const moved = sl !== o.slug; o.name = name; o.slug = sl; o.site = d.site.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); o.edit = false; o.draft = null; toast(moved ? 'Saved. Old links keep working for 90 days.' : 'Saved.'); }
   if (k === 'edit-task') { const t = T(S.taskId); t.title = document.getElementById('et-title').value.trim() || t.title; t.ask = document.getElementById('et-ask').value.trim() || t.ask; const d = document.getElementById('et-done').value.split('\n').map((x) => x.trim()).filter(Boolean); if (d.length) t.done = d; S.editTask = false; toast('Saved. Planner is told.'); }
-  if (k === 'brief') { const b = S.brief; b.goal = document.getElementById('br-goal').value.trim() || b.goal; b.done = document.getElementById('br-done').value; b.context = document.getElementById('br-ctx').value; b.editing = false; toast('Brief saved. Planner is told.'); }
   if (k === 'newtask') {
     const title = document.getElementById('nt-title').value.trim() || 'New task'; const who = document.getElementById('nt-who').value;
     const nid = Math.max(...S.tasks.map((t) => t.id)) + 1;
@@ -2722,6 +2734,7 @@ document.addEventListener('change', (e) => {
   if (c === 'pair-spend') S.pairing.spend = e.target.value;
   if (c === 'spend-cap') { S.spend.cap = e.target.value; render(); }
   if (c === 'spend-run') S.spend.perRun = e.target.value;
+  if (c === 'st-preset') { const r = S.start.roles[Number(e.target.dataset.i)]; if (r && PRESETS[e.target.value] && e.target.value !== 'coordinator') r[4] = e.target.value; render(); }
   if (c === 'pol-sel') { const P = S.policy; P.draft = Object.assign({}, P.draft || {}, { [e.target.dataset.k]: e.target.value }); render(); }
 });
 document.addEventListener('input', (e) => {
@@ -2731,6 +2744,7 @@ document.addEventListener('input', (e) => {
   if (k === 'plannote') S.plan.note = e.target.value;
   if (k === 'draft') S.draft = e.target.value;
   if (k === 'st-name') { S.start.name = e.target.value; render(); }
+  if (k === 'st-custom') { S.start.custom = e.target.value; render(); }
   if (k === 'st-domain') { const had = !!S.start.domain; S.start.domain = e.target.value; if (had !== !!S.start.domain) render(); }
   if (k === 'qcustom') S.q.custom = e.target.value;
   if (k === 'permnote') S.permReq.note = e.target.value;

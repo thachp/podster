@@ -3,7 +3,8 @@
 //! Approval and merge are two events, never one state. Approving a task completes it and merges nothing (AC-17). A merge
 //! is asked for separately, by someone who holds a `merge` grant that counts and isn't controlled by the person who
 //! controls the submitter, and it names the approved submission and its commit. The one exception is a self-reviewed
-//! merge in a private room ([`is_self_reviewed`], decision 186 as amended by the owner on 2026-11-20).
+//! merge ([`is_self_reviewed`]): in a private room (decision 186 as amended by the owner on 2026-11-20), or in a public
+//! room by the room's owner alone, who acknowledged that the repository is public (revised 2026-11-27).
 //!
 //! GitHub's rules know nothing of a review, so what was reviewed is decided here, before the merge App marks anything.
 //! The job reads the pull request itself each time and takes nothing from an earlier read, because an agent's token can
@@ -43,34 +44,78 @@ pub fn same_controller(a: &Actor, b: &Actor) -> bool {
 }
 
 /// What a self-reviewed merge rests on, read from the room's current rows: decision 186 as amended by the owner on
-/// 2026-11-20 ("Yes, as recommended"). Nothing here comes from the caller. The default allows nothing.
+/// 2026-11-20 ("Yes, as recommended") and revised on 2026-11-27 for a public room's owner. Nothing here comes from the
+/// caller but `public_acknowledged`, which only ever narrows. The default allows nothing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SelfReview<'a> {
-    /// The room is private now. A public room, or one whose visibility can't be read, keeps the second-person rule.
+    /// The room is private now. A public room, or one whose visibility can't be read, keeps the second-person rule for
+    /// everyone but its owner, and for the owner unless they acknowledged that the repository is public.
     pub room_private: bool,
     /// Whoever asks is a person. An agent never self-merges.
     pub requester_is_person: bool,
+    /// Whoever asks is the room's owner now, by the room's own row, whose authority holds. An admin isn't.
+    pub requester_is_room_owner: bool,
+    /// The request acknowledged that the repository is public and that nobody else reviewed the work: the merge
+    /// request's `public_repository_acknowledged`, kept on the room's record of the request for the job's recheck. It
+    /// counts only in a public room and only for its owner.
+    pub public_acknowledged: bool,
     /// Who approved the reviewed commit, with the person who controlled them then, from the room's record of that
     /// approval. `None` when no approval with a reviewed commit is on record.
     pub reviewer: Option<Actor<'a>>,
 }
 
-/// Whether a merge is a self-reviewed one: the person who controls the submitting agent merges work they approved
-/// themselves, in a private room. All of these must hold, or the second-person rule stands:
+/// Where a merge stands against the self-review exception.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfReviewStanding {
+    /// Not a self-reviewed merge: the second-person rule applies.
+    No,
+    /// A self-reviewed merge, allowed: private room, or a public room's owner who acknowledged it.
+    Allowed,
+    /// The public room's owner, who controls the submitter and approved its commit, but the request didn't acknowledge
+    /// that the repository is public: `public_repository_unacknowledged`.
+    NeedsAcknowledgement,
+}
+
+/// Whether a merge is a self-reviewed one, and if not, whether only the public acknowledgement is missing. The person who
+/// controls the submitting agent merges work they approved themselves. All of these must hold, or the second-person rule
+/// stands:
 ///
-/// - the room is private;
 /// - the requester is a person, who is their own controlling person;
 /// - the submitter is someone else, an agent, whose recorded controlling person is the requester;
-/// - the approval of the reviewed commit is on record as the requester's own, controlled by themselves.
+/// - the approval of the reviewed commit is on record as the requester's own, controlled by themselves;
+/// - the room is private (2026-11-20), or the room is public, the requester is its owner and the request acknowledged
+///   that the repository is public (2026-11-27). A public room's admin, or anyone else, keeps the second-person rule.
 ///
 /// Another person who controls nothing here, another of the controller's agents, and a controller who didn't approve it
 /// are never self-reviewed. It says nothing of the grant, the approval's submission or its commit, which
 /// [`check_merge_authority`] and `check_change_standing` decide as for any merge: the person still needs a live `merge`
 /// grant from the room's owner or an admin, and only the reviewed commit, unchanged, is merged.
+pub fn self_review_standing(
+    requester: &Actor,
+    submitter: &Actor,
+    review: &SelfReview,
+) -> SelfReviewStanding {
+    if !review.requester_is_person
+        || !controls_and_approved(requester, submitter, review.reviewer.as_ref())
+    {
+        return SelfReviewStanding::No;
+    }
+    if review.room_private {
+        return SelfReviewStanding::Allowed;
+    }
+    if !review.requester_is_room_owner {
+        return SelfReviewStanding::No;
+    }
+    if review.public_acknowledged {
+        SelfReviewStanding::Allowed
+    } else {
+        SelfReviewStanding::NeedsAcknowledgement
+    }
+}
+
+/// Whether a merge is a self-reviewed one that may go on: [`self_review_standing`] is `Allowed`.
 pub fn is_self_reviewed(requester: &Actor, submitter: &Actor, review: &SelfReview) -> bool {
-    review.room_private
-        && review.requester_is_person
-        && controls_and_approved(requester, submitter, review.reviewer.as_ref())
+    self_review_standing(requester, submitter, review) == SelfReviewStanding::Allowed
 }
 
 /// The part of [`is_self_reviewed`] the room's rows keep after a request: the requester is a person, their own
@@ -113,6 +158,10 @@ pub enum MergeRefusal {
     /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of, with a grant or
     /// without, except a self-reviewed merge ([`is_self_reviewed`]).
     SelfMerge,
+    /// `public_repository_unacknowledged`: a public room's owner may merge their own agent's work they approved, but
+    /// only when the request acknowledges that the repository is public and nobody else reviewed it (decision 186 as
+    /// revised 2026-11-27).
+    PublicUnacknowledged,
     /// `self_review`: the commit's approving review came from someone the submitter's person controls, or whose
     /// controlling person isn't on record (the owner's decision of 2026-11-11 on review A1). Decided by
     /// `podster_policy::repositories::independent_review`, and recorded here when the job's recheck finds it.
@@ -154,6 +203,7 @@ impl MergeRefusal {
             MergeRefusal::TaskNotLinked => "task_not_linked",
             MergeRefusal::RepoNotReady => "repo_not_ready",
             MergeRefusal::SelfMerge => "self_merge",
+            MergeRefusal::PublicUnacknowledged => "public_repository_unacknowledged",
             MergeRefusal::SelfReview => "self_review",
             MergeRefusal::Grant(refusal) => refusal.code(),
             MergeRefusal::InvalidCommit => "invalid_argument",
@@ -266,8 +316,9 @@ impl MergeAuthorized {
 ///
 /// The submitter rule compares controlling people, not IDs: the submitting agent's owner and that owner's other agents
 /// are refused as the submitter is. A reviewer may merge what they approved only if a different person controls them,
-/// except in a self-reviewed merge ([`is_self_reviewed`]): in a private room, the person who controls the submitting agent
-/// and approved its reviewed commit themselves. The task's assignee is refused either way.
+/// except in a self-reviewed merge ([`is_self_reviewed`]): the person who controls the submitting agent and approved its
+/// reviewed commit themselves, in a private room, or in a public room as its owner with the public acknowledgement. The
+/// task's assignee is refused either way.
 pub fn check_merge_authority(a: &MergeAuthority) -> Result<MergeAuthorized, MergeRefusal> {
     if !a.requester_in_room {
         return Err(MergeRefusal::AccessRevoked);
@@ -283,11 +334,16 @@ pub fn check_merge_authority(a: &MergeAuthority) -> Result<MergeAuthorized, Merg
     }
     coding_work_allowed(a.request, a.link).map_err(|_| MergeRefusal::RepoNotReady)?;
     let repo_id = a.link_repo_id.ok_or(MergeRefusal::RepoNotReady)?;
-    let self_reviewed = is_self_reviewed(&a.requester, &a.submitter, &a.self_review);
-    if (same_controller(&a.requester, &a.submitter) && !self_reviewed)
-        || a.task.assignee.as_deref() == Some(a.requester.id)
-    {
+    let standing = self_review_standing(&a.requester, &a.submitter, &a.self_review);
+    let self_reviewed = standing == SelfReviewStanding::Allowed;
+    if a.task.assignee.as_deref() == Some(a.requester.id) {
         return Err(MergeRefusal::SelfMerge);
+    }
+    if same_controller(&a.requester, &a.submitter) && !self_reviewed {
+        return Err(match standing {
+            SelfReviewStanding::NeedsAcknowledgement => MergeRefusal::PublicUnacknowledged,
+            _ => MergeRefusal::SelfMerge,
+        });
     }
     let usage = GrantUse {
         principal: a.requester.id,

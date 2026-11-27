@@ -749,9 +749,11 @@ pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<V
 }
 
 /// A task's change as the task read shows it. `merge_self_reviewed` says the last merge request was a self-reviewed one,
-/// from the change row's record of who asked, submitted and approved. `self_review_for_viewer` says whether a merge this viewer asked for now would be a self-reviewed
-/// one, by the same pure rule the merge decides with, so the merge dialog can say so. It shows and never authorizes:
-/// `merge_task` decides again from the room's rows when asked.
+/// from the change row's record of who asked, submitted and approved. `self_review_for_viewer` says whether a merge this
+/// viewer asked for now would be a self-reviewed one, by the same pure rule the merge decides with, so the merge dialog
+/// can say so; for a public room's owner, that is with the public acknowledgement, which
+/// `public_acknowledgement_for_viewer` says the request needs (decision 186 as revised 2026-11-27). They show and never
+/// authorize: `merge_task` decides again from the room's rows when asked.
 pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value> {
     let task_id = task.id.as_str();
     let Some(row) = change_row(sql, task_id)? else {
@@ -760,11 +762,9 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
     let merge_self_reviewed = super::merges::self_reviewed_request(&row);
     let reviewer = super::merges::reviewer_of(&row);
     let (submitter_id, submitter_person) = super::merges::submitter_of(Some(&row), task);
-    let review = super::merges::self_review_of(
-        viewer,
-        super::merges::room_is_private(sql)?,
-        reviewer.as_ref(),
-    );
+    let room_private = super::merges::room_is_private(sql)?;
+    // As if the viewer acknowledged: whether they could, and then whether they'd need to.
+    let review = super::merges::self_review_of(viewer, room_private, true, reviewer.as_ref());
     let self_review_for_viewer = viewer.kind == PrincipalKind::Person
         && podster_core::repo_merge::is_self_reviewed(
             &podster_core::repo_merge::Actor {
@@ -778,6 +778,7 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
             &review,
         );
     // Display only, by the policy's own submitter rule: a merge this viewer asked for now would be refused `self_merge`.
+    // `review` counts the public acknowledgement as given, so a public room's owner who may self-merge with it isn't.
     let viewer_merge_refusal = podster_policy::repositories::self_merge_hint(
         viewer,
         task,
@@ -788,6 +789,7 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
         &review,
     )
     .map(podster_policy::repositories::SelfMergeHint::code);
+    let public_acknowledgement_for_viewer = self_review_for_viewer && !room_private;
     let observed = row["pr_observed_at"].as_i64();
     let head_here = row["head_repo_id"]
         .as_i64()
@@ -808,6 +810,7 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
         "merge_finished_at": row["merge_finished_at"],
         "merge_self_reviewed": merge_self_reviewed, "self_review_for_viewer": self_review_for_viewer,
         "viewer_merge_refusal": viewer_merge_refusal,
+        "public_acknowledgement_for_viewer": public_acknowledgement_for_viewer,
     }))
 }
 

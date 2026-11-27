@@ -6,7 +6,7 @@
 )]
 
 use podster_core::repo_grants::{Grant, GrantRefusal};
-use podster_core::repo_merge::{Actor, SelfReview};
+use podster_core::repo_merge::{Actor, MergeRefusal, SelfReview};
 use podster_core::repositories::GrantAction;
 use podster_core::{decide_create, NewTask, Task};
 use podster_policy::repositories::*;
@@ -1592,6 +1592,7 @@ fn a_self_reviewed_merge_is_only_the_approving_controllers_in_a_private_room_wit
         room_private: true,
         requester_is_person: true,
         reviewer: Some(approved_by_rev),
+        ..SelfReview::default()
     };
     let rev = caller("rev", Person, Role::Member);
     let merge = grant("rev", GrantAction::Merge);
@@ -1826,6 +1827,199 @@ fn a_self_reviewed_merge_is_only_the_approving_controllers_in_a_private_room_wit
     ));
 }
 
+/// Decision 186 as revised by the owner on 2026-11-27: in a public room the room's owner, and only the owner, may merge
+/// work by an agent they control that they approved themselves, when the request acknowledges that the repository is
+/// public. Every combination of role, kind, visibility, control and acknowledgement, with the room's own role narrowing
+/// whatever the review says.
+#[test]
+fn a_public_rooms_owner_alone_may_self_merge_with_the_acknowledgement() {
+    let task = task();
+    for role in [Role::Owner, Role::Admin, Role::Member] {
+        for kind in [Person, Agent] {
+            for private in [true, false] {
+                for controls in [true, false] {
+                    for acknowledged in [true, false] {
+                        // A room's owner is always a person: an agent stored as one is no owner here.
+                        if kind == Agent && role == Role::Owner {
+                            continue;
+                        }
+                        let me = caller("rev", kind, role);
+                        // The task's reviewer: a person controls themselves; an agent's controlling person is `p-rev`.
+                        let my_person = if kind == Person { "rev" } else { "p-rev" };
+                        let submitter = Actor {
+                            id: "asg",
+                            person: Some(if controls { my_person } else { "p-other" }),
+                        };
+                        let review = SelfReview {
+                            room_private: private,
+                            requester_is_person: kind == Person,
+                            requester_is_room_owner: role == Role::Owner,
+                            public_acknowledged: acknowledged,
+                            reviewer: Some(Actor {
+                                id: "rev",
+                                person: Some(my_person),
+                            }),
+                        };
+                        let merge = grant("rev", GrantAction::Merge);
+                        let held = standing(Some(&merge));
+                        let name = format!(
+                            "{role:?} {kind:?} private={private} controls={controls} acknowledged={acknowledged}"
+                        );
+                        let allowed = authorize_merge(
+                            &me,
+                            Some(my_person),
+                            &task,
+                            &submitter,
+                            &held,
+                            &review,
+                        );
+                        let self_reviewed =
+                            self_reviewed_merge(&me, Some(my_person), &submitter, &review);
+                        if !controls {
+                            // An independent submitter: the ordinary rule, never self-reviewed.
+                            assert_eq!(allowed, Ok(()), "{name}");
+                            assert!(!self_reviewed, "{name}");
+                            assert_eq!(
+                                merge_review(&me, Some(my_person), &submitter, &review),
+                                Ok(false),
+                                "{name}"
+                            );
+                            continue;
+                        }
+                        let expected = match (kind, private, role, acknowledged) {
+                            (Agent, ..) => Err(RepoDenial::SelfMerge),
+                            (Person, true, ..) => Ok(()),
+                            (Person, false, Role::Owner, true) => Ok(()),
+                            (Person, false, Role::Owner, false) => {
+                                Err(RepoDenial::PublicUnacknowledged)
+                            }
+                            (Person, false, ..) => Err(RepoDenial::SelfMerge),
+                        };
+                        assert_eq!(allowed, expected, "{name}");
+                        assert_eq!(self_reviewed, expected.is_ok(), "{name}");
+                        if expected.is_ok() {
+                            assert_eq!(
+                                merge_review(&me, Some(my_person), &submitter, &review),
+                                Ok(true),
+                                "{name}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The room's role decides, not the review: an admin the review calls the owner is still refused.
+    let admin = caller("me", Person, Role::Admin);
+    let mine = Actor {
+        id: "asg",
+        person: Some("me"),
+    };
+    let claimed_owner = SelfReview {
+        room_private: false,
+        requester_is_person: true,
+        requester_is_room_owner: true,
+        public_acknowledged: true,
+        reviewer: Some(Actor {
+            id: "me",
+            person: Some("me"),
+        }),
+    };
+    let merge = grant("me", GrantAction::Merge);
+    assert_eq!(
+        authorize_merge(
+            &admin,
+            Some("me"),
+            &task,
+            &mine,
+            &standing(Some(&merge)),
+            &claimed_owner
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // And an owner the review doesn't call the owner, which the room's rows decide, is refused too.
+    let owner = caller("me", Person, Role::Owner);
+    assert_eq!(
+        authorize_merge(
+            &owner,
+            Some("me"),
+            &task,
+            &mine,
+            &standing(Some(&merge)),
+            &SelfReview {
+                requester_is_room_owner: false,
+                ..claimed_owner
+            }
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // Every other guardrail of 2026-11-20 holds for the public room's owner: the grant, the approver, the assignee.
+    assert_eq!(
+        authorize_merge(
+            &owner,
+            Some("me"),
+            &task,
+            &mine,
+            &standing(None),
+            &claimed_owner
+        ),
+        Err(RepoDenial::Grant(GrantRefusal::GrantRequired))
+    );
+    assert_eq!(
+        authorize_merge(
+            &owner,
+            Some("me"),
+            &task,
+            &mine,
+            &standing(Some(&merge)),
+            &SelfReview {
+                reviewer: Some(Actor {
+                    id: "agt_other",
+                    person: Some("me"),
+                }),
+                ..claimed_owner
+            }
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    let assignee = caller("asg", Person, Role::Owner);
+    let asgs = grant("asg", GrantAction::Merge);
+    assert_eq!(
+        authorize_merge(
+            &assignee,
+            Some("asg"),
+            &task,
+            &Actor {
+                id: "agt",
+                person: Some("asg"),
+            },
+            &standing(Some(&asgs)),
+            &SelfReview {
+                reviewer: Some(Actor {
+                    id: "asg",
+                    person: Some("asg"),
+                }),
+                ..claimed_owner
+            }
+        ),
+        Err(RepoDenial::SelfMerge)
+    );
+    // The refusal's code, and the job's recheck records the same.
+    assert_eq!(
+        RepoDenial::PublicUnacknowledged.code(),
+        "public_repository_unacknowledged"
+    );
+    assert_eq!(
+        RepoDenial::PublicUnacknowledged.as_merge_refusal(),
+        MergeRefusal::PublicUnacknowledged
+    );
+    assert_eq!(
+        MergeRefusal::PublicUnacknowledged.code(),
+        "public_repository_unacknowledged"
+    );
+}
+
 #[test]
 fn an_agent_is_told_only_the_setup_facts_it_could_already_see() {
     for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
@@ -1880,6 +2074,7 @@ fn the_self_merge_hint_matches_the_merge_decision_for_a_person() {
             id,
             person: Some(id),
         }),
+        ..SelfReview::default()
     };
     for (name, who, submitter, review) in [
         (
@@ -2016,6 +2211,55 @@ fn the_self_merge_hint_matches_the_merge_decision_for_a_person() {
             &task,
             &mine,
             &SelfReview::default()
+        ),
+        None
+    );
+    // Decision 186 as revised 2026-11-27: the read counts the public acknowledgement as given, so a public room's owner
+    // who controls the agent and approved its commit gets no hint, and the dialog asks for the acknowledgement. An admin
+    // in the same place is told `self_merge`, and anyone, the owner included, is told the controller is unknown when the
+    // room didn't record it. The three cases side by side.
+    let public_owner = SelfReview {
+        requester_is_room_owner: true,
+        public_acknowledged: true,
+        ..reviewed_by("p-sub", false)
+    };
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Owner),
+            &task,
+            &mine,
+            &public_owner
+        ),
+        None
+    );
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Admin),
+            &task,
+            &mine,
+            &public_owner
+        ),
+        Some(SelfMergeHint::Controls)
+    );
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Owner),
+            &task,
+            &unknown,
+            &public_owner
+        ),
+        Some(SelfMergeHint::ControllerUnknown)
+    );
+    // Without the acknowledgement the merge answers its own code, never `self_merge`, so the hint stays quiet there too.
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Owner),
+            &task,
+            &mine,
+            &SelfReview {
+                public_acknowledged: false,
+                ..public_owner
+            }
         ),
         None
     );

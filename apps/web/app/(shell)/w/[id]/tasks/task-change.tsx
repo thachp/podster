@@ -33,6 +33,11 @@ export type PullRequestChange = {
   /** Display only: a merge this viewer asked for now would be self-reviewed. The API decides when asked. */
   self_review_for_viewer?: boolean;
   /**
+   * Display only (decision 186 as revised 2026-11-27): the viewer is a public room's owner whose self-reviewed merge needs
+   * the public-repository acknowledgement, which the merge dialog asks for. Optional, so an older read still renders.
+   */
+  public_acknowledgement_for_viewer?: boolean;
+  /**
    * Display only (2026-11-27): `self_merge` when the API's policy says a merge this viewer asked for now would be refused
    * that, so the control says who can merge instead of offering a merge that can only be refused. Null says nothing about
    * whether a merge would go through. The API decides when asked. Optional, so an older read still renders.

@@ -668,6 +668,108 @@ describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11
   });
 });
 
+describe("a public room's owner merging their own agent's work (decision 186 as revised by the owner on 2026-11-27)", () => {
+  /** A room whose task `agent`, controlled by `controller`, submitted and `controller` approved at `HEAD`, with `controller`'s merge grant. */
+  async function selfApproved(controller: Who, agent: Who, visibility: "public" | "private" = "public") {
+    const id = await room();
+    if (agent.id === OWNED.id) await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(id) });
+    const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: agent.id, ...(controller.id === OWNER.id ? {} : { reviewer: controller.id }) });
+    const accepted = await must(agent, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
+    await must(agent, "POST", `/v1/workspaces/${id}/tasks/${made.id}/submit`, { version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: 7 });
+    await must(controller, "POST", `/v1/workspaces/${id}/tasks/${made.id}/verify`, { submission_no: 1, commit_sha: HEAD });
+    await grant(id, controller);
+    await alarm(id);
+    await hold(id);
+    if (visibility === "public") await inRoom(id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    return { id, task: made.id as string };
+  }
+  const read = async (who: Who, r: { id: string; task: string }) => (await must(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change;
+  const ACK = { submission_no: 1, commit_sha: HEAD, public_repository_acknowledged: true };
+  const kept = (id: string) => inRoom(id, (sql) => sql.exec("SELECT task_id, requested_at FROM merge_public_ack").toArray() as any[]);
+
+  it("refuses the owner without the acknowledgement, with its own code, and merges with it, recorded as self-reviewed", async () => {
+    const r = await selfApproved(OWNER, OWNED);
+    // The dialog's hint: a self-reviewed merge, which needs the public acknowledgement. It decides nothing.
+    expect(await read(OWNER, r)).toMatchObject({ self_review_for_viewer: true, public_acknowledgement_for_viewer: true, viewer_merge_refusal: null });
+    const unacknowledged = await merge(OWNER, r.id, r.task);
+    expect([unacknowledged.status, unacknowledged.code]).toEqual([403, "public_repository_unacknowledged"]);
+    const declined = await merge(OWNER, r.id, r.task, { ...ACK, public_repository_acknowledged: false });
+    expect([declined.status, declined.code]).toEqual([403, "public_repository_unacknowledged"]);
+    const malformed = await merge(OWNER, r.id, r.task, { ...ACK, public_repository_acknowledged: "yes" });
+    expect([malformed.status, malformed.code]).toEqual([403, "public_repository_unacknowledged"]);
+    expect(await events(r.id)).toEqual([]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
+    const asked = await merge(OWNER, r.id, r.task, ACK);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body).toMatchObject({ merge_state: "requested", self_reviewed: true });
+    expect(await events(r.id)).toEqual([{ type: "merge.requested", actor_id: OWNER.id, subject_id: null, task_id: r.task, reason: "self_reviewed" }]);
+    const row = await change(r.id, r.task);
+    expect(await kept(r.id)).toEqual([{ task_id: r.task, requested_at: row.merge_requested_at }]);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect((await events(r.id)).at(-1)).toEqual({ type: "merge.succeeded", actor_id: "system", subject_id: OWNER.id, task_id: r.task, reason: "self_reviewed" });
+    expect(await read(OWNER, r)).toMatchObject({ merge_self_reviewed: true });
+  });
+
+  it("refuses a malformed acknowledgement as a malformed body once the rest allows", async () => {
+    const r = await selfApproved(OWNER, OWNED, "private");
+    const malformed = await merge(OWNER, r.id, r.task, { ...ACK, public_repository_acknowledged: "yes" });
+    expect([malformed.status, malformed.code]).toEqual([400, "invalid_argument"]);
+    expect(await events(r.id)).toEqual([]);
+  });
+
+  it("never lets an admin self-merge in a public room, acknowledged or not", async () => {
+    const r = await selfApproved(LINKER, AGENT);
+    // The agent's controller is a room admin, not its owner.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", LINKER.id));
+    expect(await read(LINKER, r)).toMatchObject({ self_review_for_viewer: false, public_acknowledgement_for_viewer: false, viewer_merge_refusal: "self_merge" });
+    for (const body of [undefined, ACK]) {
+      const refused = await merge(LINKER, r.id, r.task, body);
+      expect([refused.status, refused.code]).toEqual([403, "self_merge"]);
+    }
+    expect(await events(r.id)).toEqual([]);
+  });
+
+  it("keeps the second-person rule for a member, and the agent never merges, with the acknowledgement", async () => {
+    const r = await selfApproved(LINKER, AGENT);
+    await grant(r.id, AGENT);
+    for (const who of [LINKER, AGENT]) {
+      const refused = await merge(who, r.id, r.task, ACK);
+      expect([refused.status, refused.code], who.id).toEqual([403, "self_merge"]);
+    }
+  });
+
+  it("asks no acknowledgement of the owner in a private room, and keeps none", async () => {
+    const r = await selfApproved(OWNER, OWNED, "private");
+    expect(await read(OWNER, r)).toMatchObject({ self_review_for_viewer: true, public_acknowledgement_for_viewer: false });
+    const asked = await merge(OWNER, r.id, r.task);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body.self_reviewed).toBe(true);
+    expect(await kept(r.id)).toEqual([]);
+  });
+
+  it("ends a merge asked for in a private room when the room goes public before the job runs: nobody acknowledged it", async () => {
+    const r = await selfApproved(OWNER, OWNED, "private");
+    expect((await merge(OWNER, r.id, r.task)).status).toBe(200);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET visibility = 'public'"));
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "public_repository_unacknowledged", merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("ends an acknowledged merge when the owner is no longer the owner by the time the job runs", async () => {
+    const r = await selfApproved(OWNER, OWNED);
+    expect((await merge(OWNER, r.id, r.task, ACK)).status).toBe(200);
+    // Another person holds the room now, as a transfer leaves it; the former owner's own grant is beside the point.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET owner_person_id = ?", MERGER.id));
+    await pass(r.id);
+    const row = await change(r.id, r.task);
+    expect(row.merge_state).toBe("failed");
+    expect(row.merge_called_at).toBeNull();
+    expect((await merges()).length).toBe(0);
+  });
+});
+
 describe("the job checks everything again", () => {
   it("ends the merge when the requester's authority is gone by the time it runs, and marks nothing", async () => {
     for (const [what, lose, reason] of [
@@ -1150,7 +1252,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 11"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 12"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");
@@ -1188,7 +1290,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 11"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 12"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");

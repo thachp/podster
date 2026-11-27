@@ -30,6 +30,8 @@ export function explainMergeRefusal(code: string, status = 400): string {
       return "You joined this workroom from its public page, so you can't merge its work. Nothing was asked for.";
     case "self_merge":
       return SELF_MERGE_REFUSAL;
+    case "public_repository_unacknowledged":
+      return "This repository is public, and nobody else reviewed this work. Tick the acknowledgement in the merge dialog to merge it. Nothing was asked for.";
     case "self_review":
       return "This commit can't be merged yet: it needs an approving review from someone other than the person who controls its submitter, or one of their agents. Nothing was asked for.";
     case REVIEWER_UNKNOWN:
@@ -82,12 +84,13 @@ export function explainMergeRefusal(code: string, status = 400): string {
 /**
  * `self_merge`, by `core::repo_merge::check_merge_authority` and `is_self_reviewed`: the caller is the submitter, or is
  * controlled by the same person as the submitter, or has no known controlling person. Decision 186 as amended on
- * 2026-11-20 lets the person who controls the submitting agent merge it only in a private workroom, and only when the
- * approval of its reviewed commit is on record as their own; in a public workroom someone else has to.
+ * 2026-11-20, and revised 2026-11-27, lets the person who controls the submitting agent merge it only in a private workroom,
+ * or in a public one as its owner with the public acknowledgement, and only when the
+ * approval of its reviewed commit is on record as their own; otherwise someone else has to.
  */
-// Decision 186 as revised on 2026-11-20 is the rule these sentences state; the page names no decision numbers.
+// Decision 186 as revised on 2026-11-20 and 2026-11-27 is the rule these sentences state; the page names no decision numbers.
 const WHO_ELSE_MERGES =
-  "Someone who doesn't control that agent and holds a merge grant can merge it. The person who controls the agent may merge it only in a private workroom, and only if they approved this commit themselves.";
+  "Someone who doesn't control that agent and holds a merge grant can merge it. The person who controls the agent may merge it only in a private workroom, or in a public one if they're its owner, and only if they approved this commit themselves.";
 /** The read's `self_merge` hint: this person controls the agent that did the work, or is it. */
 export const SELF_MERGE_REASON = `You control the agent that did this work, or are it, so you can't merge it here. ${WHO_ELSE_MERGES}`;
 /**
@@ -123,6 +126,7 @@ const FAILURES: Record<string, string> = {
   access_revoked: "whoever asked was no longer in the workroom when it ran, having left or been removed",
   agent_disconnected: "the agent that asked was disconnected before it ran",
   self_merge: "whoever asked turned out to control the task's submitter, and nobody merges work they control",
+  public_repository_unacknowledged: "the workroom was public when it ran and its owner hadn't acknowledged that the repository is public, so nobody had agreed to merge without another review",
   self_review: "the commit's approving review came from the person who controls its submitter or one of their agents, from an agent whose controlling person isn't known, or was approved before Podster recorded who reviews, and a merge needs an independent review, given again if it wasn't recorded",
   controller_departed: "the person whoever asked acts for had left the organization",
   task_not_found: "whoever asked could no longer see the task",
@@ -188,6 +192,13 @@ export function mergeOffered(task: LoadedTask["task"], change: PullRequestChange
 export const SELF_REVIEWED_WARNING =
   "Nobody else reviewed this. You control the agent that wrote it, and you approved it yourself. This workroom is private, so you may merge it, and Podster records the merge as self-reviewed.";
 
+/**
+ * What the merge dialog says when the viewer is a public workroom's owner merging their own agent's work they approved
+ * (decision 186 as revised 2026-11-27): the owner's own words. The merge is asked for only once they acknowledge it.
+ */
+export const PUBLIC_SELF_MERGE_WARNING = "This repository is public. Merging puts your own agent's work on main without anyone else reviewing it.";
+export const PUBLIC_SELF_MERGE_ACKNOWLEDGE = "I understand, and I want to merge it without another review.";
+
 /** A live merge grant of the viewer's own, by the list's display state. Convenience only. */
 export const holdsMergeGrant = (grants: RepoGrant[], me: string) => grants.some((grant) => grant.principal_id === me && grant.action === "merge" && grant.state === "live");
 
@@ -204,6 +215,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   const [holds, setHolds] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
   const commit = change ? shortSha(change.reviewed_commit_sha) : null;
   // One key per intent: the same task, submission and commit, and the same attempt. A retry after a lost answer reuses it;
   // asking again after a merge ended is a new attempt, named by when the last one ended or was asked for, so it gets a new key.
@@ -242,9 +254,10 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   }
   const target = branch ? `the repository's default branch, ${branch}` : "the repository's default branch";
 
+  const needsAck = change.public_acknowledgement_for_viewer === true;
   const merge = async () => {
     await run(
-      async () => reviewAgainRefusal(definiteMergeRefusal(await clientCommand(`/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/merge`, { submission_no: data.task.approved_submission_no, commit_sha: change.reviewed_commit_sha }, { idempotencyKey: key.current.value }))),
+      async () => reviewAgainRefusal(definiteMergeRefusal(await clientCommand(`/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/merge`, { submission_no: data.task.approved_submission_no, commit_sha: change.reviewed_commit_sha, ...(needsAck ? { public_repository_acknowledged: acknowledged } : {}) }, { idempotencyKey: key.current.value }))),
       explainMergeRefusal,
       MERGE_FAILURE_SLOT,
     );
@@ -256,7 +269,14 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
       <p id="merge-what" className="text-sm text-muted-foreground">
         Merging asks Podster to merge reviewed commit {commit} into {target}. {APPROVING_DOESNT_MERGE} {MERGE_RELEASES_NOTHING}
       </p>
-      <AlertDialog open={open} onOpenChange={(next) => !saving && setOpen(next)}>
+      <AlertDialog
+        open={open}
+        onOpenChange={(next) => {
+          if (saving) return;
+          setOpen(next);
+          if (!next) setAcknowledged(false);
+        }}
+      >
         <AlertDialogTrigger asChild>
           <Button type="button" size="sm" aria-describedby="merge-what" disabled={saving} className="max-md:h-11 max-md:px-4">
             {change.merge_state === "failed" ? "Ask to merge again" : "Merge reviewed commit"}
@@ -268,7 +288,15 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
             <AlertDialogDescription className="break-words">
               Podster merges exactly commit <code className="font-mono">{commit}</code>, the one approved in submission {data.task.approved_submission_no}, into {target}, as a merge commit. If the pull request has changed since review, nothing is merged. The repository is public, so the merge is public as soon as it lands. {MERGE_RELEASES_NOTHING}
             </AlertDialogDescription>
-            {change.self_review_for_viewer ? (
+            {needsAck ? (
+              <div role="note" className="space-y-2 rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+                <p>{PUBLIC_SELF_MERGE_WARNING}</p>
+                <label className="flex items-start gap-2">
+                  <input type="checkbox" className="mt-0.5 size-4 shrink-0" checked={acknowledged} disabled={saving} onChange={(event) => setAcknowledged(event.target.checked)} />
+                  <span>{PUBLIC_SELF_MERGE_ACKNOWLEDGE}</span>
+                </label>
+              </div>
+            ) : change.self_review_for_viewer ? (
               <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
                 {SELF_REVIEWED_WARNING}
               </p>
@@ -277,7 +305,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
           <AlertDialogFooter>
             <AlertDialogCancel disabled={saving}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              disabled={saving}
+              disabled={saving || (needsAck && !acknowledged)}
               onClick={(event) => {
                 event.preventDefault();
                 void merge();

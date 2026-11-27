@@ -788,7 +788,7 @@ pub(super) fn of_task(sql: &SqlStorage, task: &Task, viewer: &Caller) -> R<Value
         },
         &review,
     )
-    .then_some("self_merge");
+    .map(podster_policy::repositories::SelfMergeHint::code);
     let public_acknowledgement_for_viewer = self_review_for_viewer && !room_private;
     let observed = row["pr_observed_at"].as_i64();
     let head_here = row["head_repo_id"]

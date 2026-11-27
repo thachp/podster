@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-change";
-import { APPROVING_DOESNT_MERGE, explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, PUBLIC_SELF_MERGE_ACKNOWLEDGE, PUBLIC_SELF_MERGE_WARNING, SELF_MERGE_REASON, SELF_REVIEWED_WARNING } from "./task-merge";
+import { APPROVING_DOESNT_MERGE, explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal, CONTROLLER_UNKNOWN_REASON, PUBLIC_SELF_MERGE_ACKNOWLEDGE, PUBLIC_SELF_MERGE_WARNING, SELF_MERGE_REASON, SELF_MERGE_REFUSAL, SELF_REVIEWED_WARNING } from "./task-merge";
 import { verbFor } from "./task-model";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
@@ -152,7 +152,7 @@ describe("merging from the task Sheet", () => {
     await open();
     await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" }));
-    expect(await screen.findByText(/You control the agent that did this work/)).toBeInTheDocument();
+    expect(await screen.findByText(SELF_MERGE_REFUSAL)).toBeInTheDocument();
   });
 
   it("says a 503 that recorded nothing as a refusal, not an unknown outcome", async () => {
@@ -215,10 +215,12 @@ describe("a refused merge, beside its button", () => {
     await open();
     await confirmMerge();
     const alert = await within(control()).findByRole("alert");
-    expect(alert).toHaveTextContent(/You control the agent that did this work/);
+    expect(alert).toHaveTextContent(/you control the agent that did this work, or are it, or Podster can't confirm who controls that agent/);
     expect(alert).toHaveTextContent(/Someone who doesn't control that agent and holds a merge grant can merge it/);
     expect(alert).toHaveTextContent(/only in a private workroom, or in a public one if they're its owner, and only if they approved this commit themselves/);
     expect(alert).toHaveTextContent(/Nothing was asked for/);
+    // Decision numbers stay in the code's comments, never on the page.
+    expect(alert.textContent).not.toMatch(/decision/i);
   });
 
   it("names a code it doesn't know, inline", async () => {
@@ -248,6 +250,19 @@ describe("the read's hint that this viewer can't merge", () => {
     expect(screen.queryByRole("button", { name: "Merge reviewed commit" })).toBeNull();
     expect(screen.queryByText(/Merging asks Podster/)).toBeNull();
     expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
+  it("says plainly when nobody can confirm who controls the agent, without telling the viewer they control it", async () => {
+    reads.task = () => json(200, detail({ viewer_merge_refusal: "self_merge_controller_unknown" }));
+    await open();
+    expect(await screen.findByText(CONTROLLER_UNKNOWN_REASON)).toBeInTheDocument();
+    expect(CONTROLLER_UNKNOWN_REASON).toBe("Podster can't confirm who controls the agent that did this work, so it can't be merged here.");
+    expect(document.body.textContent).not.toMatch(/You control the agent/);
+    expect(screen.queryByRole("button", { name: "Merge reviewed commit" })).toBeNull();
+  });
+
+  it("names no decision numbers in anything the page shows", () => {
+    for (const text of [SELF_MERGE_REASON, CONTROLLER_UNKNOWN_REASON, SELF_MERGE_REFUSAL, explainMergeRefusal("self_merge", 403)]) expect(text).not.toMatch(/decision|\d{4}-\d{2}-\d{2}/i);
   });
 
   it.each([["absent", {}], ["null", { viewer_merge_refusal: null }], ["a code it doesn't know", { viewer_merge_refusal: "something_new" }]] as const)("offers the merge as before when the hint is %s", async (_name, over) => {

@@ -280,13 +280,21 @@ describe("decision 230's own rules", () => {
   });
 
   it("holds GitHub's repository to the scope's numeric ID, and never takes a default branch under Runner's prefix", () => {
-    const repo = { id: 9001, full_name: "PodsterDev/Todo-App", archived: false, default_branch: "main" };
-    expect(readRepository(repo, SCOPE, TASK)).toEqual({ default_branch: "main" });
+    const repo = { id: 9001, full_name: "PodsterDev/Todo-App", archived: false, private: true, default_branch: "main" };
+    expect(readRepository(repo, SCOPE, TASK)).toEqual({ default_branch: "main", public: false });
     const code = (v: unknown) => { try { readRepository(v, SCOPE, TASK); return "taken"; } catch (e) { return (e as RepoPathError).code; } };
     expect(code({ ...repo, id: 9002 })).toBe("repository_id_mismatch");
     expect(code({ ...repo, full_name: "podsterdev/renamed" })).toBe("repository_renamed");
     expect(code({ ...repo, archived: true })).toBe("repository_archived");
     for (const branch of ["podster/task_1", "podster", "podster/x", "-main", "main..x", "a@{1}"]) expect([branch, code({ ...repo, default_branch: branch })]).toEqual([branch, "default_branch_invalid"]);
+  });
+
+  it("F-2: reads the repository's visibility from GitHub's `private` field, and refuses an answer without one", () => {
+    const repo = { id: 9001, full_name: "podsterdev/todo-app", archived: false, private: false, default_branch: "main" };
+    expect(readRepository(repo, SCOPE, TASK)).toEqual({ default_branch: "main", public: true });
+    const code = (v: unknown) => { try { readRepository(v, SCOPE, TASK); return "taken"; } catch (e) { return (e as RepoPathError).code; } };
+    const { private: _, ...missing } = repo;
+    for (const bad of [missing, { ...repo, private: "false" }, { ...repo, private: null }, { ...repo, private: 0 }]) expect(code(bad)).toBe("repository_unreadable");
   });
 
   it("refuses a repository whose default branch lacks any of ADR 0009's three rules, as on a private repository on the Free plan", () => {
@@ -514,14 +522,14 @@ async function world(opts: { ignored_list_timeout_ms?: number; commit_limits?: {
   const workRoot = join(root, "work");
   const taskFolder = join(workRoot, ROOM, TASK);
   const calls: { method: string; path: string; body?: unknown }[] = [];
-  const api = { rules: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] as unknown, repoId: 9001, pullStatus: 201, revoked: false, lag: 0 };
+  const api = { rules: [{ type: "pull_request" }, { type: "required_status_checks" }, { type: "update" }] as unknown, repoId: 9001, pullStatus: 201, revoked: false, lag: 0, private: true };
   const github: GitHubCall = async (request, token) => {
     calls.push({ method: request.method, path: request.path, body: request.body });
     expect(token).toBe(TOKEN);
     if (api.revoked) throw new RepoPathError("token_revoked");
     const p = request.path;
     const head = (b: string) => { try { return sh(remote, "rev-parse", `refs/heads/${b}`); } catch { return null; } };
-    if (p === "/repos/podsterdev/todo-app") return { status: 200, body: { id: api.repoId, full_name: "podsterdev/todo-app", archived: false, default_branch: "main" } };
+    if (p === "/repos/podsterdev/todo-app") return { status: 200, body: { id: api.repoId, full_name: "podsterdev/todo-app", archived: false, private: api.private, default_branch: "main" } };
     if (p === "/repos/podsterdev/todo-app/rules/branches/main") return { status: 200, body: api.rules };
     const ref = /^\/repos\/podsterdev\/todo-app\/git\/ref\/heads\/(.+)$/.exec(p);
     if (ref) {
@@ -682,6 +690,23 @@ describe.skipIf(realGit === null)("the repository path on real Git (no network)"
     const published = await w.path.publish({ ...w.task, base_commit: base }, w.signal);
     expect(published).toMatchObject({ kind: "published", branch: "podster/task_1", pr_number: 12 });
     await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("F-2: a public repository is never pushed to or given a pull request without the owner's review, and nothing is committed", async () => {
+    const w = await world();
+    const base = (await w.path.prepare({ ...w.task, continue_from: null }, w.signal)).base_commit;
+    await writeFile(join(w.taskFolder, "feature.txt"), "done\n");
+    w.api.private = false;
+    const before = w.gitCalls.length;
+    await expect(w.path.publish({ ...w.task, base_commit: base }, w.signal)).rejects.toMatchObject({ code: "repository_public_unreviewed", transient: false });
+    await expect(w.path.publish({ ...w.task, base_commit: base, reviewed: false }, w.signal)).rejects.toMatchObject({ code: "repository_public_unreviewed" });
+    // Refused on GitHub's read, before any Git command: no commit, no push, no pull request, and no task branch on GitHub.
+    expect(w.gitCalls.slice(before)).toEqual([]);
+    expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+    expect(() => w.head("podster/task_1")).toThrow();
+    // With the owner's yes, it publishes as before.
+    const published = await w.path.publish({ ...w.task, base_commit: base, reviewed: true }, w.signal);
+    expect(published).toMatchObject({ kind: "published", branch: "podster/task_1", pr_number: 12 });
   });
 
   it("publishes one commit on the pinned base to the task branch, opens its pull request, and continues from it on a rerun", async () => {

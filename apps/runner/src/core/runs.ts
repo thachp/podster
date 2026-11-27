@@ -100,6 +100,14 @@ export const owedReport = (): BlockedReport => ({ sharing: "pending", keep: null
  */
 export type BlockedOn = { input_hash: string; facts_hash: string };
 
+/**
+ * F-2: a publication held for the owner's review, bound to the run it was asked for (`run_ref`): when it was first held,
+ * whether the owner said yes, and whether that yes was given on a screen that said the repository is public
+ * (`public_ok`). A yes for one run never covers another, and a yes that wasn't told the repository is public never
+ * covers a push to a public one.
+ */
+export type PublishReview = { run_ref: string; held_since: number; approved: boolean; public_ok?: boolean };
+
 export type RunEntry = {
   workspace_id: string;
   task_id: string;
@@ -137,6 +145,8 @@ export type RunEntry = {
   submission?: Submission | null;
   /** When a finished run's publication first failed in passing, while it is held for a retry; else null or absent. */
   publish_since?: number | null;
+  /** F-2: a publication held for, or approved in, the owner's review; null or absent otherwise. */
+  publish_review?: PublishReview | null;
   retry_at: number | null;
   attempts: { day: number; count: number };
   updated_at: number;
@@ -271,6 +281,8 @@ export function checkRuns(v: unknown): string | null {
     const pub = e.published;
     if (pub !== undefined && pub !== null && (!isObj(pub) || typeof pub.repository_id !== "string" || !/^[1-9][0-9]{0,15}$/.test(pub.repository_id) || !isText(pub.branch, 200) || typeof pub.commit !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(pub.commit) || !isCount(pub.pr_number) || pub.pr_number < 1)) return `${at}.published`;
     if (e.publish_since !== undefined && !orNull(e.publish_since, isCount)) return `${at}.publish_since`;
+    const pr = e.publish_review;
+    if (pr !== undefined && pr !== null && (!isObj(pr) || typeof pr.run_ref !== "string" || pr.run_ref.length > 128 || !isCount(pr.held_since) || typeof pr.approved !== "boolean" || (pr.public_ok !== undefined && typeof pr.public_ok !== "boolean") || Object.keys(pr).some((k) => !["run_ref", "held_since", "approved", "public_ok"].includes(k)))) return `${at}.publish_review`;
     const sub = e.submission;
     if (
       sub !== undefined &&

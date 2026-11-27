@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { cleanResult, codeBlock, codeSpan, composeNote, cutAgentWords, markHidden, MAX_NOTE_BYTES, NOTE_WORDS_BYTES, redactSecrets } from "../src/core/results.js";
 import { pullRequestUrl } from "../src/core/repository.js";
 import { checkRuns, emptyRuns, newEntry, owedReport, owedSubmission } from "../src/core/runs.js";
-import { reviewScreen, SHOWN_CHARS, TerminalPrompter, visible } from "../src/node/prompter.js";
+import { publicationScreen, reviewScreen, SHOWN_CHARS, TerminalPrompter, visible } from "../src/node/prompter.js";
 
 /** Every character that would draw nothing, or reorder what's around it, and must come out as a mark. */
 const FORMAT = [
@@ -309,6 +309,31 @@ describe("the owner's review of a held result, at the terminal", () => {
     expect(/[\u202a-\u202e\u2066-\u2069\u200b]/.test(screen)).toBe(false);
     expect(await new TerminalPrompter(terminal(["sure"]).t).review(view)).toBe("decline");
     expect(await new TerminalPrompter(terminal([]).t).review(view)).toBe("decline");
+  });
+
+  it("F-2: a held publication shows Runner's facts only; `y` publishes, `n` releases, anything else or no terminal leaves it", async () => {
+    const pv = { workspace_id: "ws_room_one", task_id: "tsk_one", reason: "repository_public" as const, full_name: "podsterdev/todo-app", branch: "podster/tsk_one", task_folder: "/work/podster/ws_room_one/tsk_one", repository_public: true };
+    const yes = terminal(["yes"]);
+    expect(await new TerminalPrompter(yes.t).publication(pv)).toBe("approve");
+    const screen = yes.screens.join("");
+    expect(screen).toContain("public on GitHub");
+    expect(screen).toContain("repository podsterdev/todo-app, branch podster/tsk_one");
+    expect(screen).toContain("nothing has been committed, pushed or opened yet");
+    expect(await new TerminalPrompter(terminal(["n"]).t).publication(pv)).toBe("decline");
+    expect(await new TerminalPrompter(terminal(["sure"]).t).publication(pv)).toBe("later");
+    expect(await new TerminalPrompter(terminal([]).t).publication(pv)).toBe("later");
+    expect(await new TerminalPrompter(terminal(["y"], false).t).publication(pv)).toBe("later");
+    expect(publicationScreen({ ...pv, reason: "outputs_held" })).toContain("holds outputs for your review");
+  });
+
+  it("F-2 review nit: the held-outputs question says plainly when the repository is public, so one yes is informed of both", () => {
+    const pv = { workspace_id: "ws_room_one", task_id: "tsk_one", reason: "outputs_held" as const, full_name: "podsterdev/todo-app", branch: "podster/tsk_one", task_folder: "/work/podster/ws_room_one/tsk_one" };
+    const open = publicationScreen({ ...pv, repository_public: true });
+    expect(open).toContain("holds outputs for your review");
+    expect(open).toContain("this repository is public: pushing publishes the work");
+    expect(publicationScreen({ ...pv, repository_public: false })).not.toContain("is public:");
+    expect(publicationScreen({ ...pv, repository_public: false })).toContain("private on GitHub; if it turns public before the push, Runner asks again");
+    expect(publicationScreen({ ...pv, repository_public: null })).toContain("couldn't read whether this repository is public");
   });
 
   it("asks nothing without a terminal, and can't share words too long to show", async () => {

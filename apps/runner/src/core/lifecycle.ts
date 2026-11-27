@@ -39,6 +39,14 @@
  * inert on GitHub (`pull-text.ts`). A refusal on the repository path releases the task with its code; a passing
  * failure leaves it to be evaluated afresh.
  *
+ * **A held publication (F-2 of M7's security review, S-34).** The commit, the pushed branch and the pull request are
+ * outputs under the room's output policy (RUNNER.md lifecycle step 9). Where the room's outputs aren't shared, or GitHub's
+ * fresh read before the push shows the repository public (a public destination, which defaults to the owner's review),
+ * nothing is committed, pushed or opened until the owner says yes on this machine, for that run only. The question says
+ * plainly when the repository reads public, and a yes covers a public push only if it said so. A no publishes nothing and
+ * releases the task. With a terminal attached, the question waits for its answer and nothing is published meanwhile;
+ * with no terminal to ask on, the publication stays held and, after `REVIEW_HOLD_MS`, the task is released unpublished.
+ *
  * **Results (M7 step 11).** A run that ends `succeeded` with a structured result Runner checks again, of status
  * `completed`, is finished and its submission owed; none, or a malformed one, is released, never submitted. A `blocked`
  * result is an answer, not a failure (the architect's ruling of 2026-11-20, below). The result's words are kept in memory only, until they're sent. At a later pass the submission is bound to
@@ -76,7 +84,7 @@ import { AuthorityEnded, waitForNext, type Poller } from "./poller.js";
 import { MAX_PROMPT_BYTES } from "./run-interface.js";
 import type { Offer } from "./state.js";
 import type { Clock, Diagnostics, Logger } from "./runtime.js";
-import { budgetOf, clockWentBack, dayOf, newEntry, owedReport, owedSubmission, reserve, settle, type After, type BlockedReport, type GiveUp, type Published, type RunEntry, type RunsState, type RunStore, type Submission } from "./runs.js";
+import { budgetOf, clockWentBack, dayOf, newEntry, owedReport, owedSubmission, reserve, settle, type After, type BlockedReport, type GiveUp, type Published, type PublishReview, type RunEntry, type RunsState, type RunStore, type Submission } from "./runs.js";
 
 /** The check-in's fixed maximum interval during a run (S-33, S-43). **Proposed** figure. */
 export const CHECK_IN_MS = 60_000;
@@ -96,7 +104,7 @@ export const WAIT_MS = 60_000;
  */
 export const PUBLISH_RETRY_MS = 60 * 60 * 1000;
 /** A finished run whose stop is confirmed and whose publication is held for a retry: it runs nothing. */
-const publicationHeld = (e: RunEntry) => e.phase === "held" && e.after_stop?.kind === "finish" && typeof e.publish_since === "number";
+const publicationHeld = (e: RunEntry) => e.phase === "held" && e.after_stop?.kind === "finish" && (typeof e.publish_since === "number" || (!!e.publish_review && e.publish_review.run_ref === (e.run_ref ?? "")));
 
 /**
  * The one progress message Podster gets while a result waits for the owner's review: Runner's fixed status, with no word
@@ -131,6 +139,9 @@ const PRIVATE = new Set([
   "repo_repository_renamed",
   "repo_path_unsafe",
   "repo_helper_unavailable",
+  // F-2: the owner's own answer on this machine about a held push, or its absence.
+  "publish_declined",
+  "publish_review_expired",
 ]);
 export const GENERIC_REASON = "runner_unavailable";
 /** Events that count as a new attempt at a task: an offer or re-offer, and a change request (L6 on #458). */
@@ -165,7 +176,28 @@ export interface OwnerPrompter {
    * `later` (or no way to ask) keeps them held. Silence is never approval.
    */
   review?(view: ResultView, signal?: AbortSignal): Promise<OwnerAnswer>;
+  /**
+   * F-2 (S-34): whether a held publication may go: Runner's commit, the push of the task branch and its pull request.
+   * `approve` publishes this run's work, `decline` publishes nothing and releases the task, and `later` (or no way to ask)
+   * keeps it held. Silence is never approval.
+   */
+  publication?(view: PublicationView, signal?: AbortSignal): Promise<OwnerAnswer>;
 }
+
+/**
+ * What the owner sees for a held publication: Runner's own facts only, no word of the agent's or the task's. `reason` is
+ * `outputs_held` when the room's outputs aren't shared, and `repository_public` when GitHub reads the repository as public.
+ */
+export type PublicationView = {
+  workspace_id: string;
+  task_id: string;
+  reason: "outputs_held" | "repository_public";
+  full_name: string;
+  branch: string;
+  task_folder: string;
+  /** GitHub's read just before the question: true public, false private, null when Runner couldn't read it. */
+  repository_public: boolean | null;
+};
 
 export type PolicyCalls = { evaluate: typeof evaluate; issueRunDecision: typeof issueRunDecision; consumeRunDecision: typeof consumeRunDecision; pinRunBase?: typeof pinRunBase };
 
@@ -190,7 +222,13 @@ export interface RepositoryPath {
    */
   prepare(task: RepoTask & { continue_from: string | null }, signal: AbortSignal): Promise<{ repository_id: string; base_commit: string }>;
   /** After the run's container is confirmed stopped: commit on top of `base_commit`, push the task branch, open its pull request. */
-  publish(task: RepoTask & { base_commit: string } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication>;
+  publish(task: RepoTask & { base_commit: string; reviewed?: boolean } & Partial<PublishWords>, signal: AbortSignal): Promise<Publication>;
+  /**
+   * F-2: whether GitHub reads the repository as public now, from the same checked read a publication makes. Optional:
+   * without it, a held-outputs question says the visibility is unknown, and the push still refuses a public repository
+   * the owner wasn't told about.
+   */
+  isPublic?(task: RepoTask, signal: AbortSignal): Promise<boolean>;
   /** Drops what it holds for the task, its token included. */
   forget(workspace_id: string, task_id: string): void;
   /**
@@ -965,7 +1003,7 @@ export class Lifecycle {
    * through the broker. Answers what to store, or null when the task was given up instead. After a local stop nothing
    * reaches Podster or GitHub: the finish waits, held, for a restart.
    */
-  private async publish(entry: RunEntry, signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait" | { wait: string }> {
+  private async publish(entry: RunEntry, signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait" | { wait: string } | { held: PublishReview }> {
     const consumed = entry.consumed;
     const facts = consumed && consumed.repository_id !== null ? repositoryOf(consumed) : null;
     if (!consumed || consumed.repository_id === null) return { published: entry.published ?? null, outcome: entry.outcome ?? "succeeded" };
@@ -979,12 +1017,19 @@ export class Lifecycle {
       await this.giveUp(entry, "accepted", "repository_unavailable");
       return null;
     }
+    // F-2 (S-34; RUNNER.md lifecycle step 9): the commit, the pushed branch and the pull request are outputs under the same
+    // policy as the words. Unless the owner said yes to this run's publication, a room whose outputs aren't shared holds
+    // them here, and the path itself refuses a public repository (`repository_public_unreviewed`), so both wait for review.
+    const review = entry.publish_review && entry.publish_review.run_ref === (entry.run_ref ?? "") ? entry.publish_review : null;
+    const approved = review?.approved === true;
+    if (!approved && !(await this.sharingAllowed(entry.workspace_id, consumed))) return this.reviewPublication(entry, facts, review, "outputs_held", signal);
     try {
       const key = keyOf(entry.workspace_id, entry.task_id);
       const held = this.titles.get(key);
       const kept = this.results.get(key);
       const words: PublishWords = { title: held && held.run_ref === entry.run_ref ? held.title : null, change_type: kept && kept.run_ref === entry.run_ref ? (kept.result.change_type ?? null) : null };
-      const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit, ...words }, signal ?? new AbortController().signal);
+      // Only a yes given on a screen that said the repository is public lets the path push to a public one.
+      const publication = await path.publish({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository, base_commit: consumed.base_commit, reviewed: approved && review?.public_ok === true, ...words }, signal ?? new AbortController().signal);
       // Published or not, the title has done its work; the result stays held for the submission.
       this.titles.delete(key);
       if (publication.kind === "no_changes") {
@@ -996,6 +1041,11 @@ export class Lifecycle {
     } catch (error) {
       if (signal?.aborted) return "wait";
       if (!(error instanceof RepoPathError)) throw error;
+      if (error.code === "repository_public_unreviewed" && review?.public_ok !== true) {
+        // Public now, and no yes was given knowing it: asked afresh, saying so, within the same hold.
+        path.forget(entry.workspace_id, entry.task_id);
+        return this.reviewPublication(entry, facts, review ? { ...review, approved: false } : null, "repository_public", signal);
+      }
       if (error.transient) {
         // Passing: the finished work is kept and published again at a later pass, never released (ruling 5 on #462).
         this.log("lifecycle.publish", "unavailable", entry, { code: error.code });
@@ -1010,6 +1060,55 @@ export class Lifecycle {
     } finally {
       path.forget(entry.workspace_id, entry.task_id);
     }
+  }
+
+  /**
+   * F-2: a publication held for the owner's review on this machine. A yes publishes this run's work, bound to its
+   * `run_ref`; a no publishes nothing and releases the task. With a terminal attached, the prompter waits for the answer
+   * (failing closed: nothing is published while nobody answers). With no terminal, the answer is `later`: asked again
+   * every `ASK_AGAIN_MS`, and released unpublished once `REVIEW_HOLD_MS` has passed. Nothing leaves the machine while it waits.
+   */
+  private async reviewPublication(entry: RunEntry, facts: NonNullable<ReturnType<typeof repositoryOf>>, review: PublishReview | null, reason: PublicationView["reason"], signal: AbortSignal | undefined): Promise<{ published: Published | null; outcome: string } | null | "wait" | { wait: string } | { held: PublishReview }> {
+    const key = keyOf(entry.workspace_id, entry.task_id);
+    const since = review?.held_since ?? this.now();
+    const done = { ...entry, after_stop: null, publish_review: null, publish_since: null, retry_at: null };
+    if (this.now() - since >= REVIEW_HOLD_MS) {
+      this.log("lifecycle.publish", "given_up", entry, { code: "publish_review_expired" });
+      this.forgetWords(key);
+      this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+      await this.giveUp(done, "accepted", "publish_review_expired");
+      return null;
+    }
+    const ask = this.deps.prompter.publication;
+    // The repository's visibility, read now, so a yes to held outputs is a yes to a public push too only when it said so.
+    let open: boolean | null = reason === "repository_public" ? true : null;
+    const path = this.deps.repository;
+    if (open === null && path?.isPublic) {
+      try {
+        open = await path.isPublic({ workspace_id: entry.workspace_id, task_id: entry.task_id, task_folder: facts.task_folder, repository: facts.repository }, signal ?? new AbortController().signal);
+      } catch (error) {
+        if (!(error instanceof RepoPathError)) throw error;
+        open = null;
+      } finally {
+        path.forget(entry.workspace_id, entry.task_id);
+      }
+      if (signal?.aborted) return "wait";
+    }
+    const view: PublicationView = { workspace_id: entry.workspace_id, task_id: entry.task_id, reason, full_name: facts.repository.full_name, branch: facts.repository.branch, task_folder: facts.task_folder, repository_public: open };
+    const answer = ask ? await ask.call(this.deps.prompter, view, signal) : "later";
+    if (signal?.aborted) return "wait";
+    this.log("lifecycle.publish", `review_${answer}`, entry, { code: reason });
+    if (answer === "decline") {
+      this.forgetWords(key);
+      this.deps.repository?.forget(entry.workspace_id, entry.task_id);
+      await this.giveUp(done, "accepted", "publish_declined");
+      return null;
+    }
+    const next: PublishReview = { run_ref: entry.run_ref ?? "", held_since: since, approved: answer === "approve", public_ok: answer === "approve" && open === true };
+    if (answer !== "approve") return { held: next };
+    // Stored before anything is pushed, so a passing failure after it doesn't ask the owner again.
+    await this.put({ ...this.current(entry), publish_review: next });
+    return this.publish({ ...entry, publish_review: next }, signal);
   }
 
   /** A stop that throws counts as unconfirmed (M2 on #458). */
@@ -1181,6 +1280,11 @@ export class Lifecycle {
         await this.put({ ...entry, phase: "held", after_stop: after });
         return;
       }
+      if (published !== null && "held" in published) {
+        // F-2: held for the owner's review, its stop confirmed and its folder kept; asked again after a wait.
+        await this.put({ ...entry, phase: "held", after_stop: after, outcome: "publish_held", publish_review: published.held, retry_at: this.now() + ASK_AGAIN_MS });
+        return;
+      }
       if (published !== null && "wait" in published) {
         // Held, its stop already confirmed and its folder and commit kept, and tried again after a wait, for at most
         // an hour from its first failure; then released (the ruling on #462's held publications).
@@ -1188,10 +1292,10 @@ export class Lifecycle {
         if (this.now() - since >= PUBLISH_RETRY_MS) {
           this.log("lifecycle.publish", "given_up", entry, { code: "repo_publish_failed" });
           this.deps.repository?.forget(entry.workspace_id, entry.task_id);
-          await this.giveUp({ ...base, publish_since: null, retry_at: null }, "accepted", "repo_publish_failed");
+          await this.giveUp({ ...base, publish_since: null, publish_review: null, retry_at: null }, "accepted", "repo_publish_failed");
           return;
         }
-        await this.put({ ...entry, phase: "held", after_stop: after, outcome: published.wait, publish_since: since, retry_at: this.now() + WAIT_MS });
+        await this.put({ ...entry, phase: "held", after_stop: after, outcome: published.wait, publish_since: since, publish_review: this.current(entry).publish_review ?? null, retry_at: this.now() + WAIT_MS });
         return;
       }
       if (published === null) return;
@@ -1202,10 +1306,10 @@ export class Lifecycle {
       if (consumed?.repository_id && !(pub && pub.repository_id === consumed.repository_id && (published.outcome === "published" || pub.commit === consumed.base_commit))) {
         this.forgetWords(keyOf(entry.workspace_id, entry.task_id));
         this.log("lifecycle.submit", "nothing_to_submit", entry, { code: "run_no_changes" });
-        await this.giveUp({ ...base, publish_since: null, retry_at: null, published: pub }, "accepted", "run_no_changes");
+        await this.giveUp({ ...base, publish_since: null, publish_review: null, retry_at: null, published: pub }, "accepted", "run_no_changes");
         return;
       }
-      await this.put({ ...base, phase: "finished", publish_since: null, retry_at: null, ran_hash: consumed?.input_hash ?? null, published: pub, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome, submission: owedSubmission() });
+      await this.put({ ...base, phase: "finished", publish_since: null, publish_review: null, retry_at: null, ran_hash: consumed?.input_hash ?? null, published: pub, outcome: published.outcome === "succeeded" ? entry.outcome : published.outcome, submission: owedSubmission() });
     }
     else if (after.kind === "release") {
       this.forgetWords(keyOf(entry.workspace_id, entry.task_id));

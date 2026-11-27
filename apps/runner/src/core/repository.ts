@@ -256,9 +256,14 @@ export function renewDue(access: RepoAccess, now: number): boolean {
   return now >= access.expires_at - RENEW_BEFORE_MS;
 }
 
-/** GitHub's own answer for the repository, held to the owner's scope by its numeric ID. Answers its default branch. */
-export function readRepository(answer: unknown, scope: RepoScope, task_id: string): { default_branch: string } {
-  if (!isObj(answer)) throw new RepoPathError("repository_unreadable");
+/**
+ * GitHub's own answer for the repository, held to the owner's scope by its numeric ID. Answers its default branch, and
+ * whether it is public, from GitHub's `private` field (F-2 of M7's security review): an answer without a boolean there is
+ * unreadable, so a visibility Runner can't read never counts as private. Podster's `get_repo_access` names no visibility,
+ * so this read, made with the broker's token before every publication, is where Runner learns it.
+ */
+export function readRepository(answer: unknown, scope: RepoScope, task_id: string): { default_branch: string; public: boolean } {
+  if (!isObj(answer) || typeof answer.private !== "boolean") throw new RepoPathError("repository_unreadable");
   if (answer.id !== scope.provider_repo_id) throw new RepoPathError("repository_id_mismatch");
   if (!isFullName(answer.full_name) || !sameName(answer.full_name, scope.full_name)) throw new RepoPathError("repository_renamed");
   if (answer.archived !== false || answer.disabled === true) throw new RepoPathError("repository_archived");
@@ -266,7 +271,7 @@ export function readRepository(answer: unknown, scope: RepoScope, task_id: strin
   if (!isBranch(branch)) throw new RepoPathError("default_branch_invalid");
   // The task branch can never be the default branch, or sit beside it under Runner's prefix.
   if (branch === taskBranch(task_id) || branch.startsWith(BRANCH_PREFIX) || `${branch}/`.startsWith(BRANCH_PREFIX)) throw new RepoPathError("default_branch_invalid");
-  return { default_branch: branch };
+  return { default_branch: branch, public: !answer.private };
 }
 
 /**

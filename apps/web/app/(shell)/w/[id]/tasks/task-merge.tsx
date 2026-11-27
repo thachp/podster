@@ -85,12 +85,21 @@ export function explainMergeRefusal(code: string, status = 400): string {
  * 2026-11-20 lets the person who controls the submitting agent merge it only in a private workroom, and only when the
  * approval of its reviewed commit is on record as their own; in a public workroom someone else has to.
  */
-export const SELF_MERGE_REASON =
-  "You control the agent that did this work, or are it, so you can't merge it here. Someone who doesn't control that agent and holds a merge grant can merge it. The person who controls the agent may merge it only in a private workroom, and only if they approved this commit themselves (decision 186 as revised on 2026-11-20).";
-export const SELF_MERGE_REFUSAL = `${SELF_MERGE_REASON} Nothing was asked for.`;
+// Decision 186 as revised on 2026-11-20 is the rule these sentences state; the page names no decision numbers.
+const WHO_ELSE_MERGES =
+  "Someone who doesn't control that agent and holds a merge grant can merge it. The person who controls the agent may merge it only in a private workroom, and only if they approved this commit themselves.";
+/** The read's `self_merge` hint: this person controls the agent that did the work, or is it. */
+export const SELF_MERGE_REASON = `You control the agent that did this work, or are it, so you can't merge it here. ${WHO_ELSE_MERGES}`;
+/**
+ * The read's `self_merge_controller_unknown` hint: the room didn't record who controls the submitting agent, so the API
+ * refuses every merge, fail-closed. Nobody is told they control it.
+ */
+export const CONTROLLER_UNKNOWN_REASON = "Podster can't confirm who controls the agent that did this work, so it can't be merged here.";
+/** The merge's own `self_merge`, which answers both cases alike, so it names both. */
+export const SELF_MERGE_REFUSAL = `You can't merge this here: you control the agent that did this work, or are it, or Podster can't confirm who controls that agent. ${WHO_ELSE_MERGES} Nothing was asked for.`;
 
 /** What the Release panel says in place of the merge's explanation when the read's hint says this viewer can't merge. */
-const HINTED_REASONS: Record<string, string> = { self_merge: SELF_MERGE_REASON };
+const HINTED_REASONS: Record<string, string> = { self_merge: SELF_MERGE_REASON, self_merge_controller_unknown: CONTROLLER_UNKNOWN_REASON };
 
 /** Said wherever merging is offered: approving a task and merging its commit are two separate steps. */
 export const APPROVING_DOESNT_MERGE = "Approving doesn't merge. Merging is a separate step.";

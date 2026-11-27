@@ -1935,35 +1935,88 @@ fn the_self_merge_hint_matches_the_merge_decision_for_a_person() {
             &review,
         );
         assert_eq!(
-            self_merge_hint(&person, &task, &submitter, &review),
+            self_merge_hint(&person, &task, &submitter, &review).is_some(),
             decided == Err(RepoDenial::SelfMerge),
             "{name}"
         );
     }
-    assert!(self_merge_hint(
-        &caller("p-sub", Person, Role::Member),
-        &task,
-        &mine,
-        &reviewed_by("p-sub", false)
-    ));
-    assert!(!self_merge_hint(
-        &caller("p-sub", Person, Role::Member),
-        &task,
-        &mine,
-        &reviewed_by("p-sub", true)
-    ));
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Member),
+            &task,
+            &mine,
+            &reviewed_by("p-sub", false)
+        ),
+        Some(SelfMergeHint::Controls)
+    );
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::Member),
+            &task,
+            &mine,
+            &reviewed_by("p-sub", true)
+        ),
+        None
+    );
+    // The assignee, as a person, is told it's their own work.
+    assert_eq!(
+        self_merge_hint(
+            &caller("asg", Person, Role::Member),
+            &task,
+            &mine,
+            &reviewed_by("rev", false)
+        ),
+        Some(SelfMergeHint::Controls)
+    );
+    // A submitter whose controlling person the room didn't record: everyone is refused, fail-closed, and told that
+    // nobody can confirm who controls it, not that they do.
+    let unknown = Actor {
+        id: "asg",
+        person: None,
+    };
+    for who in ["rev", "p-sub", "stranger"] {
+        let person = caller(who, Person, Role::Member);
+        assert_eq!(
+            self_merge_hint(&person, &task, &unknown, &reviewed_by("rev", false)),
+            Some(SelfMergeHint::ControllerUnknown),
+            "{who}"
+        );
+        assert_eq!(
+            authorize_merge(
+                &person,
+                Some(who),
+                &task,
+                &unknown,
+                &standing(Some(&grant("rev", GrantAction::Merge))),
+                &reviewed_by(who, true)
+            ),
+            Err(RepoDenial::SelfMerge),
+            "{who}"
+        );
+    }
+    assert_eq!(SelfMergeHint::Controls.code(), "self_merge");
+    assert_eq!(
+        SelfMergeHint::ControllerUnknown.code(),
+        "self_merge_controller_unknown"
+    );
     // An agent's controlling person comes from its credential, which a read doesn't have: no hint either way.
-    assert!(!self_merge_hint(
-        &caller("sibling", Agent, Role::Member),
-        &task,
-        &mine,
-        &SelfReview::default()
-    ));
+    assert_eq!(
+        self_merge_hint(
+            &caller("sibling", Agent, Role::Member),
+            &task,
+            &mine,
+            &SelfReview::default()
+        ),
+        None
+    );
     // Nor for someone not in the room.
-    assert!(!self_merge_hint(
-        &caller("p-sub", Person, Role::None),
-        &task,
-        &mine,
-        &SelfReview::default()
-    ));
+    assert_eq!(
+        self_merge_hint(
+            &caller("p-sub", Person, Role::None),
+            &task,
+            &mine,
+            &SelfReview::default()
+        ),
+        None
+    );
 }

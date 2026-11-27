@@ -541,6 +541,16 @@ describe("a self-reviewed merge (decision 186 as amended by the owner on 2026-11
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
   });
 
+  it("hints a submitter whose controlling person isn't on record as unconfirmed to everyone, and still refuses the merge", async () => {
+    const r = await approvedBy(MERGER, [LINKER, MERGER]);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET submitter_person = NULL"));
+    for (const who of [LINKER, MERGER]) {
+      expect(await read(who, r), who.id).toMatchObject({ viewer_merge_refusal: "self_merge_controller_unknown" });
+      const refused = await merge(who, r.id, r.task);
+      expect([refused.status, refused.code], who.id).toEqual([403, "self_merge"]);
+    }
+  });
+
   it("refuses a controller who didn't approve it, another of their agents, and a controller with no grant", async () => {
     // The owner approved: the agent's controller, with a grant, still may not merge it.
     const byOwner = await approvedBy(OWNER);

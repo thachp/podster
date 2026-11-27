@@ -368,21 +368,52 @@ fn refuses_self_merge(
         || task.assignee.as_deref() == Some(caller.id.as_str())
 }
 
+/// Why the task read's hint says a person can't merge: both are answered `self_merge` by the merge itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfMergeHint {
+    /// `self_merge`: the person controls the agent that submitted the work, or is the task's assignee.
+    Controls,
+    /// `self_merge_controller_unknown`: the room didn't record who controls the submitter, so nobody can be shown
+    /// independent of it and every merge is refused, fail-closed. Its own value so the page doesn't tell everyone they
+    /// control the agent.
+    ControllerUnknown,
+}
+
+impl SelfMergeHint {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            SelfMergeHint::Controls => "self_merge",
+            SelfMergeHint::ControllerUnknown => "self_merge_controller_unknown",
+        }
+    }
+}
+
 /// A display hint for the task read (2026-11-27): whether a merge this person asked for now would be refused
-/// `self_merge`, by the same rule [`authorize_merge`] applies, so the web can say who may merge instead of offering a
-/// button that can only be refused. A person only, who is their own controlling person: an agent's controlling person
-/// comes from its credential at the request, which a read doesn't have, so it gets `false`, which says nothing. It reads
-/// nothing about the grant, the review, the repository or the commit, so `false` never means a merge would go through,
-/// and it never authorizes: the merge decides again from the room's rows when asked.
+/// `self_merge`, by the same rule [`authorize_merge`] applies, and why, so the web can say who may merge instead of
+/// offering a button that can only be refused. A person only, who is their own controlling person: an agent's
+/// controlling person comes from its credential at the request, which a read doesn't have, so it gets `None`, which says
+/// nothing. It reads nothing about the grant, the review, the repository or the commit, so `None` never means a merge
+/// would go through, and it never authorizes: the merge decides again from the room's rows when asked.
 pub fn self_merge_hint(
     caller: &Caller,
     task: &Task,
     submitter: &Actor,
     review: &SelfReview,
-) -> bool {
-    caller.kind == PrincipalKind::Person
-        && caller.role != Role::None
-        && refuses_self_merge(caller, Some(caller.id.as_str()), task, submitter, review)
+) -> Option<SelfMergeHint> {
+    if caller.kind != PrincipalKind::Person
+        || caller.role == Role::None
+        || !refuses_self_merge(caller, Some(caller.id.as_str()), task, submitter, review)
+    {
+        return None;
+    }
+    let assignee = task.assignee.as_deref() == Some(caller.id.as_str());
+    let controls = caller.id == submitter.id || submitter.person == Some(caller.id.as_str());
+    Some(if submitter.person.is_none() && !assignee && !controls {
+        SelfMergeHint::ControllerUnknown
+    } else {
+        SelfMergeHint::Controls
+    })
 }
 
 /// Whether the caller's merge would be a self-reviewed one: decision 186 as amended by the owner on 2026-11-20 ("Yes, as

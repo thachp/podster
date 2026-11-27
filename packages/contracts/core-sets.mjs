@@ -80,6 +80,9 @@ export function coreSets(root) {
     hostnameRequestStates: requestStates,
     // What a room's owner is told of a hostname's setup (2026-11-25): a fixed word, never a provider's own text.
     hostnameSetupStatuses: enumNames(requests, "HostnameSetup", "name"),
+    // Cloudflare's custom hostname statuses the room keeps and shows (the security review of PR #630): a fixed list,
+    // anything else kept as `unknown`.
+    providerStatuses: stringArray(requests, "PROVIDER_STATUSES"),
     openHostnameRequestStates: subset(requests, "HostnameRequestState", "is_open", requestStates),
     environment: constant(release, "ENVIRONMENT"),
     releaseIdPrefix: constant(release, "RELEASE_ID_PREFIX"),
@@ -89,6 +92,15 @@ export function coreSets(root) {
     // A task's prompt inputs (M7 step 4): what its provenance names, and what the room records an author for.
     promptInputs: enumNames(read(root, "crates/core/src/task_inputs.rs"), "PromptInput", "name"),
   };
+}
+
+/** A `pub const NAME: [&str; N] = ["a", "b"];` in core's source, in order. */
+export function stringArray(source, name) {
+  const body = source.match(new RegExp(`pub const ${name}: \\[&str; (\\d+)\\] = \\[([^\\]]*)\\];`));
+  if (!body) throw new Error(`${name}: no such constant, as one array of plain literals`);
+  const values = [...body[2].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  if (values.length !== Number(body[1])) throw new Error(`${name}: ${values.length} values read, not ${body[1]}`);
+  return values;
 }
 
 /** The values of a `column … CHECK (column IN ('a', 'b'))` in the room's migrations, in order. The table may be made `IF NOT EXISTS`. */

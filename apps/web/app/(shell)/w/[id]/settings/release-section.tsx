@@ -9,7 +9,7 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
-import { type AppHostname, CUSTOM_DOMAIN_UNAVAILABLE, dayOf, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, timeOf, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
+import { type AppHostname, checkable, CUSTOM_DOMAIN_UNAVAILABLE, dayOf, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, timeOf, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
 import { DeployGrants, type DeployGrantsProps } from "./deploy-grants";
 import { StateBadge } from "./state-badge";
 
@@ -237,7 +237,8 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
     clear();
     setFound(null);
     setChecking(true);
-    await send<AppHostname>(`${base}/check`, {}, () => null, { explain: explainReleaseRefusal, onOk: (data) => setFound(describeCheck(data.request)) });
+    const before = request?.setup_status;
+    await send<AppHostname>(`${base}/check`, {}, () => null, { explain: explainReleaseRefusal, onOk: (data) => setFound(describeCheck(data.request, before)) });
     setChecking(false);
   };
   const remove = () => send(base, {}, request?.state === "pending" ? "The request is dropped." : "This workroom has stopped using the name. Podster is removing it.", { method: "DELETE", explain: explainReleaseRefusal });
@@ -259,15 +260,15 @@ function CustomDomain({ roomId, request, controls, requestedByName }: { roomId: 
               {visibleText(request.hostname)}
             </Row>
             {request.state === "pending" ? <Row term="Ends">{`${new Date(request.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC, if the TXT record isn't read by then`}</Row> : null}
-            {request.state === "pending" ? <Row term="Last checked">{request.checked_at === null ? "Not yet" : timeOf(request.checked_at)}</Row> : null}
-            {request.state === "pending" && request.next_check_at !== null ? <Row term="Next check">{timeOf(request.next_check_at)}</Row> : null}
+            {checkable(request) ? <Row term="Last checked">{request.checked_at === null ? "Not yet" : timeOf(request.checked_at)}</Row> : null}
+            {checkable(request) && request.next_check_at !== null ? <Row term="Next check">{timeOf(request.next_check_at)}</Row> : null}
             <Row term="Asked on">{byWhom(dayOf(request.requested_at), requestedByName)}</Row>
           </dl>
           {request.state === "pending" || request.state === "claimed" ? <DnsRecords request={request} /> : null}
         </>
       ) : null}
 
-      {controls && request?.state === "pending" ? (
+      {controls && checkable(request) ? (
         <Button type="button" variant="outline" size="sm" className={MOBILE_TARGET} disabled={retrying || checking} onClick={() => void checkNow()}>
           {checking ? "Checking…" : "Check now"}
         </Button>

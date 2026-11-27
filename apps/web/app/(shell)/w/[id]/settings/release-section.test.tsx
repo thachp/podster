@@ -22,6 +22,7 @@ const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
   end_reason: null,
   checked_at: null,
   next_check_at: Date.UTC(2026, 10, 12),
+  provider_status: null,
   ...over,
 });
 const ready: Prerequisites = { isPublic: true, repositoryReady: true };
@@ -272,7 +273,26 @@ describe("the custom domain", () => {
     expect(screen.queryByText(DNS_DELAY_NOTE)).toBeNull();
   });
 
-  it("offers Check now only on a pending request, and only to who may change release", () => {
+  it("Waiting for DNS: shows when Podster last read Cloudflare and next will, and Check now says what Cloudflare reported, by its code", async () => {
+    const checked = Date.UTC(2026, 10, 13, 8, 0, 0);
+    const waiting = (over: Partial<HostnameRequest> = {}) => request({ state: "claimed", setup_status: "provider_pending", checked_at: checked, next_check_at: checked + 120_000, provider_status: "pending", ...over });
+    show(on(), { hostname: { request: waiting() } });
+    expect(screen.getByText("Waiting for DNS")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-13 08:00:00 UTC")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-13 08:02:00 UTC")).toBeInTheDocument();
+    reply = { status: 200, body: { request: waiting({ checked_at: checked + 60_000, provider_status: "blocked" }) } };
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText("Cloudflare hasn't reported the name active yet. Its status: blocked. Podster keeps checking.")).toBeInTheDocument();
+    // The note on DNS delay is about the TXT record, which was read already.
+    expect(screen.queryByText(DNS_DELAY_NOTE)).toBeNull();
+    expect(sent[0]).toMatchObject({ method: "POST", url: "/api/v1/workspaces/ws_1/app-hostname/check", body: {} });
+    reply = { status: 200, body: { request: waiting({ setup_status: "active", provider_status: "active", next_check_at: null }) } };
+    await userEvent.click(screen.getByRole("button", { name: "Check now" }));
+    expect(await screen.findByText("Cloudflare reports the name active. The app is served here while a release is served.")).toBeInTheDocument();
+    expect(sent).toHaveLength(2);
+  });
+
+  it("offers Check now only while waiting for proof or for Cloudflare, and only to who may change release", () => {
     const first = show(on(), { hostname: { request: request() }, mayConfigure: false });
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
     first.unmount();
@@ -280,6 +300,16 @@ describe("the custom domain", () => {
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
     expect(screen.queryByText("Last checked")).toBeNull();
     second.unmount();
+    const ending = show(on(), { hostname: { request: request({ state: "ending", setup_status: "ended", next_check_at: null }) } });
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
+    ending.unmount();
+    const dns = show(on(), { hostname: { request: request({ state: "claimed", setup_status: "provider_pending", next_check_at: null }) } });
+    expect(screen.getByRole("button", { name: "Check now" })).toBeInTheDocument();
+    expect(screen.getByText("Last checked")).toBeInTheDocument();
+    dns.unmount();
+    const notAllowed = show(on(), { hostname: { request: request({ state: "claimed", setup_status: "provider_pending" }) }, mayConfigure: false });
+    expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
+    notAllowed.unmount();
     show(on(), { hostname: { request: request() }, archived: true });
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
   });
@@ -290,6 +320,11 @@ describe("the custom domain", () => {
     expect(describeCheck(request({ state: "refused", end_reason: "hostname_claimed" }))).toEqual({ text: "Podster read your TXT record, but the name couldn't be claimed. Another workroom holds this name.", notFound: false });
     expect(describeCheck(request({ state: "expired", end_reason: "hostname_request_expired" })).notFound).toBe(false);
     expect(describeCheck(null).notFound).toBe(false);
+    // From waiting for Cloudflare (2026-11-27): active, still waiting by Cloudflare's code, or ended with its reason.
+    const claimed = { state: "claimed" as const, setup_status: "provider_pending" as const };
+    expect(describeCheck(request({ ...claimed, setup_status: "active" }), "provider_pending").text).toMatch(/^Cloudflare reports the name active\./);
+    expect(describeCheck(request({ ...claimed, provider_status: null }), "provider_pending")).toEqual({ text: "Cloudflare hasn't reported the name active yet. Podster keeps checking.", notFound: false });
+    expect(describeCheck(request({ state: "ending", setup_status: "ended", end_reason: "hostname_moved" }), "provider_pending").text).toBe("Cloudflare's answer ended this workroom's use of the name. The name was moved away from Podster.");
     expect(explainReleaseRefusal("hostname_not_pending")).toMatch(/Nothing changed\.$/);
   });
 

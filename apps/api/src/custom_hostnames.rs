@@ -30,7 +30,9 @@
 //! Logs carry nothing from this module: no hostname, no ID, no zone and no token.
 use crate::{secret, Setting};
 use futures_util::future::{select, Either};
-use podster_core::hostname_requests::{provider_id_form, provider_status_form, ProviderRead};
+use podster_core::hostname_requests::{
+    known_provider_status, provider_id_form, provider_status_form, ProviderRead,
+};
 use serde_json::{json, Value};
 use std::time::Duration;
 use worker::*;
@@ -153,13 +155,16 @@ async fn call(
     answer
 }
 
-/// One entry of Cloudflare's answer, as `(id, hostname, status)`, or `None` if any of the three isn't of its form.
+/// One entry of Cloudflare's answer, as `(id, hostname, status)`, or `None` if any of the three isn't of its form. The
+/// status is kept only as one of core's fixed set (`known_provider_status`): a well-formed status not in it is `unknown`,
+/// never the string Cloudflare sent (the security review of PR #630).
 fn entry(value: &Value) -> Option<(String, String, String)> {
     let id = value["id"].as_str().filter(|id| provider_id_form(id))?;
     let hostname = value["hostname"].as_str()?;
     let status = value["status"]
         .as_str()
-        .filter(|status| provider_status_form(status))?;
+        .filter(|status| provider_status_form(status))
+        .map(known_provider_status)?;
     Some((id.to_owned(), hostname.to_owned(), status.to_owned()))
 }
 

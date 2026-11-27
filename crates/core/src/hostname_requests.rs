@@ -343,29 +343,37 @@ pub fn request_rate_allows(made_in_last_hour: usize) -> bool {
 /// **Proposed.** How long after a request's last look "Check now" is refused (2026-11-27).
 pub const CHECK_NOW_INTERVAL_MS: i64 = 30 * 1000;
 
-/// Whether a person's "Check now" on the room's request goes ahead (2026-11-27). It only moves the request's next look
-/// for its challenge, or its next ask of the hostname's object, to now; the request's states and the proof's rule are
-/// unchanged. The rate is held on the request's last look, the job's or a "Check now", which "Check now" records before
-/// it looks: so two at once can't both go, and a look the job made a moment ago isn't made again.
+/// Whether a person's "Check now" on the room's request goes ahead (2026-11-27). It only moves the job's next step for
+/// the request to now: while `proof_pending`, its look for the challenge or its ask of the hostname's object; while
+/// `provider_pending` (extended 2026-11-27), its read of the custom hostname at Cloudflare. The request's states, the
+/// proof's rule and what a read means are unchanged. The rate is held on the request's last look (`checked_at`), the
+/// job's or a "Check now", which "Check now" records before it looks: so two at once can't both go, and a look the job
+/// made a moment ago isn't made again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckNow {
     /// The request's next look is due now.
     Go,
-    /// The room has no open request, or it isn't `pending`: there is no proof left to look for.
+    /// The room has no open request, or its setup is waiting on neither the proof nor Cloudflare: there is nothing
+    /// left to look for. Its code stays `hostname_not_pending`.
     NotPending,
     /// The request was last looked at less than [`CHECK_NOW_INTERVAL_MS`] ago. The wait is in whole seconds,
     /// at least one, and never more than the interval, so a clock that ran backwards can't hold it longer.
     TooSoon { retry_after_secs: i64 },
 }
 
-/// The decision for "Check now": `state` is the room's open request's, if it has one, and `last_checked_at` when that
-/// request was last looked at.
-pub fn check_now(
-    state: Option<HostnameRequestState>,
-    last_checked_at: Option<i64>,
-    now: i64,
-) -> CheckNow {
-    if state != Some(HostnameRequestState::Pending) {
+/// The setups "Check now" goes for: waiting for the room's proof, and waiting for Cloudflare to read the custom
+/// hostname `active` (2026-11-27).
+pub fn checkable(setup: HostnameSetup) -> bool {
+    matches!(
+        setup,
+        HostnameSetup::ProofPending | HostnameSetup::ProviderPending
+    )
+}
+
+/// The decision for "Check now": `setup` is the room's open request's ([`setup_status`]), if it has one, and
+/// `last_checked_at` when that request was last looked at.
+pub fn check_now(setup: Option<HostnameSetup>, last_checked_at: Option<i64>, now: i64) -> CheckNow {
+    if !setup.is_some_and(checkable) {
         return CheckNow::NotPending;
     }
     let Some(last) = last_checked_at else {
@@ -558,6 +566,39 @@ pub fn provider_status_form(status: &str) -> bool {
     (1..=32).contains(&status.len()) && status.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
 }
 
+/// **Assumed, from Cloudflare's documented list of custom hostname statuses; no spike has seen most of them.** The only
+/// status codes the room keeps or shows (2026-11-27, the security review of PR #630). Anything else Cloudflare sends,
+/// well-formed or not, is kept and shown as `unknown`, never as itself. Only the hostname's own `status` is read; no SSL
+/// status is kept.
+pub const PROVIDER_STATUSES: [&str; 17] = [
+    "active",
+    "pending",
+    "active_redeploying",
+    "moved",
+    "pending_deletion",
+    "deleted",
+    "pending_blocked",
+    "pending_migration",
+    "pending_provisioned",
+    "test_pending",
+    "test_active",
+    "test_active_apex",
+    "test_blocked",
+    "test_failed",
+    "provisioned",
+    "blocked",
+    "unknown",
+];
+
+/// A status Cloudflare gave, as the room keeps it: one of [`PROVIDER_STATUSES`], or `unknown` for anything else.
+pub fn known_provider_status(status: &str) -> &'static str {
+    PROVIDER_STATUSES
+        .iter()
+        .copied()
+        .find(|known| *known == status)
+        .unwrap_or("unknown")
+}
+
 #[cfg(test)]
 mod tests {
     use super::HostnameRequestState;
@@ -604,26 +645,52 @@ mod tests {
     }
 
     #[test]
-    fn check_now_goes_only_for_a_pending_request() {
-        use super::{check_now, CheckNow};
+    fn check_now_goes_only_while_waiting_for_the_proof_or_for_cloudflare() {
+        use super::{check_now, setup_status, CheckNow, HostnameSetup};
         assert_eq!(check_now(None, None, 1_000), CheckNow::NotPending);
-        for state in HostnameRequestState::ALL {
-            let expected = if state == HostnameRequestState::Pending {
+        for setup in HostnameSetup::ALL {
+            let expected = if matches!(
+                setup,
+                HostnameSetup::ProofPending | HostnameSetup::ProviderPending
+            ) {
                 CheckNow::Go
             } else {
                 CheckNow::NotPending
             };
             assert_eq!(
-                check_now(Some(state), None, 1_000),
+                check_now(Some(setup), None, 1_000),
                 expected,
                 "{}",
-                state.name()
+                setup.name()
             );
-            // Not pending is the answer whatever the rate says.
-            if state != HostnameRequestState::Pending {
+            // Neither waiting is the answer whatever the rate says; either waiting is held by it.
+            let soon = check_now(Some(setup), Some(1_000), 1_000);
+            if expected == CheckNow::Go {
                 assert_eq!(
-                    check_now(Some(state), Some(1_000), 1_000),
-                    CheckNow::NotPending
+                    soon,
+                    CheckNow::TooSoon {
+                        retry_after_secs: 30
+                    },
+                    "{}",
+                    setup.name()
+                );
+            } else {
+                assert_eq!(soon, CheckNow::NotPending, "{}", setup.name());
+            }
+        }
+        // Each request state, as the room reads it: pending, and claimed until Cloudflare reads it active.
+        for state in HostnameRequestState::ALL {
+            for active in [false, true] {
+                let expected = match state {
+                    HostnameRequestState::Pending => CheckNow::Go,
+                    HostnameRequestState::Claimed if !active => CheckNow::Go,
+                    _ => CheckNow::NotPending,
+                };
+                assert_eq!(
+                    check_now(Some(setup_status(state, active)), None, 1_000),
+                    expected,
+                    "{} active={active}",
+                    state.name()
                 );
             }
         }
@@ -632,47 +699,71 @@ mod tests {
     #[test]
     fn check_now_is_refused_for_thirty_seconds_after_the_last() {
         use super::{check_now, CheckNow, CHECK_NOW_INTERVAL_MS};
-        let pending = Some(HostnameRequestState::Pending);
         let last = 1_000_000;
-        assert_eq!(CHECK_NOW_INTERVAL_MS, 30_000);
-        assert_eq!(
-            check_now(pending, Some(last), last),
-            CheckNow::TooSoon {
-                retry_after_secs: 30
-            }
-        );
-        assert_eq!(
-            check_now(pending, Some(last), last + 1),
-            CheckNow::TooSoon {
-                retry_after_secs: 30
-            }
-        );
-        assert_eq!(
-            check_now(pending, Some(last), last + 29_001),
-            CheckNow::TooSoon {
-                retry_after_secs: 1
-            }
-        );
-        assert_eq!(
-            check_now(pending, Some(last), last + 29_999),
-            CheckNow::TooSoon {
-                retry_after_secs: 1
-            }
-        );
-        assert_eq!(check_now(pending, Some(last), last + 30_000), CheckNow::Go);
-        assert_eq!(check_now(pending, Some(last), last + 90_000), CheckNow::Go);
-        // A clock that ran backwards holds it no longer than the interval.
-        assert_eq!(
-            check_now(pending, Some(last), last - 3_600_000),
-            CheckNow::TooSoon {
-                retry_after_secs: 30
-            }
-        );
-        assert_eq!(
-            check_now(pending, Some(i64::MAX), i64::MIN),
-            CheckNow::TooSoon {
-                retry_after_secs: 30
-            }
-        );
+        for pending in [
+            Some(super::HostnameSetup::ProofPending),
+            Some(super::HostnameSetup::ProviderPending),
+        ] {
+            assert_eq!(CHECK_NOW_INTERVAL_MS, 30_000);
+            assert_eq!(
+                check_now(pending, Some(last), last),
+                CheckNow::TooSoon {
+                    retry_after_secs: 30
+                }
+            );
+            assert_eq!(
+                check_now(pending, Some(last), last + 1),
+                CheckNow::TooSoon {
+                    retry_after_secs: 30
+                }
+            );
+            assert_eq!(
+                check_now(pending, Some(last), last + 29_001),
+                CheckNow::TooSoon {
+                    retry_after_secs: 1
+                }
+            );
+            assert_eq!(
+                check_now(pending, Some(last), last + 29_999),
+                CheckNow::TooSoon {
+                    retry_after_secs: 1
+                }
+            );
+            assert_eq!(check_now(pending, Some(last), last + 30_000), CheckNow::Go);
+            assert_eq!(check_now(pending, Some(last), last + 90_000), CheckNow::Go);
+            // A clock that ran backwards holds it no longer than the interval.
+            assert_eq!(
+                check_now(pending, Some(last), last - 3_600_000),
+                CheckNow::TooSoon {
+                    retry_after_secs: 30
+                }
+            );
+            assert_eq!(
+                check_now(pending, Some(i64::MAX), i64::MIN),
+                CheckNow::TooSoon {
+                    retry_after_secs: 30
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_status_is_kept_only_from_the_fixed_set() {
+        use super::{known_provider_status, provider_status_form, PROVIDER_STATUSES};
+        for status in PROVIDER_STATUSES {
+            assert_eq!(known_provider_status(status), status);
+            assert!(provider_status_form(status), "{status}");
+        }
+        for odd in [
+            "",
+            "Active",
+            "active ",
+            "pending_validation_x",
+            "verification failed: see https://example.com",
+            &"a".repeat(32),
+            &"pending".repeat(100),
+        ] {
+            assert_eq!(known_provider_status(odd), "unknown", "{odd}");
+        }
     }
 }

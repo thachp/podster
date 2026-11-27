@@ -1,6 +1,6 @@
 // The reader of core's closed sets, checked on sources of its own: it must refuse what it can't read whole, so a
 // variant added to the rules without a name, or left out of `ALL`, can't pass as "no drift".
-import { columnCheck, constant, coreSets, enumNames, subset } from "./core-sets.mjs";
+import { columnCheck, constant, coreSets, enumNames, stringArray, subset } from "./core-sets.mjs";
 
 let failed = 0;
 const check = (ok, what) => { console.log(`${ok ? "ok  " : "FAIL"} ${what}`); if (!ok) failed++; };
@@ -53,6 +53,11 @@ check(throws(() => subset(asks("matches!(self, Colour::Red)"), "Colour", "cold",
 // The real sources read whole.
 const real = coreSets(new URL("../../", import.meta.url));
 check(real.releaseStatusStates.length === real.releaseStates.length && !real.releaseStatusStates.includes("live") && real.releaseStatusStates.includes("awaiting_confirmation") && real.releaseWaitings.join() === "upload_cap,read_budget,in_flight,settling,idle" && real.releaseStates.length >= 10 && real.unpublishCauses.length >= 11 && real.hostnameRequestStates.length === 6 && real.hostnameSetupStatuses.join() === "proof_pending,provider_pending,active,ended,failed" && real.openHostnameRequestStates.length === 3 && real.servingReleaseStates.join() === "live,served" && real.holdingHostnameClaimStates.join() === "live,ending", "core's own sets are read");
+
+check(real.providerStatuses.includes("active") && real.providerStatuses.includes("moved") && real.providerStatuses.at(-1) === "unknown", "core's fixed provider statuses are read, ending in unknown");
+check(JSON.stringify(stringArray('pub const S: [&str; 2] = ["a", "b_c"];', "S")) === '["a","b_c"]', "a string array is read in order");
+check(throws(() => stringArray('pub const S: [&str; 3] = ["a", "b"];', "S")), "a string array whose count doesn't match is refused");
+check(throws(() => stringArray('pub const S: [&str; 1] = [NAME];', "S")), "a string array of other than plain literals is refused");
 
 if (failed) { console.error(`${failed} core-sets check(s) failed`); process.exit(1); }
 console.log("core-sets selftest passed");

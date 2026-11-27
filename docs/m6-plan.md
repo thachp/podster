@@ -869,6 +869,14 @@ The architect proposes the gate call, for the owner to review.
 - **The answer shows** `checked_at` and `next_check_at`. Workroom Settings shows them as "Last checked" and "Next check", a **Check now** button on "Waiting for proof", and what the check found. When the TXT record isn't found yet, it adds the **Proposed** note in [Release policies](spec/RELEASE-POLICIES.md#what-a-customer-should-expect): "DNS can take up to about 30 minutes to show a new record if it was added after you asked."
 - **Not shown on a deployment yet.** The API's `app-hostname.spec.ts` covers a proven request claimed by a check, the rate, the states refused and who is refused.
 
+**2026-11-27, later: Check now on "Waiting for DNS".** The owner asked the same day to extend it to a claimed request whose `setup_status` is `provider_pending`, where Podster waits for Cloudflare for SaaS to read the custom hostname `active`.
+
+- **The read is the job's own:** the committed claim's step, `claimed_upkeep` (`apps/api/src/workspace/custom_hostname.rs`), through the same Cloudflare client (`apps/api/src/custom_hostnames.rs`), recorded as the job records it. The answer is `active`, still `provider_pending`, or `ending` with Cloudflare's reason code (`hostname_moved`, `hostname_gone_at_provider`).
+- **New in the answer:** `provider_status`, Cloudflare's status code from its last read, only one of a fixed set (`podster_core::hostname_requests::PROVIDER_STATUSES`, Cloudflare's documented statuses), mapped when read; anything else is kept and shown as `unknown` (the security review of PR #630). No message text and no IDs. `next_check_at` now also gives the job's next read at Cloudflare while `provider_pending`.
+- **The rule:** `podster_core::hostname_requests::check_now` now takes the setup status and goes for `proof_pending` and `provider_pending`. Same policy, same 30 seconds from `checked_at`, which the provider read already writes, so there is no Durable Object schema step. The code for anything else stays `hostname_not_pending`.
+- **Workroom Settings** shows "Last checked", "Next check" and **Check now** on "Waiting for DNS" as well, and what Cloudflare reported.
+- **Not shown on a deployment yet.** The API's `app-hostname.spec.ts` covers pending to active through the stand-in for Cloudflare, still pending by its code, `moved` ending the claim, the rate, no provider, and who and which states are refused.
+
 ### Deployment grants in Workroom Settings, 2026-11-27
 
 **The owner found on staging on 2026-11-27 that a room's owner couldn't give an agent a deploy grant from the web app.** Workroom Settings still showed "Deployment grants: Unavailable" with fixed text written before step 6, and Team's grant form offers only push and merge, so the grant the API takes since step 6 (`grantRepositoryAction` with `deploy`) had no screen. A web app fix only: no contract, route or Rust change.

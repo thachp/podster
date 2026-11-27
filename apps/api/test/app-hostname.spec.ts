@@ -295,7 +295,9 @@ describe("Check now: a pending request's proof looked for at once (2026-11-27)",
     await rewindLook(r, 30_000);
     const second = await check(r);
     expect(second.status).toBe(200);
-    expect(second.body.request).toMatchObject({ id: request.id, state: "claimed", setup_status: "provider_pending", next_check_at: null });
+    expect(second.body.request).toMatchObject({ id: request.id, state: "claimed", setup_status: "provider_pending", provider_status: null });
+    // Now waiting for Cloudflare, "Next check" is the job's next read there (2026-11-27).
+    expect(second.body.request.next_check_at).toBeGreaterThanOrEqual(second.body.request.checked_at);
     expect(await looksAt(name)).toBe(2);
     const row = await requestRow(r);
     expect(row).toMatchObject({ state: "claimed", open: 1, end_reason: null });
@@ -306,8 +308,8 @@ describe("Check now: a pending request's proof looked for at once (2026-11-27)",
       { type: "app_hostname.claimed", actor_id: "podster" },
     ]);
     expect(await checksAsked(r)).toEqual([0, 1].map(() => ({ actor_id: r.owner.id, new_json: JSON.stringify({ request_id: request.id, state: "pending" }) })));
-    // Claimed, there is no proof left to look for.
-    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+    // Claimed, it waits for Cloudflare, which Check now also reads (2026-11-27), held by the same rate.
+    expect(refusedBy(await check(r))).toEqual([429, "hostname_check_too_soon"]);
   });
 
   it("is refused for 30 seconds after the request's last look, the job's or a check's, with Retry-After, and writes nothing", async () => {
@@ -386,6 +388,149 @@ describe("Check now: a pending request's proof looked for at once (2026-11-27)",
     expect(real.code).toBe("not_found");
     expect(await looksAt(name)).toBe(0);
     expect(await requestRow(r)).toMatchObject({ state: "pending", checked_at: null });
+    expect(await checksAsked(r)).toEqual([]);
+  });
+});
+
+describe("Check now while waiting for Cloudflare: the custom hostname read at once (2026-11-27)", () => {
+  const checkPath = (r: Room) => `${path(r)}/check`;
+  const check = (r: Room, who = r.owner) => switchedOn(() => api(who, "POST", checkPath(r), {}));
+  const checksAsked = (r: Room) => all(r.room, "SELECT new_json FROM audit_event WHERE action = 'app_hostname.check_asked' ORDER BY rowid").then((found) => found.map((row: any) => JSON.parse(row.new_json).state));
+  /** What the stand-in for Cloudflare holds of a name, and the calls it saw for it. */
+  const cloudflare = async (name: string) => (await (await fetch(`https://hostnames-fake.example.com/state?hostname=${name}`)).json()) as { held: { id: string; status: string } | null; calls: string[] };
+  const reads = async (name: string) => (await cloudflare(name)).calls.filter((call) => call === "read").length;
+  const setAtCloudflare = (name: string, status: string | null) => fetch(`https://hostnames-fake.example.com/set?hostname=${name}`, { method: "POST", body: JSON.stringify({ status }) });
+  /** Makes the request's next turn due now, and Check now's 30 seconds over: its last try a minute and a second before its last change. */
+  const due = (r: Room) => inRoom(r.room, (sql) => sql.exec("UPDATE hostname_request SET checked_at = updated_at - 61000 WHERE checked_at IS NOT NULL"));
+
+  /** A room holding a committed claim whose custom hostname the job created at Cloudflare, read `pending` there. */
+  async function waiting(org: string) {
+    const r = await room(org);
+    // Creating at Cloudflare is closed everywhere while the release path isn't complete; a test build opens one room.
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_custom_hostname_create_open (x INTEGER)"));
+    const name = newName();
+    const request = await askFor(r, name);
+    await answerWith(name, request.challenge_value);
+    await pass(r);
+    expect(await requestRow(r)).toMatchObject({ state: "claimed" });
+    await due(r);
+    await pass(r);
+    expect((await cloudflare(name)).held).toMatchObject({ status: "pending" });
+    const read = (await switchedOn(() => get(r))).body.request;
+    expect(read).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "pending" });
+    expect(read.next_check_at).toBeGreaterThanOrEqual(read.checked_at);
+    return { r, name, request };
+  }
+
+  it("reads Cloudflare at once, as the job does, and answers active once Cloudflare reads it active", async () => {
+    const { r, name, request } = await waiting("org_ah_cf_active");
+    const before = await reads(name);
+    // Still pending at Cloudflare: one read, recorded, and the answer says so by Cloudflare's code.
+    await due(r);
+    const first = await check(r);
+    expect(first.status).toBe(200);
+    expect(first.body.request).toMatchObject({ id: request.id, state: "claimed", setup_status: "provider_pending", provider_status: "pending" });
+    expect(first.body.request.next_check_at).toBeGreaterThan(first.body.request.checked_at);
+    expect(await reads(name)).toBe(before + 1);
+    // Cloudflare reads it active: the next check records that, as the job would, and answers active.
+    await setAtCloudflare(name, "active");
+    await due(r);
+    const second = await check(r, r.admin);
+    expect(second.status).toBe(200);
+    expect(second.body.request).toMatchObject({ id: request.id, state: "claimed", setup_status: "active", provider_status: "active", next_check_at: null });
+    expect(await reads(name)).toBe(before + 2);
+    expect(await inRoom(r.room, (sql) => sql.exec("SELECT provider_status FROM hostname_provider WHERE request_id = ?", request.id).toArray()[0])).toEqual({ provider_status: "active" });
+    expect((await switchedOn(() => get(r))).body.request).toMatchObject({ setup_status: "active" });
+    // Active, nothing is left to wait for.
+    await due(r);
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+    expect(await reads(name)).toBe(before + 2);
+    expect(await checksAsked(r)).toEqual(["claimed", "claimed"]);
+  });
+
+  it("shows another status by Cloudflare's code only, and a read of moved ends the claim with its reason", async () => {
+    const { r, name } = await waiting("org_ah_cf_moved");
+    await setAtCloudflare(name, "blocked");
+    await due(r);
+    const blocked = await check(r);
+    expect(blocked.body.request).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "blocked" });
+    // A status outside the fixed set is kept and shown as `unknown`, never as Cloudflare's own string.
+    const odd = "pending_new_kind_of_check";
+    await setAtCloudflare(name, odd);
+    await due(r);
+    const unknown = await check(r);
+    expect(unknown.body.request).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "unknown" });
+    const stored = () => inRoom(r.room, (sql) => sql.exec("SELECT provider_status FROM hostname_provider").toArray()[0].provider_status);
+    expect(await stored()).toBe("unknown");
+    // One too long, or not of the form, isn't read at all: what was kept stays, and the string goes nowhere.
+    for (const bad of ["x".repeat(200), "Pending: see https://example.com"]) {
+      await setAtCloudflare(name, bad);
+      await due(r);
+      const answer = await check(r);
+      expect(answer.status).toBe(200);
+      expect(answer.body.request.provider_status).toBe("unknown");
+      expect(JSON.stringify(answer.body)).not.toContain(bad);
+      expect(await stored()).toBe("unknown");
+    }
+    // A string kept before the fixed set is shown as `unknown` too.
+    await inRoom(r.room, (sql) => sql.exec("UPDATE hostname_provider SET provider_status = ?", odd));
+    const read = (await switchedOn(() => get(r))).body;
+    expect(read.request.provider_status).toBe("unknown");
+    expect(JSON.stringify(read)).not.toContain(odd);
+    await setAtCloudflare(name, "moved");
+    await due(r);
+    const moved = await check(r);
+    expect(moved.status).toBe(200);
+    expect(moved.body.request).toMatchObject({ state: "ending", setup_status: "ended", end_reason: "hostname_moved", next_check_at: null });
+    // Ending, there is nothing to check.
+    await due(r);
+    expect(refusedBy(await check(r))).toEqual([409, "hostname_not_pending"]);
+  });
+
+  it("is refused for 30 seconds after the request's last look, a check's or the job's own read, with Retry-After", async () => {
+    const { r, name } = await waiting("org_ah_cf_rate");
+    // The job's create a moment ago holds it.
+    expect(refusedBy(await check(r))).toEqual([429, "hostname_check_too_soon"]);
+    await due(r);
+    expect((await check(r)).status).toBe(200);
+    const looked = (await requestRow(r)).checked_at;
+    const after = await reads(name);
+    const refused = await check(r, r.admin);
+    expect(refusedBy(refused)).toEqual([429, "hostname_check_too_soon"]);
+    expect(Number(refused.retryAfter)).toBeGreaterThanOrEqual(1);
+    expect(Number(refused.retryAfter)).toBeLessThanOrEqual(30);
+    expect(await reads(name)).toBe(after);
+    expect((await requestRow(r)).checked_at).toBe(looked);
+    // The job's own read holds it too.
+    await due(r);
+    await pass(r);
+    expect(await reads(name)).toBe(after + 1);
+    expect(refusedBy(await check(r))).toEqual([429, "hostname_check_too_soon"]);
+    expect(await reads(name)).toBe(after + 1);
+    expect(await checksAsked(r)).toEqual(["claimed"]);
+  });
+
+  it("with no provider for custom hostnames reads nothing, records the try and still answers waiting", async () => {
+    const { r, name } = await waiting("org_ah_cf_none");
+    await inRoom(r.room, (sql) => sql.exec("CREATE TABLE test_custom_hostname_provider_off (x INTEGER)"));
+    const before = await reads(name);
+    await due(r);
+    const stale = (await requestRow(r)).checked_at;
+    const answer = await check(r);
+    expect(answer.status).toBe(200);
+    expect(answer.body.request).toMatchObject({ state: "claimed", setup_status: "provider_pending", provider_status: "pending" });
+    expect(answer.body.request.checked_at).toBeGreaterThan(stale);
+    expect(await reads(name)).toBe(before);
+  });
+
+  it("is still only for whoever may ask for the room's hostname", async () => {
+    const { r, name } = await waiting("org_ah_cf_who");
+    await due(r);
+    const before = await reads(name);
+    expect(refusedBy(await check(r, r.member))).toEqual([403, "not_allowed"]);
+    expect(refusedBy(await check(r, AGENT))).toEqual([403, "not_allowed"]);
+    expect(refusedBy(await check(r, OPERATOR))).toEqual([404, "workspace_not_found"]);
+    expect(await reads(name)).toBe(before);
     expect(await checksAsked(r)).toEqual([]);
   });
 });

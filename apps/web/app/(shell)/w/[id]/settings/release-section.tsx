@@ -9,7 +9,8 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
-import { type AppHostname, checkable, CUSTOM_DOMAIN_UNAVAILABLE, dayOf, DEPLOY_GRANTS_UNAVAILABLE, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, timeOf, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
+import { type AppHostname, checkable, CUSTOM_DOMAIN_UNAVAILABLE, dayOf, describeCheck, describeHostname, DNS_DELAY_NOTE, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, timeOf, WHAT_AN_APP_IS, type HostnameRead, type HostnameRequest, type ReleaseView } from "./release-model";
+import { DeployGrants, type DeployGrantsProps } from "./deploy-grants";
 import { StateBadge } from "./state-badge";
 
 /** A day, and who, only where they can be named. */
@@ -109,7 +110,7 @@ function DnsRecords({ request }: { request: HostnameRequest }) {
  * Every prop crosses from the server page to this client component, so each must be serializable: names arrive as
  * strings the server resolved ("you", a name, or null for nobody named), never as a function.
  */
-export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived, setByName = null, requestedByName = null }: { roomId: string; view: ReleaseView; hostname: HostnameRead | null; mayConfigure: boolean; archived: boolean; setByName?: string | null; requestedByName?: string | null }) {
+export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived, setByName = null, requestedByName = null, grants = null }: { roomId: string; view: ReleaseView; hostname: HostnameRead | null; mayConfigure: boolean; archived: boolean; setByName?: string | null; requestedByName?: string | null; grants?: Omit<DeployGrantsProps, "roomId"> | null }) {
   const commands = useCommands(null);
   const { send, retrying } = commands;
   const after = useRef<HTMLDivElement>(null);
@@ -158,12 +159,6 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
         </Row>
         {config.default_host ? <Row term="Live">Not shown here. An address is live only once a release is served there.</Row> : null}
         <Row term="Last changed">{config.updated_at === null ? "Never" : byWhom(dayOf(config.updated_at), setByName)}</Row>
-        <Row term="Deployment grants">
-          <span className="flex flex-wrap items-center gap-2">
-            <StateBadge label="Unavailable" tone="neutral" />
-            <span>{DEPLOY_GRANTS_UNAVAILABLE}</span>
-          </span>
-        </Row>
       </dl>
 
       {controls && view.state === "not-configured" ? (
@@ -204,6 +199,8 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
       ) : null}
       {mayConfigure && archived ? <p className="text-sm text-muted-foreground">This workroom is archived, so release can&apos;t be changed.</p> : null}
       {!mayConfigure ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can change release.</p> : null}
+
+      {grants ? <DeployGrants roomId={roomId} {...grants} /> : null}
 
       <h3 className="pt-2 font-medium">Custom domain</h3>
       {hostname === "failed" ? <ReadFailure /> : null}

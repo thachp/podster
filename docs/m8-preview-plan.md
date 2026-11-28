@@ -488,6 +488,8 @@ New rows only; M6's stand (`docs/m6-plan.md:2821-2850`; `docs/security/m6-review
 | Q11 | A new dispatch namespace, a ticket signing key and the content Worker's new configuration | **Yes;** the owner's cloud and secret steps, done by a wizard | Reuse the production namespace | Decided, as recommended: [decision 258](spec/PRODUCT.md#decisions-needed) |
 | Q12 | A pending publish after its preview is replaced | **Stays valid** for its build, with a warning in the dialog | Cancel it on replacement | Decided, as recommended: [decision 259](spec/PRODUCT.md#decisions-needed) |
 
+**2026-11-28: the wizard for Q11 (decision 258).** `scripts/wizards/preview-setup.sh` walks the owner through the preview dispatch namespace on the content account, makes the ticket key locally and sets `PREVIEW_TICKET_KEY` on `podster-api-staging`, writes `preview_namespace`, `preview_public_keys` and `preview_access_origin` into `scripts/deploy-content`'s configuration, and offers `scripts/deploy-content`'s report and then its deploy ([docs/staging.md](staging.md#setting-up-previews-m8)). It needs step 8's `scripts/deploy-content` (PR 646) on main, and refuses before that. Switching previews on, `PREVIEWS` and `CONTENT_PREVIEW_NAMESPACE` under `env.staging`, stays the architect's PR after the wizard. Checked with `bash -n` and traced by reading; not run.
+
 ## What this plan checked, and what it didn't
 
 - **Read:** `CLAUDE.md`; issue #635; PRODUCT.md decisions 181, 186, 197 to 220, 230, 238, 239 and 249 and the M6 decision notes; ADR 0010 and its revision on apps as Workers; `RELEASE-POLICIES.md`; `ARCHITECTURE.md`'s content origins; ADR 0001; the M6 threat model and security review; `docs/staging.md`'s content secrets.

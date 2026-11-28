@@ -359,7 +359,7 @@ Each step is one PR. **C** changes `packages/contracts`; **M** adds a migration.
 | --- | --- | --- | --- | --- | --- |
 | 0 | This plan and the ADR note | | quick | done | |
 | 1 | Owner answers recorded as decisions 250 on; ADR note accepted or changed | | quick | 0.5 | Owner |
-| 2 | **Spike P1**, browser facts on `podster.site` test hosts: cookies under `sandbox allow-scripts` with and without `allow-same-origin`; `__Host-` against a sibling's tossing in Chromium, Firefox and WebKit; **case-variant (`__HOST-`, `__host-`) and nameless-cookie tossing** from a sibling; jar eviction; SameSite on the redirect chain; the fragment surviving the `303` and `history.replaceState` removing it from history; `Origin-Agent-Cluster`; WebKit's tracking prevention on a cookie set through a redirect | | quick | 1.5 | Owner: a test Worker on the content zone, as spike D had |
+| 2 | **Spike P1** ([run locally 2026-11-27](#spike-p1-results-2026-11-27); the edge part is still owed), browser facts on `podster.site` test hosts: cookies under `sandbox allow-scripts` with and without `allow-same-origin`; `__Host-` against a sibling's tossing in Chromium, Firefox and WebKit; **case-variant (`__HOST-`, `__host-`) and nameless-cookie tossing** from a sibling; jar eviction; SameSite on the redirect chain; the fragment surviving the `303` and `history.replaceState` removing it from history; `Origin-Agent-Cluster`; WebKit's tracking prevention on a cookie set through a redirect | | quick | 1.5 | Owner: a test Worker on the content zone, as spike D had |
 | 3 | Contracts: routes, schemas, events, `get_task_release_status` fields, the serve-entry fixture's preview form | **C** | quick | 1 | 1 |
 | 4 | Core and policy, pure: environment, preview slot `ServeState`, build ID, publish binding, `may_view`, ticket claims and limits, epoch rules, hostname roles | | **Deep** | 3 | 3 |
 | 5 | Workspace steps 59 to 63, the hostname object's step, D1 `0010` | **M** | quick | 1 | 4 |
@@ -373,6 +373,58 @@ Each step is one PR. **C** changes `packages/contracts`; **M** adds a migration.
 | 13 | M8 security review, `docs/security/m8-review.md`, independent of the authors | | **Deep** (asked first) | 2 | 12 |
 
 **About 28 builder-days** before the security review's fixes, with 4 and 8 and 10 able to run beside 6 and 7. Steps 3 and 5 merge alone, in that order, after any other contract or migration PR open at the time. Deploys to staging go through `scripts/deploy-staging`; the content Worker's deploy, with its new binding and keys, is the owner's at a terminal (`CLAUDE.md`, "Scripts agents must use").
+
+### Spike P1 results, 2026-11-27
+
+**Run locally, once in each engine,** between 05:56 and 06:01 UTC on 2026-11-28: Playwright's Chromium 156.0.8078.4, Firefox 157.0 and WebKit 27.2, all at Playwright 1.64.1. The harness is in [`spikes/m8-preview-access/`](../spikes/m8-preview-access/README.md). It uses real TLS through a local proxy to `*.pv.test` hosts. `.test` isn't on the Public Suffix List, so these hosts are one site, as `*.podster.site` hosts are before the entry. A working stand-in of the gate in 5.3 sits on one of those hosts, and the application host is another site. Every value is in `results/<browser>.json`. **Nothing was deployed, and nothing touched `podster.site`, DNS, Cloudflare or a secret.** "Seen" below means seen in this local run, not on the edge.
+
+| Question | Chromium | Firefox | WebKit |
+| --- | --- | --- | --- |
+| Strict sandbox (`allow-scripts` only): is a host-only `SameSite=Lax` cookie sent on the page's module script, `fetch` (default or `include`), classic script or image? | No, on every one | No, on every one | No, on every one |
+| The same, for a `SameSite=None` cookie | Sent on the classic script, the image and `fetch` with `include`; never on the module script or a default `fetch` | Same as Chromium | Same as Chromium |
+| With `allow-same-origin` added: are the `__Host-` cookies sent on all of the page's own requests? | Yes, `Sec-Fetch-Site: same-origin` | Yes | Yes |
+| A sibling sets `__Host-podster_preview` with `Domain=` (header or script) | Refused; never reaches the host | Refused | Refused |
+| A sibling sets `__HOST-`, `__host-` or `__HoSt-podster_preview` with `Domain=` | Refused | Refused | **Stored for the whole domain and sent to every sibling** |
+| A sibling sets a nameless cookie whose value is `__Host-podster_preview=…` (with or without `Secure`) | Refused | Refused | Refused |
+| Jar eviction: Secure cookies set for the domain until Podster's two HttpOnly cookies on another host go | Both evicted at 179 more (180 a domain, cut back to 150, oldest first) | The same: 179 | **Not evicted at 1,000;** all 1,002 were sent |
+| The same with non-Secure cookies | Not evicted at 1,000 | Not evicted at 1,000 | Not evicted |
+| Planting on its own host: overwrite the HttpOnly session with `document.cookie` | Refused | Refused (the page's own `document.cookie` briefly shows the value; the server still gets the real one) | Refused |
+| Planting after filling its own jar with 179 or more Secure cookies | **Works:** both evicted, the page's own pair is sent | **Works** | Not reached at 1,000 |
+| The flow, started directly, from a sibling's link and from another site's link | Lands on the path asked for, all three ways | Lands, all three ways | Lands, all three ways |
+| The state cookie set on the gate's `303` is stored, and sent on `GET /__podster/enter` after the cross-site hop through the application host (`Lax`, top-level) | Yes | Yes | Yes |
+| The application host's `Lax` session sent on `/preview-access` when coming from a preview | Yes | Yes | Yes |
+| The fragment survives both `303`s and reaches the exchange page | Yes | Yes | Yes |
+| Was the ticket ever in any path, query or `Referer` the server saw? | Never | Never | Never |
+| After `history.replaceState`, does Back show the fragment? | No: `…/__podster/enter`, no fragment | No | No |
+| The exchange `POST`: `Sec-Fetch-Site` and `Origin` | `same-origin`, the host | `same-origin`, the host | `same-origin`, the host |
+| A session cookie copied into another browser without its state cookie | Refused, back round the flow | Refused | Refused |
+| An attacker's ticket opened in a victim's browser (login CSRF) | Refused, `401` | Refused | Refused |
+| A sibling's no-CORS `fetch` `POST` or form `POST` to the host, with no CSP on the sibling | Sent, `Sec-Fetch-Site: same-site`, **`Lax` cookie sent** | The same | The same |
+| The same from a sibling under the preview CSP | Blocked by `connect-src` and `form-action 'none'`; nothing sent | Blocked | Blocked |
+| The `Origin` on a page's own no-CORS `POST` under `Referrer-Policy: no-referrer` | The host | **`null`** | **`null`** |
+| `document.domain = "pv.test"` on plain pages with no `Origin-Agent-Cluster` header: can a page then read its sibling's frame? | No; origin-keyed by default | **Yes** | **Yes** |
+| The same with `Origin-Agent-Cluster: ?1` | No | No | No |
+| `document.domain` set on a page under the preview CSP | Throws `SecurityError` (sandboxed) | Throws | Throws |
+| COOP `same-origin` on the exchange page: does a sibling's `window.open` handle survive? | No: `closed` is true at once (control without COOP: false) | No | No |
+
+**What this changes in the plan, proposed for M8 step 8. None of it reopens an owner decision.**
+
+1. **Case variants are ignored, not refused** (5.4). WebKit stores a sibling's `__HOST-podster_preview` for the whole domain and sends it to every preview. Under "a case variant refuses the request, the flow again on a navigation", one sibling would lock every WebKit viewer out of every other preview, and every navigation would loop through the flow. Exact, case-sensitive matching of the two `__Host-` names is the whole control; any other name is ignored, as every other cookie is. A duplicate of an exact name can only come from the host itself, so refusing duplicates stays.
+2. **A nameless cookie can't be refused by the server** (5.4, 5.5). Its value goes out as `__Host-podster_preview=…`, which can't be told apart from the real cookie (`spike.test.mjs`). All three engines refused to store one from a sibling, so the protection is the browsers' and not the server's. The plan's line "answer both on the server, whatever a browser does" holds for case variants only. A browser that doesn't refuse nameless cookies would also let a sibling plant a pair, which the state binding doesn't stop if both cookies are planted. That stays a residual until the production gate (decision 258).
+3. **Jar eviction is measured** (5.5). In Chromium and Firefox, 179 Secure cookies set on the domain from any preview evict Podster's pair on every other preview, which is the nuisance the plan names. On its own host, the page can then plant its own pair, which is the plan's residual, now seen. Non-Secure cookies don't evict them. WebKit didn't evict at 1,000, so there the residual is cookie bombing, not eviction. Decision 257 accepted the residual for staging as stated, and this doesn't widen it.
+4. **A loop guard on the flow.** Whatever leaves a request refused on every attempt, whether eviction pressure, a stuck cookie or a browser oddity, shouldn't send a navigation round the flow forever. Proposed: after the second failed round within a minute, the gate answers `401 preview_access_required` with a fixed page. The state cookie can carry a round count, since its value is Podster's own.
+5. **The write rule leans on `Sec-Fetch-Site`, not `Origin`** (5.5, 5.8). All three engines sent `Sec-Fetch-Site`. Firefox and WebKit send `Origin: null` on a page's own no-CORS `POST` when `Referrer-Policy: no-referrer` is in force, so the `Origin` fallback would refuse an app's own write there. Keep the fallback only for a request that has no `Sec-Fetch-Site`. The preview CSP's `connect-src` and `form-action 'none'` already stop a sibling's write before it's sent, as a second lock.
+6. **`Origin-Agent-Cluster: ?1` is load-bearing** for any page Podster serves on a preview host outside the sandbox, which is the exchange page. Without it, Firefox and WebKit let two sibling pages join through `document.domain`. Under the preview CSP the sandbox already stops `document.domain`. Keep the header on every answer, as 5.8 says.
+7. **Confirmed as reasoned:** an opaque-origin page sends no `Lax` cookie on any of its own requests, so no cookie gate works under the strict sandbox (5.2). With `allow-same-origin` everything is same-origin. The `__Host-` prefix stops a sibling's `Domain=` cookie in all three engines. The fragment, `replaceState`, the state binding and COOP all work as 5.3 describes, in all three.
+
+**Owed, and needing the owner's deploy** (a test Worker on `podster.site`, as spike D had). None of it was done. The [spike's README](../spikes/m8-preview-access/README.md#what-this-cant-show-and-what-needs-the-owners-deploy) lists it:
+
+- what the edge injects or rewrites on the exchange page and a preview's answers;
+- the edge's request-header limit, which sets the size at which cookie bombing starts;
+- real TLS in place of an accepted self-signed certificate;
+- real Safari's tracking prevention, which Playwright's WebKit doesn't have.
+
+Step 12's staging run covers the first and third once step 8 is deployed. None of it blocks steps 3 to 7.
 
 ## 13. Threat model
 

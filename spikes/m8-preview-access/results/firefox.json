@@ -1,0 +1,1160 @@
+{
+  "browser": "firefox",
+  "ran": "2026-11-28T05:59:44.765Z",
+  "facts": {
+    "sandbox": {
+      "strict": {
+        "page": {
+          "origin": "null",
+          "documentCookie": "SecurityError"
+        },
+        "/favicon.ico": {
+          "cookies": [
+            "__Host-p1_none"
+          ],
+          "sfs": "cross-site",
+          "sfm": "no-cors"
+        },
+        "document": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "none",
+          "sfm": "navigate"
+        },
+        "/sub/classic.js": {
+          "cookies": [
+            "__Host-p1_none"
+          ],
+          "sfs": "cross-site",
+          "sfm": "no-cors"
+        },
+        "/sub/img.png": {
+          "cookies": [
+            "__Host-p1_none"
+          ],
+          "sfs": "cross-site",
+          "sfm": "no-cors"
+        },
+        "/sub/module.js": {
+          "cookies": [],
+          "sfs": "cross-site",
+          "sfm": "cors"
+        },
+        "/sub/fetch-default": {
+          "cookies": [],
+          "sfs": "cross-site",
+          "sfm": "cors"
+        },
+        "/sub/fetch-include": {
+          "cookies": [
+            "__Host-p1_none"
+          ],
+          "sfs": "cross-site",
+          "sfm": "cors"
+        },
+        "/sub/fetch-from-module": {
+          "cookies": [],
+          "sfs": "cross-site",
+          "sfm": "cors"
+        }
+      },
+      "same": {
+        "page": {
+          "origin": "https://a.pv.test",
+          "documentCookie": "string"
+        },
+        "document": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "none",
+          "sfm": "navigate"
+        },
+        "/sub/module.js": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "cors"
+        },
+        "/sub/classic.js": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "no-cors"
+        },
+        "/sub/img.png": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "no-cors"
+        },
+        "/sub/fetch-default": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "cors"
+        },
+        "/sub/fetch-include": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "cors"
+        },
+        "/sub/fetch-from-module": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "cors"
+        },
+        "/favicon.ico": {
+          "cookies": [
+            "__Host-podster_preview",
+            "__Host-p1_none",
+            "__Host-p1_strict"
+          ],
+          "sfs": "same-origin",
+          "sfm": "no-cors"
+        }
+      }
+    },
+    "tossing": {
+      "hostPrefixDomain/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "hostPrefixDomain/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "hostPrefixDomain/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "hostPrefixDomain/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "upperHOST/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "upperHOST/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "upperHOST/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "upperHOST/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "lowerhost/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "lowerhost/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "lowerhost/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "lowerhost/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "mixedHoSt/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "mixedHoSt/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "mixedHoSt/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "mixedHoSt/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessSecure/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessSecure/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessSecure/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessSecure/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessPlain/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessPlain/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessPlain/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessPlain/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessNoEquals/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessNoEquals/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessNoEquals/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessNoEquals/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessStatePair/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessStatePair/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "namelessStatePair/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": null,
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": []
+      },
+      "namelessStatePair/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate",
+        "tossedReachedA": false,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test"
+        ]
+      },
+      "controlPlainDomain/header/fresh": {
+        "raised": null,
+        "cookieHeaderAtA": "podster_preview=tossed",
+        "tossedReachedA": true,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": [
+          "podster_preview@.pv.test"
+        ]
+      },
+      "controlPlainDomain/header/withGenuine": {
+        "raised": null,
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate; podster_preview=tossed",
+        "tossedReachedA": true,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test",
+          "podster_preview@.pv.test"
+        ]
+      },
+      "controlPlainDomain/script/fresh": {
+        "raised": "ok",
+        "cookieHeaderAtA": "podster_preview=tossed",
+        "tossedReachedA": true,
+        "gate": {
+          "ok": true
+        },
+        "jarNames": [
+          "podster_preview@.pv.test"
+        ]
+      },
+      "controlPlainDomain/script/withGenuine": {
+        "raised": "ok",
+        "cookieHeaderAtA": "__Host-podster_preview=genuine; __Host-podster_preview_state=genuinestate; podster_preview=tossed",
+        "tossedReachedA": true,
+        "gate": {
+          "ok": true,
+          "session": "genuine",
+          "state": "genuinestate"
+        },
+        "jarNames": [
+          "__Host-podster_preview@a.pv.test",
+          "__Host-podster_preview_state@a.pv.test",
+          "podster_preview@.pv.test"
+        ]
+      }
+    },
+    "eviction": {
+      "siblingSecureFill": {
+        "50": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 52,
+          "jar": 52
+        },
+        "100": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 102,
+          "jar": 102
+        },
+        "140": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 142,
+          "jar": 142
+        },
+        "150": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 152,
+          "jar": 152
+        },
+        "160": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 162,
+          "jar": 162
+        },
+        "170": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 172,
+          "jar": 172
+        },
+        "179": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 150,
+          "jar": 150
+        },
+        "180": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 151,
+          "jar": 151
+        },
+        "181": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 152,
+          "jar": 152
+        },
+        "200": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 171,
+          "jar": 171
+        },
+        "300": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 178,
+          "jar": 178
+        },
+        "600": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 168,
+          "jar": 168
+        },
+        "1000": {
+          "session": false,
+          "state": false,
+          "cookiesSentToA": 165,
+          "jar": 165
+        }
+      },
+      "ownHostFillThenPlant": {
+        "50": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 52,
+          "jarAfterFill": 52
+        },
+        "100": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 102,
+          "jarAfterFill": 102
+        },
+        "140": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 142,
+          "jarAfterFill": 142
+        },
+        "150": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 152,
+          "jarAfterFill": 152
+        },
+        "160": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 162,
+          "jarAfterFill": 162
+        },
+        "170": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": true,
+          "genuineState": true,
+          "plantedSession": false,
+          "plantedState": false,
+          "cookiesSentToA": 172,
+          "jarAfterFill": 172
+        },
+        "179": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 152,
+          "jarAfterFill": 150
+        },
+        "180": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 153,
+          "jarAfterFill": 151
+        },
+        "181": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 154,
+          "jarAfterFill": 152
+        },
+        "200": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 173,
+          "jarAfterFill": 171
+        },
+        "300": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 180,
+          "jarAfterFill": 178
+        },
+        "600": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 170,
+          "jarAfterFill": 168
+        },
+        "1000": {
+          "overwriteBeforeFillTookEffect": true,
+          "genuineSession": false,
+          "genuineState": false,
+          "plantedSession": true,
+          "plantedState": true,
+          "cookiesSentToA": 167,
+          "jarAfterFill": 165
+        }
+      },
+      "siblingNonSecureFill": {
+        "300": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 178
+        },
+        "1000": {
+          "session": true,
+          "state": true,
+          "cookiesSentToA": 165
+        }
+      }
+    },
+    "flow": {
+      "direct": {
+        "landed": true,
+        "finalUrl": "https://g.pv.test/x?y=1",
+        "bodyText": null,
+        "chain": [
+          {
+            "host": "app.ap.test",
+            "method": "GET",
+            "path": "/favicon.ico",
+            "cookies": [
+              "__Host-app_session"
+            ],
+            "sfs": "same-origin",
+            "sfm": "no-cors",
+            "sfd": "image",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "app.ap.test",
+            "method": "GET",
+            "path": "/preview-access",
+            "cookies": [
+              "__Host-app_session"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "POST",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "same-origin",
+            "sfm": "cors",
+            "sfd": "empty",
+            "origin": "https://g.pv.test"
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/favicon.ico",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "no-cors",
+            "sfd": "image",
+            "origin": null
+          }
+        ],
+        "ticketSeenByServer": 0,
+        "historyLength": 3,
+        "backUrl": "https://g.pv.test/__podster/enter",
+        "secondStatus": 200,
+        "replayWithoutState": {
+          "gateAnswer": "sent to the application host",
+          "carried": [
+            "__Host-podster_preview"
+          ]
+        }
+      },
+      "fromSibling": {
+        "landed": true,
+        "finalUrl": "https://g.pv.test/x?y=1",
+        "bodyText": null,
+        "chain": [
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [],
+            "sfs": "same-site",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "app.ap.test",
+            "method": "GET",
+            "path": "/preview-access",
+            "cookies": [
+              "__Host-app_session"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "POST",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "same-origin",
+            "sfm": "cors",
+            "sfd": "empty",
+            "origin": "https://g.pv.test"
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/favicon.ico",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "no-cors",
+            "sfd": "image",
+            "origin": null
+          }
+        ],
+        "ticketSeenByServer": 0,
+        "historyLength": 4,
+        "backUrl": "https://g.pv.test/__podster/enter",
+        "secondStatus": 200,
+        "replayWithoutState": {
+          "gateAnswer": "sent to the application host",
+          "carried": [
+            "__Host-podster_preview"
+          ]
+        }
+      },
+      "fromOtherSite": {
+        "landed": true,
+        "finalUrl": "https://g.pv.test/x?y=1",
+        "bodyText": null,
+        "chain": [
+          {
+            "host": "app.ap.test",
+            "method": "GET",
+            "path": "/favicon.ico",
+            "cookies": [
+              "__Host-app_session"
+            ],
+            "sfs": "same-origin",
+            "sfm": "no-cors",
+            "sfd": "image",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [],
+            "sfs": "cross-site",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "app.ap.test",
+            "method": "GET",
+            "path": "/preview-access",
+            "cookies": [
+              "__Host-app_session"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "none",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "POST",
+            "path": "/__podster/enter",
+            "cookies": [
+              "__Host-podster_preview_state"
+            ],
+            "sfs": "same-origin",
+            "sfm": "cors",
+            "sfd": "empty",
+            "origin": "https://g.pv.test"
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/x",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "navigate",
+            "sfd": "document",
+            "origin": null
+          },
+          {
+            "host": "g.pv.test",
+            "method": "GET",
+            "path": "/favicon.ico",
+            "cookies": [
+              "__Host-podster_preview_state",
+              "__Host-podster_preview"
+            ],
+            "sfs": "same-origin",
+            "sfm": "no-cors",
+            "sfd": "image",
+            "origin": null
+          }
+        ],
+        "ticketSeenByServer": 0,
+        "historyLength": 4,
+        "backUrl": "https://g.pv.test/__podster/enter",
+        "secondStatus": 200,
+        "replayWithoutState": {
+          "gateAnswer": "sent to the application host",
+          "carried": [
+            "__Host-podster_preview"
+          ]
+        }
+      },
+      "loginCsrf": {
+        "body": "refused 401",
+        "url": "https://g.pv.test/__podster/enter"
+      }
+    },
+    "writes": {
+      "siblingNoCspFetch": {
+        "said": "sent",
+        "sfs": "same-site",
+        "origin": "null",
+        "laxCookieSent": true
+      },
+      "siblingNoCspForm": {
+        "said": "submitted",
+        "sfs": "same-site",
+        "origin": "null",
+        "laxCookieSent": true
+      },
+      "siblingPreviewCspFetch": {
+        "said": "TypeError",
+        "reached": false
+      },
+      "siblingPreviewCspForm": {
+        "said": "submitted",
+        "reached": false
+      },
+      "otherSiteFetch": {
+        "said": "sent",
+        "sfs": "cross-site",
+        "origin": "null",
+        "laxCookieSent": false
+      },
+      "otherSiteForm": {
+        "said": "submitted",
+        "sfs": "cross-site",
+        "origin": "null",
+        "laxCookieSent": false
+      },
+      "ownPageFetch": {
+        "said": "sent",
+        "sfs": "same-origin",
+        "origin": "null",
+        "laxCookieSent": true
+      }
+    },
+    "originAgentCluster": {
+      "withoutHeader": {
+        "parent": {
+          "set": "ok",
+          "domain": "pv.test",
+          "oac": false,
+          "readSiblingFrameTitle": "frame-title"
+        },
+        "frame": {
+          "set": "ok",
+          "domain": "pv.test",
+          "oac": false
+        }
+      },
+      "withHeader": {
+        "parent": {
+          "set": "ok",
+          "domain": "a.pv.test",
+          "oac": true,
+          "readSiblingFrameTitle": "SecurityError"
+        },
+        "frame": {
+          "set": "ok",
+          "domain": "b.pv.test",
+          "oac": true
+        }
+      },
+      "previewCspPage": {
+        "set": "SecurityError",
+        "domain": "a.pv.test",
+        "oac": true
+      }
+    },
+    "coop": {
+      "enterPage": {
+        "opened": true,
+        "closedAsSeenByOpener": true
+      },
+      "controlNoCoop": {
+        "opened": true,
+        "closedAsSeenByOpener": false
+      }
+    }
+  },
+  "version": "157.0"
+}

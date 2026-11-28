@@ -332,6 +332,9 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .kvlist { display: flex; flex-direction: column; }
 .kvlist > div { display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .kvlist > div:last-child, .check:last-child { border-bottom: 0; }
+.kvlist > div > span { min-width: 0; overflow-wrap: anywhere; }
+.kvlist.stack > div { flex-direction: column; align-items: flex-start; gap: 3px; }
+.kvlist.stack > div > span:first-child { font-size: 12.5px; }
 .kvlist > div span:first-child { color: var(--muted); }
 
 /* Rooms, start, first steps */
@@ -1856,14 +1859,15 @@ function orgNew() {
 function rooms() {
   const nc = needsCreator().length;
   const grp = (name, sub, extra, body) => '<section style="display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:baseline;gap:10px"><span class="label" style="flex:1">' + esc(name) + ' <span class="faint" style="text-transform:none;letter-spacing:0;font-weight:400">\u00b7 ' + sub + '</span></span>' + extra + '</div>' + body + '</section>';
-  return '<div class="head"><div><h1>Your workrooms</h1><p>Grouped by who owns them.</p></div><span style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" href="#org-new">Create an organization</a><a class="btn primary" href="#start">Start a workroom</a></span></div>' +
+  return '<div class="head"><div><h1>Your workrooms</h1><p>Grouped by who owns them.</p></div><a class="btn primary" href="#start">Start a workroom</a></div>' +
     (S.roomGone ? '<div class="confirm"><b style="font-weight:600">Customer order tracker was deleted</b><span class="muted">If that was a mistake, contact support within 7 days while a recoverable copy still exists.</span><button class="demo-note" data-act="room-back" style="align-self:flex-start">Demo \u00b7 bring it back</button></div>' : '') +
     grp('Personal', 'Elena Lopez \u00b7 just you', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms here yet. Workrooms you start for yourself live here.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="personal">Start one</a></div>') +
     grp(S.org.name, 'Team \u00b7 you\'re an admin', '<a href="#org" style="font-size:13px">Settings</a>', '<div class="panel">' +
     (S.roomGone ? '' : '<a class="roomrow" href="#home"><span class="mark">OT</span><span style="flex:1;min-width:0"><b style="font-weight:600">Customer order tracker</b><br><span class="muted">' + (S.archived ? 'Archived \u00b7 release ' + S.ship.live + ' still live' : S.tasks.filter((t) => t.stage === 'done').length + ' tasks done \u00b7 release ' + S.ship.live + ' is live') + '</span></span>' + (nc ? '<span class="pill" title="Needs you">' + nc + '</span>' : '') + '<span class="faint">' + I.arrow + '</span></a>') +
     '<a class="roomrow" href="#fresh"><span class="mark">BP</span><span style="flex:1;min-width:0"><b style="font-weight:600">Bakery preorders</b><br><span class="muted">' + (S.fresh.lead ? 'Planner joined \u00b7 planning the first tasks' : 'New \u00b7 fill a role to get started') + '</span></span><span class="faint">' + I.arrow + '</span></a>' +
     '</div>') +
-    S.teams.map((t) => grp(t, 'Team \u00b7 you\'re its admin', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms yet.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="' + esc(t) + '">Start one</a></div>')).join('');
+    S.teams.map((t) => grp(t, 'Team \u00b7 you\'re its admin', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms yet.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="' + esc(t) + '">Start one</a></div>')).join('') +
+    '<p class="faint" style="font-size:13px;margin:4px 0 0">Need a separate space for a team or a client? <a href="#org-new">Create an organization</a></p>';
 }
 
 /* ---------- Creator: Start a workroom ---------- */
@@ -1871,7 +1875,7 @@ const GH_REPOS = [['bakery-on-elm/storefront', 'Private', 'main', true, '2 days 
 function ghPicker(st) {
   const g = st.gh; const copy = 'podsterdev/' + slug(st.name);
   if (!g.installed) return '<div style="display:flex;flex-direction:column;gap:10px"><span class="muted" style="font-size:13.5px">Podster makes a working copy of your repository in its own GitHub organization. Agents work only in the copy. When you approve their work, Podster opens a pull request on your repository, and you merge it on GitHub.</span>' +
-    '<div class="panel kvlist" style="padding:2px 16px;box-shadow:none;background:var(--sunk)"><div><span>On your repository, it asks to</span><span>Read code \u00b7 Open pull requests</span></div><div><span>It never</span><span>Pushes to your repository, changes settings or merges</span></div><div><span>Agents work in</span><span class="mono">' + esc(copy) + '</span></div></div>' +
+    '<div class="panel kvlist stack" style="padding:2px 16px;box-shadow:none;background:var(--sunk)"><div><span>On your repository, it asks to</span><span>Read code \u00b7 Open pull requests</span></div><div><span>It never</span><span>Pushes to your repository, changes settings or merges</span></div><div><span>Agents work in</span><span class="mono">' + esc(copy) + '</span></div></div>' +
     '<span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn primary" data-act="gh-install">' + LOGO.github + ' Install on GitHub</button><span class="faint" style="font-size:12.5px">Opens GitHub. You come back here after. A public repository needs this only to open pull requests.</span></span></div>';
   const q = (g.q || '').toLowerCase();
   const list = GH_REPOS.filter((r) => r[0].indexOf(q) >= 0);
@@ -1879,7 +1883,7 @@ function ghPicker(st) {
     '<input class="in" id="gh-q" data-input="gh-q" placeholder="Search your repositories" value="' + esc(g.q || '') + '" aria-label="Search repositories">' +
     '<div class="panel" style="box-shadow:none" role="listbox" aria-label="Repositories">' + (list.length ? list.map((r) => '<button type="button" class="row" role="option" data-act="gh-pick" data-r="' + esc(r[0]) + '" style="width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left;cursor:pointer"><span style="flex:1;min-width:0"><b class="mono" style="font-weight:500;font-size:13.5px">' + esc(r[0]) + '</b><br><span class="faint" style="font-size:12.5px">' + r[1] + ' \u00b7 ' + r[2] + ' \u00b7 updated ' + r[4] + '</span></span><span class="faint">' + I.arrow + '</span></button>').join('') : '<div class="row faint" style="font-size:13px">No repository matches. Is it one the app can read? <a href="#" data-act="toast" data-msg="Opens the app\'s repository access on GitHub.">Add it on GitHub</a></div>') + '</div></div>';
   const r = GH_REPOS.find((x) => x[0] === g.pick) || GH_REPOS[0];
-  return '<div style="display:flex;flex-direction:column;gap:10px"><div class="panel kvlist" style="padding:2px 16px;box-shadow:none">' +
+  return '<div style="display:flex;flex-direction:column;gap:10px"><div class="panel kvlist stack" style="padding:2px 16px;box-shadow:none">' +
     '<div><span>Your repository</span><span class="mono">' + esc(r[0]) + ' \u00b7 ' + r[2] + '</span></div>' +
     '<div><span>Podster\'s working copy</span><span class="mono">' + esc(copy) + '</span></div>' +
     '<div><span>Visibility of the copy</span><span>' + r[1] + ', like yours</span></div>' +

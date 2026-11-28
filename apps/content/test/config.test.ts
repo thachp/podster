@@ -214,9 +214,9 @@ describe("the Worker reaches nothing but its three bindings", () => {
   const sources = readdirSync(new URL("src/", root)).map((name) => [name, read(`src/${name}`)] as const);
 
   it("reads one namespace, asks one dispatch namespace and its own write counter, and names no other binding, host or secret", () => {
-    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "hold.ts", "index.ts", "limits.ts", "names.ts", "requests.ts"]);
+    expect(sources.map(([name]) => name).sort()).toEqual(["budget.ts", "counter.ts", "handle.ts", "hold.ts", "index.ts", "limits.ts", "names.ts", "preview.ts", "requests.ts"]);
     const all = sources.map(([, text]) => text).join("\n");
-    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "APP_LIMIT_CPU_MS", "APP_LIMIT_SUBREQUESTS", "CONTENT_DOMAIN", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
+    expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "APP_LIMIT_CPU_MS", "APP_LIMIT_SUBREQUESTS", "CONTENT_DOMAIN", "PREVIEW_ACCESS_ORIGIN", "PREVIEW_APPS", "PREVIEW_PUBLIC_KEYS", "SERVE", "WRITE_BUDGET_WINDOW_MS", "WRITE_BUDGET_WRITES", "WRITE_COUNTER"]);
     // Nothing is logged for a request but a failed dispatch's line (ADR 0010's "Logs"): one console call, in the entry,
     // with the line's two fields and nothing else. The counter logs nothing.
     expect([...all.matchAll(/\bconsole\b/g)]).toHaveLength(1);
@@ -282,9 +282,16 @@ describe("the Worker reaches nothing but its three bindings", () => {
     expect(handle).toContain("deps.apps.get(script, {}, { limits: { cpuMs: limits.cpuMs, subRequests: limits.subRequests } })");
   });
 
-  it("never holds the word that would give a sandboxed page its real origin back", () => {
+  it("holds the word that gives a sandboxed page its real origin back in one place: the preview hosts' sandbox", () => {
+    // Decision 216 forbade it for good; decision 255 narrowed that on preview hosts only (M8). So it is written once,
+    // in `preview.ts`'s `PREVIEW_SANDBOX`, which only a preview host's answers carry, and nowhere else: never in the
+    // production policy's file, nor in any other source or the configuration.
     const FORBIDDEN = ["allow", "same", "origin"].join("-");
-    for (const [name, text] of sources) expect(text, name).not.toContain(FORBIDDEN);
+    for (const [name, text] of sources) expect(text.split(FORBIDDEN).length - 1, name).toBe(name === "preview.ts" ? 1 : 0);
+    expect(read("src/preview.ts")).toContain(`export const PREVIEW_SANDBOX = "sandbox allow-scripts ${FORBIDDEN}";`);
     expect(read("wrangler.jsonc")).not.toContain(FORBIDDEN);
+    // And the constant is used only by the preview policy and the exchange page's policy, both in `preview.ts`.
+    const uses = sources.flatMap(([name, text]) => [...text.matchAll(/PREVIEW_SANDBOX/g)].map(() => name));
+    expect(uses).toEqual(["preview.ts", "preview.ts", "preview.ts"]);
   });
 });

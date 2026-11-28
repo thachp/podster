@@ -512,7 +512,7 @@ impl Workspace {
                 crate::content_stop::Stop::Stopped
             );
             let seen = !stopped && {
-                let answer = crate::content_provider::fetch_marker(&fetch.host).await;
+                let answer = crate::content_provider::fetch_marker(&self.env, &fetch.host).await;
                 marker_seen(
                     answer
                         .as_ref()

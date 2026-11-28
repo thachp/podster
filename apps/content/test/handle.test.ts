@@ -81,6 +81,8 @@ function world(): World {
       },
     },
     log: (line) => w.logged.push(line),
+    previews: null,
+    random: () => new Uint8Array(32),
   };
   return w;
 }

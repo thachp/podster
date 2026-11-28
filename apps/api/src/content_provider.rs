@@ -369,23 +369,55 @@ async fn call_sized(
     answer
 }
 
+/// The header a marker fetch carries its marker token in, as the content Worker reads it (`MARKER_HEADER` in
+/// `apps/content/src/preview.ts`, M8 step 8).
+pub(crate) const MARKER_TOKEN_HEADER: &str = "x-podster-marker-token";
+
+/// **The marker token for a preview host** (M8 step 8; the preview plan's 3.2), or `None` for every other host. Only
+/// while previews are configured (the preview provider and the owner's `PREVIEW_TICKET_KEY`), only for a default host
+/// on the content domain, and only when that host's serve entry, read back from the provider, is in the preview form
+/// and names a script under the host's own label: then a token for that host, the slot and epoch the entry names, and
+/// 60 seconds (`podster_egress::preview_key::PreviewKey::marker_token`). The entry is what the content Worker's gate
+/// compares the token with, so it is read rather than assumed. A production host's entry is never in that form, so a
+/// production fetch carries nothing, as before. The token opens the marker's path with `GET` and nothing else.
+async fn marker_token(env: &Env, host: &str) -> Option<String> {
+    let provider = Provider::for_previews(env)?;
+    let label = provider.default_host_label(host)?.to_owned();
+    let key = crate::preview_access::signing_key(env).await?;
+    let Raw::Value(value) = provider.read_raw_entry(host).await else {
+        return None;
+    };
+    let entry = podster_core::serve_entry::preview_entry_script(&value)?;
+    let owned = matches!(script_owner(entry.script), ScriptOwner::Podster { label: owner, .. } if owner == label);
+    let now = i64::try_from(Date::now().as_millis()).ok()?;
+    owned
+        .then(|| key.marker_token(host, entry.slot, entry.epoch, now))
+        .flatten()
+}
+
 /// Fetches a release's marker through an app's own host, as a visitor would (M6 step 5; ADR 0010's "The release job",
 /// step 6). `(status, body)`, or `None` when there was no answer to read: unreachable, timed out, or longer than any
-/// marker. **No credential of any kind is sent,** no redirect is followed, and nothing is read but the status and at
-/// most `MARKER_MAX_BYTES` of body. The host is the room's own, checked against its form here; it is never logged.
-pub(crate) async fn fetch_marker(host: &str) -> Option<(u16, Vec<u8>)> {
+/// marker. **No credential of any kind is sent,** but on a preview host its marker token ([`marker_token`], M8 step 8),
+/// which opens that one path through the gate; no redirect is followed, and nothing is read but the status and at
+/// most `MARKER_MAX_BYTES` of body. The host is the room's own, checked against its form here; it is never logged,
+/// and nor is the token.
+pub(crate) async fn fetch_marker(env: &Env, host: &str) -> Option<(u16, Vec<u8>)> {
     use podster_core::release_marker::{MARKER_FETCH_TIMEOUT_MS, MARKER_MAX_BYTES};
     use podster_core::release_tree::MARKER_PATH;
     if !plain_host(host) {
         return None;
     }
     let url = format!("https://{host}/{MARKER_PATH}");
+    let marker = marker_token(env, host).await;
     let controller = AbortController::default();
     let signal = controller.signal();
     let attempt = async move {
         let headers = Headers::new();
         headers.set("accept", "application/json")?;
         headers.set("cache-control", "no-cache")?;
+        if let Some(marker) = &marker {
+            headers.set(MARKER_TOKEN_HEADER, marker)?;
+        }
         let mut init = RequestInit::new();
         init.with_method(Method::Get)
             .with_headers(headers)

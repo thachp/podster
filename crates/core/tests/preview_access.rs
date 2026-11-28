@@ -1031,3 +1031,31 @@ fn the_exchange_location_refuses_a_host_or_return_path_not_of_its_form() {
         assert_eq!(enter_location(HOST, "a", t, "/"), None, "session {t:?}");
     }
 }
+
+// --- one person's share of a room's hour (M8 step 7's review) -------------------------------------------------------------
+
+#[test]
+fn one_person_gets_at_most_60_tickets_an_hour_in_one_room_so_the_rooms_300_takes_five_people() {
+    assert_eq!(PER_PERSON_IN_ROOM_PER_HOUR, 60);
+    const { assert!(PER_PERSON_IN_ROOM_PER_HOUR * 5 <= PER_ROOM_PER_HOUR) };
+    let given: Vec<i64> = (0..59).map(|i| NOW - i * 1000).collect();
+    assert_eq!(person_in_room_allowed(&given, NOW), Ok(()));
+    assert_eq!(person_in_room_retry_after_ms(&given, NOW), None);
+    let mut full = given.clone();
+    full.push(NOW);
+    assert_eq!(
+        person_in_room_allowed(&full, NOW),
+        Err(AccessLimit::PersonInRoom)
+    );
+    assert_eq!(AccessLimit::PersonInRoom.code(), "preview_access_limit");
+    // The oldest, 58 seconds back, leaves at the hour.
+    assert_eq!(
+        person_in_room_retry_after_ms(&full, NOW),
+        Some(PER_ROOM_WINDOW_MS - 58_000)
+    );
+    // An hour on, every one has left.
+    assert_eq!(
+        person_in_room_allowed(&full, NOW + PER_ROOM_WINDOW_MS + 1),
+        Ok(())
+    );
+}

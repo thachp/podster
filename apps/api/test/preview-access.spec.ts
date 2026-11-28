@@ -338,6 +338,31 @@ describe("the limits (the plan's 5.3, step 2)", () => {
     expect((await all(r.id, "SELECT count(*) AS n FROM preview_access_ask"))[0].n).toBe(300);
   });
 
+  it("refuses one person past 60 tickets an hour in one room, so no one viewer spends the room's 300; others still get theirs", async () => {
+    const r = await room();
+    const st = await stateHash();
+    const now = Date.now();
+    await inRoom(r.id, (sql) => {
+      for (let i = 0; i < 60; i++) {
+        sql.exec("INSERT INTO preview_session (sid, person_id, created_at, expires_at) VALUES (?, ?, ?, ?)", `pvs_${hex(16)}`, GUEST.id, now - i * 1000, now - i * 1000 + 3_600_000);
+        sql.exec("INSERT INTO preview_access_ask (at) VALUES (?)", now - i * 1000);
+      }
+    });
+    const over = await ask(GUEST, { host: r.host, st, r: "/" });
+    expect([over.status, over.code]).toEqual([429, "preview_access_limit"]);
+    expect(Number(over.retryAfter)).toBeGreaterThan(3500);
+    expect(Number(over.retryAfter)).toBeLessThanOrEqual(3600);
+    // The refusal spends nothing of the room's, and every other viewer is still let in.
+    expect((await all(r.id, "SELECT count(*) AS n FROM preview_access_ask"))[0].n).toBe(60);
+    for (const who of [OWNER, ADMIN, MEMBER]) expect((await ask(who, { host: r.host, st, r: "/" })).status, who.id).toBe(200);
+    expect((await all(r.id, "SELECT count(*) AS n FROM preview_access_ask"))[0].n).toBe(63);
+    // An outsider asking is refused as always, whatever anyone's count.
+    expect((await ask(OUTSIDER, { host: r.host, st, r: "/" })).code).toBe("preview_access_refused");
+    // An hour on, the guest's own tickets have left the window.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE preview_session SET created_at = created_at - 3601000, expires_at = expires_at - 3601000 WHERE person_id = ?", GUEST.id));
+    expect((await ask(GUEST, { host: r.host, st, r: "/" })).status).toBe(200);
+  });
+
   it("prunes sessions past their hour as it records a new one", async () => {
     const r = await room();
     await inRoom(r.id, (sql) => sql.exec("INSERT INTO preview_session (sid, person_id, created_at, expires_at) VALUES (?, ?, 1000, 3601000)", `pvs_${hex(16)}`, MEMBER.id));
@@ -353,7 +378,6 @@ describe("revocation: the access epoch (the plan's 5.6)", () => {
     expect(slot.access_epoch, reason).toBe(from + 1);
     // Every host's entry is owed again at once, so the applier writes the new epoch.
     expect(await all(r.id, "SELECT attempts, next_attempt_at FROM preview_apply WHERE slot_id = ?", r.slot)).toEqual([{ attempts: 0, next_attempt_at: null }]);
-    expect((await all(r.id, "SELECT count(*) AS n FROM preview_session"))[0].n, "sessions dropped").toBe(0);
     const told = await all(r.id, "SELECT type, actor_id, reason FROM event WHERE type = 'preview.access_revoked' ORDER BY seq DESC LIMIT 1");
     expect(told[0]?.reason, reason).toBe(reason);
   }
@@ -388,6 +412,30 @@ describe("revocation: the access epoch (the plan's 5.6)", () => {
     await expectRaised(r, 4, "visibility_changed");
     expect((await all(r.id, "SELECT current FROM preview_slot WHERE id = ?", r.slot))[0].current).toBe(1);
     expect((await ask(MEMBER, { host: r.host, st: await stateHash(), r: "/" })).status).toBe(200);
+  });
+
+  it("goes up when the owner hands the room over, and the former owner, now an admin, still gets a ticket at the new epoch", async () => {
+    const r = await room({ epoch: 4 });
+    const done = await api(OWNER, "POST", `/v1/workspaces/${r.id}/owner/transfer`, { to: ADMIN.id, policy_version: await version(r) }, undefined, { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } });
+    expect(done.status, done.text).toBe(200);
+    await expectRaised(r, 4, "owner_changed");
+    const after = location((await ask(OWNER, { host: r.host, st: await stateHash(), r: "/" })).body.redirect);
+    expect((await verified(after.t)).claims.ep).toBe(5);
+  });
+
+  it("goes up when the owner leaves the organization, which refuses them, and again when an organization admin names a new owner", async () => {
+    const r = await room({ epoch: 4 });
+    const left = await stub(r.id).fetch("https://workspace/internal/org-departure", { method: "POST", body: JSON.stringify({ person: OWNER.id, org: ORG, actor: "per_pa_orgadmin", left_at: Date.now() }) });
+    expect(left.status, await left.text()).toBe(200);
+    await expectRaised(r, 4, "organization_departure");
+    expect((await ask(OWNER, { host: r.host, st: await stateHash(), r: "/" })).code).toBe("preview_access_refused");
+    const orgAdmin: Who = { id: "per_pa_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
+    const recovered = await api(orgAdmin, "POST", `/v1/workspaces/${r.id}/owner/recover`, { to: ADMIN.id, expected_owner: OWNER.id }, undefined, { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } });
+    expect(recovered.status, recovered.text).toBe(200);
+    const [slot] = await all(r.id, "SELECT access_epoch FROM preview_slot WHERE id = ?", r.slot);
+    expect(slot.access_epoch).toBe(6);
+    const told = await all(r.id, "SELECT reason FROM event WHERE type = 'preview.access_revoked' ORDER BY seq");
+    expect(told.map((row) => row.reason)).toEqual(["organization_departure", "owner_changed"]);
   });
 
   it("raises nothing in a room with no preview", async () => {

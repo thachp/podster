@@ -85,6 +85,17 @@ describe("GET /preview-access", () => {
     }
   });
 
+  it("serves only a top-level navigation: a frame, a fetch or a script loading it is refused before anyone is asked", async () => {
+    for (const [dest, mode] of [["iframe", "navigate"], ["empty", "cors"], ["empty", "no-cors"], ["script", "no-cors"], ["document", "cors"], ["frame", "navigate"]]) {
+      const g = gateway();
+      const response = await visit(g, undefined, { cookie: "session=abc", "sec-fetch-dest": dest, "sec-fetch-mode": mode });
+      expect(response.status, `${dest} ${mode}`).toBe(400);
+      expect(g.calls, `${dest} ${mode}`).toHaveLength(0);
+    }
+    const g = gateway();
+    expect((await visit(g, undefined, { cookie: "session=abc", "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "cross-site" })).status).toBe(303);
+  });
+
   it("shows one page for every refusal the API gives, previews off included", async () => {
     const bodies = new Set<string>();
     for (const [status, code] of [[404, "preview_access_refused"], [404, "not_found"], [403, "not_allowed"], [400, "invalid_argument"]] as const) {

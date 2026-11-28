@@ -52,13 +52,25 @@ const go = (location: string) => new Response(null, { status: 303, headers: { ..
 const refused = () => page(404, "You can't open this preview", "This preview doesn't exist, or you don't have access to it. Ask the workroom's owner if you think you should.");
 const notFromPreview = () => page(400, "This link didn't come from a preview", "Open the preview from its own address, and it will bring you here.");
 
+/**
+ * Whether the request is a top-level navigation, by Fetch Metadata: `Sec-Fetch-Dest: document` and `Sec-Fetch-Mode:
+ * navigate` when the browser sends them (all three engines do). A frame, a `fetch` or a script can't load this page,
+ * so code on a preview's origin can't drive the flow inside something it can read (M8 step 7's review). An old browser
+ * that sends neither is let through; the content Worker's exchange page (M8 step 8) is the other lock.
+ */
+export function isTopLevelNavigation(headers: Headers) {
+  const dest = headers.get("sec-fetch-dest");
+  const mode = headers.get("sec-fetch-mode");
+  return (dest === null || dest === "document") && (mode === null || mode === "navigate");
+}
+
 /** `GET /preview-access?host=&st=&r=`. `gateway` is the gateway's binding; `appUrl` this application's own origin. */
 export async function previewAccess(request: Request, gateway: Pick<Fetcher, "fetch">, appUrl: string): Promise<Response> {
   const url = new URL(request.url);
   const host = url.searchParams.get("host") ?? "";
   const st = url.searchParams.get("st") ?? "";
   const r = url.searchParams.get("r") ?? "/";
-  if (!HOST.test(host) || !STATE_HASH.test(st) || !returnPathOk(r)) return notFromPreview();
+  if (!isTopLevelNavigation(request.headers) || !HOST.test(host) || !STATE_HASH.test(st) || !returnPathOk(r)) return notFromPreview();
 
   const sent = forwardedHeaders(request.headers);
   for (const name of ["origin", "content-type", "sec-fetch-site", "idempotency-key"]) sent.delete(name);

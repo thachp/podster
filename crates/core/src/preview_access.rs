@@ -53,6 +53,11 @@ pub const PER_PERSON_WINDOW_MS: i64 = 60 * 1000;
 /// Asks of `/v1/preview-access` a room may be asked in [`PER_ROOM_WINDOW_MS`] (the plan's 5.3, step 2).
 pub const PER_ROOM_PER_HOUR: usize = 300;
 pub const PER_ROOM_WINDOW_MS: i64 = 60 * 60 * 1000;
+/// Tickets one person may be given in one room in [`PER_ROOM_WINDOW_MS`], inside the room's 300 (M8 step 7's review),
+/// so no one viewer can spend the room's hour and lock every other viewer out: the 300 then takes at least five people.
+/// **Proposed.** A session lasts an hour, so one person on a few devices, sent round again by a few epoch raises, needs
+/// a handful; 60 leaves room for that many times over.
+pub const PER_PERSON_IN_ROOM_PER_HOUR: usize = 60;
 
 /// Rounds of the flow a navigation may start in [`LOOP_GUARD_WINDOW_MS`] before the gate stops sending it round
 /// (spike P1, item 4: "after the second failed round within a minute").
@@ -675,6 +680,8 @@ pub fn return_path_ok(r: &str) -> bool {
 pub enum AccessLimit {
     Person,
     Room,
+    /// One person's tickets in one room, inside the room's hour ([`PER_PERSON_IN_ROOM_PER_HOUR`]).
+    PersonInRoom,
 }
 
 impl AccessLimit {
@@ -718,6 +725,27 @@ pub fn room_access_allowed(asked_at: &[i64], now: i64) -> Result<(), AccessLimit
     } else {
         Ok(())
     }
+}
+
+/// Whether the room may give one person one more ticket this hour, given when it gave them their earlier ones. Counted by
+/// the room, from its own session rows, and asked before [`room_access_allowed`], so a person at their own cap never
+/// spends the room's.
+pub fn person_in_room_allowed(given_at: &[i64], now: i64) -> Result<(), AccessLimit> {
+    if in_window(given_at, PER_ROOM_WINDOW_MS, now).len() >= PER_PERSON_IN_ROOM_PER_HOUR {
+        Err(AccessLimit::PersonInRoom)
+    } else {
+        Ok(())
+    }
+}
+
+/// For a person at their cap in a room, how long until one more ticket fits; `None` if one fits now.
+pub fn person_in_room_retry_after_ms(given_at: &[i64], now: i64) -> Option<i64> {
+    retry_after(
+        given_at,
+        PER_PERSON_IN_ROOM_PER_HOUR,
+        PER_ROOM_WINDOW_MS,
+        now,
+    )
 }
 
 /// For a person refused, how long until one more ask fits, for `Retry-After`; `None` if one fits now.

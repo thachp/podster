@@ -13,7 +13,8 @@
 //! which the API never reads (it signs with the current key only); the content Worker keeps the old public key for an
 //! hour, the longest a session lives, as `REPO_TOKEN_KEY` rotates (`docs/staging.md`).
 //!
-//! Nothing here logs, and a key's `Debug` shows its ID only.
+//! Nothing here logs, and a key's `Debug` shows its ID only. The signing key is wiped from memory when dropped
+//! (ed25519-dalek's `zeroize`).
 
 use ed25519_dalek::{Signer, SigningKey};
 use podster_core::preview_access::is_key_id;
@@ -99,7 +100,7 @@ mod tests {
     #[test]
     fn anything_else_is_no_key() {
         let seed = "4b".repeat(32);
-        for secret in [
+        for (case, secret) in [
             String::new(),
             seed.clone(),
             format!(":{seed}"),
@@ -113,8 +114,12 @@ mod tests {
             format!("k1:+{}", &seed[1..]),
             format!("k1:{}zz", &seed[2..]),
             format!("k1:{seed}:x"),
-        ] {
-            assert!(PreviewKey::parse(&secret).is_none(), "{secret:?}");
+        ]
+        .iter()
+        .enumerate()
+        {
+            // The case's number only: a message never prints a secret, even a test's.
+            assert!(PreviewKey::parse(secret).is_none(), "case {case}");
         }
     }
 

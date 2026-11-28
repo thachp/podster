@@ -6,8 +6,9 @@
 //! suspended or held, and the caller must pass `may_view` now, as they were resolved against the gateway's assertion.
 //! Every refusal is one answer, `preview_access_refused` (404), so nothing tells which hosts exist or who may see them.
 //!
-//! **The room's 300 an hour** (`podster_core::preview_access::room_access_allowed`) counts asks that passed the access
-//! check, one row of `preview_access_ask` each, and is asked only after it: an ask that would be refused anyway never
+//! **One person's 60 an hour in the room** (`person_in_room_allowed`, counted from the person's `preview_session` rows)
+//! and then **the room's 300 an hour** (`room_access_allowed`) count asks that passed the access check, and are asked
+//! only after it, so no one viewer can spend the room's hour: an ask that would be refused anyway never
 //! counts, so nobody outside the room can spend its hour, and a person who may not view is never told the room is busy.
 //! Every ask, granted or not, has already been counted against the person's 30 a minute in their own `Principal`.
 //!
@@ -17,16 +18,15 @@
 //! sessions and asks past the hour are pruned in the same transaction, so neither table grows without bound.
 //!
 //! **Revocation** ([`raise_epoch`]): whenever who may view can shrink, the room raises the slot's access epoch in the
-//! same transaction as the change, owes every preview host its entry again so the applier writes the new epoch, and
-//! drops the slot's session rows. Told as `preview.access_revoked` with the reason's code, IDs only.
+//! same transaction as the change, and owes every preview host its entry again so the applier writes the new epoch. Told as `preview.access_revoked` with the reason's code, IDs only.
 //!
 //! **Nothing here is logged:** no host, label, ticket, session, state hash or person.
 use super::*;
 use podster_core::preview::{EpochRaise, PreviewDeleteTrigger};
 use podster_core::preview_access::{
-    enter_location, room_access_allowed, room_retry_after_ms, session_claims, signing_input,
-    ticket_claims, token, token_payload, Claims, TokenAsk, PER_ROOM_WINDOW_MS, SESSION_ID_PREFIX,
-    SESSION_MAX_TTL_MS,
+    enter_location, person_in_room_allowed, person_in_room_retry_after_ms, room_access_allowed,
+    room_retry_after_ms, session_claims, signing_input, ticket_claims, token, token_payload,
+    Claims, TokenAsk, PER_ROOM_WINDOW_MS, SESSION_ID_PREFIX, SESSION_MAX_TTL_MS,
 };
 use podster_core::release::window_start;
 use podster_egress::preview_key::PreviewKey;
@@ -125,6 +125,21 @@ pub(super) fn grant(
         .iter()
         .filter_map(|row| row["at"].as_i64())
         .collect();
+    // One person's share first, from the room's own session rows: no one viewer can spend the room's hour.
+    let given: Vec<i64> = rows(
+        sql,
+        "SELECT created_at FROM preview_session WHERE person_id = ?",
+        vec![who.caller.id.as_str().into()],
+    )?
+    .iter()
+    .filter_map(|row| row["created_at"].as_i64())
+    .collect();
+    if person_in_room_allowed(&given, now).is_err() {
+        let wait_ms = person_in_room_retry_after_ms(&given, now).unwrap_or(1000);
+        // error-codes: preview_access_limit
+        return Err(ApiError::api(429, "preview_access_limit")
+            .retry_after(wait_ms.saturating_add(999) / 1000));
+    }
     if room_access_allowed(&asked, now).is_err() {
         let wait_ms = room_retry_after_ms(&asked, now).unwrap_or(1000);
         // error-codes: preview_access_limit
@@ -174,8 +189,8 @@ pub(super) fn grant(
 
 /// **Raises the preview's access epoch**, in the caller's transaction, because who may view it can have shrunk (the
 /// plan's 5.6): the slot written one epoch higher; every one of its hosts owed its entry again at once, so the applier
-/// writes the new epoch and the content Worker refuses every ticket and session signed before; the slot's session rows
-/// dropped. Told as `preview.access_revoked` to the room's owner and its admins who are people, with the reason's code
+/// writes the new epoch and the content Worker refuses every ticket and session signed before. The session rows stay
+/// until their hour ends, since each person's share of the room's hour is counted from them. Told as `preview.access_revoked` to the room's owner and its admins who are people, with the reason's code
 /// and nothing else. A room with no preview has nothing to raise. At the epoch's ceiling, which no room reaches in
 /// practice, revocation can't be written, so the preview is deleted instead, which takes every host down.
 pub(super) fn raise_epoch(
@@ -198,7 +213,6 @@ pub(super) fn raise_epoch(
         "UPDATE preview_apply SET attempts = 0, next_attempt_at = NULL, updated_at = ? WHERE slot_id = ?",
         vec![now.into(), raised.id().into()],
     )?;
-    exec(sql, "DELETE FROM preview_session", vec![])?;
     store::record_event_about(
         sql,
         "preview.access_revoked",

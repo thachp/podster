@@ -9,6 +9,7 @@ import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
 import { schemaShapeProblems, unknownKeywordProblems } from "./schema-shape.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
 import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
+import { previewAccessLogProblems } from "./no-log.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], service_only: serviceOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -391,12 +392,8 @@ for (const schema of ["RoomPreview", "Preview", "PreviewHostnameView", "PreviewR
   const approve = operations.get("approveRelease")?.op;
   if (approve?.requestBody?.required !== false || approve?.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ApproveRelease") problems.push("approveRelease: its body must be the optional ApproveRelease");
 }
-// M8 step 7: the preview access route carries tickets, sessions and state hashes, so the code that makes and passes them
-// writes no log line at all, IDs included (the plan's 5.3, "Nothing of this is logged"). Comments are blanked first.
-for (const file of ["apps/api/src/preview_access.rs", "apps/api/src/workspace/preview_access.rs", "apps/web/lib/preview-access.ts", "apps/web/app/preview-access/route.ts"]) {
-  const source = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-  if (/\bconsole(_log|_error|_warn|_debug|\s*\.)/.test(source)) problems.push(`${file}: the preview access path must log nothing`);
-}
+// M8 step 7: the preview access path writes no log line at all (no-log.mjs, with its self-test).
+problems.push(...previewAccessLogProblems((file) => readFileSync(new URL(`../../${file}`, import.meta.url), "utf8")));
 // The serve entries' preview form (the plan's 3.1): its mark, the slot's ID, the epoch's grammar, and vectors that cross, so a
 // production host never reads a preview entry and a preview host never reads a production one.
 {

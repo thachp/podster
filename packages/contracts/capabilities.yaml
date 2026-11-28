@@ -127,6 +127,7 @@ person_only:
   - getPreview
   - requestPreview
   - deletePreview
+  - getPreviewHostname
   - requestPreviewHostname
   - removePreviewHostname
   - checkPreviewHostname

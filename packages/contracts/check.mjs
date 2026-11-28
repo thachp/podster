@@ -328,23 +328,26 @@ for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "ReleaseAp
   if ((found?.required ?? []).slice().sort().join() !== named.sort().join()) problems.push(`${schema}: must require exactly its properties`);
 }
 
-// Previews (M8 step 3: the preview plan's section 9, ADR 0010's revision on previews, decisions 250 to 257). The contract
+// Previews (M8 step 3: the preview plan's section 9, ADR 0010's revision on previews, decisions 250 to 259). The contract
 // only: every operation is a person's (decision 253), names only what its path may, and says it isn't built and what it
 // answers until it is. No capability reaches one (the check on capabilities above refuses `preview`), and a preview's
 // states are core's release states, never awaiting approval or declined, since a preview is queued when asked.
-const previewOperations = { getPreview: "ws", requestPreview: "ws,t", deletePreview: "ws", requestPreviewHostname: "ws", removePreviewHostname: "ws", checkPreviewHostname: "ws", requestPreviewAccess: "" };
+const previewOperations = { getPreview: "ws", requestPreview: "ws,t", deletePreview: "ws", getPreviewHostname: "ws", requestPreviewHostname: "ws", removePreviewHostname: "ws", checkPreviewHostname: "ws", requestPreviewAccess: "" };
 for (const [id, params] of Object.entries(previewOperations)) {
   const found = operations.get(id);
   if (!found) { problems.push(`${id}: the preview operation is missing`); continue; }
   if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params || "nothing"}`);
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only (decision 253)`);
   if (!found.op.summary?.includes("**Not built (M8 step") || !found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say it isn't built, and that it answers \`not_found\` until it is`);
+  // While previews are off the room answers who first, as release switched off does; deleting and removing pass no gate,
+  // and the access route asks no room.
+  if (!["deletePreview", "removePreviewHostname", "requestPreviewAccess"].includes(id) && !found.op.summary?.includes("**`previews_off` comes after who is asking,**")) problems.push(`${id}: its summary must say \`previews_off\` comes after who is asking`);
   if (!found.op.summary?.includes("never an agent") && !found.op.summary?.includes("every agent") && !found.op.summary?.includes("Never an agent")) problems.push(`${id}: its summary must say no agent may`);
   // Each command but the access ticket keeps an idempotency key; a ticket is never stored for a replay.
   const hasKey = (found.op.parameters ?? []).some((p) => p.$ref?.endsWith("/idempotencyKey"));
   if (found.method !== "get" && hasKey !== (id !== "requestPreviewAccess")) problems.push(`${id}: ${hasKey ? "takes" : "lacks"} an idempotency key`);
 }
-for (const schema of ["RoomPreview", "Preview", "PreviewRelease", "RequestPreview", "PreviewAccessRequest", "PreviewAccess", "ApproveRelease", "TaskPreview"]) {
+for (const schema of ["RoomPreview", "Preview", "PreviewHostnameView", "PreviewRelease", "RequestPreview", "PreviewAccessRequest", "PreviewAccess", "ApproveRelease", "TaskPreview"]) {
   const found = api.components.schemas[schema];
   if (found?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
   if ((found?.required ?? []).slice().sort().join() !== Object.keys(found?.properties ?? {}).sort().join()) problems.push(`${schema}: must require exactly its properties`);
@@ -366,6 +369,11 @@ for (const schema of ["RoomPreview", "Preview", "PreviewRelease", "RequestPrevie
     const [schema, field] = at.split(".");
     if (schemas[schema]?.properties?.[field]?.pattern !== "^[0-9a-f]{40}$") problems.push(`${at}: must be 40 lower-case hexadecimal characters`);
   }
+  // Everyone who may view reads getPreview, so its custom hostname is the name and setup status only: setup facts stay on
+  // the owner's and admins' getPreviewHostname, as production's do on getAppHostname (widening them is the owner's ruling).
+  if (schemas.Preview?.properties?.custom_host?.oneOf?.[0]?.$ref !== "#/components/schemas/PreviewHostnameView" || Object.keys(schemas.PreviewHostnameView?.properties ?? {}).join() !== "hostname,setup_status") problems.push("Preview.custom_host: viewers may see only the hostname and setup_status (PreviewHostnameView)");
+  if (schemas.PreviewHostnameView?.properties?.setup_status?.enum?.join() !== schemas.AppHostnameRequest?.properties?.setup_status?.enum?.join()) problems.push("PreviewHostnameView.setup_status: must be exactly AppHostnameRequest.setup_status");
+  if (operations.get("getPreviewHostname")?.op?.responses?.["200"]?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/AppHostname") problems.push("getPreviewHostname: must answer the full AppHostname, for owners and admins");
   // What an agent reads of a preview is its state and commit: never a host, a label or a link (the plan's 9.2).
   if (Object.keys(schemas.TaskPreview?.properties ?? {}).join() !== "exists,release_id,commit_sha,state,observed_at,failure_code,served") problems.push("TaskPreview: must hold exactly exists, release_id, commit_sha, state, observed_at, failure_code and served, and never a host or a link");
   const preview = schemas.TaskReleaseStatus?.properties?.preview;
@@ -387,7 +395,8 @@ for (const schema of ["RoomPreview", "Preview", "PreviewRelease", "RequestPrevie
   const fixture = JSON.parse(readFileSync(new URL("serve-entry.fixture.json", import.meta.url), "utf8"));
   if (fixture.preview_mark !== "preview:") problems.push("serve-entry.fixture.json: the preview mark must be preview:");
   const epoch = new RegExp(fixture.preview_epoch_pattern ?? "$^");
-  if (!epoch.test("0") || epoch.test("01") || epoch.test("1".repeat(16)) || !Number.isSafeInteger(Number("9".repeat(15)))) problems.push("serve-entry.fixture.json: the epoch must be 0 or an unpadded decimal of at most 15 digits");
+  // The largest epoch the pattern takes must be exact as a JavaScript number, and the next digit count refused.
+  if (!epoch.test("0") || epoch.test("01") || epoch.test("-1") || !epoch.test("9".repeat(15)) || epoch.test("1".repeat(16))) problems.push("serve-entry.fixture.json: the epoch must be 0 or an unpadded decimal of at most 15 digits");
   const missing = (values, lists) => values.filter((value) => !lists.some((list) => (fixture[list] ?? []).includes(value)));
   const crosses = [
     [fixture.valid_preview_entries, ["invalid_script_names", "invalid_code_entries"], "a valid preview entry a production default host might read"],
@@ -401,7 +410,8 @@ for (const schema of ["RoomPreview", "Preview", "PreviewRelease", "RequestPrevie
   }
   for (const value of [...(fixture.valid_preview_entries ?? []), ...(fixture.valid_preview_custom_entries ?? [])]) {
     const rest = value.slice(fixture.preview_mark.length);
-    if (!value.startsWith(fixture.preview_mark) || !epoch.test(rest.slice(0, rest.indexOf(":")))) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} isn't the mark and an epoch`);
+    const ep = rest.slice(0, rest.indexOf(":"));
+    if (!value.startsWith(fixture.preview_mark) || !epoch.test(ep) || !Number.isSafeInteger(Number(ep))) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} isn't the mark and an exact epoch`);
   }
 }
 

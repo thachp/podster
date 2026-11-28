@@ -785,6 +785,35 @@ pub fn migrate(sql: &SqlStorage) -> R<()> {
     for migration in MIGRATIONS.iter().skip(current) {
         exec(sql, migration, vec![])?;
     }
+    // Test builds only: a room holding this table leaves a reference the room can't satisfy, under deferred checking, as a
+    // broken rebuild would, which is how a test shows the check below.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fail_migration_reference'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        exec(sql, "PRAGMA defer_foreign_keys = ON", vec![])?;
+        exec(
+            sql,
+            "INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at) VALUES ('ghost.rel_00000000000000000000000000000000', 'ghost', 1, 1)",
+            vec![],
+        )?;
+    }
+    // A step may defer the room's references to the end of the transaction (step 64). This runtime doesn't end the real
+    // transaction when `transactionSync` returns, so the setting would last the rest of the request, and a reference a
+    // later write broke would only fail when it commits, beyond any answer. So every reference is checked here, the
+    // setting is turned off whatever the check found, and a reference left unsatisfied fails the migration, which then
+    // leaves nothing behind.
+    let unsatisfied = rows(sql, "PRAGMA foreign_key_check", vec![])?;
+    exec(sql, "PRAGMA defer_foreign_keys = OFF", vec![])?;
+    if !unsatisfied.is_empty() {
+        return Err(crate::error::ApiError::internal(
+            "migration left a reference unsatisfied",
+        ));
+    }
     if found.is_empty() {
         exec(
             sql,

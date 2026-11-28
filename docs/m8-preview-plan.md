@@ -305,8 +305,12 @@ All forward-only, each step a new table so it reruns safely, as step 58 does (`a
 | Workspace DO | 61 | `release_build (release_id PK, build_id, tree_sha, form_version)` and `release_from_preview (release_id PK, preview_release_id, build_id)` |
 | Workspace DO | 62 | `preview_session (sid PK, person_id, created_at, expires_at)`, pruned by the alarm |
 | Workspace DO | 63 | `custom_hostname_role (request_id PK, role CHECK IN ('production','preview'))`. No row means `production` |
-| Hostname DO | its next step | The claim's role |
+| Workspace DO | 64 | `app_label` rebuilt with `kind CHECK IN ('production','preview')`. A preview label is a row of it, since `release.label` and the store and script tables reference it and the room enforces those references. A preview label is never `current`, so `current = 1` stays production's alone; it is live until `retired_at` is set. Deferred reference checks end with the migration: `migrate` runs `PRAGMA foreign_key_check`, fails on any row, and turns `defer_foreign_keys` off. Every existing label is `production` |
 | D1 | `0010_app_label_kind.sql` | `app_label_kind (label PK, kind CHECK IN ('production','preview'))` beside `app_label_index`. A read model that only routes |
+
+Built in step 5 (PR 643), with these changes from the table first proposed, accepted by the architect: step 64 was added; the hostname object has no step, because the room alone records a claim's role (`podster_core::hostnames::HostnameRole`) and the hostname's object keeps one claim a name whatever it maps to; and a person's count for `/v1/preview-access` is a table the Principal object makes when it first needs it, as its other tables are, so step 7 adds it rather than a numbered step.
+
+**For step 6:** before step 64, a label that wasn't `current` was always retired, and some code still assumes it. A live preview label breaks that assumption: `apps/api/src/workspace/label_retire.rs` (it reads `current` and `retired_at` to retire a label), `apps/api/src/workspace/takedown.rs:715` (it picks the latest label by `current IS NOT NULL`) and `apps/api/src/workspace/release_approval.rs:499` and `:674` (they index any label with `indexed_at IS NULL`). Step 6 must handle `kind = 'preview'` in each of these.
 
 ## 10. UI: the Ship panel
 

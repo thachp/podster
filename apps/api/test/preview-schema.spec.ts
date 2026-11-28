@@ -206,7 +206,12 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
     sql.exec("SELECT id, label FROM release ORDER BY id").toArray(),
     sql.exec("SELECT host, label, label_current FROM serve_state ORDER BY host").toArray(),
     sql.exec("SELECT script_name, label FROM script_delete ORDER BY script_name").toArray(),
+    sql.exec("SELECT label, store_name, store_id FROM app_store ORDER BY label").toArray(),
+    sql.exec("SELECT release_id, label, store_id FROM release_store_binding ORDER BY release_id").toArray(),
+    sql.exec("SELECT label, approved_at FROM app_label_approval ORDER BY label").toArray(),
+    sql.exec("SELECT cause, label, release_epoch FROM unpublish ORDER BY seq").toArray(),
   ];
+  const STORE_ID = "0123abcd-0123-4567-89ab-0123456789ab";
 
   it("reaches a room made before it, keeping every label and every row that names one, all production's", async () => {
     const id = await room();
@@ -217,6 +222,11 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
       sql.exec("INSERT INTO app_label (label, current, created_at, retired_at, indexed_at, suspended_at, suspension_reason) VALUES (?, NULL, 1, 2, 3, 4, 'abuse')", OLD_LABEL);
       sql.exec("INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at) VALUES (?, ?, 1, 1)", `${OLD_LABEL}.${REL(7)}`, OLD_LABEL);
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES ('d.example', 'default', ?, 1, ?, ?, 1, 1)", LABEL, REL(1), `${LABEL}.${REL(1)}`);
+      // The production label's store, a release bound to it and its approval, and the retired label's unpublish.
+      sql.exec("INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at) VALUES (?, 'd1', ?, ?, 1, 1, 2, 2)", LABEL, `podster-store-${"e".repeat(32)}`, STORE_ID);
+      sql.exec("INSERT INTO release_store_binding (release_id, label, store_id, recorded_at) VALUES (?, ?, ?, 1)", REL(1), LABEL, STORE_ID);
+      sql.exec("INSERT INTO app_label_approval (label, approved_at) VALUES (?, 1)", LABEL);
+      sql.exec("INSERT INTO unpublish (cause, label, release_epoch, at) VALUES ('release_off', ?, 1, 1)", OLD_LABEL);
       // The table as it was before the step, rebuilt by hand.
       sql.exec("PRAGMA defer_foreign_keys = ON");
       sql.exec("CREATE TABLE app_label_was AS SELECT label, current, created_at, retired_at, indexed_at, suspended_at, suspension_reason FROM app_label");
@@ -226,6 +236,7 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
         CHECK ((current IS NULL) = (retired_at IS NOT NULL)), CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL)), UNIQUE (label, current)) WITHOUT ROWID`);
       sql.exec("INSERT INTO app_label SELECT * FROM app_label_was");
       sql.exec("DROP TABLE app_label_was");
+      sql.exec("PRAGMA defer_foreign_keys = OFF");
       sql.exec("UPDATE schema_version SET version = version - 1");
       return naming(sql);
     });
@@ -236,6 +247,30 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
       { label: OLD_LABEL, kind: "production", current: null, created_at: 1, retired_at: 2, indexed_at: 3, suspended_at: 4, suspension_reason: "abuse" },
     ]);
     expect(await inRoom(id, naming)).toEqual(before);
+    expect(before.slice(3).map((rows: unknown[]) => rows.length)).toEqual([1, 1, 1, 1]);
+    // The migration turned deferred checking off again: a broken reference is refused at once, as a catchable error.
+    expect(await inRoom(id, (sql) => sql.exec("PRAGMA defer_foreign_keys").one())).toEqual({ defer_foreign_keys: 0 });
+    expect(await inRoom(id, (sql) => refuses(() => sql.exec("INSERT INTO app_label_approval (label, approved_at) VALUES ('psnowhere', 1)")))).toBe(true);
+  });
+
+  it("fails the migration cleanly, and leaves deferred checking off, when a reference is left unsatisfied", async () => {
+    const id = await room();
+    const latest = await schemaVersion(id);
+    await inRoom(id, (sql) => {
+      sql.exec("CREATE TABLE fail_migration_reference (x INTEGER)");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect(await api("GET", `/v1/workspaces/${id}`)).toBe(500);
+    expect(await inRoom(id, (sql) => [
+      sql.exec("SELECT version FROM schema_version").one().version,
+      sql.exec("SELECT count(*) AS n FROM script_delete").one().n,
+      sql.exec("PRAGMA defer_foreign_keys").one().defer_foreign_keys,
+    ])).toEqual([latest - 1, 0, 0]);
+    // Without the failpoint the same migration runs.
+    await inRoom(id, (sql) => sql.exec("DROP TABLE fail_migration_reference"));
+    expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
+    expect(await schemaVersion(id)).toBe(latest);
+    expect(await inRoom(id, (sql) => sql.exec("PRAGMA defer_foreign_keys").one().defer_foreign_keys)).toBe(0);
   });
 
   it("holds a live preview label beside the current production one, and a release under it, and runs again safely", async () => {

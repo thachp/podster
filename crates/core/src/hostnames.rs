@@ -1013,3 +1013,105 @@ pub fn free<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
         generation: record.generation.saturating_add(1),
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Roles: production or preview (M8 step 4)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What a room's custom hostname maps to (M8; the preview plan's section 7, ADR 0010's revision on previews, item 8):
+/// the room's production app or its preview. The claim itself, in the hostname's own object, holds no role: one name
+/// is one claim for one room's request whatever it maps to (decision 201), so a name can never be split between roles
+/// or rooms. Only the room records the role, beside its request (Workspace step 63).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameRole {
+    Production,
+    Preview,
+}
+
+impl HostnameRole {
+    pub const ALL: [HostnameRole; 2] = [HostnameRole::Production, HostnameRole::Preview];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            HostnameRole::Production => "production",
+            HostnameRole::Preview => "preview",
+        }
+    }
+
+    /// The role a value names, exactly. Anything else, a case twin included, is none.
+    pub fn parse(value: &str) -> Option<HostnameRole> {
+        Self::ALL.into_iter().find(|role| role.name() == value)
+    }
+}
+
+/// A request's role as the room records it: no row is `production` (the plan's 9.4, step 63), so every request made
+/// before previews stays production's. A row naming anything else is a fault and is neither role, so the caller fails
+/// closed rather than reading it as one.
+pub fn recorded_role(row: Option<&str>) -> Option<HostnameRole> {
+    match row {
+        None => Some(HostnameRole::Production),
+        Some(value) => HostnameRole::parse(value),
+    }
+}
+
+/// Custom hostnames a room may have of each role, pending or claimed (the plan's section 7: "a room may hold at most one
+/// of each"; decision 257). [`MAX_HOSTNAMES_PER_ROOM`] stays the production route's figure until M8 step 10 moves the
+/// route onto roles.
+pub const MAX_HOSTNAMES_PER_ROLE: usize = 1;
+
+/// One of the room's own live custom hostname requests, pending or claimed, as the room reads it: its role and its
+/// normalized name ([`normalize`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RoomHostname<'a> {
+    pub role: HostnameRole,
+    pub hostname: &'a str,
+}
+
+/// Why a room's request for a custom hostname of a role is refused, beyond the name's own refusals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleRefusal {
+    /// `preview_none`: a preview hostname asked for before the room has a preview (the plan's section 7).
+    PreviewNone,
+    /// `hostname_unavailable`: the room already holds or asks for this name in the other role. One name, one claim,
+    /// whatever its role (the plan's section 7, "Conflicts").
+    Unavailable,
+    /// `hostname_limit`: the room already has its one custom hostname of this role.
+    RoomLimit,
+}
+
+impl RoleRefusal {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            RoleRefusal::PreviewNone => "preview_none",
+            RoleRefusal::Unavailable => "hostname_unavailable",
+            RoleRefusal::RoomLimit => "hostname_limit",
+        }
+    }
+}
+
+/// Whether the room may ask for `hostname`, already normalized, in `role`, given its own live requests (`held`) and
+/// whether it has a preview slot. In this order: a preview hostname needs a preview; a name the room holds in the other
+/// role is refused, so one room never maps one name to both its production app and its preview; then one of each
+/// role. Another room's claim on the name is the hostname object's to refuse ([`decide_claim`]), unchanged: it holds
+/// no role, so a name held anywhere for one role is held for both.
+pub fn role_request_allowed(
+    held: &[RoomHostname],
+    role: HostnameRole,
+    hostname: &str,
+    preview_slot_exists: bool,
+) -> Result<(), RoleRefusal> {
+    if role == HostnameRole::Preview && !preview_slot_exists {
+        return Err(RoleRefusal::PreviewNone);
+    }
+    if held
+        .iter()
+        .any(|h| h.hostname == hostname && h.role != role)
+    {
+        return Err(RoleRefusal::Unavailable);
+    }
+    if held.iter().filter(|h| h.role == role).count() >= MAX_HOSTNAMES_PER_ROLE {
+        return Err(RoleRefusal::RoomLimit);
+    }
+    Ok(())
+}

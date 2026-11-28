@@ -597,9 +597,6 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .drawer { gap: 16px; }
 .callout { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 12px; background: var(--need-soft); border: 1px solid var(--need-line); }
 .callout .kind { color: var(--need); font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
-.dtabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); margin-top: 4px; }
-.dtabs button { padding: 0 0 10px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--muted); font-weight: 500; cursor: pointer; }
-.dtabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
 .dpane { display: flex; flex-direction: column; gap: 16px; }
 .donelist { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .msg { display: flex; gap: 10px; align-items: flex-start; }
@@ -850,6 +847,15 @@ const CONTRIB = ['k-home', 'k-run', 'k-agents', 'k-explore'];
 const isK = () => S.route.startsWith('k-');
 const T = (id) => S.tasks.find((t) => t.id === id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+/* Underline tabs: switch between sections or views of one page. Segmented .seg is only for a setting inside a form or toolbar.
+   items: [[value, label, count?]]; o: { id, label, key (data-* name, default v) }. Pair with tabPanel(o.id, cur, body). */
+function tabs(items, cur, act, o) {
+  const key = o.key || 'v';
+  return '<div class="tabrow" role="tablist" aria-label="' + esc(o.label) + '">' + items.map((x) => '<button type="button" role="tab" id="' + o.id + 'tab-' + esc(x[0]) + '" aria-selected="' + (cur === x[0]) + '" aria-controls="' + o.id + 'panel" data-act="' + act + '" data-' + key + '="' + esc(x[0]) + '">' + esc(x[1]) + (x[2] ? ' <span class="faint">' + esc(x[2]) + '</span>' : '') + '</button>').join('') + '</div>';
+}
+function tabPanel(id, cur, body) {
+  return '<div id="' + id + 'panel" role="tabpanel" aria-labelledby="' + id + 'tab-' + esc(cur) + '" style="display:flex;flex-direction:column;gap:22px;min-width:0">' + body + '</div>';
+}
 
 function needsCreator() {
   const out = [];
@@ -1172,8 +1178,9 @@ function home() {
   const total = needs.length + (all ? 1 : 0);
   const grouped = all ? '<span class="label">Customer order tracker</span>' + (cards || '<div class="allclear">Nothing here.</div>') + '<span class="label" style="margin-top:10px">Bakery preorders</span>' + bpCard : cards;
   return (S.archived ? '<div class="confirm"><b>Customer order tracker is archived.</b><span class="muted">Everything stays readable and the live site keeps running. Agents can\'t take or submit work.</span><button class="btn" data-act="unarchive" style="align-self:flex-start">Unarchive</button></div>' : '') +
-    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn ghost" href="#all">One list</a><div class="seg" role="group" aria-label="Which workrooms"><button data-act="scope" data-s="room" aria-pressed="' + !all + '">This workroom</button><button data-act="scope" data-s="all" aria-pressed="' + all + '">All workrooms</button></div></div></div>' +
-    '<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
+    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn ghost" href="#all">One list</a></div></div>' +
+    tabs([['room', 'This workroom'], ['all', 'All workrooms']], all ? 'all' : 'room', 'scope', { id: 'scope', label: 'Which workrooms', key: 's' }) +
+    tabPanel('scope', all ? 'all' : 'room', '<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
     '<section style="display:flex;flex-direction:column;gap:22px">' +
     '<div><span class="label">Moving without you</span><div class="quiet">' +
     moving.map((t) => t.offline
@@ -1184,7 +1191,7 @@ function home() {
     '</div></div>' +
     '<div class="panel" style="padding:16px 18px;display:flex;flex-direction:column;gap:12px"><span class="label">Customer order tracker</span>' +
     STAGES.map((s) => { const c = S.tasks.filter((t) => t.stage === s.id).length; return '<a href="#board" style="display:flex;align-items:center;gap:10px;text-decoration:none"><span class="dot" style="background:' + s.color + '"></span><span style="flex:1">' + s.name + '</span><span class="mono" style="color:' + (s.id === 'review' && c ? 'var(--need)' : 'var(--muted)') + '">' + c + '</span></a>'; }).join('') +
-    '</div></section></div>';
+    '</div></section></div>');
 }
 
 /* ---------- Creator: Board, List, Timeline ---------- */
@@ -1192,7 +1199,7 @@ const EST = { 14: [0, 1], 15: [1, 1], 16: [2, 2], 18: [4, 3], 19: [6, 2], 21: [7
 const DAYS = ['Mon 16', 'Tue 17', 'Wed 18', 'Thu 19', 'Fri 20', 'Mon 23', 'Tue 24', 'Wed 25', 'Thu 26', 'Fri 27'];
 const TODAY = 6.6;
 function viewSwitch() {
-  return '<div class="seg" role="group" aria-label="View">' + [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']].map((v) => '<button data-act="view" data-v="' + v[0] + '" aria-pressed="' + (S.view === v[0]) + '">' + v[1] + '</button>').join('') + '</div>';
+  return tabs([['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']], S.view, 'view', { id: 'view', label: 'Board view' });
 }
 function listView() {
   const order = { review: 0, building: 1, planned: 2, done: 3 };
@@ -1219,8 +1226,8 @@ function timelineView() {
 }
 function board() {
   return (S.archived ? '<div class="confirm"><b>Archived.</b><span class="muted">The board is read-only. <a href="#team">Unarchive from Team</a> to start work again.</span></div>' : '') +
-    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + viewSwitch() + '<button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
-    (S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
+    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
+    viewSwitch() + tabPanel('view', S.view, S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
     '<div class="board">' + STAGES.map((s) => {
       const ts = S.tasks.filter((t) => t.stage === s.id);
       return '<section class="col' + (s.id === 'review' ? ' you' : '') + '" data-col="' + s.id + '"><div class="colhead"><span class="dot" style="background:' + s.color + '"></span>' + s.name + '<span class="c">' + ts.length + '</span></div>' +
@@ -1424,7 +1431,7 @@ function team() {
     ['CR', true, 'Review Agent', 'Code reviewer', 'Jun Park\'s agent. Reads every change and leaves notes. ' + (S.repo.reviewer === 'hold' ? 'Its \u201cworth fixing\u201d notes must be answered before you approve.' : 'It can\'t approve or block.'), '#repo']
   ];
   if (S.left.planner) rows.splice(1, 1);
-  return '<div class="head"><div><h1>Team</h1><p>Who works here. Agents can build and suggest; only people approve and release.</p></div><a class="btn" href="#rules">Rules</a></div>' +
+  return '<div class="head"><div><h1>Team</h1><p>Who works here. Agents can build and suggest; only people approve and release.</p></div></div>' +
     '<div class="panel">' + rows.map((r) => (r[1] ? '<a class="row roomrow" href="' + (r[5] || '#agent') + '" style="padding:13px 16px">' : '<div class="row">') + '<span class="av' + (r[1] ? ' agent' : '') + '">' + esc(r[0]) + '</span><span style="flex:1;min-width:0"><b style="font-weight:600">' + r[2] + '</b> <span class="faint">\u00b7 ' + r[3] + '</span><br><span class="muted">' + r[4] + '</span></span>' + (r[1] ? '<span class="faint">' + I.arrow + '</span></a>' : '</div>')).join('') +
     '<div class="row" style="flex-wrap:wrap"><span class="av agent" style="background:transparent;border:1.5px dashed var(--line)">QA</span><span style="flex:1;min-width:200px"><b style="font-weight:600">QA</b> <span class="faint">\u00b7 open</span><br><span class="muted">' + (S.invite === 'sent' ? 'Invite sent to sam@example.com. Waiting for an answer.' : 'Tests each change on a phone before you review it.') + '</span></span>' +
     (S.invite === 'none' ? '<span style="display:flex;gap:8px"><a class="btn" href="#find">Find a tester</a><button class="btn ghost" data-act="invite-open">Invite by email</button></span>' : '') +
@@ -1792,7 +1799,7 @@ const LINKS = {
 };
 function history() {
   const h = S.hist;
-  const tabs = '<div class="seg" role="group" aria-label="View"><button data-act="hist-tab" data-t="list" aria-pressed="' + (h.tab === 'list') + '">What happened</button><button data-act="hist-tab" data-t="map" aria-pressed="' + (h.tab === 'map') + '">Who works with whom</button></div>';
+  const hTabs = tabs([['list', 'What happened'], ['map', 'Who works with whom']], h.tab, 'hist-tab', { id: 'hist', label: 'History view', key: 't' });
   let body;
   if (h.tab === 'list') {
     const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
@@ -1810,7 +1817,7 @@ function history() {
       '<div class="panel" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><span class="label">' + l.label + '</span><h2 style="font-size:18px">' + l.a + ' \u2194 ' + l.b + '</h2><span class="muted">' + l.n + '</span><div class="kvlist">' + l.items.map((x) => '<div><span style="color:var(--text)">' + x + '</span></div>').join('') + '</div>' +
       '<div class="chips">' + Object.keys(LINKS).map((k) => '<button class="btn' + (h.link === k ? ' primary' : ' ghost') + '" style="height:28px;font-size:12.5px" data-act="hist-link" data-k="' + k + '">' + LINKS[k].a.split(' ')[0] + ' \u2194 ' + LINKS[k].b.split(' ')[0] + '</button>').join('') + '</div></div></div>';
   }
-  return '<div class="head"><div><h1>History</h1><p>Everything that happened in Customer order tracker.</p></div>' + tabs + '</div>' + body;
+  return '<div class="head"><div><h1>History</h1><p>Everything that happened in Customer order tracker.</p></div></div>' + hTabs + tabPanel('hist', h.tab, body);
 }
 
 /* ---------- Contributor: First time ---------- */
@@ -1835,9 +1842,9 @@ function find() {
   const roles = ['QA', 'Frontend', 'Backend'];
   const list = AG.filter((a) => a[2] === S.findRole);
   return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Find contributors</h1><p>Agents other people run. Their records come from owners who approved their work.</p></div></div>' +
-    '<div class="seg" role="group" aria-label="Role" style="align-self:flex-start">' + roles.map((r) => '<button data-act="find-role" data-r="' + r + '" aria-pressed="' + (S.findRole === r) + '">' + r + '</button>').join('') + '</div>' +
-    '<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
-      (S.invited[a[0]] ? '<span class="stage"><span class="dot" style="background:var(--build)"></span>Invited</span>' : '<button class="btn" data-act="find-invite" data-a="' + a[0] + '" data-r="' + a[2] + '">Invite to ' + (a[2] === 'QA' ? 'QA' : a[2].toLowerCase() + ' engineer') + '</button>') + '</div>').join('') + '</div>' +
+    tabs(roles.map((r) => [r, r]), S.findRole, 'find-role', { id: 'role', label: 'Role', key: 'r' }) +
+    tabPanel('role', S.findRole, '<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
+      (S.invited[a[0]] ? '<span class="stage"><span class="dot" style="background:var(--build)"></span>Invited</span>' : '<button class="btn" data-act="find-invite" data-a="' + a[0] + '" data-r="' + a[2] + '">Invite to ' + (a[2] === 'QA' ? 'QA' : a[2].toLowerCase() + ' engineer') + '</button>') + '</div>').join('') + '</div>') +
     '<p class="faint" style="font-size:13px">Skills are what each contributor wrote. Approval counts are real. Anyone you invite can still say no.</p>';
 }
 
@@ -2101,8 +2108,7 @@ function shipPage(tab) {
   if (!SHIP_WHAT[tab]) tab = 'releases';
   const body = tab === 'settings' ? appSettingsBody() : tab === 'infra' ? infraTab() : tab === 'data' ? dataTab() : ship();
   return memberView('<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div></div>' +
-    '<div class="tabrow" role="tablist" aria-label="Ship">' + SHIP_TABS.map((x) => '<button role="tab" id="shiptab-' + x[0] + '" aria-selected="' + (tab === x[0]) + '" aria-controls="shippanel" tabindex="' + (tab === x[0] ? '0' : '-1') + '" data-act="ship-tab" data-v="' + x[0] + '">' + x[1] + '</button>').join('') + '</div>' +
-    '<div id="shippanel" role="tabpanel" aria-labelledby="shiptab-' + tab + '" style="display:flex;flex-direction:column;gap:22px">' + body + '</div>', SHIP_WHAT[tab]);
+    tabs(SHIP_TABS, tab, 'ship-tab', { id: 'ship', label: 'Ship' }) + tabPanel('ship', tab, body), SHIP_WHAT[tab]);
 }
 // [kind, short kind, name, binding, what it's for, task that last changed it, outside Cloudflare]
 const INFRA = [
@@ -2181,10 +2187,10 @@ function orgAgent() {
   return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#org" style="text-decoration:none">' + esc(S.org.name) + '</a> / Agents</p><h1 style="display:flex;align-items:center;gap:12px"><span class="av agent" style="width:34px;height:34px">MN</span>Menu Agent</h1><p>Paired by Marco Diaz on the shop\'s laptop \u00b7 Product manager in Bakery preorders</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="org-pause">' + (S.orgPaused ? 'Resume' : 'Pause') + '</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Marco.">Message Marco</button></div></div>' +
     '<div class="confirm" style="max-width:860px"><b style="font-weight:600">You can see everything this agent receives</b><span class="muted">' + esc(S.org.name) + ' owns it, and you\'re an admin. You can pause it, but you can\'t answer or act for it. Marco runs it. Items show as IDs. Open the workroom to read the message, if you\'re a member there.</span></div>' +
     (S.orgPaused ? '<div class="confirm" style="max-width:860px"><b style="font-weight:600">Paused by you</b><span class="muted">It keeps its role but won\'t run. Marco and the workroom\'s owner are told.</span></div>' : '') +
-    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="label" style="margin-right:auto">Inbox</span><div class="seg" role="group" aria-label="Filter">' + [['all', 'All'], ['waiting', 'Waiting'], ['done', 'Handled']].map((x) => '<button data-act="org-inbox" data-v="' + x[0] + '" aria-pressed="' + (f === x[0]) + '">' + x[1] + '</button>').join('') + '</div></div>' +
-    '<div class="panel" style="overflow-x:auto"><table class="tbl" style="min-width:680px"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Workroom</th><th scope="col">Task</th><th scope="col">Item</th><th scope="col">State</th></tr></thead><tbody>' +
+    tabs([['all', 'All'], ['waiting', 'Waiting'], ['done', 'Handled']], f, 'org-inbox', { id: 'inbox', label: 'Inbox' }) +
+    tabPanel('inbox', f, '<div class="panel" style="overflow-x:auto"><table class="tbl" style="min-width:680px"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Workroom</th><th scope="col">Task</th><th scope="col">Item</th><th scope="col">State</th></tr></thead><tbody>' +
     rows.map((r) => '<tr style="cursor:default"><td class="faint">' + r[0] + '</td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono">' + r[3] + '</td><td class="mono faint">' + r[5] + '</td><td><span class="stage"><span class="dot" style="background:' + (r[4] === 'Waiting' ? 'var(--build)' : 'var(--done)') + '"></span>' + r[4] + '</span></td></tr>').join('') +
-    '</tbody></table>' + (rows.length ? '' : '<div class="allclear" style="border:0">Nothing here.</div>') + '</div>' +
+    '</tbody></table>' + (rows.length ? '' : '<div class="allclear" style="border:0">Nothing here.</div>') + '</div>') +
     '<p class="faint" style="font-size:13px;margin:0">Bakery preorders is the workroom with ID wr_bp4K.</p>';
 }
 
@@ -2322,25 +2328,6 @@ function overlays() {
       : t.id === 20 ? '<a class="btn primary" href="#team">Invite a tester</a>'
       : t.stage === 'building' ? ''
       : t.ship === 'ready' ? '<a class="btn primary" href="#ship">Release it</a>' : '';
-    const qOpen = t.id === 19 && S.q.state === 'open';
-    const nMsg = (S.threads[t.id] || []).length + (t.id === 19 ? (S.q.state === 'answered' ? 3 : 1) : 0);
-    const nFile = (S.files[t.id] || []).length;
-    const tab = S.dtab || 'details';
-    const callout = qOpen
-      ? '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>Coding Agent asks</span><span>' + Q_TEXT + '</span><div class="chips">' + Q_OPTS.map((o, i) => '<button class="btn" data-act="answer" data-i="' + i + '">' + o + '</button>').join('') + '<button class="btn ghost" data-act="dtab" data-t="discussion">Write an answer</button></div></div>'
-      : t.blocked ? '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>' + t.blocked + '</span><span class="muted">' + t.blockedWhy + '</span></div>' : '';
-    const tabs = '<div class="dtabs" role="tablist">' + [['details', 'Details', 0], ['discussion', 'Discussion', nMsg], ['files', 'Files', nFile]].map((x) => '<button role="tab" aria-selected="' + (tab === x[0]) + '" data-act="dtab" data-t="' + x[0] + '">' + x[1] + (x[2] ? ' <span class="faint">' + x[2] + '</span>' : '') + '</button>').join('') + '</div>';
-    let pane;
-    if (tab === 'discussion') {
-      pane = (t.id === 19 ? '<div class="msg"><span class="av agent" style="width:26px;height:26px;font-size:9.5px">&lt;/&gt;</span><span><b style="font-weight:600">Coding Agent</b> <span class="faint" style="font-size:12px">12 min ago</span><br>' + Q_TEXT + '</span></div>' +
-        (S.q.state === 'answered' ? '<div class="msg"><span class="av" style="width:26px;height:26px;font-size:9.5px">EL</span><span><b style="font-weight:600">You</b> <span class="faint" style="font-size:12px">just now</span><br>' + esc(S.q.answer) + '</span></div><div class="msg"><span class="av agent" style="width:26px;height:26px;font-size:9.5px">&lt;/&gt;</span><span><b style="font-weight:600">Coding Agent</b> <span class="faint" style="font-size:12px">just now</span><br>Thanks. Using that and carrying on.</span></div>' : '') : '') +
-        discussion(t.id, qOpen);
-    } else if (tab === 'files') {
-      pane = fileList(t.id, !S.archived);
-    } else {
-      pane = '<div><span class="label">What you asked for</span><p style="margin-top:6px">' + t.ask + '</p></div>' +
-        '<div><span class="label">Done when</span><ul class="donelist">' + t.done.map((d) => '<li>' + d + '</li>').join('') + '</ul></div>';
-    }
     S.taskId = S.drawer;
     h += '<div class="scrim' + (S.drawerEnter ? ' enter' : '') + '" data-act="close"></div><aside class="drawer sheet-wide' + (S.drawerEnter ? ' enter' : '') + '" role="dialog" aria-label="Task #' + t.id + '">' + taskPage(true) + '</aside>';
   }

@@ -72,7 +72,7 @@ console.log('K-OK');
 __t.S.palette = false; __t.S.modal = null; location.hash = '#rules'; __t.fromHash();
 if (html.indexOf('Websites agents can reach') < 0 || html.indexOf('data-act="pol-host-rm" data-i="1"') < 0 || html.indexOf('href="#rules"') < 0) throw new Error('rules');
 __t.S.policy.draft = { join: 'ask', propose: true }; __t.render(); if (html.indexOf('savebar') < 0 || html.indexOf('Save 2 changes') < 0 || html.indexOf('Accept proven agents') < 0 || html.indexOf('Not available in public rooms') < 0) throw new Error('rules draft');
-__t.S.policy.draft = null; location.hash = '#team'; __t.fromHash(); if (html.indexOf('href="#rules"') < 0) throw new Error('team link');
+__t.S.policy.draft = null; location.hash = '#team'; __t.fromHash(); { const hd = html.slice(html.indexOf('<h1>Team</h1>')); if (html.indexOf('<h1>Team</h1>') < 0 || hd.slice(0, hd.indexOf('</div></div>')).indexOf('href="#rules"') >= 0 || html.indexOf('href="#rules"') < 0) throw new Error('team: no Rules button, sidebar keeps it'); }
 console.log('RULES-OK');
 __t.S.runFailed = false; __t.S.agentSel = 'coder'; location.hash = '#k-agent'; __t.fromHash(); if (html.indexOf('Check before sending') < 0) throw new Error('check-first setting');
 console.log('AR-OK');
@@ -164,5 +164,21 @@ __t.S.as = 'elena'; __t.S.shipTab = 'releases';
 console.log('SHIP-TABS-OK');
 __t.S.shipTab = 'infra'; location.hash = '#ship'; __t.fromHash(); if (html.indexOf('not built yet') < 0) throw new Error('infra planned'); __t.S.shipTab = 'releases';
 location.hash = '#home'; __t.fromHash(); if (html.indexOf('2026 OM.Network, LLC') < 0 || html.indexOf('2026 Podster<') >= 0) throw new Error('footer owner');
+// Tabs vs segments: page sections and views use the shared underline tab row; settings inside a form or toolbar stay .seg.
+{ const tabOk = (name, id) => { if (html.indexOf('class="tabrow" role="tablist"') < 0 || html.indexOf('role="tab" id="' + id + 'tab-') < 0 || html.indexOf('aria-controls="' + id + 'panel"') < 0 || html.indexOf('id="' + id + 'panel" role="tabpanel"') < 0) throw new Error('tabs ' + name); };
+  for (const t of ['list', 'map']) { __t.S.hist.tab = t; location.hash = '#history'; __t.fromHash(); tabOk('history ' + t, 'hist'); if (html.indexOf('id="histtab-' + t + '" aria-selected="true"') < 0 || html.indexOf('data-act="hist-tab" data-t="' + t + '"') < 0) throw new Error('history tab ' + t); }
+  __t.S.hist.tab = 'list';
+  for (const v of ['board', 'list', 'timeline']) { __t.S.view = v; location.hash = '#board'; __t.fromHash(); tabOk('board ' + v, 'view'); if (html.indexOf('id="viewtab-' + v + '" aria-selected="true"') < 0) throw new Error('board view ' + v); }
+  __t.S.view = 'board';
+  location.hash = '#home'; __t.fromHash(); tabOk('today scope', 'scope');
+  location.hash = '#find'; __t.fromHash(); tabOk('find role', 'role');
+  for (const v of ['all', 'waiting', 'done']) { __t.S.orgInbox = v; location.hash = '#org-agent'; __t.fromHash(); tabOk('org inbox ' + v, 'inbox'); if (html.indexOf('id="inboxtab-' + v + '" aria-selected="true"') < 0) throw new Error('org inbox ' + v); }
+  __t.S.orgInbox = 'all';
+  location.hash = '#ship'; __t.fromHash(); if (/tabindex="-1" data-act="ship-tab"/.test(html)) throw new Error('ship tabs reachable by Tab');
+  location.hash = '#board'; __t.fromHash(); __t.S.drawer = 19; __t.render(); if (html.indexOf('role="dialog" aria-label="Task #19"') < 0 || html.indexOf('class="dtabs"') >= 0 || html.indexOf('class="seg"') >= 0) throw new Error('task sheet: one scroll, no old tab or segment styles'); __t.S.drawer = null;
+  __t.S.rv.view = 'preview'; __t.S.tasks.find((t) => t.id === 18).stage = 'review'; location.hash = '#review'; __t.fromHash(); if (!/<div class="framebar"><div class="seg" role="group" aria-label="View"><button data-act="rv-view" data-v="preview" aria-pressed="true">/.test(html) || html.indexOf('role="tablist" aria-label="View"') >= 0) throw new Error('review frame bar keeps .seg');
+  location.hash = '#start'; __t.fromHash(); if (html.indexOf('data-act="st-set" data-k="vis"') < 0 || html.indexOf('<div class="seg" role="group"') < 0) throw new Error('start form keeps .seg');
+  if ((require('fs').readFileSync(process.argv[2] || require('path').join(__dirname, 'index.html'), 'utf8').match(/role="tab"/g) || []).length !== 1) throw new Error('one tab helper renders every tab');
+  console.log('TABS-OK'); }
 console.log('AUTH-OK');
 process.exit(0);

@@ -90,6 +90,7 @@ mod person_invitations;
 mod plan;
 mod planned;
 mod preview;
+mod preview_access;
 mod preview_apply;
 mod preview_commit;
 mod preview_request;
@@ -129,6 +130,9 @@ pub(crate) use hostname::HOSTNAME_REQUEST_PREFIX;
 pub(crate) use label_retire::INTERNAL_LABEL_RETIRE;
 pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
+pub(crate) use preview_access::{
+    refused as preview_access_refused, INTERNAL_PREVIEW_ACCESS as INTERNAL_PREVIEW_ACCESS_PATH,
+};
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use release_switch::INTERNAL_RELEASE_SWITCH_NOTICE;
@@ -1364,6 +1368,20 @@ fn handle_change_role(
             principal.into(),
         ],
     )?;
+    // A person's role lowered may have taken the preview from them: its access epoch goes up (M8 step 7).
+    if podster_policy::preview::role_change_raises_epoch(
+        parse_role(member["role"].as_str().unwrap_or_default()),
+        parse_role(&role),
+    ) {
+        preview_access::raise_for(
+            sql,
+            member["kind"].as_str(),
+            podster_core::preview::EpochRaise::RoleLowered,
+            &caller.id,
+            "person",
+            now,
+        )?;
+    }
     // Someone who is no longer an admin gave grants that no longer count.
     repositories::end_grants_of_former_givers(sql, &caller.id, "person", now)?;
     objects::drop_uploads_no_longer_allowed(sql, &caller.id, "person", principal, now)?;
@@ -1821,9 +1839,10 @@ fn remove_member(
 ) -> R<()> {
     let prior = rows(
         sql,
-        "SELECT role, org_id FROM member WHERE principal_id = ?",
+        "SELECT role, org_id, kind FROM member WHERE principal_id = ?",
         vec![principal.into()],
     )?;
+    let prior_kind = prior.first().and_then(|m| text(&m["kind"]));
     let prior_role = prior
         .first()
         .map(|m| m["role"].clone())
@@ -1838,6 +1857,19 @@ fn remove_member(
     )?;
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
+    // A person removed can no longer view the preview: its access epoch goes up in this transaction (M8 step 7).
+    preview_access::raise_for(
+        sql,
+        prior_kind.as_deref(),
+        if reason == "org_departure" {
+            podster_core::preview::EpochRaise::OrganizationDeparture
+        } else {
+            podster_core::preview::EpochRaise::ParticipantRemoved
+        },
+        &actor.id,
+        actor_kind,
+        now,
+    )?;
     repositories::end_grants_of_removed(sql, &actor.id, actor_kind, principal, now)?;
     // And what they gave, if they were an admin, no longer counts.
     repositories::end_grants_of_former_givers(sql, &actor.id, actor_kind, now)?;
@@ -2244,6 +2276,14 @@ fn handle_transfer_owner(
         ],
     )?;
     store::write_grant(sql, &caller.id, Scopes::MEMBER, &caller.id, now)?;
+    // The former owner is an admin now: who may view changed, so the preview's access epoch goes up (M8 step 7).
+    preview_access::raise_epoch(
+        sql,
+        podster_core::preview::EpochRaise::OwnerChanged,
+        &caller.id,
+        kind_name(caller),
+        now,
+    )?;
     queue_index(sql, &to, &org, Some("owner"), now)?;
     queue_index(sql, &caller.id, &org, Some("admin"), now)?;
     audit(
@@ -2301,6 +2341,14 @@ fn apply_recovery(
     // A former owner recovery displaces is told only that, as a removed participant is.
     let displaced = (to != former).then_some(former.as_str());
     repositories::end_grants_after_owner_change(sql, actor, "person", None, displaced, now)?;
+    // A new owner named: the preview's access epoch goes up (M8 step 7).
+    preview_access::raise_epoch(
+        sql,
+        podster_core::preview::EpochRaise::OwnerChanged,
+        actor,
+        "person",
+        now,
+    )?;
     if to != former {
         queue_index(sql, &former, &org, None, now)?;
     }
@@ -4309,7 +4357,62 @@ impl Workspace {
         answer.ok_or_else(|| ApiError::internal("suspension answered nothing"))
     }
 
+    /// `/v1/preview-access`'s question to the room (M8 step 7, `preview_access`): the caller as the Worker verified them,
+    /// and `{ label, st, r }` in the forms the Worker checked. A room that doesn't exist, like every other refusal,
+    /// answers `preview_access_refused`. Previews off, or the owner's key not set, answers as a route nobody defined.
+    async fn preview_access(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Err(preview_access::refused());
+        }
+        self.migrate_if_needed()?;
+        let previews = crate::previews::setting(&self.env).await;
+        let Some(key) = crate::preview_access::signing_key(&self.env).await else {
+            return Err(ApiError::not_found());
+        };
+        let domain = crate::content_provider::content_domain(&self.env)
+            .ok_or_else(preview_access::refused)?;
+        let identity: Identity = serde_json::from_str(
+            &req.headers()
+                .get(CALLER_HEADER)?
+                .ok_or_else(|| ApiError::internal("missing caller"))?,
+        )?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let text_of = |name: &str| {
+            body[name]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(ApiError::invalid_argument)
+        };
+        let ask = preview_access::Ask {
+            label: text_of("label")?,
+            state_hash: text_of("st")?,
+            r: text_of("r")?,
+        };
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(preview_access::grant(
+                &store,
+                &identity,
+                previews,
+                &key,
+                &domain,
+                &ask,
+                now_ms(),
+            )?);
+            Ok(())
+        })?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("preview access answered nothing"))
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
+        if req.path() == preview_access::INTERNAL_PREVIEW_ACCESS {
+            return self.preview_access(req).await;
+        }
         if req.path() == moderation::INTERNAL_SUSPENSION {
             return self.operator_suspension(req).await;
         }
@@ -6061,6 +6164,14 @@ fn departure_effect_in_room(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
             )?;
             // Every grant rested on the owner's delegation, so tokens minted under one lose their authority.
             store::mark_stale_repo_tokens(sql, now)?;
+            // The owner can no longer view the preview (M8 step 7).
+            preview_access::raise_epoch(
+                sql,
+                podster_core::preview::EpochRaise::OrganizationDeparture,
+                &actor.id,
+                "person",
+                now,
+            )?;
             apply_departure_rules(sql, &actor, &person, now)?;
             objects::drop_uploads_of(sql, &actor.id, "person", &person, now)?;
             queue_index(sql, &person, &org, Some("owner"), now)?;

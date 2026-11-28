@@ -23,6 +23,13 @@ assertApiBuild(new URL("./build/", import.meta.url), ["failpoints"], "npm run pr
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const pub = publicKey.export({ format: "jwk" });
 
+// The preview ticket key (M8 step 7), a throwaway per run as the assertion key is: `<kid>:<64 hex seed>`, the form
+// `podster_egress::preview_key` reads. Tests check what the API signed with the public half. No environment binds the
+// name; the real key is the owner's to make through the wizard (decision 258).
+const previewTicket = generateKeyPairSync("ed25519");
+const previewSeed = Buffer.from(previewTicket.privateKey.export({ format: "jwk" }).d ?? "", "base64url").toString("hex");
+const previewPublic = previewTicket.publicKey.export({ format: "jwk" }).x;
+
 // Wake's outbound requests land here, so tests can see them and choose how the far end answers.
 const hookRequests: { host: string; path: string; signature: string | null; agent: string | null; authorization: string | null; a2aVersion: string | null; body: string }[] = [];
 
@@ -207,6 +214,8 @@ const pool = (partition: ContentPartition) =>
         ],
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
+          PREVIEW_TICKET_KEY: `test-run:${previewSeed}`,
+          TEST_PREVIEW_TICKET_PUBLIC: previewPublic,
           SCANNER_SECRET: "test-scanner-secret",
           // Test operators only (M4 step 10). Naming real ones is the owner's call.
           OPERATORS: "per_operator_one, per_operator_two",

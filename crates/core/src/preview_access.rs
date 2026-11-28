@@ -19,7 +19,11 @@
 //!
 //! **Times.** Every `iat` and `exp` here is in milliseconds since the epoch, as every time in this crate is.
 //!
-//! **Codes.** Every `code()` here is marked `reasons`: no route answers with one yet (M8 steps 7 and 8 will).
+//! - **The wire form** ([`token_payload`], [`signing_input`], [`token`], [`enter_location`]): what the API signs and
+//!   where it sends the browser (M8 step 7). Signing itself is `podster_egress::preview_key`'s, with the owner's key.
+//!
+//! **Codes.** Every `code()` here is marked `reasons`: the API answers `preview_access_refused` and
+//! `preview_access_limit` by their own literals (M8 step 7), and the content Worker its own (M8 step 8).
 
 use crate::hostnames::normalize;
 use crate::preview::{epoch_honoured, MAX_ACCESS_EPOCH};
@@ -261,6 +265,137 @@ pub fn marker_claims(
 ) -> Result<Claims, PreviewClaimRefusal> {
     base_claims(TokenType::Marker, kid, host, slot, epoch, now)
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The token's wire form (M8 step 7)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What every token's signature is over, before its payload: a fixed label and version, so a signature made for a
+/// preview token is never one for anything else the same key might sign, and a later form can't be read as this one.
+pub const TOKEN_SIGNING_PREFIX: &str = "podster-preview-token/v1.";
+
+/// Bytes as base64url with no padding (RFC 4648, section 5).
+pub fn base64url(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk.first().copied().unwrap_or(0),
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let sextets = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        for sextet in sextets.iter().take(chunk.len() + 1) {
+            if let Some(c) = BASE64URL.get(*sextet as usize) {
+                out.push(char::from(*c));
+            }
+        }
+    }
+    out
+}
+
+/// Whether a set of claims is fit to sign: every part its form, as [`ticket_claims`], [`session_claims`] and
+/// [`marker_claims`] make them, and a lifetime no longer than its type's.
+fn claims_formed(claims: &Claims) -> bool {
+    let browser_parts = if claims.typ.is_browsers() {
+        claims.sid.as_deref().is_some_and(is_session_id)
+            && claims.st.as_deref().is_some_and(is_state_hash)
+    } else {
+        claims.sid.is_none() && claims.st.is_none()
+    };
+    is_key_id(&claims.kid)
+        && is_formed_host(&claims.aud)
+        && is_slot_id(&claims.pvw)
+        && claims.ep <= MAX_ACCESS_EPOCH
+        && claims.exp > claims.iat
+        && claims.exp.saturating_sub(claims.iat) <= claims.typ.max_ttl_ms()
+        && browser_parts
+}
+
+/// **A token's payload**: its claims as one line of JSON, in this fixed order, base64url with no padding. The keys are
+/// `typ`, `kid`, `aud`, `pvw`, `sid`, `ep`, `iat`, `exp` and `st`; a marker token has no `sid` or `st`. `ep`, `iat`
+/// and `exp` are whole numbers, the two times in milliseconds since the epoch, each exact as a JavaScript number. No
+/// value needs escaping, since each is one of its form's characters only. `None` for claims that aren't fit to sign,
+/// so nothing malformed is ever signed.
+///
+/// The whole token is `<payload>.<signature>`: the signature, base64url with no padding, is Ed25519 over the bytes of
+/// [`signing_input`]. The content Worker (M8 step 8) reads `kid` from the payload to pick a public key, checks the
+/// signature, and only then reads the claims by [`check_claims`]'s rules.
+pub fn token_payload(claims: &Claims) -> Option<String> {
+    if !claims_formed(claims) {
+        return None;
+    }
+    let mut json = format!(
+        r#"{{"typ":"{}","kid":"{}","aud":"{}","pvw":"{}""#,
+        claims.typ.name(),
+        claims.kid,
+        claims.aud,
+        claims.pvw
+    );
+    if let Some(sid) = &claims.sid {
+        json.push_str(&format!(r#","sid":"{sid}""#));
+    }
+    json.push_str(&format!(
+        r#","ep":{},"iat":{},"exp":{}"#,
+        claims.ep, claims.iat, claims.exp
+    ));
+    if let Some(st) = &claims.st {
+        json.push_str(&format!(r#","st":"{st}""#));
+    }
+    json.push('}');
+    Some(base64url(json.as_bytes()))
+}
+
+/// What a token's signature is over: [`TOKEN_SIGNING_PREFIX`] and then the payload, as it is written in the token.
+pub fn signing_input(payload: &str) -> String {
+    format!("{TOKEN_SIGNING_PREFIX}{payload}")
+}
+
+/// The whole token: the payload, a dot, and the signature in base64url with no padding.
+pub fn token(payload: &str, signature: &[u8]) -> String {
+    format!("{payload}.{}", base64url(signature))
+}
+
+/// Whether a byte may stand as it is in [`enter_location`]'s fragment: the URI's unreserved characters only.
+fn fragment_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// Percent-encodes every byte that isn't unreserved, so `URLSearchParams` on the fragment gives the value back exactly:
+/// `&`, `=`, `#`, `%` and `+` included.
+fn fragment_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if fragment_safe(byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// **Where the application host sends the browser** (the plan's 5.3, step 4):
+/// `https://<host>/__podster/enter#t=<ticket>&s=<session>&r=<r>`. The ticket and the session token are **only after
+/// `#`**, which browsers never send to any server, so no access log or `Referer` holds either; nothing is in the path
+/// or a query. `r` is percent-encoded, so the fixed exchange page reads all three with `URLSearchParams`. The session
+/// travels beside its ticket because the content Worker holds no key and can't sign one (decision 258, the plan's 5.4):
+/// it checks both against the browser's state cookie, then sets the session as its cookie, and sets nothing for a
+/// ticket that doesn't pass. `None` unless the host is a formed host and `r` a return path ([`return_path_ok`]).
+pub fn enter_location(host: &str, ticket: &str, session: &str, r: &str) -> Option<String> {
+    let token_safe = |t: &str| !t.is_empty() && t.bytes().all(fragment_safe);
+    (is_formed_host(host) && return_path_ok(r) && token_safe(ticket) && token_safe(session)).then(
+        || {
+            format!(
+                "https://{host}{ENTER_PATH}#t={ticket}&s={session}&r={}",
+                fragment_value(r)
+            )
+        },
+    )
+}
+
+/// The fixed page on every preview host that exchanges a ticket for a session (the plan's 5.3, steps 5 and 6).
+pub const ENTER_PATH: &str = "/__podster/enter";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Checking

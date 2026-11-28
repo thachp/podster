@@ -493,10 +493,18 @@ export const sameOrigin = (request: Request, env: Env) => request.headers.get("o
  * The headers a passed-through API answer keeps: its JSON type, and on a 429 the API's `Retry-After` in whole seconds
  * (a custom hostname's "Check now"), so a person's page can say when to try again. Nothing else the API set.
  */
-export function passthroughHeaders(response: Response): Record<string, string> {
+export function passthroughHeaders(response: Response, path = ""): Record<string, string> {
   const retryAfter = response.status === 429 ? response.headers.get("retry-after") : null;
-  return { "content-type": "application/json", ...(retryAfter && /^\d{1,5}$/.test(retryAfter) ? { "retry-after": retryAfter } : {}) };
+  return { "content-type": "application/json", ...(retryAfter && /^\d{1,5}$/.test(retryAfter) ? { "retry-after": retryAfter } : {}), ...(path === PREVIEW_ACCESS_PATH ? NO_STORE : {}) };
 }
+
+/**
+ * A preview host's access (M8 step 7): the API's answer carries a ticket and a session token in its `redirect`, so it is
+ * never stored by any cache and never sent on as a `Referer`. The gateway passes the request and the answer through as
+ * they are: the API decides who gets a ticket, and nothing here reads, keeps or logs either.
+ */
+const PREVIEW_ACCESS_PATH = "/v1/preview-access";
+const NO_STORE = { "cache-control": "no-store", "referrer-policy": "no-referrer" };
 
 export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
@@ -1379,7 +1387,7 @@ const appHandler = {
     if (publicRead) return publicRead;
     const named = await withInviterName(env, request.method, path, response);
     if (named) return named;
-    return new Response(response.body, { status: response.status, headers: passthroughHeaders(response) });
+    return new Response(response.body, { status: response.status, headers: passthroughHeaders(response, path) });
   },
 };
 

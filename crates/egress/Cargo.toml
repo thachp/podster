@@ -6,6 +6,10 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+# The preview ticket key (M8 step 7, `preview_key`): Ed25519 signing, already in the lockfile through crates/assertion,
+# and core's form of a key ID.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+podster-core = { path = "../core" }
 aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "alloc"] }
 hmac = "0.12"
 sha2 = "0.10"

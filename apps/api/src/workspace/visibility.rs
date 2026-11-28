@@ -297,6 +297,17 @@ pub(super) fn handle_set_visibility(
             }
         }
     }
+    // The room made public or private: who may view its preview is asked again, so the access epoch goes up (M8 step 7;
+    // the plan's 3.3 and 5.6). A private room keeps its preview (decision 251).
+    if change != VisibilityChange::NoChange {
+        super::preview_access::raise_epoch(
+            sql,
+            podster_core::preview::EpochRaise::VisibilityChanged,
+            &caller.id,
+            kind_name(caller),
+            now,
+        )?;
+    }
     if let (Some(event), Some(reason)) = (change.event_type(), change.audit_reason()) {
         let prior = if state.room.visibility == Visibility::Public {
             "public"

@@ -314,6 +314,16 @@ Built in step 5 (PR 643), with these changes from the table first proposed, acce
 
 **Built in step 6,** with one step beyond this table, accepted by its builder and owed the architect's look: **Workspace step 65, `preview_apply`**, what the preview applier last confirmed at each preview host, as `serve_apply` is for production's hosts. A preview host can't be a `serve_state` row, whose label must be `current`, so the applier's record needed a table of its own. Each of the four sites above now reads `kind`: the operator's retire refuses a live preview label (`app_label_not_taken`), the bookkeeping finding names production's label, and the label index writes a preview label's kind to D1's `app_label_kind`.
 
+**Built in step 7** (`/v1/preview-access`), with these choices beyond the plan, owed the architect's look:
+
+- **The session token travels beside its ticket**, as `#t=<ticket>&s=<session>&r=<r>`. The content Worker holds public keys only (5.4), so it can't sign the session it sets; the API signs both at once, over the same host, slot, session, epoch and state hash, and the exchange (step 8) checks both before setting the cookie. A fragment that leaks is no worse than its ticket: both need that browser's state cookie.
+- **The wire form** is `<payload>.<signature>`: the claims as one line of JSON in a fixed order, base64url, and Ed25519 over `podster-preview-token/v1.` and the payload (`podster_core::preview_access::token_payload`). Times are milliseconds.
+- **The key** is `PREVIEW_TICKET_KEY`, `<kid>:<64 hex seed>` (`podster_egress::preview_key`), the owner's to make through the wizard (decision 258); none exists yet. Absent or malformed, the route is a path nobody defined, as with previews off. The API never reads `_PREVIOUS`: only the content Worker keeps an old public key.
+- **The room's 300 an hour counts only granted asks**, and is asked after access is decided, so an outsider can neither spend it nor learn from a `429` that the host exists. The person's 30 a minute counts every ask that reaches it.
+- **Expired sessions and old asks are pruned as each ask is counted**, in the same transaction, not by the alarm.
+- **Epoch raises** are wired at a person removed (any cause, organization departure included), a person's role lowered, the owner transferred or recovered, the owner leaving the organization, and the room made public or private. An app suspension and every other deletion already raise it by deleting the preview (step 6).
+- **A custom preview hostname** isn't answered until step 10: only `<label>.<content domain>` is routed.
+
 ## 10. UI: the Ship panel
 
 The demo (`apps/demo`) is the UI's source of truth since 2026-11-24, so the screen is mocked there first, then built in `apps/web`. Under **Ship** (`docs/spec/DESIGN.md:27`), proposed:

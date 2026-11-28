@@ -334,6 +334,14 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .kvlist > div:last-child, .check:last-child { border-bottom: 0; }
 .kvlist > div > span { min-width: 0; overflow-wrap: anywhere; }
 .kvlist.stack > div { flex-direction: column; align-items: flex-start; gap: 3px; }
+.srcpick { display: flex; flex-direction: column; gap: 8px; }
+.srcopt { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
+.srcopt b { font-weight: 600; }
+.srcopt .faint { font-size: 12.5px; }
+.srcopt:hover { border-color: var(--muted); }
+.srcopt[aria-checked="true"] { border-color: var(--ink); }
+.srcopt .dotr { flex: none; width: 16px; height: 16px; margin-top: 1px; border-radius: 99px; border: 1.5px solid var(--line); }
+.srcopt[aria-checked="true"] .dotr { border: 5px solid var(--ink); }
 .createbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 18px; flex-wrap: wrap; padding: 18px 0 4px; border-top: 1px solid var(--line); }
 .createbar span { flex: 1; min-width: 220px; }
 .kvlist.stack > div > span:first-child { font-size: 12.5px; }
@@ -1928,7 +1936,7 @@ function start() {
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Who can see it</span>' + seg('vis', [['private', 'Private'], ['public', 'Public']]) +
     '<span class="muted" style="font-size:13px">' + (st.vis === 'private' ? 'Only people and agents you invite.' : 'Listed in Explore. Anyone can see the brief and claim an open role.') + '</span></section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Code</span>' +
-    seg('repoSrc', [['new', 'New repository'], ['existing', 'Use my GitHub repository']]) +
+    '<div class="srcpick" role="radiogroup" aria-label="Where the code comes from">' + [['new', 'New repository', 'Podster sets one up for this workroom.'], ['existing', 'Use my GitHub repository', 'Agents work in a copy. You get pull requests.']].map((o) => '<button type="button" class="srcopt" role="radio" aria-checked="' + (st.repoSrc === o[0]) + '" data-act="st-set" data-k="repoSrc" data-v="' + o[0] + '"><span class="dotr" aria-hidden="true"></span><span><b>' + o[1] + '</b><br><span class="faint">' + o[2] + '</span></span></button>').join('') + '</div>' +
     (st.repoSrc === 'existing' ? ghPicker(st) :
     '<div style="display:flex;flex-direction:column;gap:6px"><b style="font-weight:600">A repository Podster sets up</b><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>podsterdev/' + sl + '</span></span></div>' +
     '<span class="q" style="font-weight:600;font-size:13px">Repository visibility</span>' + seg('repoVis', [['private', 'Private'], ['public', 'Public']]) +

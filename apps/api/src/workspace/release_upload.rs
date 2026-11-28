@@ -17,6 +17,11 @@
 //! path could open for static sites alone (`code_releases_open`). *Open since 2026-11-25,* on spike H's evidence; only
 //! a test build closes it again, for a room a test names.
 //!
+//! *Since M8 step 9:* **every release's build is recorded** once the first pass has fetched and checked every file, and
+//! before its store or anything else is asked for (`release_build::record`): its build ID, from what was fetched, and its
+//! storage warning. A release made from a preview whose build isn't the one tested fails `build_mismatch` there, and
+//! nothing is sent.
+//!
 //! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
 //! it, after it has started the upload and before it commits the release live. In order:
 //!
@@ -76,6 +81,7 @@ use podster_core::app_code::{
 };
 use podster_core::app_requests::HostKind;
 use podster_core::app_store::Binding;
+use podster_core::preview_build::{build_id_of, names_browser_storage, FetchedFile};
 use podster_core::release::{
     fetch_batches, file_reads, upload_requests, ReleaseState, FETCH_PASSES, TREE_READS,
 };
@@ -169,11 +175,14 @@ async fn fetch_each(
     Ok(())
 }
 
-/// The first pass's yield: the plan, every file's hash, and the app's manifest's bytes if the release has one.
+/// The first pass's yield: the plan, every file's hash, and the app's manifest's bytes if the release has one. And, for
+/// the build (M8 step 9), every file's SHA-256 and whether any of its text names browser storage.
 struct FirstPass {
     plan: ReadPlan,
     hashes: Vec<String>,
     manifest: Option<Vec<u8>>,
+    sha256s: Vec<String>,
+    names_storage: bool,
 }
 
 impl FirstPass {
@@ -196,6 +205,30 @@ impl FirstPass {
         };
         upload_form(&plan, self.manifest.as_deref())
     }
+
+    /// The build ID of what this pass fetched and checked, as `form` will upload it
+    /// (`podster_core::preview_build::build_id_of`), or the code to fail the release by.
+    fn build(&self, form: &UploadForm, commit_sha: &str) -> Result<String, &'static str> {
+        let fetched: Vec<FetchedFile> = self
+            .plan
+            .files
+            .iter()
+            .zip(&self.hashes)
+            .zip(&self.sha256s)
+            .map(|((file, hash), sha256)| FetchedFile {
+                path: &file.path,
+                manifest_hash: hash,
+                sha256,
+            })
+            .collect();
+        build_id_of(form, commit_sha, &self.plan.tree, &fetched).map_err(|refusal| refusal.code())
+    }
+}
+
+/// The SHA-256 of `bytes`, as 64 lower-case hexadecimal characters.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Whether a release's script carries code, and whether it asks for its store.
@@ -235,8 +268,14 @@ async fn read_files(
     // manifest's, which say whether the app asks for its store.
     let all: Vec<&ReadFile> = plan.files.iter().collect();
     let mut hashes: Vec<String> = Vec::with_capacity(all.len());
+    let mut sha256s: Vec<String> = Vec::with_capacity(all.len());
+    let mut names_storage = false;
     let mut manifest = None;
     fetch_each(reader, &all, |place, hash, bytes| {
+        // The build's own record (M8 step 9): each file's SHA-256, and the storage warning, a string search of its
+        // text that never blocks.
+        sha256s.push(sha256_hex(&bytes));
+        names_storage = names_storage || names_browser_storage(&bytes);
         let is_manifest = all
             .get(place)
             .is_some_and(|file| file.path == MANIFEST_PATH);
@@ -251,6 +290,8 @@ async fn read_files(
         plan,
         hashes,
         manifest,
+        sha256s,
+        names_storage,
     })
 }
 
@@ -613,6 +654,36 @@ impl Workspace {
         ready.ok_or_else(|| ApiError::internal("a write check that answered nothing"))
     }
 
+    /// **The build the first pass fetched, recorded in the room's transaction** (`release_build::record`), or why the
+    /// release stops: a build core can't name, or, for a release made from a preview, one that isn't the build tested.
+    async fn build_recorded(
+        &self,
+        release_id: &str,
+        first: &FirstPass,
+        form: &UploadForm,
+        commit_sha: &str,
+    ) -> std::result::Result<(), Stop> {
+        let build = first.build(form, commit_sha).map_err(Stop::Code)?;
+        let refused: Rc<RefCell<Option<&'static str>>> = Rc::new(RefCell::new(None));
+        let slot = refused.clone();
+        let (id, tree, names_storage) = (
+            release_id.to_owned(),
+            first.plan.tree.clone(),
+            first.names_storage,
+        );
+        self.release_transaction(move |sql| {
+            if let Err(code) = super::release_build::record(sql, &id, &build, &tree, names_storage)?
+            {
+                *slot.borrow_mut() = Some(code);
+            }
+            Ok(Value::Null)
+        })
+        .await
+        .map_err(Stop::Room)?;
+        let code = refused.borrow_mut().take();
+        code.map_or(Ok(()), |code| Err(Stop::Code(code)))
+    }
+
     /// Whether the step may go on after the reservation: its lease still holds. Test builds only: a test changes the
     /// room here first (`release_driver::test_at`, at `reserved`).
     fn may_open(&self, sql: &SqlStorage, go_on: &dyn Fn() -> bool) -> bool {
@@ -752,28 +823,41 @@ impl Workspace {
                         // sent and no store is made.
                         Ok(first) => match admit(first.form(), self.code_releases_open()) {
                             Err(problem) => Err(Stop::Code(problem.code())),
-                            // The app's store, for a release that asks for one, before anything is sent to the
-                            // provider.
+                            // The build, recorded before anything is made or sent (M8 step 9): a release made from a
+                            // preview whose build isn't the one tested fails `build_mismatch` here.
                             Ok(form) => match self
-                                .store_before_upload(&release_id, &label, kind_of(&form).1, lease)
+                                .build_recorded(&release_id, &first, &form, &commit_sha)
                                 .await
                             {
-                                Err(error) => Err(Stop::Room(error)),
-                                Ok(StoreOutcome::Go) => {
-                                    send_files(
-                                        &provider,
-                                        &reader,
-                                        &attempt,
+                                Err(stop) => Err(stop),
+                                // The app's store, for a release that asks for one, before anything is sent to the
+                                // provider.
+                                Ok(()) => match self
+                                    .store_before_upload(
                                         &release_id,
-                                        &script,
-                                        &commit_sha,
-                                        first,
-                                        &form,
-                                        &go_on,
+                                        &label,
+                                        kind_of(&form).1,
+                                        lease,
                                     )
                                     .await
-                                }
-                                Ok(outcome) => Err(Stop::Store(outcome)),
+                                {
+                                    Err(error) => Err(Stop::Room(error)),
+                                    Ok(StoreOutcome::Go) => {
+                                        send_files(
+                                            &provider,
+                                            &reader,
+                                            &attempt,
+                                            &release_id,
+                                            &script,
+                                            &commit_sha,
+                                            first,
+                                            &form,
+                                            &go_on,
+                                        )
+                                        .await
+                                    }
+                                    Ok(outcome) => Err(Stop::Store(outcome)),
+                                },
                             },
                         },
                     };

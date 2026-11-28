@@ -720,6 +720,15 @@ CREATE TABLE IF NOT EXISTS preview_apply (host TEXT PRIMARY KEY CHECK (length(ho
   last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64),
   updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
   CHECK (confirmed = 0 OR applied_at IS NOT NULL)) WITHOUT ROWID;
+",
+// Step 66 (M8 step 9; the preview plan's 5.2.1): the storage warning of a release's build, recorded by the job in the same
+// transaction as its `release_build` row (step 61), which had no place for it: whether any of the build's text files
+// names browser storage (`podster_core::preview_build::names_browser_storage`). A string search of agent content kept as
+// one flag, never the text it found. No row, with a `release_build` row, can't happen; with neither, the job hasn't
+// fetched the build. A new table, so the step runs again safely; no room before it has one to write.
+"
+CREATE TABLE IF NOT EXISTS release_build_storage (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  names_storage INTEGER NOT NULL CHECK (names_storage IN (0, 1))) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

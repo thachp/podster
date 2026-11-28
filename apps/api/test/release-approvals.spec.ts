@@ -84,7 +84,9 @@ const release = (r: Room, n: number, extra: Record<string, unknown> = {}) => inR
 
 const path = (r: Room) => `/v1/workspaces/${r.room}/release-approvals`;
 const list = (r: Room, who = r.owner) => api(who, "GET", path(r));
-const listed = (r: Room, n: number, task: string | null = "tsk_ra_1") => ({ id: rel(n), task_id: task, commit_sha: SHA(n), state: "awaiting_approval", requested_by: r.member.id, requested_at: 1000 + n });
+const listed = (r: Room, n: number, task: string | null = "tsk_ra_1") => ({ id: rel(n), task_id: task, commit_sha: SHA(n), state: "awaiting_approval", requested_by: r.member.id, requested_at: 1000 + n,
+  // Not made from a preview (M8 step 9): nothing of the dialog's preview fields.
+  from_preview: null, build_id: null, preview_served_at: null, storage_warning: null, preview_replaced: null, preview_notice: null, storage_notice: null });
 
 afterEach(async () => {
   for (const id of made.splice(0)) await alarmQuiet(stub(id));

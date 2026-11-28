@@ -1115,6 +1115,11 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
         let reason = podster_core::app_store::NoBinding::DeleteOwed.code();
         return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
     }
+    // A release made from a preview goes live only on the build it names, as its job recorded it (M8 step 9).
+    if !super::release_build::publish_holds(sql, release_id)? {
+        let reason = podster_core::preview_build::BuildMismatch.code();
+        return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
+    }
     // Only a script the room has recorded as written whole is ever set on a host.
     if !uploaded(sql, release_id, &script)? {
         let mut waiting = answer(&release, false, None);

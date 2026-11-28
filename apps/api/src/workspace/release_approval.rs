@@ -363,14 +363,20 @@ pub(super) fn approve(
     sql: &SqlStorage,
     who: &Participant,
     release_id: &str,
+    body: &Value,
     reads: &ApprovalReads,
     domain: Option<&str>,
 ) -> R<Value> {
     let now = release_now(sql);
+    // The body's form first: nothing, or `{ build }` alone (M8 step 9).
+    let sent = super::release_build::approval_body(body)?;
     // Release bookkeeping first, as at the start of every release command: one from before an unpublish is ended.
     end_stale(sql, now)?;
     let caller = &who.caller;
     let release = awaiting(sql, release_id)?;
+    // **An approval is valid only for its own build** (decision 259): a release made from a preview must be sent back
+    // exactly the build it names, never the slot's preview now; any other release takes none.
+    super::release_build::approval_build(sql, release_id, sent.as_deref())?;
     let requester = text(&release["requested_by"]).unwrap_or_default();
     match judge_as(sql, &release, &reads.recheck, Some(&caller.id), now)? {
         // Nothing that was read fails, and something couldn't be read: nothing is written.

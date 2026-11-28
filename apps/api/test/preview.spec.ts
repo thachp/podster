@@ -798,6 +798,60 @@ describe("publishing from a preview (M8 step 9, the plan's 4.3)", () => {
     expect((await getPreview(r)).body.preview.serving.id).toBe(a.id);
   });
 
+  it("doesn't call the preview replaced when a newer preview release shows the identical build", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    // The same commit made the preview again: another preview release, the very same build.
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+    const again = await served(r, TASK_B, COMMIT_B);
+    expect(again.id).not.toBe(b.id);
+    expect(await releaseOf(r, b.id)).toMatchObject({ state: "replaced" });
+    expect(await buildOf(r, again.id)).toBe(build);
+    expect((await approvals(r)).find((x) => x.id === asked.body.id)).toMatchObject({ from_preview: b.id, build_id: build, preview_replaced: false });
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+  });
+
+  it("publishes the pinned build after the preview is deleted, fetching the commit again, or fails cleanly if it differs", async () => {
+    // Deleted after the request: the commit is fetched again, and the build that was tested goes live.
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    expect((await deletePreview(r)).status).toBe(200);
+    expect(await releaseOf(r, b.id)).toMatchObject({ state: "unpublished" });
+    expect((await approvals(r)).find((x) => x.id === asked.body.id)).toMatchObject({ build_id: build, preview_replaced: true });
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+    await publishServed(r, asked.body.id);
+    expect(await buildOf(r, asked.body.id)).toBe(build);
+    // Deleted before the request: a deleted preview's tested build may still be published, and if what GitHub now
+    // answers for the commit isn't that build, the publish fails `build_mismatch` and production stays as it was.
+    const other = await room();
+    await grantDeploy(other);
+    const ob = await served(other, TASK_B, COMMIT_B);
+    const obuild = (await buildOf(other, ob.id))!;
+    expect((await deletePreview(other)).status).toBe(200);
+    const late = await publish(other, ob.id);
+    expect(late.status, JSON.stringify(late.body)).toBe(200);
+    expect((await approve(other, late.body.id, { build: obuild })).body.state).toBe("queued");
+    const before = await production(other);
+    const changed = repository();
+    const blobs: Record<string, string> = { ...changed.blobs };
+    changed.trees[DIR_B] = { tree: tree({ "index.html": "<p>changed since</p>\n" }, blobs) };
+    await github("/reset", {});
+    await github("/seed", { ...changed, blobs });
+    expect(await driveProduction(other, late.body.id)).toMatchObject({ state: "failed", failure_code: "build_mismatch" });
+    expect((await uploadState(`${other.prodLabel}.${late.body.id}`)).namespaces).toEqual([]);
+    const after = await production(other);
+    expect([after.entry, after.rows.serve]).toEqual([before.entry, before.rows.serve]);
+    expect(await releaseOf(other, PROD)).toMatchObject({ state: "served" });
+  });
+
   it("fails a publish whose fetched build isn't the one tested, before anything is uploaded, and production stays live", async () => {
     const r = await room();
     await grantDeploy(r);

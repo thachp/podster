@@ -9,6 +9,7 @@ import { promptWrites, provenanceInRequests } from "./provenance-checks.mjs";
 import { schemaShapeProblems, unknownKeywordProblems } from "./schema-shape.mjs";
 import { exclusiveSchemeProblems } from "./security-classes.mjs";
 import { calls, passthroughRefuses } from "./gateway-wiring.mjs";
+import { previewAccessLogProblems } from "./no-log.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [], pairing_only: pairingOnly = [], service_only: serviceOnly = [], a2a = {} } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -336,8 +337,9 @@ for (const [id, params] of Object.entries(previewOperations)) {
   if (!found) { problems.push(`${id}: the preview operation is missing`); continue; }
   if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params || "nothing"}`);
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only (decision 253)`);
-  // M8 step 6 built the room's preview, read, asked for and deleted, which the room itself answers behind the switch.
-  const previewBuilt = ["getPreview", "requestPreview", "deletePreview"].includes(id);
+  // M8 step 6 built the room's preview, read, asked for and deleted, which the room itself answers behind the switch; M8
+  // step 7 the access route, which answers behind the switch and the owner's key.
+  const previewBuilt = ["getPreview", "requestPreview", "deletePreview", "requestPreviewAccess"].includes(id);
   if (previewBuilt ? found.op.summary?.includes("Not built") || !found.op.summary?.includes("Built behind the switch") || !found.op.summary?.includes("`not_found`") : !found.op.summary?.includes("**Not built (M8 step") || !found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say ${previewBuilt ? "it is built behind the switch, and not that it isn't, and what it answers while release is off (`not_found`)" : "it isn't built, and that it answers `not_found` until it is"}`);
   // While previews are off the room answers who first, as release switched off does; deleting and removing pass no gate,
   // and the access route asks no room.
@@ -389,6 +391,8 @@ for (const schema of ["RoomPreview", "Preview", "PreviewHostnameView", "PreviewR
   const approve = operations.get("approveRelease")?.op;
   if (approve?.requestBody?.required !== false || approve?.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ApproveRelease") problems.push("approveRelease: its body must be the optional ApproveRelease");
 }
+// M8 step 7: the preview access path writes no log line at all (no-log.mjs, with its self-test).
+problems.push(...previewAccessLogProblems((file) => readFileSync(new URL(`../../${file}`, import.meta.url), "utf8")));
 // The serve entries' preview form (the plan's 3.1): its mark, the slot's ID, the epoch's grammar, and vectors that cross, so a
 // production host never reads a preview entry and a preview host never reads a production one.
 {

@@ -244,7 +244,7 @@ pub(super) fn publish_holds(sql: &SqlStorage, release_id: &str) -> R<bool> {
 
 /// What the approval list shows of a release made from a preview (the plan's section 10), and nulls for any other:
 /// the preview release and its build, when that build reached the preview, its storage warning, whether the preview now
-/// shows something else, and the dialog's words.
+/// shows another build (a newer release of the same build isn't one), and the dialog's words.
 pub(super) fn approval_view(sql: &SqlStorage, release_id: &str) -> R<Value> {
     let Some(source) = from_preview(sql, release_id)? else {
         return Ok(json!({
@@ -262,7 +262,13 @@ pub(super) fn approval_view(sql: &SqlStorage, release_id: &str) -> R<Value> {
     .and_then(|row| row["served_at"].as_i64());
     let storage = storage_of(sql, &source.preview_release_id)?;
     let serving = super::preview::serving_now(sql)?;
-    let replaced = serving.as_deref() != Some(source.preview_release_id.as_str());
+    // Replaced means the preview now shows another *build*, or none: a newer preview release of the very same build
+    // (the same commit asked for again) shows exactly what is being approved.
+    let serving_build = match serving.as_deref() {
+        Some(id) => build_of(sql, id)?,
+        None => None,
+    };
+    let replaced = serving_build.as_deref() != Some(source.build_id.as_str());
     let warned = storage == Some(true);
     Ok(json!({
         "from_preview": source.preview_release_id,

@@ -638,7 +638,9 @@ name = "podster-egress"
 version = "0.0.0"
 dependencies = [
  "aes-gcm",
+ "ed25519-dalek",
  "hmac",
+ "podster-core",
  "sha2",
  "url",
 ]

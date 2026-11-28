@@ -1316,6 +1316,30 @@ pub async fn provisioning_delegation(
     Ok(Response::from_json(&answer)?)
 }
 
+/// A person's asks of `/v1/preview-access` (M8 step 7; the preview plan's 5.3, step 2), one row an ask, for their 30 a
+/// minute (`podster_core::preview_access::person_access_allowed`). Made the first time it is needed, as this object's
+/// other tables are, so it has no numbered step (the plan's 9.4). Rows past the minute are dropped as each ask counts.
+/// IDs only: a time and nothing else.
+const PREVIEW_ACCESS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS preview_access_ask (at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE INDEX IF NOT EXISTS preview_access_ask_at ON preview_access_ask (at);
+";
+
+/// Counts one ask of `/v1/preview-access` against the person's 30 a minute, in their own object and its one transaction,
+/// so two asks at once can't both take the last place. `Ok(None)` when it was counted; `Ok(Some(ms))` when the person is
+/// past the limit, with how long until one more fits, and nothing counted.
+pub async fn count_preview_access(env: &Env, person: &str) -> R<Option<i64>> {
+    let mut response = internal(env, person, "/internal/preview-access-ask", &json!({})).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't count the preview ask"));
+    }
+    let answer: Value = response.json().await?;
+    Ok(match answer["counted"].as_bool() {
+        Some(true) => None,
+        _ => Some(answer["retry_after_ms"].as_i64().unwrap_or(1000).max(1)),
+    })
+}
+
 /// Takes one of an organization's room slots, or refuses at the limit.
 pub async fn reserve_org_room(env: &Env, org: &str, workspace: &str) -> R<()> {
     let body = json!({ "org": org, "workspace": workspace });
@@ -2148,6 +2172,41 @@ impl Principal {
                         json!({ "provider": provider, "granted": podster_core::provisioning::organization_delegated(None), "set_by": null, "set_at": null })
                     }
                 });
+            }
+            "/internal/preview-access-ask" => {
+                let state = self.state.storage().sql();
+                let answer = Rc::new(RefCell::new(json!(null)));
+                let slot = answer.clone();
+                let now = Date::now().as_millis() as i64;
+                transaction_sync(&self.state, move || {
+                    use podster_core::preview_access::{
+                        person_access_allowed, person_retry_after_ms, PER_PERSON_WINDOW_MS,
+                    };
+                    exec(&state, PREVIEW_ACCESS_SCHEMA, vec![])?;
+                    let start = podster_core::release::window_start(now, PER_PERSON_WINDOW_MS);
+                    exec(
+                        &state,
+                        "DELETE FROM preview_access_ask WHERE at < ?",
+                        vec![start.into()],
+                    )?;
+                    let asked: Vec<i64> =
+                        rows(&state, "SELECT at FROM preview_access_ask", vec![])?
+                            .iter()
+                            .filter_map(|row| row["at"].as_i64())
+                            .collect();
+                    *slot.borrow_mut() = if person_access_allowed(&asked, now).is_ok() {
+                        exec(
+                            &state,
+                            "INSERT INTO preview_access_ask (at) VALUES (?)",
+                            vec![now.into()],
+                        )?;
+                        json!({ "counted": true })
+                    } else {
+                        json!({ "counted": false, "retry_after_ms": person_retry_after_ms(&asked, now) })
+                    };
+                    Ok(())
+                })?;
+                return Ok(answer.borrow().clone());
             }
             "/internal/repo-request-reserve" => {
                 let body: Value = req.json().await?;

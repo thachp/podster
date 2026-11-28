@@ -605,6 +605,11 @@ pub const MAX_ACCESS_EPOCH: u64 = 999_999_999_999_999;
 
 /// Every change that can shrink who may view a preview, each of which raises its access epoch in the same room
 /// transaction (the plan's 5.6). Told as `preview.access_revoked`, IDs only, never names.
+///
+/// **Two of the plan's list have no raise of their own** (M8 step 7's review): a person invitation revoked once accepted
+/// ends the person's place through the room's removal, which raises [`EpochRaise::ParticipantRemoved`], and a pending
+/// one gave no place to lose; an operator's suspension of the app deletes the preview (`preview_delete_trigger`), which
+/// raises the epoch as [`EpochRaise::PreviewDeleted`], and the access route refuses a suspended label besides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EpochRaise {
     ParticipantRemoved,
@@ -613,23 +618,18 @@ pub enum EpochRaise {
     OwnerChanged,
     /// The room made private or public: not a deletion (the plan's 3.3).
     VisibilityChanged,
-    PersonInvitationRevoked,
     PreviewDeleted,
-    /// An operator suspended the preview's label or a host.
-    OperatorSuspension,
     /// The notice path that tells a room a person left its organization (the plan's 5.6, proposed).
     OrganizationDeparture,
 }
 
 impl EpochRaise {
-    pub const ALL: [EpochRaise; 8] = [
+    pub const ALL: [EpochRaise; 6] = [
         EpochRaise::ParticipantRemoved,
         EpochRaise::RoleLowered,
         EpochRaise::OwnerChanged,
         EpochRaise::VisibilityChanged,
-        EpochRaise::PersonInvitationRevoked,
         EpochRaise::PreviewDeleted,
-        EpochRaise::OperatorSuspension,
         EpochRaise::OrganizationDeparture,
     ];
 
@@ -640,9 +640,7 @@ impl EpochRaise {
             EpochRaise::RoleLowered => "role_lowered",
             EpochRaise::OwnerChanged => "owner_changed",
             EpochRaise::VisibilityChanged => "visibility_changed",
-            EpochRaise::PersonInvitationRevoked => "person_invitation_revoked",
             EpochRaise::PreviewDeleted => "preview_deleted",
-            EpochRaise::OperatorSuspension => "operator_suspension",
             EpochRaise::OrganizationDeparture => "organization_departure",
         }
     }

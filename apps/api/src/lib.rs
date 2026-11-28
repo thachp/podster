@@ -15,6 +15,7 @@ mod hostname_claim;
 mod hostname_proof;
 mod moderation;
 mod objects;
+mod preview_access;
 mod previews;
 mod principal;
 mod provider;
@@ -513,6 +514,11 @@ async fn route(
     }
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,
+        // A person asks to open a preview host (M8 step 7). A path nobody defined while previews are off or the owner's
+        // key isn't set; never an agent's.
+        ["v1", "preview-access"] if method == Method::Post => {
+            return preview_access::request(&env, &caller, body.as_deref()).await;
+        }
         ["v1", "files", ws, id] if method == Method::Get => {
             return downloads::stream_download(&env, caller, ws, id).await;
         }

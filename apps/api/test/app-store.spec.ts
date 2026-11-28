@@ -334,7 +334,7 @@ describe("the room's record of its store", () => {
       // A store owed a deletion, and one gone.
       old("l2", NAMES[2], { store_id: IDS[0], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "operator_takedown", updated_at: 3 });
       old("l3", NAMES[3], { store_id: IDS[1], create_sent_at: 1, made_at: 2, delete_owed_at: 3, delete_cause: "owner_deleted", gone_at: 4, updated_at: 4 });
-      sql.exec("UPDATE schema_version SET version = version - 15");
+      sql.exec("UPDATE schema_version SET version = version - 14");
     });
     expect(await visit(r)).toBe(200);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);

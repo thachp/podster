@@ -216,6 +216,9 @@ const keys = m6Keys(contract);
 const all = schemas(contract);
 check(all.find((s) => s.name === "ReleaseConfig")?.properties.includes("default_host") && JSON.stringify(all.find((s) => s.name === "VerifyTask")?.properties) === JSON.stringify(["submission_no", "commit_sha"]), "schemas are read with their properties, block and inline alike");
 for (const name of ["release_config", "app_hostname", "default_host", "custom_host", "approval_policy", "challenge_name"]) check(keys.includes(name), `M6's fields, derived from the contract, include ${name}`);
+// M8's preview routes share AppHostname with M6's and name default_host and custom_host on their own schemas: neither
+// takes an M6 field away, and a schema only previews use adds none.
+for (const name of ["room_preview", "preview", "preview_release", "serving", "replacement", "storage_warning", "preview_hostname_view"]) check(!keys.includes(name), `a field only M8's previews name isn't counted as M6's: ${name}`);
 for (const name of ["id", "state", "version", "commit_sha", "requested_by", "reason", "hostname", "enabled", "release", "status", "task_id"]) check(!keys.includes(name), `a field other schemas or routes also name isn't counted as M6's: ${name}`);
 check(m6Fields({ id: "ws_1", name: "x", policy_version: 3, members: [{ id: "a" }] }, keys).length === 0, "an ordinary room read has no M6 field");
 check(JSON.stringify(m6Fields({ task: { id: "t" }, release_config: {}, roles: [{ default_host: "x" }] }, keys)) === JSON.stringify(["release_config", "roles[0].default_host"]), "an M6 field is found anywhere, with where it is");

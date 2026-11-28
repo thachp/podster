@@ -43,6 +43,21 @@
 // hold is sent whole with its exact length, one that fails within it is `502 app_error`, and one that outgrows it is
 // streamed and aborted, never ended cleanly, if the app's body fails later.
 //
+// **Preview hosts** (M8 step 8; `docs/m8-preview-plan.md`, 5.3 to 5.8): a default host whose entry is in the preview form
+// (`preview.ts`) is served only through the preview namespace's binding, `PREVIEW_APPS`, and only behind the gate:
+//   - `/__podster/` and everything under it, in any case, is this Worker's own on **every** host, for every method,
+//     right after step 1 and before any gate or dispatch: no app is ever asked for it. On a preview host,
+//     `/__podster/enter` is the fixed exchange page (`GET`, `HEAD`) and the exchange (`POST`); every other path and
+//     method there, and the whole prefix on every other host, is not-found.
+//   - With the binding, the public keys or the application host's origin not configured, previews are off: no entry
+//     is read in the preview form, so a preview host is not-found exactly as any host with no entry, and every host
+//     answers exactly as it did before M8.
+//   - On a preview host, after its entry: `robots.txt` is this Worker's own; a write not from the same origin is
+//     refused; then the gate, the session bound to the state cookie, or a navigation sent round the flow; only then
+//     the rules for its kind, as above, with its own headers (`previewFixedHeaders`).
+//   - **A production host's answers are exactly what they were,** but for the prefix: no cookie is read or set, and
+//     its headers and policy are unchanged.
+//
 // One thing is logged, and only for a dispatch that failed: its fixed class and the release's ID (`DispatchLog`).
 // Nothing else of a request is ever logged: no message, host, label, path, header or body (ADR 0010's "Logs").
 import { BUDGET_REFUSAL_STATUS, retryAfterSeconds } from "./budget";
@@ -50,7 +65,8 @@ import type { WriteGate } from "./counter";
 import { HOLD_MS, holdBody } from "./hold";
 import type { DispatchLimits } from "./limits";
 import { customEntryKind, defaultEntryKind, defaultHostLabel, isHost, isWrittenHost, onDomain, scriptLabel, scriptRelease, STOP_KEY } from "./names";
-import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
+import { cookiePairs, ENTER_PAGE, ENTER_PATH, ENTER_POLICY, gateCookies, isPodsterPath, MARKER_HEADER, nextRound, PREVIEW_MARK, PREVIEW_ROBOTS, previewEntry, type PreviewEntry, type PreviewKeys, previewSandboxPolicy, readState, refusalCode, returnPathOk, SESSION_COOKIE, SESSION_COOKIE_MAX_AGE_S, setCookie, STATE_COOKIE, STATE_COOKIE_MAX_AGE_S, stateHash, STOPPED_PAGE, base64url, checkClaims, type TokenRefusal, type TokenType, verifiedClaims, writeAllowed, writeState } from "./preview";
+import { allowedMethods, bodyWithinCap, CODE_ALLOW_ORIGIN, checkPreflight, checkRequest, forwardedHeaders, type HostKind, isJsonContentType, READ_HEADERS, REFUSAL_STATUS, type RequestClass } from "./requests";
 
 /**
  * **The code-apps switch, on since 2026-11-25** (the M6 plan's gate for apps with code, on spike H's evidence). On, a
@@ -102,6 +118,16 @@ export type DispatchLog = { event: "dispatch_missing" | "dispatch_error" | "disp
 export interface StopMemory {
   read: { at: number; stopped: boolean } | null;
 }
+/**
+ * What serving previews needs, all three configured (M8 step 8, decision 258), or nothing: the preview namespace's
+ * binding, the public keys tokens are checked with, and the application host's origin, where a viewer with no session
+ * is sent for a ticket. Until the owner's wizard sets them, `Deps.previews` is null and every preview host is not-found.
+ */
+export interface Previews {
+  apps: Apps;
+  keys: PreviewKeys;
+  accessOrigin: string;
+}
 export interface Deps {
   entries: Entries;
   apps: Apps;
@@ -131,6 +157,10 @@ export interface Deps {
   writes: WriteGate;
   /** Where a failed dispatch's line goes. The Worker's entry writes it to the Worker's log; a test keeps it. */
   log: (line: DispatchLog) => void;
+  /** Previews, when configured; null and every preview host is not-found. A production host never reads it. */
+  previews: Previews | null;
+  /** 32 random bytes, for a new state cookie. Passed in, so a test can tell one from another. */
+  random: () => Uint8Array;
 }
 
 /** The visitor's headers that go through to an app with a read. Each calls only for answer headers let through below. */
@@ -177,7 +207,7 @@ type ReadableBy = "*" | typeof CODE_ALLOW_ORIGIN | null;
 /**
  * The host an answer is for: its origin, which the sandbox names, and whether it is a custom hostname.
  */
-type Site = { origin: string; custom: boolean };
+type Site = { origin: string; custom: boolean; preview: boolean };
 
 /**
  * `Strict-Transport-Security`, for a year. On the content domain, which is Podster's own, it covers every name under the
@@ -190,6 +220,7 @@ export function hstsFor(custom: boolean): string {
 
 /** The headers this Worker sets on every answer, an app's and its own. `own` answers are never kept by a browser. */
 function fixedHeaders(headers: Headers, site: Site, own: boolean, readableBy: ReadableBy = "*"): Headers {
+  if (site.preview) return previewFixedHeaders(headers, site);
   const origin = site.origin;
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-content-type-options", "nosniff");
@@ -198,6 +229,26 @@ function fixedHeaders(headers: Headers, site: Site, own: boolean, readableBy: Re
   // A sandboxed page is cross-origin to its own host, so its own files need this to load (spike C).
   if (readableBy !== null) headers.set("access-control-allow-origin", readableBy);
   headers.set("content-security-policy", sandboxPolicy(origin));
+  return headers;
+}
+
+/**
+ * The headers on every answer from a preview host, an app's and this Worker's own (the plan's 5.8; step 7's
+ * requirements): the production set, but never kept anywhere (`private, no-store`, with `no-transform` kept), readable
+ * by no other origin (no `Access-Control-Allow-Origin` at all: nothing before this sets one on a preview answer, and an
+ * app's never passes), never indexed, in its own agent cluster, and
+ * **`Cross-Origin-Opener-Policy: same-origin` forced on every answer**, whatever an app sends, so no preview page keeps
+ * a window handle across the hop through the application host. The policy is production's with the preview sandbox.
+ */
+function previewFixedHeaders(headers: Headers, site: Site): Headers {
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("strict-transport-security", hstsFor(site.custom));
+  headers.set("cache-control", "private, no-store, no-transform");
+  headers.set("content-security-policy", previewSandboxPolicy(sandboxPolicy(site.origin)));
+  headers.set("x-robots-tag", "noindex, nofollow, noarchive");
+  headers.set("origin-agent-cluster", "?1");
+  headers.set("cross-origin-opener-policy", "same-origin");
   return headers;
 }
 
@@ -387,8 +438,10 @@ async function codeHost(request: Request, url: URL, site: Site, script: string, 
     const budget = label === null ? null : await deps.writes.admit(label);
     if (budget === null || !budget.ok) {
       const refusal = budget === null ? ({ code: "write_budget_unknown" } as const) : budget.refusal;
-      // The wait is readable by the page, so it can tell its visitor when to try again.
-      const wait: Record<string, string> = refusal.code === "write_budget_spent" ? { "retry-after": String(retryAfterSeconds(refusal.retryAfterMs)), "access-control-expose-headers": "retry-after" } : {};
+      // The wait is readable by the page, so it can tell its visitor when to try again. A preview page is same-origin,
+      // so it reads the header with no exposure, and no preview answer carries any `Access-Control-` header.
+      const expose: Record<string, string> = site.preview ? {} : { "access-control-expose-headers": "retry-after" };
+      const wait: Record<string, string> = refusal.code === "write_budget_spent" ? { "retry-after": String(retryAfterSeconds(refusal.retryAfterMs)), ...expose } : {};
       return asCode(BUDGET_REFUSAL_STATUS[refusal.code], refusal.code, wait);
     }
     // Then sent on.
@@ -472,6 +525,224 @@ function passRead(request: Request, answer: Response, site: Site, readableBy: Re
   return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
 }
 
+/** A static host's read: the one dispatch, and its answer passed as a static host's always is. */
+async function staticRead(request: Request, url: URL, site: Site, script: string, deps: Deps): Promise<Response> {
+  const answer = await dispatch(deps, script, requestForApp(request, url, "read"), deps.limits);
+  // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
+  // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
+  if (answer === "missing" || answer === "error") return notFound(request, site);
+  return passRead(request, answer, site, "*", () => notFound(request, site), () => own(request, site, 502, "app_answer_unservable"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Preview hosts (M8 step 8)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A preview host's entry, confirmed: its own form, a script under this host's own label, and previews configured. */
+type PreviewHost = { entry: PreviewEntry; previews: Previews };
+
+/** The entry read as a preview host's, or null: not the preview form, a script under another label, or previews off. */
+function confirmedPreview(value: string, label: string, deps: Deps): PreviewHost | null {
+  const entry = previewEntry(value);
+  if (entry === null || scriptLabel(entry.script) !== label || deps.previews === null) return null;
+  return { entry, previews: deps.previews };
+}
+
+/**
+ * Whether a request is a top-level navigation, the only kind the gate sends round the flow (the plan's 5.3, step 1):
+ * `GET` with `Sec-Fetch-Mode: navigate`, or with no `Sec-Fetch-Mode` and an `Accept` that names `text/html`.
+ */
+function isNavigation(request: Request): boolean {
+  if (request.method !== "GET") return false;
+  const mode = request.headers.get("sec-fetch-mode");
+  if (mode !== null) return mode === "navigate";
+  return (request.headers.get("accept") ?? "").toLowerCase().includes("text/html");
+}
+
+/** The two cookies, or null when an exact name came twice: then nothing of either is used. */
+function previewCookies(request: Request) {
+  const found = gateCookies(cookiePairs(request.headers.get("cookie")));
+  return found === "duplicate" ? null : found;
+}
+
+/** A token's claims if it verifies and passes every check for `typ` here; otherwise why not (null when unreadable). */
+async function passes(token: string, typ: TokenType, request: Request, url: URL, host: PreviewHost, hash: string | null, deps: Deps): Promise<{ ok: true; sid: string | null; exp: number } | { ok: false; refusal: TokenRefusal | null }> {
+  const claims = await verifiedClaims(token, host.previews.keys);
+  if (claims === null) return { ok: false, refusal: null };
+  const refusal = checkClaims(claims, typ, { host: url.hostname, now: deps.now(), entrySlot: host.entry.slot, entryEpoch: host.entry.epoch, stateHash: hash, path: url.pathname, method: request.method });
+  return refusal === null ? { ok: true, sid: claims.sid, exp: claims.exp } : { ok: false, refusal };
+}
+
+/**
+ * **The gate** (the plan's 5.3, steps 1 and 7, and 5.4): null when the request may go on to the app, or the answer.
+ *
+ * - A marker token, in `MARKER_HEADER`, for the release job's marker fetch: that path, with `GET`, and nothing else; a
+ *   request that carries one is decided by it alone.
+ * - Otherwise the session cookie, verified, for this host, slot and epoch, **and bound to this browser's state cookie**:
+ *   its `st` must be the SHA-256 of the state sent with it.
+ * - Refused, a navigation goes round the flow, at most twice a minute (the loop guard): a state cookie is set if there
+ *   is none of its form, kept if there is, with the round recorded, and the browser is sent to the application host's
+ *   `/preview-access` with this host, the state's hash and the path to come back to, none of them a credential.
+ *   Past the guard, a fixed `401` page. Anything that isn't a navigation is `401`, never a redirect.
+ */
+async function gate(request: Request, url: URL, site: Site, host: PreviewHost, deps: Deps): Promise<Response | null> {
+  const required = (code: string) => own(request, site, 401, code);
+  const marker = request.headers.get(MARKER_HEADER);
+  if (marker !== null) {
+    const checked = await passes(marker, "marker", request, url, host, null, deps);
+    return checked.ok ? null : required(refusalCode(checked.ok ? null : checked.refusal));
+  }
+  const cookies = previewCookies(request);
+  const state = readState(cookies?.state ?? null);
+  let refusal: TokenRefusal | null = null;
+  if (cookies !== null && cookies.session !== null && state !== null) {
+    const checked = await passes(cookies.session, "session", request, url, host, await stateHash(state.random), deps);
+    if (checked.ok) return null;
+    refusal = checked.refusal;
+  }
+  if (!isNavigation(request)) return required(refusalCode(refusal));
+  const round = nextRound(state?.rounds ?? null, deps.now());
+  if (round === "stop") {
+    const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
+    fixedHeaders(headers, site, true);
+    return new Response(STOPPED_PAGE, { status: 401, headers });
+  }
+  const random = state?.random ?? base64url(deps.random().slice(0, 32));
+  const back = `${url.pathname}${url.search}`;
+  const target = new URL("/preview-access", host.previews.accessOrigin);
+  target.searchParams.set("host", url.hostname);
+  target.searchParams.set("st", await stateHash(random));
+  target.searchParams.set("r", returnPathOk(back) ? back : "/");
+  const headers = new Headers({ "content-type": "text/plain; charset=utf-8", location: target.toString() });
+  headers.append("set-cookie", setCookie(STATE_COOKIE, writeState({ random, rounds: round }), STATE_COOKIE_MAX_AGE_S));
+  fixedHeaders(headers, site, true);
+  return new Response(`preview_access_required\n`, { status: 303, headers });
+}
+
+/** The largest exchange body read: a ticket, a session and a return path, with room to spare. */
+const MAX_EXCHANGE_BYTES = 16 * 1024;
+
+/**
+ * **The exchange** (the plan's 5.3, step 6): `POST /__podster/enter` with `{ t, s, r }`. Refused `403` unless
+ * `Sec-Fetch-Site: same-origin` and `Origin` is exactly this host. Then the ticket and the session must each verify and
+ * pass, for this host, slot and epoch and this browser's state cookie, and name the same session; only then is the
+ * session set as its cookie, for no longer than it lives and at most an hour, the state cookie refreshed with its round
+ * record cleared, and `200 { r }` answered, `r` a path on this host. Anything else is `401`, and sets nothing.
+ */
+async function exchange(request: Request, url: URL, site: Site, host: PreviewHost, deps: Deps): Promise<Response> {
+  if (request.headers.get("sec-fetch-site") !== "same-origin" || request.headers.get("origin") !== `https://${url.hostname}`) return own(request, site, 403, "preview_exchange_not_same_origin");
+  const refused = (refusal: TokenRefusal | null = null) => own(request, site, 401, refusalCode(refusal));
+  const type = request.headers.get("content-type");
+  if (type === null || !isJsonContentType(type)) return refused();
+  const body = await bodyUpTo(request, MAX_EXCHANGE_BYTES);
+  if (body === null) return refused();
+  let asked: unknown;
+  try {
+    asked = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  } catch {
+    return refused();
+  }
+  if (typeof asked !== "object" || asked === null || Array.isArray(asked)) return refused();
+  const fields = asked as Record<string, unknown>;
+  if (Object.keys(fields).sort().join() !== "r,s,t" || typeof fields.t !== "string" || typeof fields.s !== "string" || typeof fields.r !== "string") return refused();
+  const cookies = previewCookies(request);
+  const state = readState(cookies?.state ?? null);
+  if (state === null) return refused("StateMismatch");
+  const hash = await stateHash(state.random);
+  const ticket = await passes(fields.t, "ticket", request, url, host, hash, deps);
+  if (!ticket.ok) return refused(ticket.refusal);
+  const session = await passes(fields.s, "session", request, url, host, hash, deps);
+  if (!session.ok) return refused(session.refusal);
+  if (ticket.sid === null || ticket.sid !== session.sid) return refused();
+  const maxAge = Math.min(SESSION_COOKIE_MAX_AGE_S, Math.floor((session.exp - deps.now()) / 1000));
+  if (maxAge < 1) return refused("Expired");
+  const back = returnPathOk(fields.r) ? fields.r : "/";
+  const headers = new Headers({ "content-type": "application/json" });
+  headers.append("set-cookie", setCookie(SESSION_COOKIE, fields.s, maxAge));
+  headers.append("set-cookie", setCookie(STATE_COOKIE, writeState({ random: state.random, rounds: null }), STATE_COOKIE_MAX_AGE_S));
+  fixedHeaders(headers, site, true);
+  return new Response(JSON.stringify({ r: back }), { status: 200, headers });
+}
+
+/** A body read up to `cap` bytes and no further: its bytes, or null past the cap. */
+async function bodyUpTo(request: Request, cap: number): Promise<Uint8Array | null> {
+  if (request.body === null) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let counted = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      counted += value.byteLength;
+      if (counted > cap) return null;
+      chunks.push(value);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  const body = new Uint8Array(counted);
+  let at = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return body;
+}
+
+/**
+ * **`/__podster/` and everything under it,** on every host and for every method, after the validation folders and the
+ * service-worker refusal and before anything else (the plan's 5.3, P15). An app is never asked for any of it: this
+ * returns this Worker's own answer in every case. Only a preview host's `/__podster/enter` is anything but not-found:
+ * the fixed exchange page for `GET` and `HEAD`, the exchange for `POST`, and `405` for any other method there. The
+ * host's entry is read only to tell a preview host from any other, so each answer carries its own kind's headers.
+ */
+async function podsterPath(request: Request, url: URL, site: Site, label: string | null, deps: Deps): Promise<Response> {
+  if (label === null || url.protocol !== "https:" || (await stopped(deps))) return notFound(request, site);
+  let value: string | null;
+  try {
+    value = await deps.entries.get(url.hostname, { cacheTtl: KV_CACHE_SECONDS });
+  } catch {
+    return notFound(request, site);
+  }
+  if (value === null || deps.previews === null || !value.startsWith(PREVIEW_MARK)) return notFound(request, site);
+  const previewSite: Site = { ...site, preview: true };
+  const host = confirmedPreview(value, label, deps);
+  if (host === null || url.pathname !== ENTER_PATH) return notFound(request, previewSite);
+  if (request.method === "POST") return await exchange(request, url, previewSite, host, deps);
+  if (request.method !== "GET" && request.method !== "HEAD") return own(request, previewSite, 405, "method_not_allowed", { allow: "GET, HEAD, POST" });
+  const headers = new Headers({ "content-type": "text/html; charset=utf-8" });
+  fixedHeaders(headers, previewSite, true);
+  headers.set("content-security-policy", ENTER_POLICY);
+  headers.set("x-frame-options", "DENY");
+  return new Response(request.method === "HEAD" ? null : ENTER_PAGE, { status: 200, headers });
+}
+
+/**
+ * **A preview host's request**, after its entry was read and found in the preview form (the plan's 5.3 to 5.8). Not
+ * confirmed, or previews off, and it is not-found. Then, in order: `robots.txt`, this Worker's own, before the gate; a
+ * write not from this very origin, refused; the gate; and only then the rules for its kind, exactly as a production
+ * host of that kind has them, dispatched through the preview namespace's binding and never production's, with this
+ * host's own headers.
+ */
+async function previewHost(request: Request, url: URL, site: Site, label: string, value: string, deps: Deps, methodRefused: () => Response): Promise<Response> {
+  const host = confirmedPreview(value, label, deps);
+  if (host === null) return isRead(request.method) ? notFound(request, site) : methodRefused();
+  if (isRead(request.method) && url.pathname === "/robots.txt") {
+    const headers = new Headers({ "content-type": "text/plain; charset=utf-8" });
+    fixedHeaders(headers, site, true);
+    return new Response(request.method === "HEAD" ? null : PREVIEW_ROBOTS, { status: 200, headers });
+  }
+  if (!writeAllowed(request.method, request.headers.get("sec-fetch-site"), request.headers.get("origin"), url.hostname)) return own(request, site, 403, "preview_write_not_same_origin");
+  const refused = await gate(request, url, site, host, deps);
+  if (refused !== null) return refused;
+  // Through the preview namespace alone: the same handling as production's, with the other binding.
+  const inPreview: Deps = { ...deps, apps: host.previews.apps };
+  if (host.entry.kind === "code") return await codeHost(request, url, site, host.entry.script, inPreview);
+  if (!isRead(request.method)) return methodRefused();
+  return await staticRead(request, url, site, host.entry.script, inPreview);
+}
+
 export async function handle(request: Request, deps: Deps): Promise<Response> {
   const url = new URL(request.url);
   const host = url.hostname;
@@ -481,7 +752,7 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   const custom = label === null && isHost(deps.domain) && isWrittenHost(host) && !onDomain(host, deps.domain);
   // The sandbox names the host, so a host that is no app's is named as nothing a page could be served from.
   const origin = label === null && !custom ? "'none'" : `https://${host}`;
-  const site: Site = { origin, custom };
+  const site: Site = { origin, custom, preview: false };
   // Learned once the entry is confirmed, so an error after it is answered as that kind of host's own.
   let kind: HostKind | null = null;
   try {
@@ -497,6 +768,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // the header is refused, whatever it holds. Refusing the script is what keeps an app from running on in a
     // browser after it is taken down, and it holds even if the sandbox were ever loosened.
     if (read && request.headers.has("service-worker")) return own(request, site, 403, "no_service_workers");
+    // Podster's own prefix, on every host and for every method, before any gate or dispatch: see `podsterPath`.
+    if (isPodsterPath(url.pathname)) return await podsterPath(request, url, site, label, deps);
     if (label === null && !custom) return unconfirmed();
     // An app is never served over plain HTTP, and this doesn't rest on the zone's own redirect. The scheme is read
     // from the request's URL, which is what Cloudflare's edge received and no header of the visitor's can change.
@@ -516,6 +789,13 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // A default host: only a script's name, and only one under this host's own label, so a host never serves another
     // app's script. A custom hostname: only its own form, naming this very host. Either may begin with the mark that
     // its script has code, which is the host's kind; anything else that looks like a mark is no entry.
+    // A default host's entry in the preview form is a preview host's, served only through the preview namespace and
+    // behind the gate. The production readers below never read that form, nor the preview reader any other.
+    // While previews are off, nothing here is read in the preview form, so every host answers exactly as before.
+    if (value !== null && !custom && label !== null && deps.previews !== null && value.startsWith(PREVIEW_MARK)) {
+      site.preview = true;
+      return await previewHost(request, url, site, label, value, deps, methodRefused);
+    }
     const entry = value === null ? null : custom ? customEntryKind(host, value) : defaultEntryKind(value);
     if (entry === null || (!custom && scriptLabel(entry.script) !== label)) return unconfirmed();
     const script = entry.script;
@@ -524,12 +804,7 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     if (kind === "code") return await codeHost(request, url, site, script, deps);
     // A static host: GET and HEAD, as always (`podster_core::app_requests`' rule for a static host).
     if (!read) return methodRefused();
-
-    const answer = await dispatch(deps, script, requestForApp(request, url, "read"), deps.limits);
-    // A static release's script runs no code of the app's, so a rejection can only be the platform's own, and it
-    // can't be told from a script that is gone: not-found, whatever its message. See `dispatch`.
-    if (answer === "missing" || answer === "error") return notFound(request, site);
-    return passRead(request, answer, site, "*", () => notFound(request, site), () => own(request, site, 502, "app_answer_unservable"));
+    return await staticRead(request, url, site, script, deps);
   } catch {
     // Nothing above is expected to throw. If it does, the visitor still gets this Worker's own answer and headers.
     return own(request, site, 502, "error", {}, kind === "code" ? CODE_ALLOW_ORIGIN : "*");

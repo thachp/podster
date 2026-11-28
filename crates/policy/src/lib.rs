@@ -10,6 +10,7 @@ pub mod moderation;
 pub mod nudge;
 pub mod outputs;
 pub mod pairing;
+pub mod preview;
 pub mod provenance;
 pub mod public;
 pub mod release;

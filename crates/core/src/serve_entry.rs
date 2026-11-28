@@ -106,3 +106,83 @@ pub fn custom_entry_script_kind<'a>(host: &str, value: &'a str) -> Option<(HostK
     let (kind, rest) = unmarked(value);
     custom_entry_script(host, rest).map(|script| (kind, script))
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The preview form (M8 step 4)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Before a preview host's entry (M8; the preview plan's 3.1, ADR 0010's revision on previews, item 2). A preview
+/// entry is this mark, the preview slot's access epoch in decimal, `:`, and then exactly the entry a production host of
+/// the same form would hold: [`default_entry_value`]'s on a default preview host, [`custom_entry_value_kind`]'s on a
+/// custom one. `packages/contracts/serve-entry.fixture.json` holds its vectors (`valid_preview_entries` and the rest).
+///
+/// **The forms cross:** no production reader reads a preview entry, since what follows a production entry's optional
+/// code mark must be a script's name, and `preview:` can't begin one; and no preview reader reads a production entry,
+/// since it must begin with this mark. The content Worker dispatches a preview entry only through the preview
+/// namespace's binding and an unmarked one only through production's, so neither can name the other's script (M8 step
+/// 8). The host's kind comes from its entry, never its name.
+pub const PREVIEW_MARK: &str = "preview:";
+
+/// The epoch as written: `0`, or a digit other than `0` and at most 14 more, so it is exact as a JavaScript number
+/// (the fixture's `preview_epoch_pattern`). `None` past [`crate::preview::MAX_ACCESS_EPOCH`], which is never written.
+fn epoch_text(epoch: u64) -> Option<String> {
+    (epoch <= crate::preview::MAX_ACCESS_EPOCH).then(|| epoch.to_string())
+}
+
+/// The epoch read back from exactly [`epoch_text`]'s form: no sign, no leading zero, no space, at most 15 digits.
+fn parse_epoch(text: &str) -> Option<u64> {
+    let digits = !text.is_empty() && text.len() <= 15 && text.bytes().all(|b| b.is_ascii_digit());
+    let unpadded = text == "0" || !text.starts_with('0');
+    if !(digits && unpadded) {
+        return None;
+    }
+    text.parse::<u64>()
+        .ok()
+        .filter(|epoch| *epoch <= crate::preview::MAX_ACCESS_EPOCH)
+}
+
+/// The epoch and the production form left once the mark and the epoch are taken off: once, from the start only.
+fn split_preview(value: &str) -> Option<(u64, &str)> {
+    let (epoch, rest) = value.strip_prefix(PREVIEW_MARK)?.split_once(':')?;
+    Some((parse_epoch(epoch)?, rest))
+}
+
+/// What a default preview host's entry holds for `script`, of `kind`, under access epoch `epoch`. `None` for a name
+/// Podster doesn't make or an epoch past [`crate::preview::MAX_ACCESS_EPOCH`]. That the script's label is the slot's
+/// preview label is the writer's to check, as for production ([`crate::preview::preview_commit_live`] holds it).
+pub fn preview_entry_value(epoch: u64, kind: HostKind, script: &str) -> Option<String> {
+    let epoch = epoch_text(epoch)?;
+    default_entry_value(kind, script).map(|value| format!("{PREVIEW_MARK}{epoch}:{value}"))
+}
+
+/// The epoch, the kind and the script a default preview host's entry names, or `None` for any value
+/// [`preview_entry_value`] wouldn't write.
+pub fn preview_entry_script(value: &str) -> Option<(u64, HostKind, &str)> {
+    let (epoch, rest) = split_preview(value)?;
+    let (kind, script) = default_entry_script(rest)?;
+    Some((epoch, kind, script))
+}
+
+/// What a custom preview hostname's entry holds for `script`, of `kind`, under access epoch `epoch`: `None` wherever
+/// [`custom_entry_value_kind`] is, or past the largest epoch.
+pub fn preview_custom_entry_value(
+    epoch: u64,
+    kind: HostKind,
+    host: &str,
+    script: &str,
+) -> Option<String> {
+    let epoch = epoch_text(epoch)?;
+    custom_entry_value_kind(kind, host, script)
+        .map(|value| format!("{PREVIEW_MARK}{epoch}:{value}"))
+}
+
+/// The epoch, the kind and the script a custom preview hostname's entry names, read for exactly `host`: `None` for any
+/// value [`preview_custom_entry_value`] wouldn't write for that host.
+pub fn preview_custom_entry_script_kind<'a>(
+    host: &str,
+    value: &'a str,
+) -> Option<(u64, HostKind, &'a str)> {
+    let (epoch, rest) = split_preview(value)?;
+    let (kind, script) = custom_entry_script_kind(host, rest)?;
+    Some((epoch, kind, script))
+}

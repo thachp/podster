@@ -14,7 +14,7 @@ workspace = true
 idna = "1.1"
 icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
 icu_properties = { version = "2.4", default-features = false, features = ["compiled_data"] }
-
-# For the test that checks the Public Suffix List snapshot's SHA-256 against the one recorded beside it.
-[dev-dependencies]
+# The preview build ID (M8 step 4, `preview_build`): a SHA-256 over the build's canonical text. Pure arithmetic, already
+# in the lockfile through crates/policy and this crate's own tests.
 sha2 = "0.10"
+

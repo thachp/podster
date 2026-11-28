@@ -2100,7 +2100,7 @@ const SHIP_WHAT = { releases: 'release, or go back to an earlier release', setti
 function shipPage(tab) {
   if (!SHIP_WHAT[tab]) tab = 'releases';
   const body = tab === 'settings' ? appSettingsBody() : tab === 'infra' ? infraTab() : tab === 'data' ? dataTab() : ship();
-  return memberView('<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div>' + (tab === 'releases' ? '<button class="btn" data-act="ship-tab" data-v="settings">App settings</button>' : '') + '</div>' +
+  return memberView('<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div></div>' +
     '<div class="tabrow" role="tablist" aria-label="Ship">' + SHIP_TABS.map((x) => '<button role="tab" id="shiptab-' + x[0] + '" aria-selected="' + (tab === x[0]) + '" aria-controls="shippanel" tabindex="' + (tab === x[0] ? '0' : '-1') + '" data-act="ship-tab" data-v="' + x[0] + '">' + x[1] + '</button>').join('') + '</div>' +
     '<div id="shippanel" role="tabpanel" aria-labelledby="shiptab-' + tab + '" style="display:flex;flex-direction:column;gap:22px">' + body + '</div>', SHIP_WHAT[tab]);
 }

@@ -84,7 +84,7 @@ __t.S.app.form = { n: 'TEXTING_API_KEY', secret: true, touched: false, live: '',
 __t.S.app.form = { n: 'API_TOKEN', secret: false, touched: true, live: '', prevMode: 'same', prev: '', editing: false }; __t.render(); if (html.indexOf('looks like a key') < 0) throw new Error('nudge');
 __t.S.app.form = { n: 'EMAIL_API_KEY', secret: true, wasSecret: true, touched: true, live: '', prevMode: 'placeholder', prev: '', editing: true }; __t.render(); if (html.indexOf("can\'t be made plain") < 0 && html.indexOf('can\\\'t be made plain') < 0 && html.indexOf('be made plain again') < 0) throw new Error('no unsecret');
 __t.S.app.form = null; __t.S.app.domains.push(['shop.bakeryonelm.example', 'wait']); __t.render(); if (html.indexOf('CNAME') < 0) throw new Error('dns');
-location.hash = '#ship'; __t.fromHash(); if (html.indexOf('data-act="ship-tab" data-v="settings">App settings') < 0) throw new Error('ship link');
+location.hash = '#ship'; __t.fromHash(); if (html.indexOf('>App settings</button>') >= 0 || html.indexOf('id="shiptab-settings"') < 0) throw new Error('ship settings tab only');
 for (const i of [0, 1, 2, 3, 4]) { __t.S.mailSel = i; location.hash = '#mail'; __t.fromHash(); if (html.indexOf('data-act="mail-go"') < 0) throw new Error('mail ' + i); }
 __t.S.mailSel = 4; __t.render(); if (html.indexOf('Your sign-in link') < 0) throw new Error('signin mail');
 __t.S.as = 'marco'; location.hash = '#ship'; __t.fromHash(); if (html.indexOf('Only Elena can release') < 0) throw new Error('marco ship');

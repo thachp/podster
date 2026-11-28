@@ -142,6 +142,9 @@ __t.S.as = 'elena'; __t.S.palette = false; __t.S.modal = null; __t.S.drawer = nu
   P.serving = sv; want(['>Replacing<', 'keeps showing'], 'replacing'); if (html.indexOf('data-act="prev-ask"') >= 0) throw new Error('preview controls while replacing');
   P.next = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'release_marker_missing' }; want(['Replacement failed', 'failed: the new build didn', 'The preview still shows'], 'failed');
   P.failed = null; P.deleting = true; want(['>Deleting<'], 'deleting'); P.deleting = false;
+  P.serving = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'release_marker_missing' }; want(['>Failed<', 'Making a preview of', 'Nothing is served'], 'first failed'); if (html.indexOf('Open preview') >= 0) throw new Error('first failed offers open'); P.serving = sv; P.failed = null;
+  for (const [av, w] of [['unavailable', "aren't available on this Podster deployment"], ['off', 'switched off on this Podster deployment'], ['hidden', 'shown only to people with a role']]) { P.avail = av; want([w, 'data-act="prev-avail"'], av); if (html.indexOf('Open preview') >= 0 || html.indexOf('data-act="prev-ask"') >= 0) throw new Error('preview ' + av + ' offers controls'); }
+  P.avail = 'on';
   P.ask = 'delete'; want(['Delete the preview?'], 'delete ask'); P.ask = 'replace'; want(['Replace the preview with'], 'replace ask'); P.ask = 'publish'; want(['Ask to publish build bld_7c1e94a0'], 'publish ask'); P.ask = null;
   P.priv = true; want(['Only a public workroom can publish'], 'private'); if (html.indexOf('Publish this build') >= 0) throw new Error('private room offers publish'); P.priv = false;
   P.pub = Object.assign({}, sv); want(['waits for approval', 'Review and approve'], 'pending');

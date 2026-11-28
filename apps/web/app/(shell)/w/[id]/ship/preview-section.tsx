@@ -43,7 +43,8 @@ export type TaskChoice = { id: string; title: string };
  * What the page read besides the preview, each the API's own answer, never a role rule of this page's:
  * - `manages`: the room's release configuration answered this viewer, which it does only for its owner and admins as
  *   people, the same people `requestPreview` and `deletePreview` take. Rust decides both again when asked.
- * - `isPublic`: the room's visibility read, which answers only those who manage it; null where it wasn't answered.
+ * - `isPublic`: the room's visibility read, which answers only those who manage it; null where it wasn't answered, and
+ *   then Publish is still offered and the API decides.
  * - `archived`: the room's status. An archived room takes no new preview.
  * - `repository`: the room's repository's `owner/name`, for commit links only.
  */
@@ -236,7 +237,7 @@ function PreviewCard({ roomId, preview, manages, isPublic, archived, repository,
         />
       ) : null}
 
-      {serving && serving.build_id && preview?.state === "active" ? <Publish roomId={roomId} serving={serving} build={serving.build_id} manages={manages} isPublic={isPublic} archived={archived} /> : null}
+      {serving && serving.build_id && preview?.state === "active" ? <Publish roomId={roomId} serving={serving} build={serving.build_id} isPublic={isPublic} archived={archived} /> : null}
     </div>
   );
 }
@@ -353,16 +354,17 @@ function AskPreview({ roomId, tasks, replacing, repository, send, retrying, afte
 
 /**
  * Publish this build: a release of the preview's own task and commit naming the preview release, so the approval binds to
- * its build. Offered where the room's visibility read said public; a private room says why it can't. Whether this person
- * may ask, by a deployment grant, is the API's to say, and it says it here if not.
+ * its build. Offered to anyone shown the preview, unless the room's visibility read said private, when it says why it
+ * can't. Whether this person may ask, by a deployment grant, is the API's to say, and its refusal is said here.
  */
-function Publish({ roomId, serving, build, manages, isPublic, archived }: { roomId: string; serving: PreviewRelease; build: string; manages: boolean; isPublic: boolean | null; archived: boolean }) {
+function Publish({ roomId, serving, build, isPublic, archived }: { roomId: string; serving: PreviewRelease; build: string; isPublic: boolean | null; archived: boolean }) {
   const commands = useCommands(null);
   const { send, retrying } = commands;
   const after = useRef<HTMLDivElement>(null);
-  if (!manages || archived) return null;
+  if (archived) return null;
+  // Only a visibility read that answered "private" holds it back. Who may ask, by a deployment grant, no read here says,
+  // so anyone shown the preview is offered it and the API's refusal is said beside the button.
   if (isPublic === false) return <p className="text-sm text-muted-foreground">{PRIVATE_CANT_PUBLISH}</p>;
-  if (isPublic !== true) return null;
   const ask = () =>
     send(`/api/v1/workspaces/${encodeURIComponent(roomId)}/releases`, { task_id: serving.task_id, commit_sha: serving.commit_sha, from_preview: serving.id }, `Asked. Build ${shortBuild(build)} waits for the owner or an admin to approve it in Needs attention.`, { explain: explainPublishRefusal });
   return (

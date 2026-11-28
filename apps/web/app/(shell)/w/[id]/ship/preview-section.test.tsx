@@ -131,11 +131,19 @@ describe("the card's states", () => {
 });
 
 describe("controls follow the API's answers", () => {
-  it("someone the release configuration didn't answer sees the preview and its link, and no control", () => {
+  it("someone the release configuration didn't answer sees the preview, its link and Publish, and no make, replace or delete", () => {
     show({ manages: false, isPublic: null });
     expect(screen.getByRole("link", { name: "Open preview" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Delete|Publish|preview/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Delete|Replace|Make/ })).toBeNull();
     expect(screen.queryByLabelText(/finished task/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Publish this build" })).toBeInTheDocument();
+  });
+
+  it("a member's publish is decided by the API, and its refusal said inline", async () => {
+    replies["POST /api/v1/workspaces/ws_1/releases"] = { status: 403, body: { error: { code: "grant_required" } } };
+    show({ manages: false, isPublic: null });
+    await confirm("Publish this build", "Ask to publish");
+    expect(await screen.findByRole("alert")).toHaveTextContent(/deployment grant.*Nothing was asked for\./);
   });
 
   it("a private room says why it can't publish, in place of the button", () => {
@@ -144,9 +152,9 @@ describe("controls follow the API's answers", () => {
     expect(document.body).toHaveTextContent(PRIVATE_CANT_PUBLISH);
   });
 
-  it("an unread visibility offers no publish and claims nothing", () => {
+  it("an unread visibility still offers publish, for the API to decide, and claims nothing about the room", () => {
     show({ isPublic: null });
-    expect(screen.queryByRole("button", { name: "Publish this build" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Publish this build" })).toBeInTheDocument();
     expect(document.body).not.toHaveTextContent(PRIVATE_CANT_PUBLISH);
   });
 

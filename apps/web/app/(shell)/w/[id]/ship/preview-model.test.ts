@@ -81,6 +81,9 @@ describe("refusals, each saying nothing changed", () => {
     ["release_off", /Release is off in this workroom/],
     ["workspace_archived", /archived/],
     ["standing_unknown", /couldn't check/],
+    ["access_revoked", /place in this workroom has ended/],
+    ["workspace_not_found", /isn't there, or you can no longer see it/],
+    ["requester_lost_authority", /no longer hold what this needs/],
   ])("preview %s", (code, words) => {
     expect(explainPreviewRefusal(code, 409)).toMatch(words);
     expect(explainPreviewRefusal(code, 409)).toMatch(/Nothing changed\./);
@@ -95,6 +98,9 @@ describe("refusals, each saying nothing changed", () => {
     ["release_pending", /already waiting/],
     ["release_limit", /20 asks/],
     ["preview_in_flight", /still being made/],
+    ["access_revoked", /place in this workroom has ended/],
+    ["workspace_not_found", /isn't there, or you can no longer see it/],
+    ["requester_lost_authority", /no longer hold release authority/],
   ])("publish %s", (code, words) => {
     expect(explainPublishRefusal(code, 409)).toMatch(words);
     expect(explainPublishRefusal(code, 409)).toMatch(/Nothing (new )?was asked for\.$/);

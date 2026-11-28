@@ -760,7 +760,7 @@ const S = {
   newOrder: '',
   ship: { live: 3, top: 3, liveDay: 'Tue', phase: null, step: 0, confirm: false, back: false, rbAsk: null, rolledFrom: null },
   /* M8 preview slot (docs/m8-preview-plan.md, section 10). One preview a room: what it serves, the replacement in flight or failed, its custom hostname. */
-  prev: { serving: { task: 15, commit: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a', build: 'bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92', at: 'Tuesday 5:20 PM', storage: true, by: 'You' }, next: null, failed: null, deleting: false, pick: '16', ask: null, pub: null, priv: false, host: { name: 'preview.bakeryonelm.example', proof: 'ok', tls: 'ok' }, hostDraft: '', label: 'p-7f3k2q9m.podster.site' },
+  prev: { serving: { task: 15, commit: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a', build: 'bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92', at: 'Tuesday 5:20 PM', storage: true, by: 'You' }, next: null, failed: null, deleting: false, pick: '16', ask: null, pub: null, priv: false, avail: 'on', host: { name: 'preview.bakeryonelm.example', proof: 'ok', tls: 'ok' }, hostDraft: '', label: 'p-7f3k2q9m.podster.site' },
   permReq: { state: 'open', scope: 'task', denyOpen: false, note: '' },
   invite: 'none',
   run: { state: 'request', lines: [], pct: 0, timer: null, invite: 'open' },
@@ -1352,12 +1352,17 @@ function previewState() {
   const P = S.prev;
   if (P.deleting) return 'deleting';
   if (P.next) return P.serving ? 'replacing' : 'building';
-  if (!P.serving) return 'none';
+  if (!P.serving) return P.failed ? 'first-failed' : 'none';
   return P.failed ? 'failed' : 'ready';
 }
+const PREV_AVAIL = { unavailable: ['Unavailable', 'Previews aren\'t available on this Podster deployment, so this workroom has none.'], off: ['Off', 'Previews are switched off on this Podster deployment, so this workroom has none. Production isn\'t affected.'], hidden: ['Not shown to you', 'This workroom\'s preview is shown only to people with a role in it.'] };
+const PREV_AVAIL_NEXT = { on: 'unavailable', unavailable: 'off', off: 'hidden', hidden: 'on' };
 function previewCard() {
-  const P = S.prev; const st = previewState();
-  const label = { none: 'None', building: 'Building', replacing: 'Replacing', ready: 'Ready', failed: 'Replacement failed', deleting: 'Deleting' }[st];
+  const P = S.prev;
+  const demoAvail = '<button class="btn ghost" style="height:28px;font-size:12.5px" data-act="prev-avail">Demo · see it ' + ({ on: 'unavailable on this deployment', unavailable: 'with previews switched off', off: 'as someone it isn\'t shown to', hidden: 'available again' })[P.avail] + '</button>';
+  if (P.avail !== 'on') { const a = PREV_AVAIL[P.avail]; return '<section class="panel" aria-label="Preview" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="flex:1">Preview</span>' + prevChip(a[0], false) + '</div><span class="muted">' + a[1] + '</span><div>' + demoAvail + '</div></section>'; }
+  const st = previewState();
+  const label = { none: 'None', building: 'Building', replacing: 'Replacing', ready: 'Ready', failed: 'Replacement failed', 'first-failed': 'Failed', deleting: 'Deleting' }[st];
   const sv = P.serving;
   const commitLink = (c) => '<a href="#" class="mono" data-act="toast" data-msg="Opens commit ' + esc(c.slice(0, 7)) + ' in the repository." title="' + esc(c) + '">' + esc(c.slice(0, 7)) + '</a>';
   const taskName = (id) => { const t = T(id); return t ? esc(t.title) : 'Task #' + id; };
@@ -1366,6 +1371,7 @@ function previewCard() {
   let body = '';
   if (st === 'none') body = '<span class="muted">This workroom has no preview. Make one from a finished task\'s merged code to try it before customers do. Customers never see a preview.</span>';
   if (st === 'deleting') body = '<span class="muted">Podster is taking the preview down: its address stops answering, and its data is deleted. Customers keep release ' + S.ship.live + '.</span>';
+  if (st === 'first-failed') body = '<div class="confirm" style="border-color:var(--need-line);background:var(--need-soft)"><b>Making a preview of ' + commitLink(P.failed.commit) + ' failed: ' + esc(PREV_REASONS[P.failed.reason] || P.failed.reason) + '.</b><span class="muted">Nothing is served. Customers keep release ' + S.ship.live + '.</span></div>';
   if (st === 'building') body = '<span class="muted">Building ' + taskName(P.next.task) + ' at ' + commitLink(P.next.commit) + '. It isn\'t served yet.</span>';
   if (sv && st !== 'deleting') {
     body += '<div class="kvlist">' +
@@ -1408,8 +1414,8 @@ function previewCard() {
       : '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" data-act="prev-ask" data-v="publish">Publish this build</button><span class="faint" style="font-size:13px">Puts exactly build ' + esc(shortBld(sv.build)) + ' live, after approval.</span></div>';
   }
   const pub = P.pub ? '<div class="row" style="border:1px solid var(--need-line);border-radius:10px"><span class="dot" style="background:var(--need)"></span><span style="flex:1;min-width:0"><b style="font-weight:600">Publish of build ' + esc(shortBld(P.pub.build)) + ' waits for approval</b><br><span class="faint">Asked by ' + esc(P.pub.by) + ' just now' + (sv && sv.build !== P.pub.build ? ' · the preview now shows another build' : '') + '</span></span><button class="btn need" data-act="pub-open">Review and approve</button></div>' : '';
-  return '<section class="panel" aria-label="Preview" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="flex:1">Preview</span>' + prevChip(label, st === 'failed') + '</div>' + body + host + ask + acts + pub +
-    '<button class="btn ghost" style="align-self:flex-start;height:28px;font-size:12.5px" data-act="prev-priv">Demo · see it in a ' + (P.priv ? 'public' : 'private') + ' workroom</button></section>';
+  return '<section class="panel" aria-label="Preview" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="flex:1">Preview</span>' + prevChip(label, st === 'failed' || st === 'first-failed') + '</div>' + body + host + ask + acts + pub +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" style="height:28px;font-size:12.5px" data-act="prev-priv">Demo · see it in a ' + (P.priv ? 'public' : 'private') + ' workroom</button>' + demoAvail + '</div></section>';
 }
 function pubApproveModal() {
   const P = S.prev; const r = P.pub; if (!r) return '';
@@ -2557,6 +2563,7 @@ document.addEventListener('click', (e) => {
     case 'prev-ask': S.prev.ask = el.dataset.v; break;
     case 'prev-cancel': S.prev.ask = null; break;
     case 'prev-priv': S.prev.priv = !S.prev.priv; break;
+    case 'prev-avail': S.prev.avail = PREV_AVAIL_NEXT[S.prev.avail]; break;
     case 'prev-host-rm': S.prev.host = null; toast('The preview stops answering on that name. Podster removes it.'); break;
     case 'prev-go': {
       const P = S.prev; const kind = P.ask; P.ask = null;
@@ -2564,7 +2571,7 @@ document.addEventListener('click', (e) => {
       const id = Number(P.pick); const commit = ({ 16: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', 15: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a' })[id] || 'c0ffee12ab34cd56ef7890ab12cd34ef56ab7890';
       P.failed = null; P.next = { task: id, commit }; render();
       setTimeout(() => {
-        if (S.trouble.preview && P.serving) { P.failed = { commit, reason: 'release_marker_missing' }; P.next = null; toast('The replacement failed. The preview still shows the last build that worked.'); render(); return; }
+        if (S.trouble.preview) { P.failed = { commit, reason: 'release_marker_missing' }; P.next = null; toast('The replacement failed. The preview still shows the last build that worked.'); render(); return; }
         P.serving = { task: id, commit, build: 'bld_' + (id === 16 ? '2d9f6b18c4e07a35b1f8d2c6e9a04b7d' : '7c1e94a03f5b2d8e6a9c0f1b3d5e7a92'), at: 'just now', storage: id !== 16, by: 'You' }; P.next = null; toast('The preview shows ' + commit.slice(0, 7) + '.'); render();
       }, 2200);
       return;

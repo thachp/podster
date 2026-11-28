@@ -139,6 +139,8 @@ describe("release approvals in Needs attention", () => {
 
 // M8 step 11: a release made from a preview is approved for exactly the build the dialog showed.
 const BUILD = `bld_${"b7".repeat(16)}`;
+/** Another build in the same answer: the one the preview shows now, and the one a second row was asked for from. */
+const OTHER_BUILD = `bld_${"e9".repeat(16)}`;
 const PREVIEW_REL = `rel_${"c3".repeat(16)}`;
 const fromPreview = (over: Partial<ApprovalItem["release"]> = {}) =>
   item({ from_preview: PREVIEW_REL, build_id: BUILD, preview_served_at: Date.UTC(2026, 10, 27, 9, 30), storage_warning: false, preview_replaced: false, preview_notice: "server words", storage_notice: null, ...over });
@@ -166,15 +168,19 @@ describe("approving a release made from a preview", () => {
 
   it("warns when the preview has moved on, and repeats the storage warning, still approving the release's own build", async () => {
     const user = userEvent.setup();
-    show(read([fromPreview({ preview_replaced: true, storage_warning: true })]));
+    const other = { ...fromPreview({ id: `rel_${"d4".repeat(16)}`, commit_sha: "f".repeat(40), build_id: OTHER_BUILD }), workspace: "ws_1" };
+    show(read([fromPreview({ preview_replaced: true, storage_warning: true }), other]));
     expect(screen.getByText(/the preview now shows a different build/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(`The preview now shows a different build. You are approving ${BUILD}, which was tested on 2026-11-27.`);
     expect(dialog).toHaveTextContent(STORAGE_WARNING);
+    expect(dialog).not.toHaveTextContent(OTHER_BUILD);
     await user.click(within(dialog).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].url).toBe(`/api/v1/workspaces/ws_1/releases/${REL}/approve`);
     expect(JSON.parse(String(sent[0].body))).toEqual({ build: BUILD });
+    expect(String(sent[0].body)).not.toContain(OTHER_BUILD);
   });
 
   it("says release_build_changed inline, and declining a preview's release still sends no body", async () => {

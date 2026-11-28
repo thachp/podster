@@ -207,6 +207,12 @@ export function explainPreviewRefusal(code: string, status = 400): string {
       return "That task isn't there, or you can't see it. Nothing changed.";
     case "invalid_argument":
       return "Podster didn't take that request. Reload and try again. Nothing changed.";
+    case "access_revoked":
+      return "Your place in this workroom has ended, so you can't change its preview. Nothing changed.";
+    case "workspace_not_found":
+      return "This workroom isn't there, or you can no longer see it. Nothing changed.";
+    case "requester_lost_authority":
+      return "You no longer hold what this needs in this workroom's organization. Nothing changed.";
     default:
       return explainReleaseRefusal(code, status);
   }
@@ -240,6 +246,12 @@ export function explainPublishRefusal(code: string, status = 400): string {
     case "not_allowed":
     case "not_a_participant":
       return "You can't ask for a release in this workroom. Nothing was asked for.";
+    case "access_revoked":
+      return "Your place in this workroom has ended, so you can't ask for a release here. Nothing was asked for.";
+    case "workspace_not_found":
+      return "This workroom isn't there, or you can no longer see it. Nothing was asked for.";
+    case "requester_lost_authority":
+      return "You no longer hold release authority here, in this workroom's organization, so a release can't be asked for. Nothing was asked for.";
     default:
       return explainPreviewRefusal(code, status).replace(/Nothing changed\.$/, "Nothing was asked for.");
   }

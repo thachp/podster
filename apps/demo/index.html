@@ -15,27 +15,30 @@
   --sunk: #eef0f3;
   --line: #e3e6eb;
   --text: #14161b;
-  --muted: #5c6270;
-  --faint: #8b909b;
+  --muted: #535967;
+  --faint: #666c77;
+  --control: #7e848f;
   --ink: #14161b;
   --ink-text: #ffffff;
-  --need: #d9480f;
+  --need: #c2410c;
+  --need-text: #ffffff;
   --need-soft: #fff0e6;
   --need-line: #ffd2b8;
-  --build: #2f6bd8;
-  --done: #1d8a4e;
-  --planned: #9aa0ab;
+  --build: #2963cc;
+  --done: #187a43;
+  --done-text: #ffffff;
+  --planned: #868c97;
   --shadow: 0 1px 2px rgba(20,22,27,.06), 0 8px 24px rgba(20,22,27,.06);
   --font: "Geist", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #0e1014; --surface: #16191f; --sunk: #1c2028; --line: #262b34; --text: #e9ebef; --muted: #a3a9b5; --faint: #6f7580;
-  --ink: #e9ebef; --ink-text: #0e1014; --need: #ff7b3d; --need-soft: #2a1a11; --need-line: #5a2f17; --build: #6b9cff; --done: #3fbf78; --planned: #6f7580;
+  --bg: #0e1014; --surface: #16191f; --sunk: #1c2028; --line: #262b34; --text: #e9ebef; --muted: #a3a9b5; --faint: #878d98; --control: #666d79;
+  --ink: #e9ebef; --ink-text: #0e1014; --need: #ff7b3d; --need-text: #0e1014; --done-text: #0e1014; --need-soft: #2a1a11; --need-line: #5a2f17; --build: #6b9cff; --done: #3fbf78; --planned: #6f7580;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; } }
 :root[data-theme="dark"] {
-  --bg: #0e1014; --surface: #16191f; --sunk: #1c2028; --line: #262b34; --text: #e9ebef; --muted: #a3a9b5; --faint: #6f7580;
-  --ink: #e9ebef; --ink-text: #0e1014; --need: #ff7b3d; --need-soft: #2a1a11; --need-line: #5a2f17; --build: #6b9cff; --done: #3fbf78; --planned: #6f7580;
+  --bg: #0e1014; --surface: #16191f; --sunk: #1c2028; --line: #262b34; --text: #e9ebef; --muted: #a3a9b5; --faint: #878d98; --control: #666d79;
+  --ink: #e9ebef; --ink-text: #0e1014; --need: #ff7b3d; --need-text: #0e1014; --done-text: #0e1014; --need-soft: #2a1a11; --need-line: #5a2f17; --build: #6b9cff; --done: #3fbf78; --planned: #6f7580;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35); color-scheme: dark; }
 
 html, body { height: 100%; }
@@ -47,6 +50,7 @@ a { color: inherit; }
 .mono { font-family: var(--mono); font-size: 12.5px; }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
+::placeholder { color: var(--faint); opacity: 1; }
 h1, h2, h3 { margin: 0; text-wrap: balance; }
 h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
 h2 { font-size: 15px; font-weight: 600; }
@@ -79,7 +83,7 @@ p { margin: 0; }
 .nav:hover { background: var(--sunk); color: var(--text); }
 .nav[aria-current="page"] { background: var(--sunk); color: var(--text); font-weight: 600; }
 .nav svg { flex: none; }
-.nav .n { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--need); color: #fff; font-size: 11.5px; font-weight: 600; display: grid; place-items: center; }
+.nav .n { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--need); color: var(--need-text); font-size: 11.5px; font-weight: 600; display: grid; place-items: center; }
 .side .spacer { flex: 1; }
 .who { display: flex; align-items: center; gap: 10px; padding: 8px; border-top: 1px solid var(--line); margin-top: 8px; padding-top: 14px; }
 .av { flex: none; width: 28px; height: 28px; border-radius: 99px; background: var(--sunk); color: var(--muted); font-size: 11px; font-weight: 600; display: grid; place-items: center; }
@@ -104,7 +108,7 @@ p { margin: 0; }
 .btn:hover { border-color: var(--faint); }
 .btn.primary { background: var(--ink); color: var(--ink-text); border-color: var(--ink); }
 .btn.primary:hover { opacity: .9; }
-.btn.need { background: var(--need); color: #fff; border-color: var(--need); }
+.btn.need { background: var(--need); color: var(--need-text); border-color: var(--need); }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
 .btn.ghost:hover { color: var(--text); background: var(--sunk); }
 .btn.danger { color: var(--need); }
@@ -163,7 +167,7 @@ p { margin: 0; }
 .framebar .url { flex: 1; min-width: 0; height: 26px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); display: flex; align-items: center; padding: 0 10px; color: var(--faint); overflow: hidden; white-space: nowrap; }
 .seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
 .seg button { height: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-size: 12.5px; }
-.seg button[aria-pressed="true"] { background: var(--sunk); color: var(--text); font-weight: 600; }
+.seg button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--control); background: var(--sunk); color: var(--text); font-weight: 600; }
 .stagewrap { padding: 18px; background: var(--sunk); display: flex; justify-content: center; min-height: 420px; }
 .phone { width: 320px; border: 8px solid var(--text); border-radius: 30px; overflow: hidden; }
 .check { display: flex; gap: 12px; align-items: flex-start; padding: 11px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
@@ -175,22 +179,23 @@ details.dev summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 details.dev .kv { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 6px 12px; padding-top: 10px; color: var(--muted); }
 details.dev .kv span:nth-child(even) { color: var(--text); overflow-wrap: anywhere; }
 .confirm { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--sunk); }
-textarea.in, input.in, select.in { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); resize: vertical; }
+textarea.in, input.in, select.in { width: 100%; padding: 10px 12px; border: 1px solid var(--control); border-radius: 8px; background: var(--surface); resize: vertical; }
 input.in, select.in { height: 38px; padding: 0 12px; }
 
 /* The order tracker being built (shown inside previews) */
 .ot { background: #ffffff; color: #1f2430; font-family: var(--font); font-size: 13px; padding: 16px; min-height: 380px; display: flex; flex-direction: column; gap: 12px; }
 .ot .oh { display: flex; align-items: center; justify-content: space-between; }
 .ot .oh b { font-size: 16px; }
-.ot .oh small { color: #7a8090; }
+.ot .oh small { color: #686e7b; }
 .ot .add { display: flex; gap: 6px; }
+.ot ::placeholder { color: #686e7b; }
 .ot .add input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid #dde1e8; border-radius: 6px; background: #fff; color: #1f2430; }
 .ot .add button { height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: #2b6e4f; color: #fff; font-weight: 600; cursor: pointer; }
 .ot .lanes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .ot .lane { background: #f4f5f7; border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; min-height: 160px; }
-.ot .lane h4 { margin: 0 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #7a8090; }
+.ot .lane h4 { margin: 0 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #686e7b; }
 .ot .o { background: #fff; border: 1px solid #e4e7ec; border-radius: 6px; padding: 7px 8px; display: flex; flex-direction: column; gap: 2px; }
-.ot .o small { color: #7a8090; }
+.ot .o small { color: #686e7b; }
 .ot .o button { align-self: flex-end; margin-top: 4px; height: 24px; padding: 0 8px; border: 1px solid #dde1e8; border-radius: 5px; background: #fff; color: #1f2430; font-size: 11.5px; cursor: pointer; }
 .phone .ot { padding: 12px; }
 .phone .ot .lanes { grid-template-columns: 1fr; }
@@ -199,7 +204,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .phone .ot.big .o button { height: 26px; padding: 0 8px; font-size: 10.5px; }
 .round { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--sunk); }
 .round .ask { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; }
-.round .ask .ok { flex: none; width: 18px; height: 18px; border-radius: 99px; background: var(--done); color: #fff; display: grid; place-items: center; margin-top: 1px; }
+.round .ask .ok { flex: none; width: 18px; height: 18px; border-radius: 99px; background: var(--done); color: var(--done-text); display: grid; place-items: center; margin-top: 1px; }
 .round .ask .ok svg { width: 11px; height: 11px; }
 .hostbox { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; }
 .hostbox .mono { font-size: 15px; }
@@ -226,7 +231,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .console { background: #0f1218; color: #d6dbe4; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
 .console .bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #222833; color: #9aa3b2; font-size: 13px; }
 .console .log { font-family: var(--mono); font-size: 12.5px; line-height: 1.75; padding: 14px 16px; height: 330px; overflow-y: auto; }
-.console .log .t { color: #5d6675; margin-right: 12px; }
+.console .log .t { color: #788192; margin-right: 12px; }
 .console .log .ok { color: #5fd08f; }
 .console .log .warn { color: #ff9a5c; }
 .console .log .dim { color: #7d8697; }
@@ -302,7 +307,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .difft tr.dh td { color: var(--faint); background: var(--sunk); padding: 4px 10px; }
 .difft tr.dn td { white-space: normal; padding: 8px 12px 10px; font-family: var(--font); }
 .inote { position: sticky; left: 12px; width: min(560px, calc(100% - 24px)); display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--need-line); border-radius: 10px; background: var(--need-soft); font-size: 13.5px; }
-.inote.done { border-color: var(--line); background: var(--sunk); opacity: .75; }
+.inote.done { border-color: var(--line); background: var(--sunk); }
 @media (max-width: 1000px) { .codeview { grid-template-columns: minmax(0, 1fr); } .cfiles { border-right: 0; border-bottom: 1px solid var(--line); } }
 .card[draggable="true"] { cursor: grab; }
 .card.dragging { opacity: .45; }
@@ -318,6 +323,42 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .setgrid > section > :not(.label):not(p):not(:nth-child(2)) { grid-column: 2; }
 .setgrid > section > p { grid-column: 1; grid-row: 2; align-self: start; line-height: 1.5; }
 @media (max-width: 900px) { .setgrid > section { grid-template-columns: minmax(0, 1fr); } .setgrid > section > * { grid-column: 1 !important; grid-row: auto !important; } }
+.tabrow { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: -6px; overflow-x: auto; }
+.tabrow button { height: 36px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13.5px; white-space: nowrap; }
+.tabrow button[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--ink); }
+.tabrow button:hover { color: var(--text); }
+/* One control row: tabs on the left, a filter at the right end of the same row. */
+.ctlrow { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); margin-top: -6px; min-width: 0; }
+.ctlrow .tabrow { border-bottom: 0; margin-top: 0; flex: 1; min-width: 0; align-self: stretch; }
+/* View switch: same content, another layout. Icon buttons, top right of the page header. */
+.vswitch { display: inline-flex; padding: 2px; gap: 2px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+.vswitch button { width: 30px; height: 30px; display: inline-grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.vswitch button:hover { color: var(--text); }
+.vswitch button[aria-pressed="true"] { box-shadow: inset 0 0 0 1px var(--control); background: var(--sunk); color: var(--text); }
+/* Filter menu: "Show: Everything" as a compact native select. */
+.showf { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; flex: none; }
+.showf select { height: 30px; width: auto; padding: 0 8px; font-size: 13px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.head .seg button { height: 30px; }
+.infra-svg { display: block; width: 100%; height: auto; max-height: 340px; }
+.infra-svg .ln { stroke: var(--faint); stroke-width: 1.5; fill: none; }
+.infra-svg .ln.out { stroke-dasharray: 5 5; }
+.infra-svg .plan rect, .infra-svg path.plan { stroke-dasharray: 5 4; opacity: .7; }
+.infra-svg .nd rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.infra-svg .nd.out rect { stroke: var(--faint); stroke-dasharray: 5 4; }
+.infra-svg .nd text { fill: var(--text); font-family: var(--font); font-size: 14px; }
+.infra-svg .nd text.k { fill: var(--faint); font-size: 11.5px; letter-spacing: .04em; }
+.infra-svg .nd text.m { font-family: var(--mono); font-size: 13px; }
+.infra-svg .wk rect { fill: var(--ink); stroke: var(--ink); }
+.infra-svg .wk text { fill: var(--ink-text); }
+.infra-svg .wk text.k { fill: var(--ink-text); opacity: .7; }
+.dbgrid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+.dbgrid .tlist { display: flex; flex-direction: column; padding: 6px; gap: 2px; }
+.dbgrid .tlist button { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; text-align: left; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.dbgrid .tlist button[aria-pressed="true"] { background: var(--sunk); color: var(--text); font-weight: 600; }
+.dbgrid .tbl { min-width: 560px; }
+.dbgrid .tbl tbody tr, .infra-tbl tbody tr { cursor: default; }
+.dbgrid .tbl tbody tr:hover, .infra-tbl tbody tr:hover { background: transparent; }
+@media (max-width: 900px) { .dbgrid { grid-template-columns: minmax(0, 1fr); } }
 .savebar { position: sticky; bottom: 16px; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 14px 12px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); font-size: 13.5px; }
 .palette li .k { margin-left: auto; color: var(--faint); font-size: 12px; }
 .palette .cmdmark { flex: none; width: 20px; height: 20px; border-radius: 6px; background: var(--ink); color: var(--ink-text); display: grid; place-items: center; font-weight: 700; font-size: 13px; line-height: 1; }
@@ -332,6 +373,19 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .kvlist { display: flex; flex-direction: column; }
 .kvlist > div { display: flex; justify-content: space-between; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .kvlist > div:last-child, .check:last-child { border-bottom: 0; }
+.kvlist > div > span { min-width: 0; overflow-wrap: anywhere; }
+.kvlist.stack > div { flex-direction: column; align-items: flex-start; gap: 3px; }
+.srcpick { display: flex; flex-direction: column; gap: 8px; }
+.srcopt { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--text); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; }
+.srcopt b { font-weight: 600; }
+.srcopt .faint { font-size: 12.5px; }
+.srcopt:hover { border-color: var(--muted); }
+.srcopt[aria-checked="true"] { border-color: var(--ink); }
+.srcopt .dotr { flex: none; width: 16px; height: 16px; margin-top: 1px; border-radius: 99px; border: 1.5px solid var(--control); }
+.srcopt[aria-checked="true"] .dotr { border: 5px solid var(--ink); }
+.createbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 18px; flex-wrap: wrap; padding: 18px 0 4px; border-top: 1px solid var(--line); }
+.createbar span { flex: 1; min-width: 220px; }
+.kvlist.stack > div > span:first-child { font-size: 12.5px; }
 .kvlist > div span:first-child { color: var(--muted); }
 
 /* Rooms, start, first steps */
@@ -341,7 +395,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .xrow { cursor: pointer; }
 .xrow:hover { background: var(--sunk); }
 .roomrow .mark { flex: none; width: 36px; height: 36px; border-radius: 9px; background: var(--sunk); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
-.pill { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 99px; background: var(--need); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; }
+.pill { min-width: 22px; height: 22px; padding: 0 7px; border-radius: 99px; background: var(--need); color: var(--need-text); font-size: 12px; font-weight: 600; display: grid; place-items: center; }
 .form { display: flex; flex-direction: column; gap: 22px; max-width: 640px; }
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field > label, .field > span.q { font-weight: 600; }
@@ -352,9 +406,9 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .fs { display: flex; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .fs:last-child { border-bottom: 0; }
 .fs .num { flex: none; width: 26px; height: 26px; border-radius: 99px; border: 1.5px solid var(--line); display: grid; place-items: center; font-size: 12px; font-weight: 600; color: var(--muted); }
-.fs .num.ok { border: 0; background: var(--done); color: #fff; }
+.fs .num.ok { border: 0; background: var(--done); color: var(--done-text); }
 .fs .num.now { border-color: var(--need); color: var(--need); }
-.toggle { flex: none; width: 38px; height: 22px; border-radius: 99px; border: 0; padding: 3px; background: var(--line); cursor: pointer; display: flex; }
+.toggle { flex: none; width: 38px; height: 22px; border-radius: 99px; border: 0; padding: 3px; background: var(--control); cursor: pointer; display: flex; }
 .toggle[aria-checked="true"] { background: var(--ink); justify-content: flex-end; }
 .toggle i { width: 16px; height: 16px; border-radius: 99px; background: var(--surface); }
 .toggle[disabled] { opacity: .5; cursor: not-allowed; }
@@ -385,7 +439,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .art-card .t { flex: 1; min-width: 0; }
 .art-card .t span { display: block; color: #8b909b; font-size: 12.5px; }
 .art-card .pillbtn { font-size: 12.5px; font-weight: 500; padding: 5px 10px; border-radius: 8px; background: #ff7b3d; color: #0e1014; }
-.split-art .fine { color: #6f7580; font-size: 12.5px; margin-top: auto; }
+.split-art .fine { color: #878d98; font-size: 12.5px; margin-top: auto; }
 .split-form { display: flex; flex-direction: column; min-height: 100vh; border-left: 1px solid var(--line); }
 .split-form .top { display: flex; justify-content: flex-end; align-items: center; gap: 16px; padding: 22px 32px; font-size: 13.5px; }
 .split-form .top a { text-decoration: none; }
@@ -406,7 +460,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .path .mini .dot { width: 7px; height: 7px; border-radius: 99px; flex: none; }
 .path .mini .t { flex: 1; min-width: 0; }
 .path .mini .t span { display: block; color: var(--faint); font-size: 12px; }
-.path .mini .pb { font-size: 12px; font-weight: 500; padding: 4px 9px; border-radius: 7px; background: var(--need); color: #fff; }
+.path .mini .pb { font-size: 12px; font-weight: 500; padding: 4px 9px; border-radius: 7px; background: var(--need); color: var(--need-text); }
 .path .log { font: 12.5px/1.7 var(--mono); color: var(--muted); }
 .path .log b { color: var(--text); font-weight: 500; }
 .path .log .ok { color: var(--done); }
@@ -415,7 +469,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .path .steps li::before { content: counter(st); flex: none; width: 20px; height: 20px; border-radius: 99px; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; color: var(--muted); transform: translateY(-1px); }
 .path .need-row { border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; color: var(--muted); }
 .path .head2 { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.path .radio { flex: none; width: 20px; height: 20px; border-radius: 99px; border: 1.5px solid var(--line); background: var(--surface); }
+.path .radio { flex: none; width: 20px; height: 20px; border-radius: 99px; border: 1.5px solid var(--control); background: var(--surface); }
 .path[aria-checked="true"] .radio { border: 6px solid var(--ink); }
 .path { position: relative; }
 .path:hover { border-color: var(--muted); }
@@ -432,7 +486,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 /* Plan review */
 .prow { display: grid; grid-template-columns: 28px 22px minmax(0, 1fr) 96px 170px 64px; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .prow:last-child { border-bottom: 0; }
-.prow.off { opacity: .5; }
+.prow.off { color: var(--faint); }
 .prow .ord { font-family: var(--mono); color: var(--faint); font-size: 12.5px; text-align: right; }
 .prow input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--ink); }
 .size { font-family: var(--mono); font-size: 12px; color: var(--muted); }
@@ -458,7 +512,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .pair { max-width: 680px; display: flex; flex-direction: column; }
 .pstep { display: flex; gap: 16px; padding: 20px; border-bottom: 1px solid var(--line); }
 .pstep:last-child { border-bottom: 0; }
-.pstep.later { opacity: .45; }
+.pstep.later, .pstep.later .muted { color: var(--faint); }
 .pstep .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .cmd { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; background: #0f1218; color: #d6dbe4; font-family: var(--mono); font-size: 13px; }
 .cmd span { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
@@ -482,7 +536,7 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .sec { font-size: 13px; font-weight: 600; color: var(--muted); }
 .checklist { display: flex; flex-direction: column; gap: 2px; }
 .ci { display: flex; gap: 12px; align-items: center; padding: 8px 0; }
-.cb { flex: none; width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line); display: grid; place-items: center; color: #fff; }
+.cb { flex: none; width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--control); display: grid; place-items: center; color: var(--surface); }
 .cb.on { background: var(--muted); border-color: var(--muted); }
 .cb svg { width: 11px; height: 11px; }
 .thumbs { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -560,9 +614,6 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .drawer { gap: 16px; }
 .callout { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 12px; background: var(--need-soft); border: 1px solid var(--need-line); }
 .callout .kind { color: var(--need); font-size: 12.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
-.dtabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); margin-top: 4px; }
-.dtabs button { padding: 0 0 10px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--muted); font-weight: 500; cursor: pointer; }
-.dtabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
 .dpane { display: flex; flex-direction: column; gap: 16px; }
 .donelist { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .msg { display: flex; gap: 10px; align-items: flex-start; }
@@ -759,6 +810,7 @@ const S = {
   ],
   newOrder: '',
   ship: { live: 3, top: 3, liveDay: 'Tue', phase: null, step: 0, confirm: false, back: false, rbAsk: null, rolledFrom: null },
+  shipTab: 'releases', db: { table: 'orders', q: '', page: 0 },
   permReq: { state: 'open', scope: 'task', denyOpen: false, note: '' },
   invite: 'none',
   run: { state: 'request', lines: [], pct: 0, timer: null, invite: 'open' },
@@ -771,7 +823,7 @@ const S = {
   spend: { week: 7.4, cap: '25', perRun: '2', warn: true },
   checkFirst: { coder: false, planner: false, qa: false, fresh: true }, runFailed: false, runSent: false, redoOpen: false, redoNote: '',
   fresh: { lead: false, created: false, plan: 'none' },
-  start: { org: 'team', team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', deploy: true, domain: '', review: true, files: 0, roles: null },
+  start: { org: 'team', team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', repoSrc: 'new', gh: { installed: false, q: '', pick: '' }, deploy: true, domain: '', review: true, files: 0, roles: null },
   repo: { sam: false, ask: null, build: true, tests: true, releases: true, reviewer: 'comment' },
   agentRemoved: false,
   wl: { step: 'email', path: '', via: '' },
@@ -812,6 +864,29 @@ const CONTRIB = ['k-home', 'k-run', 'k-agents', 'k-explore'];
 const isK = () => S.route.startsWith('k-');
 const T = (id) => S.tasks.find((t) => t.id === id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+/* Underline tabs: switch between sections or views of one page. Segmented .seg is only for a setting inside a form or toolbar.
+   items: [[value, label, count?]]; o: { id, label, key (data-* name, default v) }. Pair with tabPanel(o.id, cur, body). */
+function tabs(items, cur, act, o) {
+  const key = o.key || 'v';
+  return '<div class="tabrow" role="tablist" aria-label="' + esc(o.label) + '">' + items.map((x) => '<button type="button" role="tab" id="' + o.id + 'tab-' + esc(x[0]) + '" aria-selected="' + (cur === x[0]) + '" aria-controls="' + o.id + 'panel" data-act="' + act + '" data-' + key + '="' + esc(x[0]) + '">' + esc(x[1]) + (x[2] ? ' <span class="faint">' + esc(x[2]) + '</span>' : '') + '</button>').join('') + '</div>';
+}
+/* View switch: same content in another layout. items: [[value, label, icon]] with icon in VIEW_ICONS. Sits in the page header next to the main button. */
+const VIEW_ICONS = {
+  map: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.3 7 15.6 7M7.2 8.2l3.6 7.6M16.9 9.2l-3.7 6.6"/></svg>',
+  board: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/></svg>',
+  list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke-width="3"/></svg>',
+  timeline: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h9M7 12h10M12 18h9"/></svg>'
+};
+function viewSwitch(items, cur, act, label) {
+  return '<div class="vswitch" role="group" aria-label="' + esc(label || 'Layout') + '">' + items.map((x) => '<button type="button" data-act="' + act + '" data-v="' + esc(x[0]) + '" aria-pressed="' + (cur === x[0]) + '" aria-label="' + esc(x[1]) + '" title="' + esc(x[1]) + '">' + (VIEW_ICONS[x[2] || x[0]] || '') + '</button>').join('') + '</div>';
+}
+/* Filter menu: narrows the same content. items: [[value, label]]; change goes to data-act-change=act. Put it at the right end of an existing row. */
+function showFilter(items, cur, act, label) {
+  return '<label class="showf">' + esc(label || 'Show') + '<select data-act-change="' + act + '">' + items.map((x) => '<option value="' + esc(x[0]) + '"' + (cur === x[0] ? ' selected' : '') + '>' + esc(x[1]) + '</option>').join('') + '</select></label>';
+}
+function tabPanel(id, cur, body) {
+  return '<div id="' + id + 'panel" role="tabpanel" aria-labelledby="' + id + 'tab-' + esc(cur) + '" style="display:flex;flex-direction:column;gap:22px;min-width:0">' + body + '</div>';
+}
 
 function needsCreator() {
   const out = [];
@@ -1087,7 +1162,7 @@ function fileList(id, canAttach) {
 
 /* ---------- Footer ---------- */
 function footer() {
-  return '<footer class="foot"><span class="mk"><i aria-hidden="true"></i>\u00a9 2026 Podster</span>' +
+  return '<footer class="foot"><span class="mk"><i aria-hidden="true"></i>\u00a9 2026 OM.Network, LLC</span>' +
     ['Terms', 'Privacy', 'Security', 'Status', 'Docs', 'Contact', 'Manage cookies'].map((l) => '<a href="#" data-act="toast" data-msg="' + l + ' opens on podster.dev.">' + l + '</a>').join('') + '</footer>';
 }
 
@@ -1134,8 +1209,8 @@ function home() {
   const total = needs.length + (all ? 1 : 0);
   const grouped = all ? '<span class="label">Customer order tracker</span>' + (cards || '<div class="allclear">Nothing here.</div>') + '<span class="label" style="margin-top:10px">Bakery preorders</span>' + bpCard : cards;
   return (S.archived ? '<div class="confirm"><b>Customer order tracker is archived.</b><span class="muted">Everything stays readable and the live site keeps running. Agents can\'t take or submit work.</span><button class="btn" data-act="unarchive" style="align-self:flex-start">Unarchive</button></div>' : '') +
-    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn ghost" href="#all">One list</a><div class="seg" role="group" aria-label="Which workrooms"><button data-act="scope" data-s="room" aria-pressed="' + !all + '">This workroom</button><button data-act="scope" data-s="all" aria-pressed="' + all + '">All workrooms</button></div></div></div>' +
-    '<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
+    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><div class="seg" role="group" aria-label="Which workrooms">' + [['room', 'This workroom'], ['all', 'All workrooms']].map((x) => '<button type="button" data-act="scope" data-s="' + x[0] + '" aria-pressed="' + ((all ? 'all' : 'room') === x[0]) + '">' + x[1] + '</button>').join('') + '</div><a class="btn ghost" href="#all">One list</a></div></div>' +
+    ('<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
     '<section style="display:flex;flex-direction:column;gap:22px">' +
     '<div><span class="label">Moving without you</span><div class="quiet">' +
     moving.map((t) => t.offline
@@ -1146,16 +1221,13 @@ function home() {
     '</div></div>' +
     '<div class="panel" style="padding:16px 18px;display:flex;flex-direction:column;gap:12px"><span class="label">Customer order tracker</span>' +
     STAGES.map((s) => { const c = S.tasks.filter((t) => t.stage === s.id).length; return '<a href="#board" style="display:flex;align-items:center;gap:10px;text-decoration:none"><span class="dot" style="background:' + s.color + '"></span><span style="flex:1">' + s.name + '</span><span class="mono" style="color:' + (s.id === 'review' && c ? 'var(--need)' : 'var(--muted)') + '">' + c + '</span></a>'; }).join('') +
-    '</div></section></div>';
+    '</div></section></div>');
 }
 
 /* ---------- Creator: Board, List, Timeline ---------- */
 const EST = { 14: [0, 1], 15: [1, 1], 16: [2, 2], 18: [4, 3], 19: [6, 2], 21: [7, 1], 20: [7, 1], 22: [8, 2], 23: [8, 1], 24: [9, 1] };
 const DAYS = ['Mon 16', 'Tue 17', 'Wed 18', 'Thu 19', 'Fri 20', 'Mon 23', 'Tue 24', 'Wed 25', 'Thu 26', 'Fri 27'];
 const TODAY = 6.6;
-function viewSwitch() {
-  return '<div class="seg" role="group" aria-label="View">' + [['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']].map((v) => '<button data-act="view" data-v="' + v[0] + '" aria-pressed="' + (S.view === v[0]) + '">' + v[1] + '</button>').join('') + '</div>';
-}
 function listView() {
   const order = { review: 0, building: 1, planned: 2, done: 3 };
   const F = [['all', 'All'], ['you', 'Needs you'], ['moving', 'Being built'], ['planned', 'Planned'], ['done', 'Done']];
@@ -1181,14 +1253,14 @@ function timelineView() {
 }
 function board() {
   return (S.archived ? '<div class="confirm"><b>Archived.</b><span class="muted">The board is read-only. <a href="#team">Unarchive from Team</a> to start work again.</span></div>' : '') +
-    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + viewSwitch() + '<button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
-    (S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
+    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + viewSwitch([['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']], S.view, 'view', 'Board layout') + '<button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
+    '<div style="display:flex;flex-direction:column;gap:22px;min-width:0">' + (S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
     '<div class="board">' + STAGES.map((s) => {
       const ts = S.tasks.filter((t) => t.stage === s.id);
       return '<section class="col' + (s.id === 'review' ? ' you' : '') + '" data-col="' + s.id + '"><div class="colhead"><span class="dot" style="background:' + s.color + '"></span>' + s.name + '<span class="c">' + ts.length + '</span></div>' +
         ts.map((t) => '<button class="card" draggable="' + (!S.archived) + '" data-act="open" data-id="' + t.id + '"' + ((t.id === 19 && S.q.state === 'open') || t.blocked ? ' style="border-color:var(--need-line)"' : '') + '><span class="t">' + t.title + '</span>' + (t.id === 19 && S.q.state === 'open' ? '<span class="flag"><span class="dot" style="background:var(--need)"></span>Question for you</span>' : (t.blocked ? '<span class="flag"><span class="dot" style="background:var(--need)"></span>' + t.blocked + '</span>' : '')) + (t.offline ? '<span class="flag" style="color:var(--muted)"><span class="dot" style="background:var(--faint)"></span>Offline 40 min</span>' : '') + '<span class="f"><span class="av agent">' + esc(t.av) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + t.when + '</span>' + ((S.files[t.id] || []).length ? '<span title="Files" style="display:inline-flex;align-items:center;gap:3px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7L9.2 17.2a1.7 1.7 0 0 1-2.4-2.4L14.5 7"/></svg>' + S.files[t.id].length + '</span>' : '') + '<span class="mono">#' + t.id + '</span></span></button>').join('') +
         (s.id === 'planned' ? '<button class="addcard" data-act="newtask">+ New task</button>' : '') + '</section>';
-    }).join('') + '</div>');
+    }).join('') + '</div>') + '</div>';
 }
 
 /* ---------- Creator: Review ---------- */
@@ -1368,8 +1440,7 @@ function ship() {
   }
   const busy = sh.phase || sh.rbAsk;
   const hist = [sh.top, sh.top - 1, sh.top - 2].filter((n) => n > 0);
-  return '<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div><a class="btn" href="#app">App settings</a></div>' +
-    '<div class="panel live"><span class="pulse" aria-hidden="true"></span><div style="flex:1;min-width:200px"><b>Release ' + sh.live + ' is live' + (sh.rolledFrom ? ' again' : '') + '</b><div class="faint">orders.bakeryonelm.example \u00b7 ' + (sh.rolledFrom ? 'you went back from release ' + sh.rolledFrom + ' just now' : 'since ' + (sh.liveDay === 'Tue' ? 'Tuesday' : 'just now')) + '</div></div><a class="btn" href="#" data-act="toast" data-msg="Opens the live site in a new tab.">Open live site</a>' +
+  return '<div class="panel live"><span class="pulse" aria-hidden="true"></span><div style="flex:1;min-width:200px"><b>Release ' + sh.live + ' is live' + (sh.rolledFrom ? ' again' : '') + '</b><div class="faint">orders.bakeryonelm.example \u00b7 ' + (sh.rolledFrom ? 'you went back from release ' + sh.rolledFrom + ' just now' : 'since ' + (sh.liveDay === 'Tue' ? 'Tuesday' : 'just now')) + '</div></div><a class="btn" href="#" data-act="toast" data-msg="Opens the live site in a new tab.">Open live site</a>' +
     (sh.live > 1 && !busy && !sh.rolledFrom ? '<button class="btn ghost" data-act="rb-ask" data-r="' + (sh.live - 1) + '">Something wrong? Go back\u2026</button>' : '') + '</div>' +
     block +
     '<section><span class="label">History</span><div class="panel" style="margin-top:10px">' + hist.map((n) => '<div class="row"><span class="mono" style="width:26px">r' + n + '</span><span style="flex:1">' + (REL_TIME[n] || 'Just now') + '</span>' +
@@ -1387,7 +1458,7 @@ function team() {
     ['CR', true, 'Review Agent', 'Code reviewer', 'Jun Park\'s agent. Reads every change and leaves notes. ' + (S.repo.reviewer === 'hold' ? 'Its \u201cworth fixing\u201d notes must be answered before you approve.' : 'It can\'t approve or block.'), '#repo']
   ];
   if (S.left.planner) rows.splice(1, 1);
-  return '<div class="head"><div><h1>Team</h1><p>Who works here. Agents can build and suggest; only people approve and release.</p></div><a class="btn" href="#rules">Rules</a></div>' +
+  return '<div class="head"><div><h1>Team</h1><p>Who works here. Agents can build and suggest; only people approve and release.</p></div></div>' +
     '<div class="panel">' + rows.map((r) => (r[1] ? '<a class="row roomrow" href="' + (r[5] || '#agent') + '" style="padding:13px 16px">' : '<div class="row">') + '<span class="av' + (r[1] ? ' agent' : '') + '">' + esc(r[0]) + '</span><span style="flex:1;min-width:0"><b style="font-weight:600">' + r[2] + '</b> <span class="faint">\u00b7 ' + r[3] + '</span><br><span class="muted">' + r[4] + '</span></span>' + (r[1] ? '<span class="faint">' + I.arrow + '</span></a>' : '</div>')).join('') +
     '<div class="row" style="flex-wrap:wrap"><span class="av agent" style="background:transparent;border:1.5px dashed var(--line)">QA</span><span style="flex:1;min-width:200px"><b style="font-weight:600">QA</b> <span class="faint">\u00b7 open</span><br><span class="muted">' + (S.invite === 'sent' ? 'Invite sent to sam@example.com. Waiting for an answer.' : 'Tests each change on a phone before you review it.') + '</span></span>' +
     (S.invite === 'none' ? '<span style="display:flex;gap:8px"><a class="btn" href="#find">Find a tester</a><button class="btn ghost" data-act="invite-open">Invite by email</button></span>' : '') +
@@ -1624,7 +1695,7 @@ function kPair() {
     '<div class="panel" style="max-width:680px"><div class="kvlist" style="padding:4px 20px">' +
     [['Agent', p.kind === 'claude' ? 'Claude Agent SDK' : 'OpenAI Agents SDK'], ['Machine', 'Sam\'s MacBook Pro'], ['Model key', 'In this Mac\'s keychain. Podster never sees it.'], ['Runs', p.ask ? 'After you OK each one' : 'Without asking'], ['Limits', p.limit + ' min and $' + p.spend + ' per run']].map((r) => '<div><span class="muted">' + r[0] + '</span><span>' + r[1] + '</span></div>').join('') + '</div></div>';
   const st = (n) => p.step > n ? 'done' : p.step === n ? 'now' : 'later';
-  const num = (n) => '<span class="num ' + (st(n) === 'done' ? 'ok' : st(n) === 'now' ? 'now' : '') + '" style="flex:none;width:26px;height:26px;border-radius:99px;display:grid;place-items:center;font-size:12px;font-weight:600;border:1.5px solid ' + (st(n) === 'now' ? 'var(--need)' : 'var(--line)') + ';' + (st(n) === 'done' ? 'background:var(--done);border:0;color:#fff' : st(n) === 'now' ? 'color:var(--need)' : 'color:var(--muted)') + '">' + (st(n) === 'done' ? I.check : n) + '</span>';
+  const num = (n) => '<span class="num ' + (st(n) === 'done' ? 'ok' : st(n) === 'now' ? 'now' : '') + '" style="flex:none;width:26px;height:26px;border-radius:99px;display:grid;place-items:center;font-size:12px;font-weight:600;border:1.5px solid ' + (st(n) === 'now' ? 'var(--need)' : 'var(--line)') + ';' + (st(n) === 'done' ? 'background:var(--done);border:0;color:var(--done-text)' : st(n) === 'now' ? 'color:var(--need)' : 'color:var(--muted)') + '">' + (st(n) === 'done' ? I.check : n) + '</span>';
   const next = (n, label, cls) => '<div><button class="btn ' + (cls || 'primary') + '" data-act="pair-step" data-s="' + n + '">' + label + '</button></div>';
   const summary = {
     1: (p.kind === 'claude' ? 'Claude Agent SDK' : 'OpenAI Agents SDK') + ' \u00b7 ' + esc(p.name),
@@ -1755,13 +1826,13 @@ const LINKS = {
 };
 function history() {
   const h = S.hist;
-  const tabs = '<div class="seg" role="group" aria-label="View"><button data-act="hist-tab" data-t="list" aria-pressed="' + (h.tab === 'list') + '">What happened</button><button data-act="hist-tab" data-t="map" aria-pressed="' + (h.tab === 'map') + '">Who works with whom</button></div>';
+  const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
+  const hCtl = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' + (h.tab === 'list' ? showFilter(F, h.f, 'hist-f', 'Show') : '') + viewSwitch([['list', 'What happened', 'list'], ['map', 'Who works with whom', 'map']], h.tab, 'hist-tab', 'History view') + '</div>';
   let body;
   if (h.tab === 'list') {
-    const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
     const rows = HIST.filter((e) => h.f === 'all' || e[2] === h.f);
     const days = []; rows.forEach((e) => { if (days.indexOf(e[0]) < 0) days.push(e[0]); });
-    body = '<div class="chips">' + F.map((f) => '<button class="btn' + (h.f === f[0] ? ' primary' : ' ghost') + '" style="height:30px" data-act="hist-f" data-f="' + f[0] + '">' + f[1] + '</button>').join('') + '</div>' +
+    body = (days.length ? '' : '<div class="allclear">Nothing here.</div>') +
       days.map((d) => '<section><span class="label">' + d + '</span><div class="panel" style="margin-top:10px">' + rows.filter((e) => e[0] === d).map((e) => '<div class="row"' + (e[5] ? ' data-act="open" data-id="' + e[5] + '" style="cursor:pointer"' : '') + '><span class="faint mono" style="width:70px;flex:none">' + e[1] + '</span><span class="av' + (e[3] === 'EL' ? '' : ' agent') + '" style="width:24px;height:24px;font-size:9.5px">' + esc(e[3]) + '</span><span style="flex:1;min-width:0">' + e[4] + '</span>' + (e[5] ? '<span class="mono faint">#' + e[5] + '</span>' : '') + '</div>').join('') + '</div></section>').join('');
   } else {
     const N = { 'You': [300, 44], 'Planner': [90, 170], 'Coding Agent': [510, 170], 'Review Agent': [510, 320], 'QA': [90, 320] };
@@ -1773,7 +1844,7 @@ function history() {
       '<div class="panel" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><span class="label">' + l.label + '</span><h2 style="font-size:18px">' + l.a + ' \u2194 ' + l.b + '</h2><span class="muted">' + l.n + '</span><div class="kvlist">' + l.items.map((x) => '<div><span style="color:var(--text)">' + x + '</span></div>').join('') + '</div>' +
       '<div class="chips">' + Object.keys(LINKS).map((k) => '<button class="btn' + (h.link === k ? ' primary' : ' ghost') + '" style="height:28px;font-size:12.5px" data-act="hist-link" data-k="' + k + '">' + LINKS[k].a.split(' ')[0] + ' \u2194 ' + LINKS[k].b.split(' ')[0] + '</button>').join('') + '</div></div></div>';
   }
-  return '<div class="head"><div><h1>History</h1><p>Everything that happened in Customer order tracker.</p></div>' + tabs + '</div>' + body;
+  return '<div class="head"><div><h1>History</h1><p>' + (h.tab === 'map' ? 'Who works with whom in Customer order tracker. Click a line to see what passed between them.' : 'Everything that happened in Customer order tracker.') + '</p></div>' + hCtl + '</div>' + body;
 }
 
 /* ---------- Contributor: First time ---------- */
@@ -1797,10 +1868,9 @@ function find() {
   ];
   const roles = ['QA', 'Frontend', 'Backend'];
   const list = AG.filter((a) => a[2] === S.findRole);
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Find contributors</h1><p>Agents other people run. Their records come from owners who approved their work.</p></div></div>' +
-    '<div class="seg" role="group" aria-label="Role" style="align-self:flex-start">' + roles.map((r) => '<button data-act="find-role" data-r="' + r + '" aria-pressed="' + (S.findRole === r) + '">' + r + '</button>').join('') + '</div>' +
-    '<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
-      (S.invited[a[0]] ? '<span class="stage"><span class="dot" style="background:var(--build)"></span>Invited</span>' : '<button class="btn" data-act="find-invite" data-a="' + a[0] + '" data-r="' + a[2] + '">Invite to ' + (a[2] === 'QA' ? 'QA' : a[2].toLowerCase() + ' engineer') + '</button>') + '</div>').join('') + '</div>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Find contributors</h1><p>Agents other people run. Their records come from owners who approved their work.</p></div>' + showFilter(roles.map((r) => [r, r]), S.findRole, 'find-role', 'Role') + '</div>' +
+    ('<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
+      (S.invited[a[0]] ? '<span class="stage"><span class="dot" style="background:var(--build)"></span>Invited</span>' : '<button class="btn" data-act="find-invite" data-a="' + a[0] + '" data-r="' + a[2] + '">Invite to ' + (a[2] === 'QA' ? 'QA' : a[2].toLowerCase() + ' engineer') + '</button>') + '</div>').join('') + '</div>') +
     '<p class="faint" style="font-size:13px">Skills are what each contributor wrote. Approval counts are real. Anyone you invite can still say no.</p>';
 }
 
@@ -1856,17 +1926,39 @@ function orgNew() {
 function rooms() {
   const nc = needsCreator().length;
   const grp = (name, sub, extra, body) => '<section style="display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:baseline;gap:10px"><span class="label" style="flex:1">' + esc(name) + ' <span class="faint" style="text-transform:none;letter-spacing:0;font-weight:400">\u00b7 ' + sub + '</span></span>' + extra + '</div>' + body + '</section>';
-  return '<div class="head"><div><h1>Your workrooms</h1><p>Grouped by who owns them.</p></div><span style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn" href="#org-new">Create an organization</a><a class="btn primary" href="#start">Start a workroom</a></span></div>' +
+  return '<div class="head"><div><h1>Your workrooms</h1><p>Grouped by who owns them.</p></div><a class="btn primary" href="#start">Start a workroom</a></div>' +
     (S.roomGone ? '<div class="confirm"><b style="font-weight:600">Customer order tracker was deleted</b><span class="muted">If that was a mistake, contact support within 7 days while a recoverable copy still exists.</span><button class="demo-note" data-act="room-back" style="align-self:flex-start">Demo \u00b7 bring it back</button></div>' : '') +
     grp('Personal', 'Elena Lopez \u00b7 just you', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms here yet. Workrooms you start for yourself live here.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="personal">Start one</a></div>') +
     grp(S.org.name, 'Team \u00b7 you\'re an admin', '<a href="#org" style="font-size:13px">Settings</a>', '<div class="panel">' +
     (S.roomGone ? '' : '<a class="roomrow" href="#home"><span class="mark">OT</span><span style="flex:1;min-width:0"><b style="font-weight:600">Customer order tracker</b><br><span class="muted">' + (S.archived ? 'Archived \u00b7 release ' + S.ship.live + ' still live' : S.tasks.filter((t) => t.stage === 'done').length + ' tasks done \u00b7 release ' + S.ship.live + ' is live') + '</span></span>' + (nc ? '<span class="pill" title="Needs you">' + nc + '</span>' : '') + '<span class="faint">' + I.arrow + '</span></a>') +
     '<a class="roomrow" href="#fresh"><span class="mark">BP</span><span style="flex:1;min-width:0"><b style="font-weight:600">Bakery preorders</b><br><span class="muted">' + (S.fresh.lead ? 'Planner joined \u00b7 planning the first tasks' : 'New \u00b7 fill a role to get started') + '</span></span><span class="faint">' + I.arrow + '</span></a>' +
     '</div>') +
-    S.teams.map((t) => grp(t, 'Team \u00b7 you\'re its admin', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms yet.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="' + esc(t) + '">Start one</a></div>')).join('');
+    S.teams.map((t) => grp(t, 'Team \u00b7 you\'re its admin', '', '<div class="panel" style="padding:16px 18px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="muted" style="flex:1;min-width:200px">No workrooms yet.</span><a class="btn ghost" href="#start" data-act="st-org" data-v="' + esc(t) + '">Start one</a></div>')).join('') +
+    '<p class="faint" style="font-size:13px;margin:4px 0 0">Need a separate space for a team or a client? <a href="#org-new">Create an organization</a></p>';
 }
 
 /* ---------- Creator: Start a workroom ---------- */
+const GH_REPOS = [['bakery-on-elm/storefront', 'Private', 'main', true, '2 days ago'], ['bakery-on-elm/orders-api', 'Private', 'main', false, 'last week'], ['bakery-on-elm/menu-site', 'Public', 'main', true, '3 weeks ago'], ['elena-lopez/recipes', 'Private', 'master', false, 'in March']];
+function ghPicker(st) {
+  const g = st.gh; const copy = 'podsterdev/' + slug(st.name);
+  if (!g.installed) return '<div style="display:flex;flex-direction:column;gap:10px"><span class="muted" style="font-size:13.5px">Podster makes a working copy of your repository in its own GitHub organization. Agents work only in the copy. When you approve their work, Podster opens a pull request on your repository, and you merge it on GitHub.</span>' +
+    '<div class="panel kvlist stack" style="padding:2px 16px;box-shadow:none;background:var(--sunk)"><div><span>On your repository, it asks to</span><span>Read code \u00b7 Open pull requests</span></div><div><span>It never</span><span>Pushes to your repository, changes settings or merges</span></div><div><span>Agents work in</span><span class="mono">' + esc(copy) + '</span></div></div>' +
+    '<span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn primary" data-act="gh-install">' + LOGO.github + ' Install on GitHub</button><span class="faint" style="font-size:12.5px">Opens GitHub. You come back here after. A public repository needs this only to open pull requests.</span></span></div>';
+  const q = (g.q || '').toLowerCase();
+  const list = GH_REPOS.filter((r) => r[0].indexOf(q) >= 0);
+  if (!g.pick) return '<div style="display:flex;flex-direction:column;gap:10px"><span class="stage" style="font-size:13px"><span class="dot" style="background:var(--done)"></span>Podster can read bakery-on-elm and elena-lopez \u00b7 <a href="#" data-act="toast" data-msg="Opens the app\'s settings on GitHub.">Change on GitHub</a></span>' +
+    '<input class="in" id="gh-q" data-input="gh-q" placeholder="Search your repositories" value="' + esc(g.q || '') + '" aria-label="Search repositories">' +
+    '<div class="panel" style="box-shadow:none" role="listbox" aria-label="Repositories">' + (list.length ? list.map((r) => '<button type="button" class="row" role="option" data-act="gh-pick" data-r="' + esc(r[0]) + '" style="width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left;cursor:pointer"><span style="flex:1;min-width:0"><b class="mono" style="font-weight:500;font-size:13.5px">' + esc(r[0]) + '</b><br><span class="faint" style="font-size:12.5px">' + r[1] + ' \u00b7 ' + r[2] + ' \u00b7 updated ' + r[4] + '</span></span><span class="faint">' + I.arrow + '</span></button>').join('') : '<div class="row faint" style="font-size:13px">No repository matches. Is it one the app can read? <a href="#" data-act="toast" data-msg="Opens the app\'s repository access on GitHub.">Add it on GitHub</a></div>') + '</div></div>';
+  const r = GH_REPOS.find((x) => x[0] === g.pick) || GH_REPOS[0];
+  return '<div style="display:flex;flex-direction:column;gap:10px"><div class="panel kvlist stack" style="padding:2px 16px;box-shadow:none">' +
+    '<div><span>Your repository</span><span class="mono">' + esc(r[0]) + ' \u00b7 ' + r[2] + '</span></div>' +
+    '<div><span>Podster\'s working copy</span><span class="mono">' + esc(copy) + '</span></div>' +
+    '<div><span>Visibility of the copy</span><span>' + r[1] + ', like yours</span></div>' +
+    '<div><span>Kept up to date</span><span>From your ' + r[2] + ' before each task starts</span></div>' +
+    '<div><span>When you approve</span><span>A pull request opens on ' + esc(r[0]) + '. You merge it on GitHub.</span></div></div>' +
+    '<span class="faint" style="font-size:12.5px">Your CI and branch rules apply to Podster\'s pull requests like anyone else\'s. Your repository\'s secrets never reach the copy.</span>' +
+    '<span><button type="button" class="btn ghost" data-act="gh-pick" data-r="">Choose another</button></span></div>';
+}
 const PRESETS = { member: ['Member', 'Sees every task and thread, creates and offers tasks, and reviews when named.'], guest: ['Guest', 'Sees only its own tasks and threads, and reviews when named.'], public_participant: ['Public participant', 'Sees only its own tasks and threads, reads only what it submitted, and can\'t review.'], coordinator: ['Coordinator', 'Like Member, and can take over a task whose requester left. No admin, merge or release rights.'] };
 const ROLE_CHOICES = [['Frontend engineer', 'The pages people see', 'member'], ['Backend engineer', 'Data, payments, email', 'member'], ['Full-stack engineer', 'Builds it end to end', 'member'], ['QA', 'Tests before you review', 'member'], ['Code reviewer', 'Reads every change', 'member'], ['UI/UX designer', 'Screens, flows and wording', 'guest'], ['System designer', 'How the parts fit together', 'member'], ['Architect', 'Reviews big changes', 'member'], ['DevOps and release', 'Owns deploys', 'member'], ['Security reviewer', 'Looks for risky changes', 'guest'], ['Mobile engineer', 'Phone apps', 'member'], ['Data engineer', 'Reports and imports', 'member'], ['Technical writer', 'Docs and help text', 'guest']];
 const TEAMS = {
@@ -1901,17 +1993,18 @@ function start() {
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Who can see it</span>' + seg('vis', [['private', 'Private'], ['public', 'Public']]) +
     '<span class="muted" style="font-size:13px">' + (st.vis === 'private' ? 'Only people and agents you invite.' : 'Listed in Explore. Anyone can see the brief and claim an open role.') + '</span></section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Code</span>' +
+    '<div class="srcpick" role="radiogroup" aria-label="Where the code comes from">' + [['new', 'New repository', 'Podster sets one up for this workroom.'], ['existing', 'Use my GitHub repository', 'Agents work in a copy. You get pull requests.']].map((o) => '<button type="button" class="srcopt" role="radio" aria-checked="' + (st.repoSrc === o[0]) + '" data-act="st-set" data-k="repoSrc" data-v="' + o[0] + '"><span class="dotr" aria-hidden="true"></span><span><b>' + o[1] + '</b><br><span class="faint">' + o[2] + '</span></span></button>').join('') + '</div>' +
+    (st.repoSrc === 'existing' ? ghPicker(st) :
     '<div style="display:flex;flex-direction:column;gap:6px"><b style="font-weight:600">A repository Podster sets up</b><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>podsterdev/' + sl + '</span></span></div>' +
     '<span class="q" style="font-weight:600;font-size:13px">Repository visibility</span>' + seg('repoVis', [['private', 'Private'], ['public', 'Public']]) +
-    '<span class="faint" style="font-size:13px">Separate from the workroom. ' + (st.repoVis === 'public' ? 'Anyone can read the code; only agents here can change it.' : 'Only this workroom\'s agents and people can see the code.') + ' You can export it or move it to your own GitHub later.</span></section>' +
+    '<span class="faint" style="font-size:13px">Separate from the workroom. ' + (st.repoVis === 'public' ? 'Anyone can read the code; only agents here can change it.' : 'Only this workroom\'s agents and people can see the code.') + ' You can export it or move it to your own GitHub later.</span>') + '</section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px"><span class="label" style="flex:1">Going live</span><button type="button" class="toggle" role="switch" aria-label="Set up releases" aria-checked="' + st.deploy + '" data-act="st-toggle" data-k="deploy"><i></i></button></div>' +
     (st.deploy ? '<span class="muted" style="font-size:13px">Approved work goes live on Cloudflare Workers when you release it. Nothing goes live on its own.</span>' +
       '<div class="field"><span class="q" style="font-size:13px">Address</span><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>' + sl + '.podster.site</span></span></div>' +
       '<div class="field"><label for="st-domain" style="font-size:13px">Your own domain <span class="faint" style="font-weight:400">\u00b7 optional</span></label><input class="in" id="st-domain" data-input="st-domain" placeholder="preorders.bakeryonelm.com" value="' + esc(st.domain) + '"><span class="stage" style="font-size:12.5px"><span class="dot" style="background:' + (st.domain ? 'var(--build)' : 'var(--planned)') + '"></span>' + (st.domain ? 'We\'ll show the DNS records after you create it' : 'Not set up') + '</span></div>'
       : '<span class="muted" style="font-size:13px">Off. Approved work goes into the code, but nothing goes live. Turn it on any time.</span>') + '</section>' +
-    '<button class="btn need lg" type="submit" style="height:48px">Create workroom</button>' +
-    '<span class="faint" style="font-size:13px;text-align:center">Agents join later, when people with agents claim or accept a role. Creating this doesn\'t start anything.</span>' +
-    '</div></form>';
+    '</div>' +
+    '<div class="createbar"><span class="faint" style="font-size:13px">Agents join later, when people with agents claim or accept a role. Creating this doesn\'t start anything.</span><button class="btn need lg" type="submit" style="height:44px;padding:0 22px">Create workroom</button></div></form>';
 }
 
 /* ---------- Creator: A brand-new workroom ---------- */
@@ -1942,7 +2035,7 @@ function fresh() {
   return '<div class="head"><div><h1>' + title + '</h1><p>Bakery preorders \u00b7 ' + sub + '</p></div>' +
     '<button class="demo-note" data-act="fresh-lead">Demo \u00b7 ' + (l ? 'reset' : 'pretend Planner joins') + '</button></div>' +
     '<div class="grid2" style="align-items:start"><div class="panel firststeps">' +
-    step('ok', 1, 'Workroom created', 'Private, with its own code repository and a live site at preorders.bakeryonelm.example once you release. Your brief is saved.') +
+    step('ok', 1, 'Workroom created', (S.start.repoSrc === 'existing' && S.start.gh.pick ? 'Private. Agents work in a copy of ' + esc(S.start.gh.pick) + ', and approved work comes to you as a pull request on GitHub' : 'Private, with its own code repository') + ', and a live site at preorders.bakeryonelm.example once you release. Your brief is saved.') +
     (l ? step('ok', 2, 'Planner joined as product manager', 'Your own agent, paired from this Mac. It reads the brief and plans the work.')
       : step('now', 2, 'Add the first agent', 'Start with one that plans. Builders and testers can join once there are tasks.',
         '<div style="display:flex;flex-direction:column;gap:8px"><div class="row" style="border:1px solid var(--line);border-radius:10px"><span style="flex:1;min-width:0"><b style="font-weight:500">Pair your own agent</b><br><span class="faint" style="font-size:13px">Runs on your machine with Podster Runner. About 2 minutes.</span></span><button class="btn primary" data-act="fresh-lead">Pair an agent</button></div>' +
@@ -2010,7 +2103,8 @@ function envForm() {
       (F.secret ? (F.prevMode === 'other' ? '<span style="font-size:13px;color:var(--need)">Previews run code you haven\'t approved yet. Use a test key here, not the live one.</span>' : '<span class="faint" style="font-size:12.5px">Unapproved code never touches the real key. Features that need it show as off in previews.</span>') : '') + '</div>' +
     '<div style="display:flex;gap:8px"><button class="btn primary" type="submit">' + (F.editing ? 'Save' : 'Add variable') + '</button><button class="btn ghost" type="button" data-act="env-cancel">Cancel</button></div></form>';
 }
-function appSettings() {
+function appSettings() { return shipPage('settings'); }
+function appSettingsBody() {
   const A = S.app; const has22 = A.vars.some((v) => v.n === 'TEXTING_API_KEY');
   const lock = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
   const row = (v) => (A.form && A.form.editing && A.form.n === v.n) ? envForm() :
@@ -2018,7 +2112,7 @@ function appSettings() {
       '<span class="mono" style="font-size:12.5px;color:var(--muted);overflow-wrap:anywhere">' + (v.secret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 <span class="faint">live</span>' : esc(v.live)) + '</span>' +
       '<span class="faint" style="font-size:12.5px">Previews: ' + (v.secret ? (v.prev ? 'their own key' : 'a placeholder') : (v.prev ? '<span class="mono">' + esc(v.prev) + '</span>' : 'same value')) + ' \u00b7 ' + (v.secret ? 'agents see the name only' : 'agents can read it') + ' \u00b7 ' + v.at + '</span></span>' +
       '<button class="btn ghost" style="height:28px" data-act="env-edit" data-n="' + v.n + '">' + (v.secret ? 'Replace' : 'Edit') + '</button><button class="btn ghost danger" style="height:28px" data-act="env-rm" data-n="' + v.n + '">Remove</button></div>';
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#ship" style="text-decoration:none">Ship</a> /</p><h1>App settings</h1><p>What the app needs to run, on the live site and in previews.</p></div></div>' +
+  return '<p class="muted" style="margin:0">What the app needs to run, on the live site and in previews.</p>' +
     (has22 ? '' : '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>Needed for a task in the plan</span><b style="font-weight:600">\u201cSend a text when an order is ready\u201d needs a texting service key</b><span class="muted" style="font-size:13.5px">Sign up with a texting service, then add its key here as a secret. Coding Agent builds against the name TEXTING_API_KEY and never sees the value.</span><div><button class="btn primary" data-act="env-add" data-n="TEXTING_API_KEY">Add TEXTING_API_KEY</button></div></div>') +
     '<div class="setgrid wide-first">' +
     '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Environment variables</span><div class="panel" style="padding:4px 18px">' +
@@ -2031,6 +2125,79 @@ function appSettings() {
         (d[1] === 'ok' ? '' : '<div style="flex-basis:100%;display:flex;flex-direction:column;gap:8px;padding-top:6px"><span class="muted" style="font-size:13.5px">At the company where you bought the domain, add this record:</span><div class="kvlist mono" style="margin:0;font-size:12.5px"><div><span>Type</span><span>CNAME</span></div><div><span>Name</span><span>' + esc(d[0].split('.')[0]) + '</span></div><div><span>Points to</span><span>customer-order-tracker.podster.site</span></div></div><div><button class="demo-note" data-act="dom-check" data-i="' + i + '">Demo \u00b7 pretend DNS is set</button></div></div>') + '</div>').join('') +
       '<form class="row" data-form="dom-add" style="padding:12px 0;gap:8px"><input class="in mono" id="dom-new" data-input="domnew" placeholder="shop.bakeryonelm.example" value="' + esc(A.domDraft) + '" style="flex:1;height:34px" aria-label="Add a domain"><button class="btn" type="submit">Add domain</button></form>' +
     '</div></section></div>';
+}
+
+/* ---------- Creator: Ship tabs (Releases, Settings, Infrastructure, Data) ---------- */
+const SHIP_TABS = [['releases', 'Releases'], ['settings', 'Settings'], ['infra', 'Infrastructure'], ['data', 'Data']];
+const SHIP_WHAT = { releases: 'release, or go back to an earlier release', settings: 'change secrets and domains', infra: 'release changes to it', data: 'see live data' };
+function shipPage(tab) {
+  if (!SHIP_WHAT[tab]) tab = 'releases';
+  const body = tab === 'settings' ? appSettingsBody() : tab === 'infra' ? infraTab() : tab === 'data' ? dataTab() : ship();
+  return memberView('<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div></div>' +
+    tabs(SHIP_TABS, tab, 'ship-tab', { id: 'ship', label: 'Ship' }) + tabPanel('ship', tab, body), SHIP_WHAT[tab]);
+}
+// [kind, short kind, name, binding, what it's for, task that last changed it, outside Cloudflare]
+const INFRA = [
+  ['Database', 'D1', 'orders-db', 'DB', 'Keeps orders, customers and what each order contains.', 15, false],
+  ['Key-value store', 'KV', 'sessions', 'SESSIONS', 'Remembers who is signed in on the shop\'s order page.', 16, false],
+  ['File storage', 'R2', 'receipts', 'RECEIPTS', 'Holds a receipt for each finished order.', 18, false],
+  ['Queue', 'Queue', 'notify-ready', 'NOTIFY_READY', 'Lines up \u201cyour order is ready\u201d texts so none get lost.', 22, false],
+  ['Outside site', 'Reaches', 'api.texting.example', '', 'Sends the texts. The only site outside Cloudflare the app may reach.', 22, true]
+];
+const infraPlanned = (s) => { const t = S.tasks.find((x) => x.id === s[5]); return !!t && t.stage === 'planned'; };
+function infraDiagram() {
+  const W = { x: 300, y: 118, w: 160, h: 64 };
+  const at = [[30, 30], [30, 216], [580, 30], [580, 216], [290, 262]];
+  const nodes = INFRA.map((s, i) => {
+    const p = at[i]; const nw = i === 4 ? 180 : 150; const cx = p[0] + nw / 2; const cy = p[1] + 27;
+    const fx = i === 4 ? W.x + W.w / 2 : (i < 2 ? W.x : W.x + W.w); const fy = i === 4 ? W.y + W.h : W.y + W.h / 2;
+    const tx = i === 4 ? cx : (i < 2 ? p[0] + nw : p[0]);
+    return '<path class="ln' + (s[6] ? ' out' : '') + (infraPlanned(s) ? ' plan' : '') + '" d="M' + fx + ' ' + fy + ' L' + tx + ' ' + (i === 4 ? p[1] : cy) + '"/>' +
+      '<g class="nd' + (s[6] ? ' out' : '') + (infraPlanned(s) ? ' plan' : '') + '"><rect x="' + p[0] + '" y="' + p[1] + '" width="' + nw + '" height="54" rx="10"/><text class="k" x="' + (p[0] + 14) + '" y="' + (p[1] + 21) + '">' + esc(s[1].toUpperCase()) + '</text><text class="m" x="' + (p[0] + 14) + '" y="' + (p[1] + 40) + '">' + esc(s[2]) + '</text></g>';
+  }).join('');
+  const alt = 'The Worker orders, connected to ' + INFRA.map((s) => s[0].toLowerCase() + ' ' + s[2]).join(', ');
+  return '<svg class="infra-svg" viewBox="0 0 760 326" role="img" aria-label="' + esc(alt) + '">' + nodes +
+    '<g class="nd wk"><rect x="' + W.x + '" y="' + W.y + '" width="' + W.w + '" height="' + W.h + '" rx="12"/><text class="k" x="' + (W.x + 16) + '" y="' + (W.y + 25) + '">WORKER</text><text class="m" x="' + (W.x + 16) + '" y="' + (W.y + 46) + '" style="font-size:15px">orders</text></g></svg>';
+}
+function infraTab() {
+  return '<div class="confirm" style="flex-direction:row;align-items:center;gap:12px;flex-wrap:wrap"><span style="flex:1;min-width:240px">This comes from <span class="mono">wrangler.jsonc</span> in the repository. To change it, an agent edits the code in a pull request; it takes effect when you release.</span><a class="btn ghost" href="#" data-act="toast" data-msg="Opens wrangler.jsonc on GitHub.">View wrangler.jsonc</a></div>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">How Customer order tracker runs</span><div class="panel" style="padding:18px 20px">' + infraDiagram() + '</div>' +
+    '<p class="faint" style="font-size:13px;margin:0">One Cloudflare Worker, <span class="mono">orders</span>, answers every visit to orders.bakeryonelm.example. Lines show what it\'s allowed to use. Dashed ones are planned, or leave Cloudflare.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">What it uses</span><div class="panel" style="overflow-x:auto"><table class="tbl infra-tbl"><thead><tr><th scope="col">Kind</th><th scope="col">Name</th><th scope="col">What it\'s for</th><th scope="col">Binding</th><th scope="col">Last changed</th></tr></thead><tbody>' +
+    INFRA.map((s) => '<tr><td>' + esc(s[0]) + ' <span class="faint">\u00b7 ' + esc(s[1]) + '</span></td><td class="mono">' + esc(s[2]) + '</td><td class="muted">' + esc(s[4]) + '</td><td class="mono">' + (s[3] ? esc(s[3]) : '<span class="faint">\u2014</span>') + '</td><td class="faint">' + (infraPlanned(s) ? 'Planned in <a href="#" data-act="open" data-id="' + s[5] + '">#' + s[5] + '</a> \u00b7 not built yet' : 'In <a href="#" data-act="open" data-id="' + s[5] + '">#' + s[5] + '</a>') + '</td></tr>').join('') +
+    '</tbody></table></div></section>';
+}
+// Fictional sample data only.
+const DB = {
+  orders: { count: 214, cols: [['id', 'INTEGER', false, 'Primary'], ['customer_id', 'INTEGER', false, '\u2192 customers.id'], ['status', 'TEXT', false, ''], ['pickup_at', 'TEXT', true, ''], ['total_cents', 'INTEGER', false, ''], ['created_at', 'TEXT', false, '']],
+    rows: [[214, 87, 'ready', 'Today 4:00 PM', 2450, 'Today 9:12 AM'], [213, 12, 'baking', 'Today 5:30 PM', 1800, 'Today 8:55 AM'], [212, 64, 'received', 'Tomorrow 8:00 AM', 3600, 'Today 8:40 AM'], [211, 3, 'ready', 'Today 3:00 PM', 950, 'Yesterday 6:02 PM'], [210, 41, 'picked up', 'Yesterday 5:00 PM', 4200, 'Yesterday 2:15 PM'], [209, 87, 'picked up', 'Yesterday 12:00 PM', 1200, 'Yesterday 9:30 AM'], [208, 25, 'picked up', 'Mon 4:30 PM', 2750, 'Mon 10:01 AM'], [207, 58, 'cancelled', '', 1500, 'Mon 9:44 AM'], [206, 12, 'picked up', 'Mon 11:00 AM', 600, 'Sun 7:20 PM'], [205, 70, 'picked up', 'Sun 3:00 PM', 5400, 'Sun 11:48 AM']] },
+  customers: { count: 87, cols: [['id', 'INTEGER', false, 'Primary'], ['name', 'TEXT', false, ''], ['phone', 'TEXT', true, ''], ['texts_ok', 'INTEGER', false, ''], ['created_at', 'TEXT', false, '']],
+    rows: [[87, 'Ava Linden', '555-0142', 1, 'Today 9:10 AM'], [70, 'Theo Marsh', '555-0117', 0, 'Sat 1:02 PM'], [64, 'Priya Calder', '555-0188', 1, 'Fri 4:40 PM'], [58, 'Owen Brightwater', '', 0, 'Thu 10:15 AM'], [41, 'Mina Okafor', '555-0163', 1, 'Nov 12'], [25, 'Jules Fennimore', '555-0109', 1, 'Nov 8'], [12, 'Rosa Quill', '555-0131', 1, 'Nov 3'], [7, 'Ben Hollis', '555-0175', 0, 'Nov 2'], [5, 'Iris Vane', '555-0124', 1, 'Nov 2'], [3, 'Caleb Thorn', '555-0156', 1, 'Nov 1']] },
+  order_items: { count: 531, cols: [['id', 'INTEGER', false, 'Primary'], ['order_id', 'INTEGER', false, '\u2192 orders.id'], ['item', 'TEXT', false, ''], ['qty', 'INTEGER', false, ''], ['note', 'TEXT', true, '']],
+    rows: [[531, 214, 'Sourdough loaf', 2, ''], [530, 214, 'Cinnamon roll', 4, 'Extra icing'], [529, 213, 'Birthday cake, 8 in', 1, 'Write \u201cHappy 7th, Lou\u201d'], [528, 212, 'Baguette', 6, ''], [527, 212, 'Croissant', 12, ''], [526, 211, 'Rye loaf', 1, 'Sliced'], [525, 210, 'Fruit tart', 2, ''], [524, 210, 'Croissant', 6, ''], [523, 209, 'Bagel', 6, 'Sesame'], [522, 208, 'Sourdough loaf', 1, '']] }
+};
+function dataTab() {
+  const head = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="stage" style="padding:2px 9px;border:1px solid var(--line);border-radius:99px;font-size:12px;font-weight:600;color:var(--text)">Preview</span><span class="muted" style="font-size:13.5px">Whether apps get a database is still being decided. This shows how it could look.</span></div>';
+  const lockIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  const agentLine = '<p class="faint" style="font-size:13px;margin:0">Agents never see live data. They work with sample data in previews.</p>';
+  if (member()) return head + '<div class="panel" style="padding:28px 24px;display:flex;flex-direction:column;align-items:flex-start;gap:8px"><span class="stage">' + lockIcon + 'Locked</span><b style="font-weight:600">Only owners and admins can see live data</b><span class="muted" style="font-size:13.5px">You can still see the tables and their columns in the code. Ask Elena if you need a row checked.</span></div>' + agentLine;
+  const name = DB[S.db.table] ? S.db.table : 'orders'; const t = DB[name];
+  const q = S.db.q.trim().toLowerCase();
+  const rows = q ? t.rows.filter((r) => r.some((c) => String(c).toLowerCase().indexOf(q) >= 0)) : t.rows;
+  const cell = (v) => v === '' ? '<span class="faint">null</span>' : esc(v);
+  return head +
+    '<div class="dbgrid"><section style="display:flex;flex-direction:column;gap:10px"><span class="label">Tables</span><div class="panel tlist" role="group" aria-label="Tables">' +
+      Object.keys(DB).map((k) => '<button data-act="db-table" data-v="' + k + '" aria-pressed="' + (k === name) + '"><span>' + k + '</span><span class="faint">' + DB[k].count + '</span></button>').join('') + '</div></section>' +
+    '<section style="display:flex;flex-direction:column;gap:18px;min-width:0">' +
+      '<div style="display:flex;flex-direction:column;gap:10px"><span class="label">Columns \u00b7 <span class="mono" style="text-transform:none;letter-spacing:0">' + name + '</span></span><div class="panel" style="overflow-x:auto"><table class="tbl"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Can be empty</th><th scope="col">Key</th></tr></thead><tbody>' +
+        t.cols.map((c) => '<tr><td class="mono">' + esc(c[0]) + '</td><td class="mono muted">' + esc(c[1]) + '</td><td class="muted">' + (c[2] ? 'Yes' : 'No') + '</td><td class="muted">' + (c[3] ? esc(c[3]) : '<span class="faint">\u2014</span>') + '</td></tr>').join('') + '</tbody></table></div></div>' +
+      '<div style="display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="margin-right:auto">Rows</span><input class="in" id="db-q" type="search" data-input="db-q" value="' + esc(S.db.q) + '" placeholder="Search these rows" aria-label="Search rows in ' + name + '" style="max-width:240px;height:32px"></div>' +
+        '<div class="panel" style="overflow-x:auto"><table class="tbl"><thead><tr>' + t.cols.map((c) => '<th scope="col" class="mono" style="text-transform:none;letter-spacing:0">' + esc(c[0]) + '</th>').join('') + '</tr></thead><tbody>' +
+        rows.map((r) => '<tr class="dbrow">' + r.map((v, i) => '<td' + (i === 0 || typeof v === 'number' ? ' class="mono"' : '') + '>' + cell(v) + '</td>').join('') + '</tr>').join('') + '</tbody></table>' +
+        (rows.length ? '' : '<div class="allclear" style="border:0">No rows on this page match \u201c' + esc(S.db.q) + '\u201d.</div>') + '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="faint" style="font-size:13px;margin-right:auto">' + (q ? rows.length + ' of ' + t.rows.length + ' rows on this page match \u00b7 ' : '') + '1\u2013' + t.rows.length + ' of ' + t.count + '</span><button class="btn ghost" style="height:28px" disabled>Previous</button><button class="btn ghost" style="height:28px" data-act="db-page">Next</button></div></div>' +
+    '</section></div>' +
+    '<div class="confirm" style="gap:4px"><span>Read-only. Changes to columns come from migrations in pull requests. Rows change only through the app.</span><span class="faint" style="font-size:13px">Opening live data is recorded (IDs only).</span></div>' + agentLine;
 }
 
 /* ---------- Organization: one agent the organization owns (admin oversight) ---------- */
@@ -2046,10 +2213,10 @@ function orgAgent() {
   return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#org" style="text-decoration:none">' + esc(S.org.name) + '</a> / Agents</p><h1 style="display:flex;align-items:center;gap:12px"><span class="av agent" style="width:34px;height:34px">MN</span>Menu Agent</h1><p>Paired by Marco Diaz on the shop\'s laptop \u00b7 Product manager in Bakery preorders</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="org-pause">' + (S.orgPaused ? 'Resume' : 'Pause') + '</button><button class="btn ghost" data-act="toast" data-msg="Message sent to Marco.">Message Marco</button></div></div>' +
     '<div class="confirm" style="max-width:860px"><b style="font-weight:600">You can see everything this agent receives</b><span class="muted">' + esc(S.org.name) + ' owns it, and you\'re an admin. You can pause it, but you can\'t answer or act for it. Marco runs it. Items show as IDs. Open the workroom to read the message, if you\'re a member there.</span></div>' +
     (S.orgPaused ? '<div class="confirm" style="max-width:860px"><b style="font-weight:600">Paused by you</b><span class="muted">It keeps its role but won\'t run. Marco and the workroom\'s owner are told.</span></div>' : '') +
-    '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span class="label" style="margin-right:auto">Inbox</span><div class="seg" role="group" aria-label="Filter">' + [['all', 'All'], ['waiting', 'Waiting'], ['done', 'Handled']].map((x) => '<button data-act="org-inbox" data-v="' + x[0] + '" aria-pressed="' + (f === x[0]) + '">' + x[1] + '</button>').join('') + '</div></div>' +
-    '<div class="panel" style="overflow-x:auto"><table class="tbl" style="min-width:680px"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Workroom</th><th scope="col">Task</th><th scope="col">Item</th><th scope="col">State</th></tr></thead><tbody>' +
+    tabs([['all', 'All'], ['waiting', 'Waiting'], ['done', 'Handled']], f, 'org-inbox', { id: 'inbox', label: 'Inbox' }) +
+    tabPanel('inbox', f, '<div class="panel" style="overflow-x:auto"><table class="tbl" style="min-width:680px"><thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Workroom</th><th scope="col">Task</th><th scope="col">Item</th><th scope="col">State</th></tr></thead><tbody>' +
     rows.map((r) => '<tr style="cursor:default"><td class="faint">' + r[0] + '</td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono">' + r[3] + '</td><td class="mono faint">' + r[5] + '</td><td><span class="stage"><span class="dot" style="background:' + (r[4] === 'Waiting' ? 'var(--build)' : 'var(--done)') + '"></span>' + r[4] + '</span></td></tr>').join('') +
-    '</tbody></table>' + (rows.length ? '' : '<div class="allclear" style="border:0">Nothing here.</div>') + '</div>' +
+    '</tbody></table>' + (rows.length ? '' : '<div class="allclear" style="border:0">Nothing here.</div>') + '</div>') +
     '<p class="faint" style="font-size:13px;margin:0">Bakery preorders is the workroom with ID wr_bp4K.</p>';
 }
 
@@ -2135,7 +2302,7 @@ function splitPage(form) {
     '</div><p class="fine">Podster never runs an agent. Agents run on their owners\u2019 machines.</p></aside>' +
     '<main class="split-form"><div class="top"><div class="brand mobile-brand"><i></i>Podster</div><a href="#public" class="muted">See a public workroom</a><a href="#door" class="faint">Demo \u00b7 problems signing in</a></div>' +
     '<div class="mid">' + form + '</div>' +
-    '<div class="foot"><span>\u00a9 2026 Podster</span><a href="#" data-act="toast" data-msg="Opens the terms.">Terms</a><a href="#" data-act="toast" data-msg="Opens the privacy notice.">Privacy</a><a href="#" data-act="toast" data-msg="Opens the docs.">Docs</a></div></main></div>' + overlays();
+    '<div class="foot"><span>\u00a9 2026 OM.Network, LLC</span><a href="#" data-act="toast" data-msg="Opens the terms.">Terms</a><a href="#" data-act="toast" data-msg="Opens the privacy notice.">Privacy</a><a href="#" data-act="toast" data-msg="Opens the docs.">Docs</a></div></main></div>' + overlays();
 }
 function welcome() {
   const w = S.wl;
@@ -2187,25 +2354,6 @@ function overlays() {
       : t.id === 20 ? '<a class="btn primary" href="#team">Invite a tester</a>'
       : t.stage === 'building' ? ''
       : t.ship === 'ready' ? '<a class="btn primary" href="#ship">Release it</a>' : '';
-    const qOpen = t.id === 19 && S.q.state === 'open';
-    const nMsg = (S.threads[t.id] || []).length + (t.id === 19 ? (S.q.state === 'answered' ? 3 : 1) : 0);
-    const nFile = (S.files[t.id] || []).length;
-    const tab = S.dtab || 'details';
-    const callout = qOpen
-      ? '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>Coding Agent asks</span><span>' + Q_TEXT + '</span><div class="chips">' + Q_OPTS.map((o, i) => '<button class="btn" data-act="answer" data-i="' + i + '">' + o + '</button>').join('') + '<button class="btn ghost" data-act="dtab" data-t="discussion">Write an answer</button></div></div>'
-      : t.blocked ? '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>' + t.blocked + '</span><span class="muted">' + t.blockedWhy + '</span></div>' : '';
-    const tabs = '<div class="dtabs" role="tablist">' + [['details', 'Details', 0], ['discussion', 'Discussion', nMsg], ['files', 'Files', nFile]].map((x) => '<button role="tab" aria-selected="' + (tab === x[0]) + '" data-act="dtab" data-t="' + x[0] + '">' + x[1] + (x[2] ? ' <span class="faint">' + x[2] + '</span>' : '') + '</button>').join('') + '</div>';
-    let pane;
-    if (tab === 'discussion') {
-      pane = (t.id === 19 ? '<div class="msg"><span class="av agent" style="width:26px;height:26px;font-size:9.5px">&lt;/&gt;</span><span><b style="font-weight:600">Coding Agent</b> <span class="faint" style="font-size:12px">12 min ago</span><br>' + Q_TEXT + '</span></div>' +
-        (S.q.state === 'answered' ? '<div class="msg"><span class="av" style="width:26px;height:26px;font-size:9.5px">EL</span><span><b style="font-weight:600">You</b> <span class="faint" style="font-size:12px">just now</span><br>' + esc(S.q.answer) + '</span></div><div class="msg"><span class="av agent" style="width:26px;height:26px;font-size:9.5px">&lt;/&gt;</span><span><b style="font-weight:600">Coding Agent</b> <span class="faint" style="font-size:12px">just now</span><br>Thanks. Using that and carrying on.</span></div>' : '') : '') +
-        discussion(t.id, qOpen);
-    } else if (tab === 'files') {
-      pane = fileList(t.id, !S.archived);
-    } else {
-      pane = '<div><span class="label">What you asked for</span><p style="margin-top:6px">' + t.ask + '</p></div>' +
-        '<div><span class="label">Done when</span><ul class="donelist">' + t.done.map((d) => '<li>' + d + '</li>').join('') + '</ul></div>';
-    }
     S.taskId = S.drawer;
     h += '<div class="scrim' + (S.drawerEnter ? ' enter' : '') + '" data-act="close"></div><aside class="drawer sheet-wide' + (S.drawerEnter ? ' enter' : '') + '" role="dialog" aria-label="Task #' + t.id + '">' + taskPage(true) + '</aside>';
   }
@@ -2381,7 +2529,7 @@ function connect() {
 }
 
 /* ---------- Render + routing ---------- */
-const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => memberView(appSettings(), 'change secrets and domains'), 'Customer order tracker / Ship / <b>App settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => memberView(ship(), 'release, or go back to an earlier release'), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], 'org-new': [orgNew, 'Your workrooms / <b>Create an organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
+const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => shipPage('settings'), 'Customer order tracker / Ship / <b>Settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => shipPage(S.shipTab), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], 'org-new': [orgNew, 'Your workrooms / <b>Create an organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
 function render() {
   const v = VIEWS[S.route] || VIEWS.home;
   const active = document.activeElement && document.activeElement.id;
@@ -2521,6 +2669,9 @@ document.addEventListener('click', (e) => {
     case 'dom-rm': { const d = S.app.domains.splice(Number(el.dataset.i), 1)[0]; toast(d[0] + ' removed.'); break; }
     case 'dom-check': S.app.domains[Number(el.dataset.i)][1] = 'ok'; toast('Connected. HTTPS is on.'); break;
     case 'org-inbox': S.orgInbox = el.dataset.v; break;
+    case 'ship-tab': S.shipTab = el.dataset.v; if (S.route !== 'ship') { go('ship'); return; } break;
+    case 'db-table': S.db = { table: el.dataset.v, q: '', page: 0 }; break;
+    case 'db-page': toast('This preview has one page of sample rows.'); break;
     case 'org-pause': S.orgPaused = !S.orgPaused; toast(S.orgPaused ? 'Paused. Marco and the owner are told.' : 'Resumed.'); break;
     case 'door': S.door = el.dataset.v; S.resendAsked = false; break;
     case 'door-resend': S.resendAsked = true; break;
@@ -2544,6 +2695,8 @@ document.addEventListener('click', (e) => {
     case 'pick': { const it = paletteItems()[Number(el.dataset.i)]; S.palette = false; if (it) it[2](); break; }
     case 'toast': toast(el.dataset.msg); break;
     case 'st-org': S.start.org = el.dataset.v; if (el.tagName === 'A') { S.roomMenu = false; } break;
+    case 'gh-install': S.start.gh.installed = true; toast('Podster can read your repositories now. Pick one.'); break;
+    case 'gh-pick': S.start.gh.pick = el.dataset.r; S.start.gh.q = ''; break;
     case 'st-set': S.start[el.dataset.k] = el.dataset.v; if (el.dataset.k === 'team') S.start.roles = null; if (el.dataset.k === 'vis' && el.dataset.v !== 'public' && S.start.roles) S.start.roles.forEach((r) => { if (r[4] === 'public_participant') r[4] = 'guest'; }); break;
     case 'st-toggle': S.start[el.dataset.k] = !S.start[el.dataset.k]; break;
     case 'st-open': { const r = S.start.roles[Number(el.dataset.i)]; r[2] = Math.max(1, Math.min(10, r[2] + Number(el.dataset.d))); break; }
@@ -2668,7 +2821,7 @@ document.addEventListener('click', (e) => {
     case 'brief-pub': S.brief.pubAsk = true; break;
     case 'brief-pub-no': S.brief.pubAsk = false; break;
     case 'brief-pub-yes': S.brief.pub = !S.brief.pub; S.brief.pubAsk = false; toast(S.brief.pub ? 'Public. It\'s listed in Explore.' : 'Private again.'); break;
-    case 'hist-tab': S.hist.tab = el.dataset.t; break;
+    case 'hist-tab': S.hist.tab = el.dataset.v || el.dataset.t; break;
     case 'hist-f': S.hist.f = el.dataset.f; break;
     case 'hist-link': S.hist.link = el.dataset.k; break;
     case 'perm': { const k3 = el.dataset.k; const cur = Object.assign({}, S.perm.saved, S.perm.draft || {}); S.perm.draft = Object.assign({}, S.perm.draft || {}, { [k3]: !cur[k3] }); break; }
@@ -2735,6 +2888,8 @@ document.addEventListener('change', (e) => {
   if (c === 'spend-cap') { S.spend.cap = e.target.value; render(); }
   if (c === 'spend-run') S.spend.perRun = e.target.value;
   if (c === 'st-preset') { const r = S.start.roles[Number(e.target.dataset.i)]; if (r && PRESETS[e.target.value] && e.target.value !== 'coordinator') r[4] = e.target.value; render(); }
+  if (c === 'hist-f') { S.hist.f = e.target.value; render(); }
+  if (c === 'find-role') { S.findRole = e.target.value; render(); }
   if (c === 'pol-sel') { const P = S.policy; P.draft = Object.assign({}, P.draft || {}, { [e.target.dataset.k]: e.target.value }); render(); }
 });
 document.addEventListener('input', (e) => {
@@ -2744,6 +2899,7 @@ document.addEventListener('input', (e) => {
   if (k === 'plannote') S.plan.note = e.target.value;
   if (k === 'draft') S.draft = e.target.value;
   if (k === 'st-name') { S.start.name = e.target.value; render(); }
+  if (k === 'gh-q') { S.start.gh.q = e.target.value; render(); }
   if (k === 'st-custom') { S.start.custom = e.target.value; render(); }
   if (k === 'st-domain') { const had = !!S.start.domain; S.start.domain = e.target.value; if (had !== !!S.start.domain) render(); }
   if (k === 'qcustom') S.q.custom = e.target.value;
@@ -2760,6 +2916,7 @@ document.addEventListener('input', (e) => {
   if (k === 'env-live') S.app.form.live = e.target.value;
   if (k === 'env-prev') S.app.form.prev = e.target.value;
   if (k === 'domnew') S.app.domDraft = e.target.value;
+  if (k === 'db-q') { S.db.q = e.target.value; render(); }
   if (k === 'paircode') S.pairing.code = e.target.value;
   if (k === 'pairname') S.pairing.name = e.target.value;
   if (k === 'plan-who') { S.plan.items[Number(e.target.dataset.i)].who = e.target.value; render(); }

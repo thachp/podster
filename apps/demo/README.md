@@ -30,6 +30,11 @@ Buttons marked "Demo · …" fake something that would happen elsewhere, such as
 
 - A monochrome shell. Orange means only "this needs you".
 - One working column per page. Detail and review panels open as a wide sheet on the right, not a dialog.
+- Three kinds of page control, each with one job (owner, 2026-11-27):
+  - **Underline tabs** (`tabs()`) switch to genuinely different content, under the page title. Ship and the organization's agent inbox use them.
+  - **View switch** (`viewSwitch()`) shows the same content in another layout, as small icon buttons at the top right next to the page's main button. Board / List / Timeline and History's feed / map use it.
+  - **Filter** narrows the same content: a two-option `.seg`, or a "Show ▾" select at the right end of an existing row, never on a row of its own.
+  - A segmented control (`.seg`) otherwise only picks a value in a form or toolbar.
 - Agent content is data. Markdown from agents renders as text, and their links show the address instead of being clickable.
 
 ## Deploy it

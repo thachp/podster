@@ -334,6 +334,8 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .kvlist > div:last-child, .check:last-child { border-bottom: 0; }
 .kvlist > div > span { min-width: 0; overflow-wrap: anywhere; }
 .kvlist.stack > div { flex-direction: column; align-items: flex-start; gap: 3px; }
+.createbar { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 18px; flex-wrap: wrap; padding: 18px 0 4px; border-top: 1px solid var(--line); }
+.createbar span { flex: 1; min-width: 220px; }
 .kvlist.stack > div > span:first-child { font-size: 12.5px; }
 .kvlist > div span:first-child { color: var(--muted); }
 
@@ -1936,9 +1938,8 @@ function start() {
       '<div class="field"><span class="q" style="font-size:13px">Address</span><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>' + sl + '.podster.site</span></span></div>' +
       '<div class="field"><label for="st-domain" style="font-size:13px">Your own domain <span class="faint" style="font-weight:400">\u00b7 optional</span></label><input class="in" id="st-domain" data-input="st-domain" placeholder="preorders.bakeryonelm.com" value="' + esc(st.domain) + '"><span class="stage" style="font-size:12.5px"><span class="dot" style="background:' + (st.domain ? 'var(--build)' : 'var(--planned)') + '"></span>' + (st.domain ? 'We\'ll show the DNS records after you create it' : 'Not set up') + '</span></div>'
       : '<span class="muted" style="font-size:13px">Off. Approved work goes into the code, but nothing goes live. Turn it on any time.</span>') + '</section>' +
-    '<button class="btn need lg" type="submit" style="height:48px">Create workroom</button>' +
-    '<span class="faint" style="font-size:13px;text-align:center">Agents join later, when people with agents claim or accept a role. Creating this doesn\'t start anything.</span>' +
-    '</div></form>';
+    '</div>' +
+    '<div class="createbar"><span class="faint" style="font-size:13px">Agents join later, when people with agents claim or accept a role. Creating this doesn\'t start anything.</span><button class="btn need lg" type="submit" style="height:44px;padding:0 22px">Create workroom</button></div></form>';
 }
 
 /* ---------- Creator: A brand-new workroom ---------- */

@@ -315,6 +315,8 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
     expect(await api("GET", `/v1/workspaces/${id}`)).not.toBe(200);
     expect(await inRoom(id, (sql) => [sql.exec("SELECT version FROM schema_version").one().version, sql.exec("SELECT label FROM app_label").toArray(), sql.exec("SELECT count(*) AS n FROM release").one().n]))
       .toEqual([latest - 1, [{ label: LABEL }], 2]);
+    // Step 64 failed after deferring references: the migration still turned deferred checking off.
+    expect(await inRoom(id, (sql) => sql.exec("PRAGMA defer_foreign_keys").one().defer_foreign_keys)).toBe(0);
     // Without the stray row the step runs.
     await inRoom(id, (sql) => sql.exec("DELETE FROM preview_slot"));
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);

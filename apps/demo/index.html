@@ -318,6 +318,30 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .setgrid > section > :not(.label):not(p):not(:nth-child(2)) { grid-column: 2; }
 .setgrid > section > p { grid-column: 1; grid-row: 2; align-self: start; line-height: 1.5; }
 @media (max-width: 900px) { .setgrid > section { grid-template-columns: minmax(0, 1fr); } .setgrid > section > * { grid-column: 1 !important; grid-row: auto !important; } }
+.tabrow { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-top: -6px; overflow-x: auto; }
+.tabrow button { height: 36px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13.5px; white-space: nowrap; }
+.tabrow button[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--ink); }
+.tabrow button:hover { color: var(--text); }
+.infra-svg { display: block; width: 100%; height: auto; max-height: 340px; }
+.infra-svg .ln { stroke: var(--faint); stroke-width: 1.5; fill: none; }
+.infra-svg .ln.out { stroke-dasharray: 5 5; }
+.infra-svg .plan rect, .infra-svg path.plan { stroke-dasharray: 5 4; opacity: .7; }
+.infra-svg .nd rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+.infra-svg .nd.out rect { stroke: var(--faint); stroke-dasharray: 5 4; }
+.infra-svg .nd text { fill: var(--text); font-family: var(--font); font-size: 14px; }
+.infra-svg .nd text.k { fill: var(--faint); font-size: 11.5px; letter-spacing: .04em; }
+.infra-svg .nd text.m { font-family: var(--mono); font-size: 13px; }
+.infra-svg .wk rect { fill: var(--ink); stroke: var(--ink); }
+.infra-svg .wk text { fill: var(--ink-text); }
+.infra-svg .wk text.k { fill: var(--ink-text); opacity: .7; }
+.dbgrid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+.dbgrid .tlist { display: flex; flex-direction: column; padding: 6px; gap: 2px; }
+.dbgrid .tlist button { display: flex; justify-content: space-between; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; cursor: pointer; text-align: left; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.dbgrid .tlist button[aria-pressed="true"] { background: var(--sunk); color: var(--text); font-weight: 600; }
+.dbgrid .tbl { min-width: 560px; }
+.dbgrid .tbl tbody tr, .infra-tbl tbody tr { cursor: default; }
+.dbgrid .tbl tbody tr:hover, .infra-tbl tbody tr:hover { background: transparent; }
+@media (max-width: 900px) { .dbgrid { grid-template-columns: minmax(0, 1fr); } }
 .savebar { position: sticky; bottom: 16px; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 14px 12px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); font-size: 13.5px; }
 .palette li .k { margin-left: auto; color: var(--faint); font-size: 12px; }
 .palette .cmdmark { flex: none; width: 20px; height: 20px; border-radius: 6px; background: var(--ink); color: var(--ink-text); display: grid; place-items: center; font-weight: 700; font-size: 13px; line-height: 1; }
@@ -772,6 +796,7 @@ const S = {
   ],
   newOrder: '',
   ship: { live: 3, top: 3, liveDay: 'Tue', phase: null, step: 0, confirm: false, back: false, rbAsk: null, rolledFrom: null },
+  shipTab: 'releases', db: { table: 'orders', q: '', page: 0 },
   permReq: { state: 'open', scope: 'task', denyOpen: false, note: '' },
   invite: 'none',
   run: { state: 'request', lines: [], pct: 0, timer: null, invite: 'open' },
@@ -1381,8 +1406,7 @@ function ship() {
   }
   const busy = sh.phase || sh.rbAsk;
   const hist = [sh.top, sh.top - 1, sh.top - 2].filter((n) => n > 0);
-  return '<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div><a class="btn" href="#app">App settings</a></div>' +
-    '<div class="panel live"><span class="pulse" aria-hidden="true"></span><div style="flex:1;min-width:200px"><b>Release ' + sh.live + ' is live' + (sh.rolledFrom ? ' again' : '') + '</b><div class="faint">orders.bakeryonelm.example \u00b7 ' + (sh.rolledFrom ? 'you went back from release ' + sh.rolledFrom + ' just now' : 'since ' + (sh.liveDay === 'Tue' ? 'Tuesday' : 'just now')) + '</div></div><a class="btn" href="#" data-act="toast" data-msg="Opens the live site in a new tab.">Open live site</a>' +
+  return '<div class="panel live"><span class="pulse" aria-hidden="true"></span><div style="flex:1;min-width:200px"><b>Release ' + sh.live + ' is live' + (sh.rolledFrom ? ' again' : '') + '</b><div class="faint">orders.bakeryonelm.example \u00b7 ' + (sh.rolledFrom ? 'you went back from release ' + sh.rolledFrom + ' just now' : 'since ' + (sh.liveDay === 'Tue' ? 'Tuesday' : 'just now')) + '</div></div><a class="btn" href="#" data-act="toast" data-msg="Opens the live site in a new tab.">Open live site</a>' +
     (sh.live > 1 && !busy && !sh.rolledFrom ? '<button class="btn ghost" data-act="rb-ask" data-r="' + (sh.live - 1) + '">Something wrong? Go back\u2026</button>' : '') + '</div>' +
     block +
     '<section><span class="label">History</span><div class="panel" style="margin-top:10px">' + hist.map((n) => '<div class="row"><span class="mono" style="width:26px">r' + n + '</span><span style="flex:1">' + (REL_TIME[n] || 'Just now') + '</span>' +
@@ -2046,7 +2070,8 @@ function envForm() {
       (F.secret ? (F.prevMode === 'other' ? '<span style="font-size:13px;color:var(--need)">Previews run code you haven\'t approved yet. Use a test key here, not the live one.</span>' : '<span class="faint" style="font-size:12.5px">Unapproved code never touches the real key. Features that need it show as off in previews.</span>') : '') + '</div>' +
     '<div style="display:flex;gap:8px"><button class="btn primary" type="submit">' + (F.editing ? 'Save' : 'Add variable') + '</button><button class="btn ghost" type="button" data-act="env-cancel">Cancel</button></div></form>';
 }
-function appSettings() {
+function appSettings() { return shipPage('settings'); }
+function appSettingsBody() {
   const A = S.app; const has22 = A.vars.some((v) => v.n === 'TEXTING_API_KEY');
   const lock = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
   const row = (v) => (A.form && A.form.editing && A.form.n === v.n) ? envForm() :
@@ -2054,7 +2079,7 @@ function appSettings() {
       '<span class="mono" style="font-size:12.5px;color:var(--muted);overflow-wrap:anywhere">' + (v.secret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 <span class="faint">live</span>' : esc(v.live)) + '</span>' +
       '<span class="faint" style="font-size:12.5px">Previews: ' + (v.secret ? (v.prev ? 'their own key' : 'a placeholder') : (v.prev ? '<span class="mono">' + esc(v.prev) + '</span>' : 'same value')) + ' \u00b7 ' + (v.secret ? 'agents see the name only' : 'agents can read it') + ' \u00b7 ' + v.at + '</span></span>' +
       '<button class="btn ghost" style="height:28px" data-act="env-edit" data-n="' + v.n + '">' + (v.secret ? 'Replace' : 'Edit') + '</button><button class="btn ghost danger" style="height:28px" data-act="env-rm" data-n="' + v.n + '">Remove</button></div>';
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#ship" style="text-decoration:none">Ship</a> /</p><h1>App settings</h1><p>What the app needs to run, on the live site and in previews.</p></div></div>' +
+  return '<p class="muted" style="margin:0">What the app needs to run, on the live site and in previews.</p>' +
     (has22 ? '' : '<div class="callout"><span class="kind"><span class="dot" style="background:var(--need)"></span>Needed for a task in the plan</span><b style="font-weight:600">\u201cSend a text when an order is ready\u201d needs a texting service key</b><span class="muted" style="font-size:13.5px">Sign up with a texting service, then add its key here as a secret. Coding Agent builds against the name TEXTING_API_KEY and never sees the value.</span><div><button class="btn primary" data-act="env-add" data-n="TEXTING_API_KEY">Add TEXTING_API_KEY</button></div></div>') +
     '<div class="setgrid wide-first">' +
     '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">Environment variables</span><div class="panel" style="padding:4px 18px">' +
@@ -2067,6 +2092,80 @@ function appSettings() {
         (d[1] === 'ok' ? '' : '<div style="flex-basis:100%;display:flex;flex-direction:column;gap:8px;padding-top:6px"><span class="muted" style="font-size:13.5px">At the company where you bought the domain, add this record:</span><div class="kvlist mono" style="margin:0;font-size:12.5px"><div><span>Type</span><span>CNAME</span></div><div><span>Name</span><span>' + esc(d[0].split('.')[0]) + '</span></div><div><span>Points to</span><span>customer-order-tracker.podster.site</span></div></div><div><button class="demo-note" data-act="dom-check" data-i="' + i + '">Demo \u00b7 pretend DNS is set</button></div></div>') + '</div>').join('') +
       '<form class="row" data-form="dom-add" style="padding:12px 0;gap:8px"><input class="in mono" id="dom-new" data-input="domnew" placeholder="shop.bakeryonelm.example" value="' + esc(A.domDraft) + '" style="flex:1;height:34px" aria-label="Add a domain"><button class="btn" type="submit">Add domain</button></form>' +
     '</div></section></div>';
+}
+
+/* ---------- Creator: Ship tabs (Releases, Settings, Infrastructure, Data) ---------- */
+const SHIP_TABS = [['releases', 'Releases'], ['settings', 'Settings'], ['infra', 'Infrastructure'], ['data', 'Data']];
+const SHIP_WHAT = { releases: 'release, or go back to an earlier release', settings: 'change secrets and domains', infra: 'release changes to it', data: 'see live data' };
+function shipPage(tab) {
+  if (!SHIP_WHAT[tab]) tab = 'releases';
+  const body = tab === 'settings' ? appSettingsBody() : tab === 'infra' ? infraTab() : tab === 'data' ? dataTab() : ship();
+  return memberView('<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div>' + (tab === 'releases' ? '<button class="btn" data-act="ship-tab" data-v="settings">App settings</button>' : '') + '</div>' +
+    '<div class="tabrow" role="tablist" aria-label="Ship">' + SHIP_TABS.map((x) => '<button role="tab" id="shiptab-' + x[0] + '" aria-selected="' + (tab === x[0]) + '" aria-controls="shippanel" tabindex="' + (tab === x[0] ? '0' : '-1') + '" data-act="ship-tab" data-v="' + x[0] + '">' + x[1] + '</button>').join('') + '</div>' +
+    '<div id="shippanel" role="tabpanel" aria-labelledby="shiptab-' + tab + '" style="display:flex;flex-direction:column;gap:22px">' + body + '</div>', SHIP_WHAT[tab]);
+}
+// [kind, short kind, name, binding, what it's for, task that last changed it, outside Cloudflare]
+const INFRA = [
+  ['Database', 'D1', 'orders-db', 'DB', 'Keeps orders, customers and what each order contains.', 15, false],
+  ['Key-value store', 'KV', 'sessions', 'SESSIONS', 'Remembers who is signed in on the shop\'s order page.', 16, false],
+  ['File storage', 'R2', 'receipts', 'RECEIPTS', 'Holds a receipt for each finished order.', 18, false],
+  ['Queue', 'Queue', 'notify-ready', 'NOTIFY_READY', 'Lines up \u201cyour order is ready\u201d texts so none get lost.', 22, false],
+  ['Outside site', 'Reaches', 'api.texting.example', '', 'Sends the texts. The only site outside Cloudflare the app may reach.', 22, true]
+];
+const infraPlanned = (s) => { const t = S.tasks.find((x) => x.id === s[5]); return !!t && t.stage === 'planned'; };
+function infraDiagram() {
+  const W = { x: 300, y: 118, w: 160, h: 64 };
+  const at = [[30, 30], [30, 216], [580, 30], [580, 216], [290, 262]];
+  const nodes = INFRA.map((s, i) => {
+    const p = at[i]; const nw = i === 4 ? 180 : 150; const cx = p[0] + nw / 2; const cy = p[1] + 27;
+    const fx = i === 4 ? W.x + W.w / 2 : (i < 2 ? W.x : W.x + W.w); const fy = i === 4 ? W.y + W.h : W.y + W.h / 2;
+    const tx = i === 4 ? cx : (i < 2 ? p[0] + nw : p[0]);
+    return '<path class="ln' + (s[6] ? ' out' : '') + (infraPlanned(s) ? ' plan' : '') + '" d="M' + fx + ' ' + fy + ' L' + tx + ' ' + (i === 4 ? p[1] : cy) + '"/>' +
+      '<g class="nd' + (s[6] ? ' out' : '') + (infraPlanned(s) ? ' plan' : '') + '"><rect x="' + p[0] + '" y="' + p[1] + '" width="' + nw + '" height="54" rx="10"/><text class="k" x="' + (p[0] + 14) + '" y="' + (p[1] + 21) + '">' + esc(s[1].toUpperCase()) + '</text><text class="m" x="' + (p[0] + 14) + '" y="' + (p[1] + 40) + '">' + esc(s[2]) + '</text></g>';
+  }).join('');
+  const alt = 'The Worker orders, connected to ' + INFRA.map((s) => s[0].toLowerCase() + ' ' + s[2]).join(', ');
+  return '<svg class="infra-svg" viewBox="0 0 760 326" role="img" aria-label="' + esc(alt) + '">' + nodes +
+    '<g class="nd wk"><rect x="' + W.x + '" y="' + W.y + '" width="' + W.w + '" height="' + W.h + '" rx="12"/><text class="k" x="' + (W.x + 16) + '" y="' + (W.y + 25) + '">WORKER</text><text class="m" x="' + (W.x + 16) + '" y="' + (W.y + 46) + '" style="font-size:15px">orders</text></g></svg>';
+}
+function infraTab() {
+  return '<div class="confirm" style="flex-direction:row;align-items:center;gap:12px;flex-wrap:wrap"><span style="flex:1;min-width:240px">This comes from <span class="mono">wrangler.jsonc</span> in the repository. To change it, an agent edits the code in a pull request; it takes effect when you release.</span><a class="btn ghost" href="#" data-act="toast" data-msg="Opens wrangler.jsonc on GitHub.">View wrangler.jsonc</a></div>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">How Customer order tracker runs</span><div class="panel" style="padding:18px 20px">' + infraDiagram() + '</div>' +
+    '<p class="faint" style="font-size:13px;margin:0">One Cloudflare Worker, <span class="mono">orders</span>, answers every visit to orders.bakeryonelm.example. Lines show what it\'s allowed to use. Dashed ones are planned, or leave Cloudflare.</p></section>' +
+    '<section style="display:flex;flex-direction:column;gap:10px"><span class="label">What it uses</span><div class="panel" style="overflow-x:auto"><table class="tbl infra-tbl"><thead><tr><th scope="col">Kind</th><th scope="col">Name</th><th scope="col">What it\'s for</th><th scope="col">Binding</th><th scope="col">Last changed</th></tr></thead><tbody>' +
+    INFRA.map((s) => '<tr><td>' + esc(s[0]) + ' <span class="faint">\u00b7 ' + esc(s[1]) + '</span></td><td class="mono">' + esc(s[2]) + '</td><td class="muted">' + esc(s[4]) + '</td><td class="mono">' + (s[3] ? esc(s[3]) : '<span class="faint">\u2014</span>') + '</td><td class="faint">' + (infraPlanned(s) ? 'Planned in <a href="#" data-act="open" data-id="' + s[5] + '">#' + s[5] + '</a> \u00b7 not built yet' : 'In <a href="#" data-act="open" data-id="' + s[5] + '">#' + s[5] + '</a>') + '</td></tr>').join('') +
+    '</tbody></table></div></section>';
+}
+// Fictional sample data only.
+const DB = {
+  orders: { count: 214, cols: [['id', 'INTEGER', false, 'Primary'], ['customer_id', 'INTEGER', false, '\u2192 customers.id'], ['status', 'TEXT', false, ''], ['pickup_at', 'TEXT', true, ''], ['total_cents', 'INTEGER', false, ''], ['created_at', 'TEXT', false, '']],
+    rows: [[214, 87, 'ready', 'Today 4:00 PM', 2450, 'Today 9:12 AM'], [213, 12, 'baking', 'Today 5:30 PM', 1800, 'Today 8:55 AM'], [212, 64, 'received', 'Tomorrow 8:00 AM', 3600, 'Today 8:40 AM'], [211, 3, 'ready', 'Today 3:00 PM', 950, 'Yesterday 6:02 PM'], [210, 41, 'picked up', 'Yesterday 5:00 PM', 4200, 'Yesterday 2:15 PM'], [209, 87, 'picked up', 'Yesterday 12:00 PM', 1200, 'Yesterday 9:30 AM'], [208, 25, 'picked up', 'Mon 4:30 PM', 2750, 'Mon 10:01 AM'], [207, 58, 'cancelled', '', 1500, 'Mon 9:44 AM'], [206, 12, 'picked up', 'Mon 11:00 AM', 600, 'Sun 7:20 PM'], [205, 70, 'picked up', 'Sun 3:00 PM', 5400, 'Sun 11:48 AM']] },
+  customers: { count: 87, cols: [['id', 'INTEGER', false, 'Primary'], ['name', 'TEXT', false, ''], ['phone', 'TEXT', true, ''], ['texts_ok', 'INTEGER', false, ''], ['created_at', 'TEXT', false, '']],
+    rows: [[87, 'Ava Linden', '555-0142', 1, 'Today 9:10 AM'], [70, 'Theo Marsh', '555-0117', 0, 'Sat 1:02 PM'], [64, 'Priya Calder', '555-0188', 1, 'Fri 4:40 PM'], [58, 'Owen Brightwater', '', 0, 'Thu 10:15 AM'], [41, 'Mina Okafor', '555-0163', 1, 'Nov 12'], [25, 'Jules Fennimore', '555-0109', 1, 'Nov 8'], [12, 'Rosa Quill', '555-0131', 1, 'Nov 3'], [7, 'Ben Hollis', '555-0175', 0, 'Nov 2'], [5, 'Iris Vane', '555-0124', 1, 'Nov 2'], [3, 'Caleb Thorn', '555-0156', 1, 'Nov 1']] },
+  order_items: { count: 531, cols: [['id', 'INTEGER', false, 'Primary'], ['order_id', 'INTEGER', false, '\u2192 orders.id'], ['item', 'TEXT', false, ''], ['qty', 'INTEGER', false, ''], ['note', 'TEXT', true, '']],
+    rows: [[531, 214, 'Sourdough loaf', 2, ''], [530, 214, 'Cinnamon roll', 4, 'Extra icing'], [529, 213, 'Birthday cake, 8 in', 1, 'Write \u201cHappy 7th, Lou\u201d'], [528, 212, 'Baguette', 6, ''], [527, 212, 'Croissant', 12, ''], [526, 211, 'Rye loaf', 1, 'Sliced'], [525, 210, 'Fruit tart', 2, ''], [524, 210, 'Croissant', 6, ''], [523, 209, 'Bagel', 6, 'Sesame'], [522, 208, 'Sourdough loaf', 1, '']] }
+};
+function dataTab() {
+  const head = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="stage" style="padding:2px 9px;border:1px solid var(--line);border-radius:99px;font-size:12px;font-weight:600;color:var(--text)">Preview</span><span class="muted" style="font-size:13.5px">Whether apps get a database is still being decided. This shows how it could look.</span></div>';
+  const lockIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  const agentLine = '<p class="faint" style="font-size:13px;margin:0">Agents never see live data. They work with sample data in previews.</p>';
+  if (member()) return head + '<div class="panel" style="padding:28px 24px;display:flex;flex-direction:column;align-items:flex-start;gap:8px"><span class="stage">' + lockIcon + 'Locked</span><b style="font-weight:600">Only owners and admins can see live data</b><span class="muted" style="font-size:13.5px">You can still see the tables and their columns in the code. Ask Elena if you need a row checked.</span></div>' + agentLine;
+  const name = DB[S.db.table] ? S.db.table : 'orders'; const t = DB[name];
+  const q = S.db.q.trim().toLowerCase();
+  const rows = q ? t.rows.filter((r) => r.some((c) => String(c).toLowerCase().indexOf(q) >= 0)) : t.rows;
+  const cell = (v) => v === '' ? '<span class="faint">null</span>' : esc(v);
+  return head +
+    '<div class="dbgrid"><section style="display:flex;flex-direction:column;gap:10px"><span class="label">Tables</span><div class="panel tlist" role="group" aria-label="Tables">' +
+      Object.keys(DB).map((k) => '<button data-act="db-table" data-v="' + k + '" aria-pressed="' + (k === name) + '"><span>' + k + '</span><span class="faint">' + DB[k].count + '</span></button>').join('') + '</div></section>' +
+    '<section style="display:flex;flex-direction:column;gap:18px;min-width:0">' +
+      '<div style="display:flex;flex-direction:column;gap:10px"><span class="label">Columns \u00b7 <span class="mono" style="text-transform:none;letter-spacing:0">' + name + '</span></span><div class="panel" style="overflow-x:auto"><table class="tbl"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Can be empty</th><th scope="col">Key</th></tr></thead><tbody>' +
+        t.cols.map((c) => '<tr><td class="mono">' + esc(c[0]) + '</td><td class="mono muted">' + esc(c[1]) + '</td><td class="muted">' + (c[2] ? 'Yes' : 'No') + '</td><td class="muted">' + (c[3] ? esc(c[3]) : '<span class="faint">\u2014</span>') + '</td></tr>').join('') + '</tbody></table></div></div>' +
+      '<div style="display:flex;flex-direction:column;gap:10px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="margin-right:auto">Rows</span><input class="in" id="db-q" type="search" data-input="db-q" value="' + esc(S.db.q) + '" placeholder="Search these rows" aria-label="Search rows in ' + name + '" style="max-width:240px;height:32px"></div>' +
+        '<div class="panel" style="overflow-x:auto"><table class="tbl"><thead><tr>' + t.cols.map((c) => '<th scope="col" class="mono" style="text-transform:none;letter-spacing:0">' + esc(c[0]) + '</th>').join('') + '</tr></thead><tbody>' +
+        rows.map((r) => '<tr class="dbrow">' + r.map((v, i) => '<td' + (i === 0 || typeof v === 'number' ? ' class="mono"' : '') + '>' + cell(v) + '</td>').join('') + '</tr>').join('') + '</tbody></table>' +
+        (rows.length ? '' : '<div class="allclear" style="border:0">No rows on this page match \u201c' + esc(S.db.q) + '\u201d.</div>') + '</div>' +
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="faint" style="font-size:13px;margin-right:auto">' + (q ? rows.length + ' of ' + t.rows.length + ' rows on this page match \u00b7 ' : '') + '1\u2013' + t.rows.length + ' of ' + t.count + '</span><button class="btn ghost" style="height:28px" disabled>Previous</button><button class="btn ghost" style="height:28px" data-act="db-page">Next</button></div></div>' +
+    '</section></div>' +
+    '<div class="confirm" style="gap:4px"><span>Read-only. Changes to columns come from migrations in pull requests. Rows change only through the app.</span><span class="faint" style="font-size:13px">Opening live data is recorded (IDs only).</span></div>' + agentLine;
 }
 
 /* ---------- Organization: one agent the organization owns (admin oversight) ---------- */
@@ -2417,7 +2516,7 @@ function connect() {
 }
 
 /* ---------- Render + routing ---------- */
-const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => memberView(appSettings(), 'change secrets and domains'), 'Customer order tracker / Ship / <b>App settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => memberView(ship(), 'release, or go back to an earlier release'), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], 'org-new': [orgNew, 'Your workrooms / <b>Create an organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
+const VIEWS = { all: [everything, '<b>Everything</b>'], 'k-all': [everything, '<b>Everything</b>'], rules: [() => memberView(rules(), 'change the rules'), 'Customer order tracker / <b>Rules</b>'], app: [() => shipPage('settings'), 'Customer order tracker / Ship / <b>Settings</b>'], 'org-agent': [orgAgent, 'Organization / <b>Menu Agent</b>'], door: [door, '', true], 'k-agent': [kAgent, 'Your agents / <b>Agent</b>'], 'k-spend': [kSpend, '<b>Spend</b>'], connect: [connect, 'Account / <b>Connect your chat</b>'], 'k-connect': [connect, 'Account / <b>Connect your chat</b>'], home: [home, '<b>Today</b>'], board: [board, 'Customer order tracker / <b>Board</b>'], review: [review, 'Customer order tracker / Board / <b>Review</b>'], ship: [() => shipPage(S.shipTab), 'Customer order tracker / <b>Ship</b>'], team: [() => memberView(team(), 'invite people or archive the workroom'), 'Customer order tracker / <b>Team</b>'], 'k-home': [kHome, '<b>Today</b>'], 'k-run': [kRun, 'Your agents / <b>Live run</b>'], 'k-agents': [kAgents, '<b>Your agents</b>'], 'k-room': [kRoom, 'Explore / <b>Workroom</b>'], 'k-explore': [kExplore, '<b>Explore</b>'], rooms: [rooms, '<b>Your workrooms</b>'], start: [start, 'Your workrooms / <b>Start a workroom</b>'], fresh: [fresh, 'Bakery preorders / <b>Today</b>'], repo: [() => memberView(repo(), 'change checks, approvers and releases'), 'Customer order tracker / Team / <b>Code and releases</b>'], agent: [agent, 'Customer order tracker / Team / <b>Coding Agent</b>'], welcome: [welcome, '', true], public: [pub, '', true], plan: [plan, 'Customer order tracker / Today / <b>Planner\'s plan</b>'], 'k-pair': [kPair, 'Your agents / <b>Add an agent</b>'], 'k-record': [kRecord, '<b>Track record</b>'], mail: [mail, '<b>Notifications</b>'], find: [find, 'Customer order tracker / Team / <b>Find contributors</b>'], org: [() => memberView(org(), 'add people or change roles'), '<b>Organization</b>'], 'org-new': [orgNew, 'Your workrooms / <b>Create an organization</b>'], me: [account, '<b>Account</b>'], brief: [brief, 'Customer order tracker / <b>Brief</b>'], task: [taskPage, 'Customer order tracker / Board / <b>Task</b>'], history: [history, 'Customer order tracker / <b>History</b>'], 'k-new': [kNew, '<b>Today</b>'], 'k-me': [account, '<b>Account</b>'], 'k-mail': [mail, '<b>Notifications</b>'] };
 function render() {
   const v = VIEWS[S.route] || VIEWS.home;
   const active = document.activeElement && document.activeElement.id;
@@ -2557,6 +2656,9 @@ document.addEventListener('click', (e) => {
     case 'dom-rm': { const d = S.app.domains.splice(Number(el.dataset.i), 1)[0]; toast(d[0] + ' removed.'); break; }
     case 'dom-check': S.app.domains[Number(el.dataset.i)][1] = 'ok'; toast('Connected. HTTPS is on.'); break;
     case 'org-inbox': S.orgInbox = el.dataset.v; break;
+    case 'ship-tab': S.shipTab = el.dataset.v; if (S.route !== 'ship') { go('ship'); return; } break;
+    case 'db-table': S.db = { table: el.dataset.v, q: '', page: 0 }; break;
+    case 'db-page': toast('This preview has one page of sample rows.'); break;
     case 'org-pause': S.orgPaused = !S.orgPaused; toast(S.orgPaused ? 'Paused. Marco and the owner are told.' : 'Resumed.'); break;
     case 'door': S.door = el.dataset.v; S.resendAsked = false; break;
     case 'door-resend': S.resendAsked = true; break;
@@ -2799,6 +2901,7 @@ document.addEventListener('input', (e) => {
   if (k === 'env-live') S.app.form.live = e.target.value;
   if (k === 'env-prev') S.app.form.prev = e.target.value;
   if (k === 'domnew') S.app.domDraft = e.target.value;
+  if (k === 'db-q') { S.db.q = e.target.value; render(); }
   if (k === 'paircode') S.pairing.code = e.target.value;
   if (k === 'pairname') S.pairing.name = e.target.value;
   if (k === 'plan-who') { S.plan.items[Number(e.target.dataset.i)].who = e.target.value; render(); }

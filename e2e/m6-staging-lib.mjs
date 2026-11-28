@@ -278,10 +278,19 @@ export function schemas(openapi) {
 export const snake = (name) => name.replace(/^[A-Z]/, (letter) => letter.toLowerCase()).replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 
 /**
+ * M8's previews (the preview plan) build on M6's release and sit behind the same switch, so they are release's too: an
+ * operation whose own path is a preview's and whose summary marks it M8's. A route that only mentions a preview, such as
+ * M5's task release status, isn't one.
+ */
+const M8_PREVIEW_MARK = "(M8, the preview plan";
+const isPreviewOperation = (op) => /(^|\/)preview(-[a-z]+)?(\/|$)/.test(op.path) && op.text.includes(M8_PREVIEW_MARK);
+
+/**
  * The fields that are M6's, derived from the contract. A schema is M6's when its own description marks it, or when only
- * M6 operations (and M6 schemas) refer to it. Its name, as a field would carry it, is one; and so is each of its
- * properties whose name appears nowhere else in the contract. `release` is left to `m6Fields`, which tells M5's `release: { exists: false }`
- * from an M6 release.
+ * M6 operations (and M6 schemas) refer to it, M8's preview operations aside: they are release's too, behind the same
+ * switch, so a schema they share with M6 stays M6's, though one only they use isn't. Its name, as a field would carry it,
+ * is one; and so is each of its properties whose name appears nowhere else in the contract outside release, M6's or M8's
+ * previews'. `release` is left to `m6Fields`, which tells M5's `release: { exists: false }` from an M6 release.
  */
 export function m6Keys(openapi) {
   const all = schemas(openapi);
@@ -291,12 +300,29 @@ export function m6Keys(openapi) {
     if (schema.text.includes(M6_MARK)) return true;
     const users = ops.filter((op) => refersTo(op.text, schema.name));
     const viaSchemas = all.filter((other) => other.name !== schema.name && refersTo(other.text, schema.name));
-    return users.length + viaSchemas.length > 0 && users.every((op) => op.m6) && viaSchemas.every((other) => other.text.includes(M6_MARK));
+    const m6Users = users.filter((op) => op.m6);
+    return m6Users.length + viaSchemas.length > 0 && users.every((op) => op.m6 || isPreviewOperation(op)) && viaSchemas.every((other) => other.text.includes(M6_MARK));
   };
   const ours = all.filter(isM6);
-  // Everything of the contract's that isn't M6's: a property named anywhere in it isn't distinctive enough to count.
+  // A schema only M8's preview operations or other preview schemas use is release's, never M6's: it adds no key, and its
+  // properties don't make an M6 property common.
+  const previewOnly = new Set();
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const schema of all) {
+      if (previewOnly.has(schema.name) || ours.includes(schema)) continue;
+      const users = ops.filter((op) => refersTo(op.text, schema.name));
+      const viaSchemas = all.filter((other) => other.name !== schema.name && refersTo(other.text, schema.name));
+      if (users.length + viaSchemas.length > 0 && users.every(isPreviewOperation) && viaSchemas.every((other) => previewOnly.has(other.name))) {
+        previewOnly.add(schema.name);
+        changed = true;
+      }
+    }
+  }
+  // Everything of the contract's that isn't release's: a property named anywhere in it isn't distinctive enough to count.
   let rest = String(openapi);
-  for (const text of [...ours.map((schema) => schema.text), ...ops.filter((op) => op.m6).map((op) => op.text)]) rest = rest.split(text).join("");
+  const released = [...ours, ...all.filter((schema) => previewOnly.has(schema.name))].map((schema) => schema.text);
+  for (const text of [...released, ...ops.filter((op) => op.m6 || isPreviewOperation(op)).map((op) => op.text)]) rest = rest.split(text).join("");
   const elsewhere = (name) => new RegExp(`\\b${name}\\b`).test(rest);
   const keys = new Set(ours.map((schema) => snake(schema.name)));
   for (const schema of ours) for (const property of schema.properties) if (!elsewhere(property)) keys.add(property);

@@ -322,6 +322,18 @@ input.in, select.in { height: 38px; padding: 0 12px; }
 .tabrow button { height: 36px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: transparent; color: var(--muted); cursor: pointer; font-size: 13.5px; white-space: nowrap; }
 .tabrow button[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--ink); }
 .tabrow button:hover { color: var(--text); }
+/* One control row: tabs on the left, a filter at the right end of the same row. */
+.ctlrow { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); margin-top: -6px; min-width: 0; }
+.ctlrow .tabrow { border-bottom: 0; margin-top: 0; flex: 1; min-width: 0; align-self: stretch; }
+/* View switch: same content, another layout. Icon buttons, top right of the page header. */
+.vswitch { display: inline-flex; padding: 2px; gap: 2px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); }
+.vswitch button { width: 30px; height: 30px; display: inline-grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+.vswitch button:hover { color: var(--text); }
+.vswitch button[aria-pressed="true"] { background: var(--sunk); color: var(--text); }
+/* Filter menu: "Show: Everything" as a compact native select. */
+.showf { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; flex: none; }
+.showf select { height: 30px; width: auto; padding: 0 8px; font-size: 13px; color: var(--text); border: 1px solid var(--line); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.head .seg button { height: 30px; }
 .infra-svg { display: block; width: 100%; height: auto; max-height: 340px; }
 .infra-svg .ln { stroke: var(--faint); stroke-width: 1.5; fill: none; }
 .infra-svg .ln.out { stroke-dasharray: 5 5; }
@@ -853,6 +865,19 @@ function tabs(items, cur, act, o) {
   const key = o.key || 'v';
   return '<div class="tabrow" role="tablist" aria-label="' + esc(o.label) + '">' + items.map((x) => '<button type="button" role="tab" id="' + o.id + 'tab-' + esc(x[0]) + '" aria-selected="' + (cur === x[0]) + '" aria-controls="' + o.id + 'panel" data-act="' + act + '" data-' + key + '="' + esc(x[0]) + '">' + esc(x[1]) + (x[2] ? ' <span class="faint">' + esc(x[2]) + '</span>' : '') + '</button>').join('') + '</div>';
 }
+/* View switch: same content in another layout. items: [[value, label, icon]] with icon in VIEW_ICONS. Sits in the page header next to the main button. */
+const VIEW_ICONS = {
+  board: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/></svg>',
+  list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke-width="3"/></svg>',
+  timeline: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h9M7 12h10M12 18h9"/></svg>'
+};
+function viewSwitch(items, cur, act, label) {
+  return '<div class="vswitch" role="group" aria-label="' + esc(label || 'Layout') + '">' + items.map((x) => '<button type="button" data-act="' + act + '" data-v="' + esc(x[0]) + '" aria-pressed="' + (cur === x[0]) + '" aria-label="' + esc(x[1]) + '" title="' + esc(x[1]) + '">' + (VIEW_ICONS[x[2] || x[0]] || '') + '</button>').join('') + '</div>';
+}
+/* Filter menu: narrows the same content. items: [[value, label]]; change goes to data-act-change=act. Put it at the right end of an existing row. */
+function showFilter(items, cur, act, label) {
+  return '<label class="showf">' + esc(label || 'Show') + '<select data-act-change="' + act + '">' + items.map((x) => '<option value="' + esc(x[0]) + '"' + (cur === x[0] ? ' selected' : '') + '>' + esc(x[1]) + '</option>').join('') + '</select></label>';
+}
 function tabPanel(id, cur, body) {
   return '<div id="' + id + 'panel" role="tabpanel" aria-labelledby="' + id + 'tab-' + esc(cur) + '" style="display:flex;flex-direction:column;gap:22px;min-width:0">' + body + '</div>';
 }
@@ -1178,9 +1203,8 @@ function home() {
   const total = needs.length + (all ? 1 : 0);
   const grouped = all ? '<span class="label">Customer order tracker</span>' + (cards || '<div class="allclear">Nothing here.</div>') + '<span class="label" style="margin-top:10px">Bakery preorders</span>' + bpCard : cards;
   return (S.archived ? '<div class="confirm"><b>Customer order tracker is archived.</b><span class="muted">Everything stays readable and the live site keeps running. Agents can\'t take or submit work.</span><button class="btn" data-act="unarchive" style="align-self:flex-start">Unarchive</button></div>' : '') +
-    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn ghost" href="#all">One list</a></div></div>' +
-    tabs([['room', 'This workroom'], ['all', 'All workrooms']], all ? 'all' : 'room', 'scope', { id: 'scope', label: 'Which workrooms', key: 's' }) +
-    tabPanel('scope', all ? 'all' : 'room', '<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
+    '<div class="head"><div><p class="faint" style="margin:0 0 4px">Tuesday afternoon</p><h1>' + words[Math.min(total, 6)] + '</h1></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><div class="seg" role="group" aria-label="Which workrooms">' + [['room', 'This workroom'], ['all', 'All workrooms']].map((x) => '<button type="button" data-act="scope" data-s="' + x[0] + '" aria-pressed="' + ((all ? 'all' : 'room') === x[0]) + '">' + x[1] + '</button>').join('') + '</div><a class="btn ghost" href="#all">One list</a></div></div>' +
+    ('<div class="grid2"><section class="decisions">' + (grouped || '<div class="allclear">You\'re all caught up. Agents keep working; we\'ll put anything that needs you here.</div>') + '</section>' +
     '<section style="display:flex;flex-direction:column;gap:22px">' +
     '<div><span class="label">Moving without you</span><div class="quiet">' +
     moving.map((t) => t.offline
@@ -1198,9 +1222,6 @@ function home() {
 const EST = { 14: [0, 1], 15: [1, 1], 16: [2, 2], 18: [4, 3], 19: [6, 2], 21: [7, 1], 20: [7, 1], 22: [8, 2], 23: [8, 1], 24: [9, 1] };
 const DAYS = ['Mon 16', 'Tue 17', 'Wed 18', 'Thu 19', 'Fri 20', 'Mon 23', 'Tue 24', 'Wed 25', 'Thu 26', 'Fri 27'];
 const TODAY = 6.6;
-function viewSwitch() {
-  return tabs([['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']], S.view, 'view', { id: 'view', label: 'Board view' });
-}
 function listView() {
   const order = { review: 0, building: 1, planned: 2, done: 3 };
   const F = [['all', 'All'], ['you', 'Needs you'], ['moving', 'Being built'], ['planned', 'Planned'], ['done', 'Done']];
@@ -1226,14 +1247,14 @@ function timelineView() {
 }
 function board() {
   return (S.archived ? '<div class="confirm"><b>Archived.</b><span class="muted">The board is read-only. <a href="#team">Unarchive from Team</a> to start work again.</span></div>' : '') +
-    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
-    viewSwitch() + tabPanel('view', S.view, S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
+    '<div class="head"><div><h1>Board</h1><p>' + (S.view === 'board' ? 'Every task moves left to right. Only the orange column waits on you. Drag Planned cards to set the order.' : S.view === 'list' ? 'Every task in one table. Click a column to sort.' : 'When things happened, and when Planner expects the rest.') + '</p></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">' + viewSwitch([['board', 'Board'], ['list', 'List'], ['timeline', 'Timeline']], S.view, 'view', 'Board layout') + '<button class="btn primary" data-act="newtask"' + (S.archived ? ' disabled' : '') + '>New task</button></div></div>' +
+    '<div style="display:flex;flex-direction:column;gap:22px;min-width:0">' + (S.view === 'list' ? listView() : S.view === 'timeline' ? timelineView() :
     '<div class="board">' + STAGES.map((s) => {
       const ts = S.tasks.filter((t) => t.stage === s.id);
       return '<section class="col' + (s.id === 'review' ? ' you' : '') + '" data-col="' + s.id + '"><div class="colhead"><span class="dot" style="background:' + s.color + '"></span>' + s.name + '<span class="c">' + ts.length + '</span></div>' +
         ts.map((t) => '<button class="card" draggable="' + (!S.archived) + '" data-act="open" data-id="' + t.id + '"' + ((t.id === 19 && S.q.state === 'open') || t.blocked ? ' style="border-color:var(--need-line)"' : '') + '><span class="t">' + t.title + '</span>' + (t.id === 19 && S.q.state === 'open' ? '<span class="flag"><span class="dot" style="background:var(--need)"></span>Question for you</span>' : (t.blocked ? '<span class="flag"><span class="dot" style="background:var(--need)"></span>' + t.blocked + '</span>' : '')) + (t.offline ? '<span class="flag" style="color:var(--muted)"><span class="dot" style="background:var(--faint)"></span>Offline 40 min</span>' : '') + '<span class="f"><span class="av agent">' + esc(t.av) + '</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + t.when + '</span>' + ((S.files[t.id] || []).length ? '<span title="Files" style="display:inline-flex;align-items:center;gap:3px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7L9.2 17.2a1.7 1.7 0 0 1-2.4-2.4L14.5 7"/></svg>' + S.files[t.id].length + '</span>' : '') + '<span class="mono">#' + t.id + '</span></span></button>').join('') +
         (s.id === 'planned' ? '<button class="addcard" data-act="newtask">+ New task</button>' : '') + '</section>';
-    }).join('') + '</div>');
+    }).join('') + '</div>') + '</div>';
 }
 
 /* ---------- Creator: Review ---------- */
@@ -1799,13 +1820,13 @@ const LINKS = {
 };
 function history() {
   const h = S.hist;
-  const hTabs = tabs([['list', 'What happened'], ['map', 'Who works with whom']], h.tab, 'hist-tab', { id: 'hist', label: 'History view', key: 't' });
+  const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
+  const hTabs = '<div class="ctlrow">' + tabs([['list', 'What happened'], ['map', 'Who works with whom']], h.tab, 'hist-tab', { id: 'hist', label: 'History view', key: 't' }) + (h.tab === 'list' ? showFilter(F, h.f, 'hist-f', 'Show') : '') + '</div>';
   let body;
   if (h.tab === 'list') {
-    const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
     const rows = HIST.filter((e) => h.f === 'all' || e[2] === h.f);
     const days = []; rows.forEach((e) => { if (days.indexOf(e[0]) < 0) days.push(e[0]); });
-    body = '<div class="chips">' + F.map((f) => '<button class="btn' + (h.f === f[0] ? ' primary' : ' ghost') + '" style="height:30px" data-act="hist-f" data-f="' + f[0] + '">' + f[1] + '</button>').join('') + '</div>' +
+    body = (days.length ? '' : '<div class="allclear">Nothing here.</div>') +
       days.map((d) => '<section><span class="label">' + d + '</span><div class="panel" style="margin-top:10px">' + rows.filter((e) => e[0] === d).map((e) => '<div class="row"' + (e[5] ? ' data-act="open" data-id="' + e[5] + '" style="cursor:pointer"' : '') + '><span class="faint mono" style="width:70px;flex:none">' + e[1] + '</span><span class="av' + (e[3] === 'EL' ? '' : ' agent') + '" style="width:24px;height:24px;font-size:9.5px">' + esc(e[3]) + '</span><span style="flex:1;min-width:0">' + e[4] + '</span>' + (e[5] ? '<span class="mono faint">#' + e[5] + '</span>' : '') + '</div>').join('') + '</div></section>').join('');
   } else {
     const N = { 'You': [300, 44], 'Planner': [90, 170], 'Coding Agent': [510, 170], 'Review Agent': [510, 320], 'QA': [90, 320] };
@@ -1841,9 +1862,8 @@ function find() {
   ];
   const roles = ['QA', 'Frontend', 'Backend'];
   const list = AG.filter((a) => a[2] === S.findRole);
-  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Find contributors</h1><p>Agents other people run. Their records come from owners who approved their work.</p></div></div>' +
-    tabs(roles.map((r) => [r, r]), S.findRole, 'find-role', { id: 'role', label: 'Role', key: 'r' }) +
-    tabPanel('role', S.findRole, '<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
+  return '<div class="head"><div><p class="faint" style="margin:0 0 4px"><a href="#team" style="text-decoration:none">Team</a> /</p><h1>Find contributors</h1><p>Agents other people run. Their records come from owners who approved their work.</p></div>' + showFilter(roles.map((r) => [r, r]), S.findRole, 'find-role', 'Role') + '</div>' +
+    ('<div class="panel">' + list.map((a) => '<div class="row" style="flex-wrap:wrap;align-items:flex-start"><span class="av agent">' + a[0].split(' ').map((w) => w[0]).join('').slice(0, 2) + '</span><span style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:2px"><span><b style="font-weight:600">' + a[0] + '</b> <span class="faint">\u00b7 run by ' + a[1] + '</span></span><span class="muted">' + a[3] + '</span><span class="faint" style="font-size:13px">' + a[4] + ' \u00b7 ' + a[5] + '</span></span>' +
       (S.invited[a[0]] ? '<span class="stage"><span class="dot" style="background:var(--build)"></span>Invited</span>' : '<button class="btn" data-act="find-invite" data-a="' + a[0] + '" data-r="' + a[2] + '">Invite to ' + (a[2] === 'QA' ? 'QA' : a[2].toLowerCase() + ' engineer') + '</button>') + '</div>').join('') + '</div>') +
     '<p class="faint" style="font-size:13px">Skills are what each contributor wrote. Approval counts are real. Anyone you invite can still say no.</p>';
 }
@@ -2862,6 +2882,8 @@ document.addEventListener('change', (e) => {
   if (c === 'spend-cap') { S.spend.cap = e.target.value; render(); }
   if (c === 'spend-run') S.spend.perRun = e.target.value;
   if (c === 'st-preset') { const r = S.start.roles[Number(e.target.dataset.i)]; if (r && PRESETS[e.target.value] && e.target.value !== 'coordinator') r[4] = e.target.value; render(); }
+  if (c === 'hist-f') { S.hist.f = e.target.value; render(); }
+  if (c === 'find-role') { S.findRole = e.target.value; render(); }
   if (c === 'pol-sel') { const P = S.policy; P.draft = Object.assign({}, P.draft || {}, { [e.target.dataset.k]: e.target.value }); render(); }
 });
 document.addEventListener('input', (e) => {

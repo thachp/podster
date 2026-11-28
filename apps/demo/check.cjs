@@ -182,5 +182,22 @@ location.hash = '#home'; __t.fromHash(); if (html.indexOf('2026 OM.Network, LLC'
   location.hash = '#start'; __t.fromHash(); if (html.indexOf('data-act="st-set" data-k="vis"') < 0 || html.indexOf('<div class="seg" role="group"') < 0) throw new Error('start form keeps .seg');
   if ((require('fs').readFileSync(process.argv[2] || require('path').join(__dirname, 'index.html'), 'utf8').match(/role="tab"/g) || []).length !== 1) throw new Error('one tab helper renders every tab');
   console.log('TABS-OK'); }
+// WCAG 2.1 AA colour contrast on the palette tokens, light and dark (both dark blocks must match).
+{ const src = require('fs').readFileSync(process.argv[2] || require('path').join(__dirname, 'index.html'), 'utf8');
+  const tok = (re, nm) => { const m = src.match(re); if (!m) throw new Error('contrast: no ' + nm + ' block'); const o = {}; for (const [, k, v] of m[1].matchAll(/--([a-z-]+):\s*(#[0-9a-fA-F]{6})\b/g)) o[k] = v.toLowerCase(); return o; };
+  const L = tok(/:root \{([\s\S]*?)\}/, 'light'), D = tok(/:root\[data-theme="dark"\] \{([\s\S]*?)\}/, 'dark'), DM = tok(/:root:not\(\[data-theme="light"\]\) \{([\s\S]*?)\}/, 'dark media');
+  if (JSON.stringify(D) !== JSON.stringify(DM)) throw new Error('contrast: dark blocks differ');
+  const lum = (h) => { const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const need = (th, T, fg, bg, min) => { const r = ratio(T[fg], T[bg]); if (!(r >= min)) throw new Error('contrast ' + th + ': --' + fg + ' on --' + bg + ' is ' + r.toFixed(2) + ' < ' + min); };
+  for (const [th, T] of [['light', L], ['dark', D]]) {
+    for (const fg of ['text', 'muted', 'faint']) for (const bg of ['bg', 'surface', 'sunk']) need(th, T, fg, bg, 4.5);
+    need(th, T, 'need-text', 'need', 4.5); need(th, T, 'done-text', 'done', 4.5); need(th, T, 'ink-text', 'ink', 4.5);
+    need(th, T, 'need', 'need-soft', 4.5); need(th, T, 'need', 'surface', 4.5);
+    need(th, T, 'need', 'surface', 3); need(th, T, 'build', 'surface', 3); need(th, T, 'planned', 'surface', 3);
+    for (const bg of ['bg', 'surface', 'sunk']) need(th, T, 'control', bg, 3);
+  }
+  if (/background: var\(--(need|done)\);[^}]*color: #fff/.test(src)) throw new Error('contrast: hard-coded white text on --need/--done');
+  console.log('CONTRAST-OK'); }
 console.log('AUTH-OK');
 process.exit(0);

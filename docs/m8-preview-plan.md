@@ -400,7 +400,7 @@ New rows only; M6's stand (`docs/m6-plan.md:2821-2850`; `docs/security/m6-review
 
 ## Owner decisions
 
-**Q1 to Q10 decided by the owner on 2026-11-27,** in the words "Accept all", to a list of eight items that grouped them (Q2 with Q3, Q7 with Q8), each as recommended below, recorded as decisions 250 to 257 in [PRODUCT.md](spec/PRODUCT.md#m8-preview-decisions-november-27-2026). The owner was told of and accepted the trade-off with them: `allow-same-origin` on preview hosts, narrowing decision 216 there only, and the jar-eviction residual on staging. Recommendations are the architect's. **Still open, for the owner:** Q11 and Q12, and which production gate under Q9.
+**Q1 to Q10 decided by the owner on 2026-11-27,** in the words "Accept all", to the architect's list of eight items (the architect grouped the plan's questions into eight items: Q2 with Q3, Q7 with Q8, Q10 into item 8), each as recommended below, recorded as decisions 250 to 257 in [PRODUCT.md](spec/PRODUCT.md#m8-preview-decisions-november-27-2026). The owner was told of and accepted the trade-off with them: `allow-same-origin` on preview hosts, narrowing decision 216 there only, and the jar-eviction residual on staging. Recommendations are the architect's. **Still open, for the owner:** Q11 and Q12, and which production gate under Q9.
 
 | # | Question | Recommendation | Not taken | Decided |
 | --- | --- | --- | --- | --- |

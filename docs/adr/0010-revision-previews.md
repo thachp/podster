@@ -25,7 +25,7 @@
 
 ## The owner's answers, 2026-11-27
 
-The owner was shown eight of the [plan's questions](../m8-preview-plan.md#owner-decisions), each with its recommendation, and the trade-off, and answered "Accept all". That covers Q1 to Q10: the second environment, private-room previews with private production still refused, gated public previews, no agent-made previews yet, previews optional before publishing, the mechanism and the narrowing of decision 216 on staging after spike P1 with the jar-eviction residual accepted there, the production gate, and one preview per room sharing the room's caps. **Still open, for the owner:** Q11, the preview namespace, ticket key and content Worker configuration, and Q12, a pending publish after its preview is replaced. **Also still the owner's:** which production gate under Q9.
+The architect grouped the [plan's questions](../m8-preview-plan.md#owner-decisions) into eight items: Q2 with Q3, Q7 with Q8, Q10 into item 8. The owner was shown those eight, each with its recommendation, and the trade-off, and answered "Accept all". That covers Q1 to Q10: the second environment, private-room previews with private production still refused, gated public previews, no agent-made previews yet, previews optional before publishing, the mechanism and the narrowing of decision 216 on staging after spike P1 with the jar-eviction residual accepted there, the production gate, and one preview per room sharing the room's caps. **Still open, for the owner:** Q11, the preview namespace, ticket key and content Worker configuration, and Q12, a pending publish after its preview is replaced. **Also still the owner's:** which production gate under Q9.
 
 ## Not verified
 

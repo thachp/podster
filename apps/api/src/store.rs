@@ -587,6 +587,119 @@ CREATE TABLE IF NOT EXISTS invitation_invitee (invitation_id TEXT PRIMARY KEY RE
 "
 CREATE TABLE IF NOT EXISTS merge_public_ack (task_id TEXT PRIMARY KEY,
   requested_at INTEGER NOT NULL CHECK (typeof(requested_at) = 'integer')) WITHOUT ROWID;
+",
+// Steps 59 to 63 (M8 step 5; docs/m8-preview-plan.md, 9.4; decisions 250 to 259): the schema previews need, and nothing
+// that runs yet. Each is a new table, so each runs again safely, and none writes a row: a room from before them has no
+// preview, and every release and custom hostname it holds stays production's.
+//
+// Step 59 (decision 250): a release's environment, one row a release. `release.environment` can only say `production`,
+// and SQLite can't change a check without rebuilding the table, so a preview release is the one with a row here naming
+// `preview`. No row is `production` (`podster_core::preview::recorded_environment`).
+"
+CREATE TABLE IF NOT EXISTS release_environment (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  environment TEXT NOT NULL CHECK (environment IN ('production', 'preview'))) WITHOUT ROWID;
+",
+// Step 60 (the plan's 3.1, 3.2 and 5.6; decision 257): the room's preview slot, as `podster_core::preview::PreviewSlot`
+// holds it. At most one is current, as `app_label` keeps one current label; a deleted slot keeps its row, `current`
+// cleared and `deleted_at` set, so its ID and preview label are never drawn again. Its serve state is production's shape
+// in columns of its own, never in `serve_state` or `release_config`, so nothing a preview writes can name a production
+// host: the serve epoch; the default host's release and version (its host is the preview label's, so it isn't stored),
+// and at most one custom host's name, release, version and closed flag; the flight's release, epoch and time, and each
+// host's flight version and what it served before, which only a flight holds. A host's script is always the slot's
+// label, a dot and the release named, so only the release is kept. The access epoch only goes up, and never past
+// `podster_core::preview::MAX_ACCESS_EPOCH`.
+"
+CREATE TABLE IF NOT EXISTS preview_slot (id TEXT PRIMARY KEY CHECK (length(id) = 36 AND substr(id, 1, 4) = 'pvw_' AND substr(id, 5) NOT GLOB '*[^0-9a-f]*'),
+  label TEXT NOT NULL UNIQUE CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'),
+  current INTEGER UNIQUE CHECK (current = 1),
+  access_epoch INTEGER NOT NULL DEFAULT 0 CHECK (typeof(access_epoch) = 'integer' AND access_epoch BETWEEN 0 AND 999999999999999),
+  serve_epoch INTEGER NOT NULL DEFAULT 0 CHECK (typeof(serve_epoch) = 'integer' AND serve_epoch >= 0),
+  default_release_id TEXT REFERENCES release (id),
+  default_version INTEGER NOT NULL DEFAULT 0 CHECK (typeof(default_version) = 'integer' AND default_version >= 0),
+  default_flight_version INTEGER CHECK (default_flight_version IS NULL OR (typeof(default_flight_version) = 'integer' AND default_flight_version >= 0)),
+  default_flight_before TEXT REFERENCES release (id),
+  custom_host TEXT CHECK (custom_host IS NULL OR (length(custom_host) BETWEEN 4 AND 253 AND custom_host NOT GLOB '*[^a-z0-9.-]*' AND custom_host GLOB '*?.?*'
+    AND custom_host NOT GLOB '.*' AND custom_host NOT GLOB '*.' AND custom_host NOT GLOB '*..*')),
+  custom_release_id TEXT REFERENCES release (id),
+  custom_version INTEGER CHECK (custom_version IS NULL OR (typeof(custom_version) = 'integer' AND custom_version >= 0)),
+  custom_closed INTEGER CHECK (custom_closed IS NULL OR custom_closed IN (0, 1)),
+  custom_flight_version INTEGER CHECK (custom_flight_version IS NULL OR (typeof(custom_flight_version) = 'integer' AND custom_flight_version >= 0)),
+  custom_flight_before TEXT REFERENCES release (id),
+  in_flight_release TEXT REFERENCES release (id),
+  in_flight_epoch INTEGER CHECK (in_flight_epoch IS NULL OR (typeof(in_flight_epoch) = 'integer' AND in_flight_epoch >= 0)),
+  in_flight_at INTEGER CHECK (in_flight_at IS NULL OR typeof(in_flight_at) = 'integer'),
+  created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'),
+  deleted_at INTEGER CHECK (deleted_at IS NULL OR typeof(deleted_at) = 'integer'),
+  updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
+  CHECK ((current IS NULL) = (deleted_at IS NOT NULL)),
+  CHECK ((custom_host IS NULL) = (custom_version IS NULL)), CHECK ((custom_host IS NULL) = (custom_closed IS NULL)),
+  CHECK (custom_host IS NOT NULL OR (custom_release_id IS NULL AND custom_flight_version IS NULL AND custom_flight_before IS NULL)),
+  CHECK (custom_closed IS NOT 1 OR custom_release_id IS NULL),
+  CHECK ((in_flight_release IS NULL) = (in_flight_epoch IS NULL)), CHECK ((in_flight_release IS NULL) = (in_flight_at IS NULL)),
+  CHECK (in_flight_release IS NOT NULL OR (default_flight_version IS NULL AND default_flight_before IS NULL
+    AND custom_flight_version IS NULL AND custom_flight_before IS NULL))) WITHOUT ROWID;
+",
+// Step 61 (the plan's 4.1 and 4.3; decisions 254 and 259): a release's build, recorded by the job once it fetched and
+// checked the tree, and what a production release made from a preview names: the preview release and its build, both
+// fixed once written. The approval is checked against `release_from_preview.build_id`, never the slot's current
+// preview, so replacing the preview can't move it. A release with no `release_from_preview` row wasn't made from one.
+"
+CREATE TABLE IF NOT EXISTS release_build (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  build_id TEXT NOT NULL CHECK (length(build_id) = 36 AND substr(build_id, 1, 4) = 'bld_' AND substr(build_id, 5) NOT GLOB '*[^0-9a-f]*'),
+  tree_sha TEXT NOT NULL CHECK (length(tree_sha) = 40 AND tree_sha NOT GLOB '*[^0-9a-f]*'),
+  form_version TEXT NOT NULL CHECK (length(form_version) BETWEEN 1 AND 256)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS release_from_preview (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  preview_release_id TEXT NOT NULL REFERENCES release (id),
+  build_id TEXT NOT NULL CHECK (length(build_id) = 36 AND substr(build_id, 1, 4) = 'bld_' AND substr(build_id, 5) NOT GLOB '*[^0-9a-f]*'),
+  CHECK (release_id != preview_release_id)) WITHOUT ROWID;
+",
+// Step 62 (the plan's 5.3, steps 2 and 3, and 5.4): a preview session the room signed, by its ID, with the person it
+// maps to, since no token carries a person's ID; the alarm prunes it once expired. A session lasts at most an hour
+// (`podster_core::preview_access::SESSION_MAX_TTL_MS`). And the room's count of asks to `/v1/preview-access`, one row an
+// ask, for its 300 an hour; a person's 30 a minute is counted in their own Principal object, not here.
+"
+CREATE TABLE IF NOT EXISTS preview_session (sid TEXT PRIMARY KEY CHECK (length(sid) = 36 AND substr(sid, 1, 4) = 'pvs_' AND substr(sid, 5) NOT GLOB '*[^0-9a-f]*'),
+  person_id TEXT NOT NULL CHECK (length(person_id) BETWEEN 1 AND 128),
+  created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer'),
+  expires_at INTEGER NOT NULL CHECK (typeof(expires_at) = 'integer' AND expires_at > created_at AND expires_at <= created_at + 3600000)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS preview_session_expiry ON preview_session (expires_at);
+CREATE TABLE IF NOT EXISTS preview_access_ask (at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE INDEX IF NOT EXISTS preview_access_ask_at ON preview_access_ask (at);
+",
+// Step 63 (the plan's section 7): what each of the room's custom hostname requests maps to, one row a request. No row is
+// `production` (`podster_core::hostnames::recorded_role`), so every request made before previews stays production's.
+// Only the room records a role: the hostname's own object holds one claim a name, whatever it maps to (decision 201).
+"
+CREATE TABLE IF NOT EXISTS custom_hostname_role (request_id TEXT PRIMARY KEY REFERENCES hostname_request (id),
+  role TEXT NOT NULL CHECK (role IN ('production', 'preview'))) WITHOUT ROWID;
+",
+// Step 64 (M8 step 5, beyond the plan's 9.4): a preview label must be a row of `app_label`, since a preview is a
+// release record (the plan's 3.1) and `release.label`, `script_delete.label`, `app_store.label` and
+// `release_store_binding.label` all reference it, which the room enforces. As it stood, a label that isn't the current
+// one had to be retired, and only one is current, so a live preview label could be neither. The table gains `kind`, and
+// a preview label is never `current`: `current` stays the production label alone, so every read of `current = 1` still
+// means production. A preview label is live until `retired_at` is set, and `label` stays the primary key, so no label is
+// ever drawn twice across both kinds. SQLite can't change a check in place, so the table is rebuilt, forward-only, every
+// row kept and every other check as it was; references to it are deferred to the end of the room's migration
+// transaction, so every row that names a label is checked again against the new table before anything is committed.
+// Run again, it is rebuilt again: a label is `preview` exactly when a preview slot (step 60) holds it, which no
+// rebuild loses. Forward-only: every existing label is `production`.
+"
+PRAGMA defer_foreign_keys = ON;
+CREATE TABLE app_label_copy (label TEXT PRIMARY KEY, current INTEGER, created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER,
+  suspended_at INTEGER, suspension_reason TEXT) WITHOUT ROWID;
+INSERT INTO app_label_copy (label, current, created_at, retired_at, indexed_at, suspended_at, suspension_reason)
+  SELECT label, current, created_at, retired_at, indexed_at, suspended_at, suspension_reason FROM app_label;
+DROP TABLE app_label;
+CREATE TABLE app_label (label TEXT PRIMARY KEY CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'),
+  kind TEXT NOT NULL DEFAULT 'production' CHECK (kind IN ('production', 'preview')), current INTEGER UNIQUE CHECK (current = 1),
+  created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER, suspended_at INTEGER, suspension_reason TEXT,
+  CHECK (kind = 'production' OR current IS NULL), CHECK (kind = 'preview' OR (current IS NULL) = (retired_at IS NOT NULL)),
+  CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL)), UNIQUE (label, current)) WITHOUT ROWID;
+INSERT INTO app_label (label, kind, current, created_at, retired_at, indexed_at, suspended_at, suspension_reason)
+  SELECT label, CASE WHEN label IN (SELECT label FROM preview_slot) THEN 'preview' ELSE 'production' END,
+    current, created_at, retired_at, indexed_at, suspended_at, suspension_reason FROM app_label_copy;
+DROP TABLE app_label_copy;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

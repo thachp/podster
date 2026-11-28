@@ -76,7 +76,7 @@ export default defineConfig({
           GITHUB_CLIENT_SECRET: "test-client-secret",
           TEST_DIRECTORY_SCHEMA: read("./migrations/0001_directory.sql") + read("./migrations/0003_one_personal_org.sql") + read("./migrations/0004_org_invitations.sql") + read("./migrations/0005_org_departure.sql") + read("./migrations/0006_pairing_host.sql"),
           TEST_AUTH_SCHEMA: read("./migrations/0002_auth.sql"),
-          TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql") + read("../api/migrations/0002_room_status.sql") + read("../api/migrations/0003_membership_by_org.sql") + read("../api/migrations/0004_ownerless_rooms.sql") + read("../api/migrations/0005_public_workroom_index.sql") + read("../api/migrations/0006_public_explore_order.sql") + read("../api/migrations/0007_repo_room_index.sql") + read("../api/migrations/0008_app_label_index.sql") + read("../api/migrations/0009_app_label_approved.sql"),
+          TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql") + read("../api/migrations/0002_room_status.sql") + read("../api/migrations/0003_membership_by_org.sql") + read("../api/migrations/0004_ownerless_rooms.sql") + read("../api/migrations/0005_public_workroom_index.sql") + read("../api/migrations/0006_public_explore_order.sql") + read("../api/migrations/0007_repo_room_index.sql") + read("../api/migrations/0008_app_label_index.sql") + read("../api/migrations/0009_app_label_approved.sql") + read("../api/migrations/0010_app_label_kind.sql"),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           // Every gateway source file, each after a `// FILE:` line, for the static check that an agent's link ends only by
           // a disconnect (deploy-release.spec.ts).

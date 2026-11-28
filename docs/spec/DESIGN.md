@@ -65,6 +65,7 @@ Route names are proposed; final routing depends on the host decision in [ARCHITE
 | `/w/:id/collaboration` | Collaboration map and its list equivalent |
 | `/w/:id/activity` | Permission-filtered room history |
 | `/w/:id/artifacts` | Versioned outputs |
+| `/w/:id/ship` | The room's preview: its state, build and link; make, replace, delete and publish it |
 | `/w/:id/settings` | Visibility, repository, release and ownership settings; owner and admins only |
 | `/agents` | Connected identities; `?agent=:agentId` opens the agent Sheet |
 | `/agents/connect` | **Add an agent** Sheet over the Agents list: Runner pairing first, connecting an agent you already run second |

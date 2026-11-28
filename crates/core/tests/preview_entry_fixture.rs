@@ -13,8 +13,12 @@ use podster_core::app_requests::HostKind;
 use podster_core::preview::MAX_ACCESS_EPOCH;
 use podster_core::serve_entry::{
     custom_entry_script_kind, default_entry_script, preview_custom_entry_script_kind,
-    preview_custom_entry_value, preview_entry_script, preview_entry_value, CODE_MARK, PREVIEW_MARK,
+    preview_custom_entry_value, preview_entry_script, preview_entry_value, PreviewEntry, CODE_MARK,
+    PREVIEW_MARK,
 };
+
+/// The slot every fixture vector names.
+const SLOT: &str = "pvw_0123456789abcdef0123456789abcdef";
 
 const FIXTURE: &str = include_str!("../../../packages/contracts/serve-entry.fixture.json");
 
@@ -58,12 +62,18 @@ fn every_valid_preview_entry_reads_back_and_is_written_exactly_so() {
     let valid = strings("valid_preview_entries");
     assert!(valid.len() >= 5);
     for value in valid {
-        let read = preview_entry_script(value);
-        let Some((epoch, kind, script)) = read else {
+        let Some(PreviewEntry {
+            slot,
+            epoch,
+            kind,
+            script,
+        }) = preview_entry_script(value)
+        else {
             panic!("{value:?} should be a preview entry");
         };
+        assert_eq!(slot, SLOT);
         assert_eq!(
-            preview_entry_value(epoch, kind, script).as_deref(),
+            preview_entry_value(slot, epoch, kind, script).as_deref(),
             Some(value)
         );
         let expected_kind = if value.contains(CODE_MARK) {
@@ -92,11 +102,17 @@ fn every_valid_preview_custom_entry_reads_back_for_its_own_host_alone() {
     let valid = strings("valid_preview_custom_entries");
     assert!(valid.len() >= 3);
     for value in valid {
-        let Some((epoch, kind, script)) = preview_custom_entry_script_kind(host, value) else {
+        let Some(PreviewEntry {
+            slot,
+            epoch,
+            kind,
+            script,
+        }) = preview_custom_entry_script_kind(host, value)
+        else {
             panic!("{value:?} should be {host}'s preview entry");
         };
         assert_eq!(
-            preview_custom_entry_value(epoch, kind, host, script).as_deref(),
+            preview_custom_entry_value(slot, epoch, kind, host, script).as_deref(),
             Some(value)
         );
         assert_eq!(
@@ -149,24 +165,27 @@ fn production_and_preview_entries_never_read_as_each_other() {
 fn no_preview_entry_is_written_past_the_largest_epoch_or_for_a_name_podster_doesnt_make() {
     let script = "k3v9q2.rel_0123456789abcdef0123456789abcdef";
     let host = "app.example.com";
-    assert!(preview_entry_value(MAX_ACCESS_EPOCH, HostKind::Static, script).is_some());
+    assert!(preview_entry_value(SLOT, MAX_ACCESS_EPOCH, HostKind::Static, script).is_some());
     assert_eq!(
-        preview_entry_value(MAX_ACCESS_EPOCH + 1, HostKind::Static, script),
+        preview_entry_value(SLOT, MAX_ACCESS_EPOCH + 1, HostKind::Static, script),
         None
     );
-    assert_eq!(preview_entry_value(u64::MAX, HostKind::Code, script), None);
     assert_eq!(
-        preview_custom_entry_value(MAX_ACCESS_EPOCH + 1, HostKind::Static, host, script),
+        preview_entry_value(SLOT, u64::MAX, HostKind::Code, script),
+        None
+    );
+    assert_eq!(
+        preview_custom_entry_value(SLOT, MAX_ACCESS_EPOCH + 1, HostKind::Static, host, script),
         None
     );
     for bad in ["", "stopped", "_stop", "k3v9q2", "someone-elses-script"] {
         assert_eq!(
-            preview_entry_value(0, HostKind::Static, bad),
+            preview_entry_value(SLOT, 0, HostKind::Static, bad),
             None,
             "{bad:?}"
         );
         assert_eq!(
-            preview_custom_entry_value(0, HostKind::Static, host, bad),
+            preview_custom_entry_value(SLOT, 0, HostKind::Static, host, bad),
             None,
             "{bad:?}"
         );
@@ -174,7 +193,7 @@ fn no_preview_entry_is_written_past_the_largest_epoch_or_for_a_name_podster_does
     // A host Rust never writes for gets no preview entry either.
     for refused in strings("custom_entry_refused_hosts") {
         assert_eq!(
-            preview_custom_entry_value(0, HostKind::Static, refused, script),
+            preview_custom_entry_value(SLOT, 0, HostKind::Static, refused, script),
             None,
             "{refused:?}"
         );
@@ -195,17 +214,54 @@ fn property_an_epoch_round_trips_and_only_the_patterns_decimals_read() {
     for _ in 0..5_000 {
         let epoch = next() % (MAX_ACCESS_EPOCH + 1);
         for kind in [HostKind::Static, HostKind::Code] {
-            let value = preview_entry_value(epoch, kind, script).unwrap_or_default();
-            assert_eq!(preview_entry_script(&value), Some((epoch, kind, script)));
-            // A leading zero, a sign or a space makes it no entry.
-            let rest = value.strip_prefix(PREVIEW_MARK).unwrap_or_default();
+            let value = preview_entry_value(SLOT, epoch, kind, script).unwrap_or_default();
+            assert_eq!(
+                preview_entry_script(&value),
+                Some(PreviewEntry {
+                    slot: SLOT,
+                    epoch,
+                    kind,
+                    script
+                })
+            );
+            // A leading zero, a sign or a space before the epoch makes it no entry, and so does a lost slot.
+            let prefix = format!("{PREVIEW_MARK}{SLOT}:");
+            let rest = value.strip_prefix(&prefix).unwrap_or_default();
             for twisted in [
-                format!("{PREVIEW_MARK}0{rest}"),
-                format!("{PREVIEW_MARK}+{rest}"),
-                format!("{PREVIEW_MARK} {rest}"),
+                format!("{prefix}0{rest}"),
+                format!("{prefix}+{rest}"),
+                format!("{prefix} {rest}"),
+                format!("{PREVIEW_MARK}{rest}"),
             ] {
                 assert_eq!(preview_entry_script(&twisted), None, "{twisted:?}");
             }
         }
+    }
+}
+
+/// The entry names its slot, so a host a later slot holds never reads as the earlier slot's (M8 step 4's review).
+#[test]
+fn an_entry_names_exactly_its_own_slot() {
+    let script = "k3v9q2.rel_0123456789abcdef0123456789abcdef";
+    let other = "pvw_fedcba9876543210fedcba9876543210";
+    let value = preview_entry_value(other, 3, HostKind::Static, script).unwrap();
+    assert_eq!(preview_entry_script(&value).map(|e| e.slot), Some(other));
+    for bad in [
+        "",
+        "pvs_fedcba9876543210fedcba9876543210",
+        "pvw_FEDCBA9876543210fedcba9876543210",
+        "pvw_1",
+        "pvw_fedcba9876543210fedcba9876543210:",
+    ] {
+        assert_eq!(
+            preview_entry_value(bad, 3, HostKind::Static, script),
+            None,
+            "{bad:?}"
+        );
+        assert_eq!(
+            preview_custom_entry_value(bad, 3, HostKind::Static, "app.example.com", script),
+            None,
+            "{bad:?}"
+        );
     }
 }

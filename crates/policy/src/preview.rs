@@ -169,10 +169,13 @@ pub struct AccessFacts {
     pub preview_suspended: bool,
 }
 
-/// Why access to a preview host was refused. **Every one answers `preview_access_refused` (404)**, so the route never
+/// Why access to a preview host was refused. **Every one but previews off answers `preview_access_refused` (404)**, so the route never
 /// tells anyone which hosts exist, which room holds one, or whether they lack access (the plan's 5.3, step 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreviewAccessRefusal {
+    /// `not_found`: previews are switched off or undecided for the deployment (`PREVIEWS` anything but exactly
+    /// `true`). The contract answers the route then as one nobody defined, and no room is asked.
+    PreviewsOff,
     NotThisRoomsPreviewHost,
     NoPreview,
     Suspended,
@@ -182,19 +185,28 @@ pub enum PreviewAccessRefusal {
 impl PreviewAccessRefusal {
     // codes: reasons
     pub fn code(self) -> &'static str {
-        "preview_access_refused"
+        match self {
+            PreviewAccessRefusal::PreviewsOff => "not_found",
+            _ => "preview_access_refused",
+        }
     }
 }
 
-/// **Whether a person gets a ticket for a preview host** (the plan's 5.3, step 3): the host must be the room's current
+/// **Whether a person gets a ticket for a preview host** (the plan's 5.3, step 3): previews must be on for the
+/// deployment, which is asked before anything else, as the contract has the route not exist while they are off; then
+/// the host must be the room's current
 /// preview host, the preview must exist and not be suspended, and the caller must pass [`may_view`] now. The host is
 /// checked first, so nothing about the caller is asked of a host that isn't this room's. The limits come before this,
 /// in their own objects (`podster_core::preview_access`).
 pub fn decide_access(
+    previews: DeploymentPreviews,
     caller: &Caller,
     standing: ViewStanding,
     facts: AccessFacts,
 ) -> Result<(), PreviewAccessRefusal> {
+    if !previews.allows_previews() {
+        return Err(PreviewAccessRefusal::PreviewsOff);
+    }
     if !facts.host_is_rooms_preview_host {
         return Err(PreviewAccessRefusal::NotThisRoomsPreviewHost);
     }

@@ -23,7 +23,8 @@
 //!
 //! **Why the text can't be read two ways.** Every part is checked for its form before it is written: commits and trees
 //! are hexadecimal, hashes fixed-length hexadecimal, module names [`crate::app_code::module_name_form`] (no space), paths
-//! [`crate::release_tree::check_path`] (no control character, so no line break), form parts without a line break. A
+//! [`crate::release_tree::check_path`] (no control character, so no line break), form parts without a space or a line
+//! break. A
 //! path may hold a space, but it is always followed by exactly one space and a fixed-length hash at the end of its
 //! line, so each line reads back one way. Duplicates are refused, and lines are sorted, so order never matters.
 //!
@@ -124,7 +125,8 @@ pub enum BuildRefusal {
     Main,
     /// `build_store_invalid`: a store asked for by a release with no code.
     Store,
-    /// `build_form_invalid`: a part of the upload form that is empty or holds a line break.
+    /// `build_form_invalid`: a part of the upload form that is empty or holds a space, a line break or a control
+    /// character.
     Form,
 }
 
@@ -165,8 +167,10 @@ fn lower_hex(text: &str, len: usize) -> bool {
     text.len() == len && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// A part of the upload form as it goes on the form's line: not empty, and no space, line break or other white space
+/// or control character, since the line's parts are joined by single spaces and must read back one way.
 fn form_part(part: &str) -> bool {
-    !part.is_empty() && !part.contains(['\n', '\r'])
+    !part.is_empty() && !part.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// The canonical text a build ID is the SHA-256 of (the plan's 4.1), or why it can't be made. Public so a reviewer,

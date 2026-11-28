@@ -371,7 +371,12 @@ const FACTS: AccessFacts = AccessFacts {
 #[test]
 fn access_is_given_on_the_rooms_own_preview_host_to_whoever_may_view() {
     assert_eq!(
-        decide_access(&caller(Person, Role::Guest), STANDS, FACTS),
+        decide_access(
+            DeploymentPreviews::On,
+            &caller(Person, Role::Guest),
+            STANDS,
+            FACTS
+        ),
         Ok(())
     );
 }
@@ -429,7 +434,7 @@ fn every_refusal_of_access_is_one_answer() {
         ),
     ];
     for (who, standing, facts, refusal) in cases {
-        let result = decide_access(&who, standing, facts);
+        let result = decide_access(DeploymentPreviews::On, &who, standing, facts);
         assert_eq!(result, Err(refusal));
         assert_eq!(refusal.code(), "preview_access_refused");
     }
@@ -439,6 +444,7 @@ fn every_refusal_of_access_is_one_answer() {
 fn the_host_is_checked_before_anything_about_the_caller() {
     // A stranger asking about a host that isn't this room's learns only the one answer, by the host check.
     let result = decide_access(
+        DeploymentPreviews::On,
         &caller(Person, Role::None),
         STANDS,
         AccessFacts {
@@ -465,4 +471,29 @@ fn a_role_lowered_or_taken_away_raises_the_epoch_and_a_role_raised_doesnt() {
             );
         }
     }
+}
+
+#[test]
+fn access_while_previews_are_off_or_undecided_is_refused_before_anything_is_asked() {
+    for previews in [DeploymentPreviews::Off, DeploymentPreviews::Undecided] {
+        // Even for the owner on the room's own preview host; and before the host or the caller is looked at.
+        assert_eq!(
+            decide_access(previews, &caller(Person, Role::Owner), STANDS, FACTS),
+            Err(PreviewAccessRefusal::PreviewsOff)
+        );
+        assert_eq!(
+            decide_access(
+                previews,
+                &caller(Agent, Role::None),
+                STANDS,
+                AccessFacts {
+                    host_is_rooms_preview_host: false,
+                    ..FACTS
+                }
+            ),
+            Err(PreviewAccessRefusal::PreviewsOff)
+        );
+    }
+    // While off the route is one nobody defined (the contract's `requestPreviewAccess`).
+    assert_eq!(PreviewAccessRefusal::PreviewsOff.code(), "not_found");
 }

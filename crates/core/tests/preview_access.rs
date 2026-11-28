@@ -44,6 +44,7 @@ fn presented(now: i64) -> Presented<'static> {
     Presented {
         host: HOST,
         now,
+        entry_slot: SLOT,
         entry_epoch: 3,
         state_hash: Some(ST),
         path: "/",
@@ -419,14 +420,15 @@ fn property_any_one_claim_changed_refuses_the_ticket() {
     let mut seed = 0x5eed_ac55_u64;
     for _ in 0..5_000 {
         let mut bad = good.clone();
-        match next(&mut seed) % 7 {
+        match next(&mut seed) % 8 {
             0 => bad.typ = TokenType::ALL[(1 + next(&mut seed) % 2) as usize],
             1 => bad.aud = format!("x{}.podster.site", next(&mut seed)),
             2 => bad.ep = next(&mut seed) % 3,
             3 => bad.exp = NOW - (next(&mut seed) % 1_000) as i64,
             4 => bad.st = Some(ST2.to_owned()),
             5 => bad.st = None,
-            _ => bad.exp = bad.iat + TICKET_TTL_MS + 1 + (next(&mut seed) % 1_000) as i64,
+            6 => bad.exp = bad.iat + TICKET_TTL_MS + 1 + (next(&mut seed) % 1_000) as i64,
+            _ => bad.pvw = format!("pvw_{:032x}", 1 + next(&mut seed)),
         }
         assert!(
             check_claims(&bad, TokenType::Ticket, &p).is_err(),
@@ -708,5 +710,106 @@ fn property_the_limits_count_exactly_the_window() {
                 assert!(person_access_allowed(&stamps, NOW + wait - 1).is_err());
             }
         }
+    }
+}
+
+// --- the slot binding (M8 step 4's security review) --------------------------------------------------------------------
+
+const NEW_SLOT: &str = "pvw_11111111111111111111111111111111";
+
+#[test]
+fn a_token_is_honoured_only_on_a_host_whose_entry_names_its_own_slot() {
+    let ticket = ticket_claims(&ask()).unwrap();
+    let session = session_claims(&ask()).unwrap();
+    let elsewhere = Presented {
+        entry_slot: NEW_SLOT,
+        ..presented(NOW)
+    };
+    assert_eq!(
+        check_claims(&ticket, TokenType::Ticket, &elsewhere),
+        Err(TokenRefusal::WrongSlot)
+    );
+    assert_eq!(
+        check_claims(&session, TokenType::Session, &elsewhere),
+        Err(TokenRefusal::WrongSlot)
+    );
+    let marker = marker_claims(KID, HOST, SLOT, 3, NOW).unwrap();
+    let at_marker = Presented {
+        path: "/.well-known/podster-release.json",
+        state_hash: None,
+        ..elsewhere
+    };
+    assert_eq!(
+        check_claims(&marker, TokenType::Marker, &at_marker),
+        Err(TokenRefusal::WrongSlot)
+    );
+    assert_eq!(TokenRefusal::WrongSlot.code(), "preview_access_required");
+}
+
+/// The review's case: a custom preview hostname is deleted with its slot and claimed again by a new slot of the same
+/// room, whose access epoch starts lower. A session from the old slot, still inside its hour, on the same host, is
+/// refused by the slot, whatever the epochs say.
+#[test]
+fn a_reclaimed_host_with_a_lower_epoch_refuses_the_old_slots_tokens() {
+    let host = "preview.example.com";
+    let old = TokenAsk {
+        host,
+        epoch: 9,
+        ..ask()
+    };
+    let session = session_claims(&old).unwrap();
+    let ticket = ticket_claims(&old).unwrap();
+    // The new slot's entry on the same host: epoch 0, below the old token's 9, so the epoch alone would honour it.
+    let reclaimed = Presented {
+        host,
+        entry_slot: NEW_SLOT,
+        entry_epoch: 0,
+        ..presented(NOW + 1_000)
+    };
+    assert!(podster_core::preview::epoch_honoured(
+        session.ep,
+        reclaimed.entry_epoch
+    ));
+    assert_eq!(
+        check_claims(&session, TokenType::Session, &reclaimed),
+        Err(TokenRefusal::WrongSlot)
+    );
+    assert_eq!(
+        check_claims(&ticket, TokenType::Ticket, &reclaimed),
+        Err(TokenRefusal::WrongSlot)
+    );
+    // The new slot's own session on that host passes.
+    let fresh = session_claims(&TokenAsk {
+        host,
+        slot: NEW_SLOT,
+        epoch: 0,
+        ..ask()
+    })
+    .unwrap();
+    assert_eq!(check_claims(&fresh, TokenType::Session, &reclaimed), Ok(()));
+}
+
+#[test]
+fn a_lower_epoch_on_the_same_slot_is_still_refused() {
+    let session = session_claims(&TokenAsk { epoch: 2, ..ask() }).unwrap();
+    assert_eq!(
+        check_claims(&session, TokenType::Session, &presented(NOW)),
+        Err(TokenRefusal::EpochBelow)
+    );
+}
+
+#[test]
+fn a_host_entry_naming_no_slot_honours_nothing() {
+    let ticket = ticket_claims(&ask()).unwrap();
+    for bad in ["", "pvw_", "PVW_0123456789abcdef0123456789abcdef"] {
+        let p = Presented {
+            entry_slot: bad,
+            ..presented(NOW)
+        };
+        assert_eq!(
+            check_claims(&ticket, TokenType::Ticket, &p),
+            Err(TokenRefusal::WrongSlot),
+            "{bad:?}"
+        );
     }
 }

@@ -23,6 +23,7 @@
 
 use crate::hostnames::normalize;
 use crate::preview::{epoch_honoured, MAX_ACCESS_EPOCH};
+pub use crate::preview::{is_slot_id, SLOT_ID_PREFIX};
 use crate::release::window_start;
 use crate::release_tree::MARKER_PATH;
 
@@ -57,9 +58,7 @@ pub const LOOP_GUARD_WINDOW_MS: i64 = 60 * 1000;
 /// The longest return path, as the contract's `PreviewAccessRequest.r` allows.
 pub const MAX_RETURN_PATH_LEN: usize = 2048;
 
-/// Before a preview slot's ID. **Proposed** here: the plan names `pvw` as the claim but no form for its value.
-pub const SLOT_ID_PREFIX: &str = "pvw_";
-/// Before a preview session's ID. **Proposed** here, as [`SLOT_ID_PREFIX`].
+/// Before a preview session's ID. **Proposed** here, as [`SLOT_ID_PREFIX`] is.
 pub const SESSION_ID_PREFIX: &str = "pvs_";
 /// The longest signing key ID. **Proposed.**
 pub const MAX_KEY_ID_LEN: usize = 64;
@@ -113,11 +112,6 @@ fn prefixed_hex_id(text: &str, prefix: &str) -> bool {
     text.strip_prefix(prefix).is_some_and(|hex| {
         hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     })
-}
-
-/// A preview slot's ID: `pvw_` and 32 lower-case hexadecimal characters (**Proposed**).
-pub fn is_slot_id(text: &str) -> bool {
-    prefixed_hex_id(text, SLOT_ID_PREFIX)
 }
 
 /// A preview session's ID: `pvs_` and 32 lower-case hexadecimal characters (**Proposed**).
@@ -190,6 +184,7 @@ pub struct TokenAsk<'a> {
     pub kid: &'a str,
     /// The room's current preview host the flow started on, as the room holds it.
     pub host: &'a str,
+    /// The room's preview slot's ID ([`crate::preview::PreviewSlot::id`]).
     pub slot: &'a str,
     pub session: &'a str,
     /// The slot's access epoch now.
@@ -277,6 +272,8 @@ pub struct Presented<'a> {
     /// The request's host, exactly.
     pub host: &'a str,
     pub now: i64,
+    /// The preview slot's ID in the host's serve entry ([`crate::serve_entry::PreviewEntry::slot`]).
+    pub entry_slot: &'a str,
     /// The access epoch in the host's serve entry ([`crate::serve_entry::preview_entry_script`]).
     pub entry_epoch: u64,
     /// The SHA-256 of the state cookie sent with the request, if one was, in [`is_state_hash`]'s form.
@@ -293,6 +290,9 @@ pub enum TokenRefusal {
     WrongType,
     /// `aud` isn't exactly this request's host: a token for another preview host, default or custom.
     WrongAudience,
+    /// `pvw` isn't the slot the host's entry names: a token for a slot since deleted, on a host a later slot holds,
+    /// whatever either epoch is (M8 step 4's security review).
+    WrongSlot,
     /// At or past `exp`.
     Expired,
     /// Signed before the room last raised the access epoch (the plan's 5.6).
@@ -308,9 +308,10 @@ pub enum TokenRefusal {
 }
 
 impl TokenRefusal {
-    pub const ALL: [TokenRefusal; 7] = [
+    pub const ALL: [TokenRefusal; 8] = [
         TokenRefusal::WrongType,
         TokenRefusal::WrongAudience,
+        TokenRefusal::WrongSlot,
         TokenRefusal::Expired,
         TokenRefusal::EpochBelow,
         TokenRefusal::StateMismatch,
@@ -331,8 +332,13 @@ impl TokenRefusal {
 
 /// **The checks a token must pass on a preview host** once its signature has (the plan's 5.3, steps 6 and 7, and 5.4),
 /// in this order: its claims are their form; its type is the one expected here; `aud` is exactly the request's host;
-/// `now` is before `exp`; `ep` isn't below the host entry's epoch; for a ticket or a session, `st` is exactly the hash
+/// `pvw` is exactly the slot the host's entry names; `now` is before `exp`; `ep` isn't below the host entry's epoch; for a ticket or a session, `st` is exactly the hash
 /// of the state cookie sent with this request; for a marker token, the path is the marker's and the method `GET`.
+///
+/// **Accepted, not a gap: a ticket replayed in the same browser within its 60 seconds passes again.** Nothing here
+/// records a ticket as used, and the contract stores none (`requestPreviewAccess`). Such a replay needs that browser's
+/// own state cookie, so it can only give the browser that started the flow the session it was already given, for the
+/// same person, slot and epoch; any other browser fails `st`. The 60 seconds and the epoch bound it.
 pub fn check_claims(
     claims: &Claims,
     expected: TokenType,
@@ -357,6 +363,9 @@ pub fn check_claims(
     }
     if claims.aud != presented.host {
         return Err(TokenRefusal::WrongAudience);
+    }
+    if claims.pvw != presented.entry_slot || !is_slot_id(presented.entry_slot) {
+        return Err(TokenRefusal::WrongSlot);
     }
     if presented.now >= claims.exp {
         return Err(TokenRefusal::Expired);

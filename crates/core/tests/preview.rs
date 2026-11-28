@@ -10,8 +10,8 @@
 
 use podster_core::preview::*;
 use podster_core::release::{
-    unpublish, CommitLiveRefusal, DesiredServe, ReleaseState, ServeState, StaleCompletion,
-    UnpublishTrigger,
+    unpublish, CommitLiveRefusal, CommitMark, DesiredServe, ReleaseState, ServeState,
+    StaleCompletion, UnpublishTrigger,
 };
 
 const NOW: i64 = 1_800_000_000_000;
@@ -20,6 +20,27 @@ const OTHER_LABEL: &str = "k3v9q2";
 const ID_A: &str = "rel_0000000000000000000000000000000a";
 const ID_B: &str = "rel_0000000000000000000000000000000b";
 const ID_C: &str = "rel_0000000000000000000000000000000c";
+
+const SLOT: &str = "pvw_0123456789abcdef0123456789abcdef";
+const OTHER_SLOT: &str = "pvw_fedcba9876543210fedcba9876543210";
+
+/// The room's slot holding `serve`, at access epoch `epoch`.
+fn slot_of(epoch: u64, serve: PreviewServe) -> PreviewSlot {
+    PreviewSlot::from_stored(SLOT, LABEL, epoch, serve).unwrap()
+}
+
+/// A preview release committed live on the room's slot holding `serve`: the slot's serve state after, and the mark.
+fn commit(
+    serve: &PreviewServe,
+    release_epoch: u64,
+    script: &str,
+    release_id: &str,
+    state: ReleaseState,
+) -> Result<(PreviewServe, CommitMark), PreviewCommitRefusal> {
+    let slot = slot_of(0, serve.clone());
+    preview_commit_live(&slot, release_epoch, script, release_id, state)
+        .map(|(after, mark)| (after.serve().clone(), mark))
+}
 
 fn script(label: &str, id: &str) -> String {
     format!("{label}.{id}")
@@ -163,8 +184,7 @@ fn a_stored_slot_holds_a_default_host_and_at_most_one_custom_host() {
 fn serving(id: &str) -> PreviewServe {
     let serve = PreviewServe::new();
     let s = script(LABEL, id);
-    let (serve, mark) =
-        preview_commit_live(&serve, LABEL, 0, &s, id, ReleaseState::Uploading).unwrap();
+    let (serve, mark) = commit(&serve, 0, &s, id, ReleaseState::Uploading).unwrap();
     preview_confirm_served(&serve, &mark, &s).unwrap().serve
 }
 
@@ -172,8 +192,7 @@ fn serving(id: &str) -> PreviewServe {
 fn the_first_preview_goes_live_on_commit_and_is_served_once_its_marker_comes_back() {
     let serve = PreviewServe::new();
     let a = script(LABEL, ID_A);
-    let (live, mark) =
-        preview_commit_live(&serve, LABEL, 0, &a, ID_A, ReleaseState::Uploading).unwrap();
+    let (live, mark) = commit(&serve, 0, &a, ID_A, ReleaseState::Uploading).unwrap();
     assert_eq!(live.hosts()[0].script.as_deref(), Some(a.as_str()));
     assert!(live.in_flight().is_some());
     // Nothing is confirmed until the marker comes back.
@@ -189,8 +208,7 @@ fn a_replacement_that_is_served_deletes_the_one_it_replaced_and_keeps_nothing_fo
     let serve = serving(ID_A);
     let a = script(LABEL, ID_A);
     let b = script(LABEL, ID_B);
-    let (live, mark) =
-        preview_commit_live(&serve, LABEL, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
+    let (live, mark) = commit(&serve, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
     let confirmed = preview_confirm_served(&live, &mark, &b).unwrap();
     assert_eq!(confirmed.serve.serving().as_deref(), Some(b.as_str()));
     // No preview rollback (the plan's 3.1, kept scripts): the one before is deleted, never kept.
@@ -202,8 +220,7 @@ fn a_failed_replacement_leaves_the_last_working_preview_serving() {
     let serve = serving(ID_A);
     let a = script(LABEL, ID_A);
     let b = script(LABEL, ID_B);
-    let (live, mark) =
-        preview_commit_live(&serve, LABEL, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
+    let (live, mark) = commit(&serve, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
     let back = preview_set_back(&live, &mark, &b).unwrap();
     assert_eq!(back.serve.hosts()[0].script.as_deref(), Some(a.as_str()));
     assert_eq!(back.serve.serving().as_deref(), Some(a.as_str()));
@@ -217,10 +234,8 @@ fn a_second_replacement_while_one_is_in_flight_is_refused_preview_in_flight() {
     let serve = serving(ID_A);
     let b = script(LABEL, ID_B);
     let c = script(LABEL, ID_C);
-    let (live, _) =
-        preview_commit_live(&serve, LABEL, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
-    let refused =
-        preview_commit_live(&live, LABEL, 0, &c, ID_C, ReleaseState::Uploading).unwrap_err();
+    let (live, _) = commit(&serve, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
+    let refused = commit(&live, 0, &c, ID_C, ReleaseState::Uploading).unwrap_err();
     assert_eq!(
         refused,
         PreviewCommitRefusal::Commit(CommitLiveRefusal::InFlight)
@@ -232,8 +247,8 @@ fn a_second_replacement_while_one_is_in_flight_is_refused_preview_in_flight() {
 fn a_retried_commit_of_the_flight_replays_its_answer() {
     let serve = PreviewServe::new();
     let a = script(LABEL, ID_A);
-    let first = preview_commit_live(&serve, LABEL, 0, &a, ID_A, ReleaseState::Uploading).unwrap();
-    let again = preview_commit_live(&first.0, LABEL, 0, &a, ID_A, ReleaseState::Live).unwrap();
+    let first = commit(&serve, 0, &a, ID_A, ReleaseState::Uploading).unwrap();
+    let again = commit(&first.0, 0, &a, ID_A, ReleaseState::Live).unwrap();
     assert_eq!(first, again);
 }
 
@@ -243,20 +258,13 @@ fn a_slot_serves_only_scripts_under_its_own_label_for_their_own_release() {
     // Another room's label, or production's label of this room: never.
     let foreign = script(OTHER_LABEL, ID_A);
     assert_eq!(
-        preview_commit_live(&serve, LABEL, 0, &foreign, ID_A, ReleaseState::Uploading),
+        commit(&serve, 0, &foreign, ID_A, ReleaseState::Uploading),
         Err(PreviewCommitRefusal::ScriptMismatch)
     );
     // A script of this label but another release's ID.
     let other_release = script(LABEL, ID_B);
     assert_eq!(
-        preview_commit_live(
-            &serve,
-            LABEL,
-            0,
-            &other_release,
-            ID_A,
-            ReleaseState::Uploading
-        ),
+        commit(&serve, 0, &other_release, ID_A, ReleaseState::Uploading),
         Err(PreviewCommitRefusal::ScriptMismatch)
     );
     assert_eq!(
@@ -271,22 +279,13 @@ fn a_slot_serves_only_scripts_under_its_own_label_for_their_own_release() {
         "code:pv7q2.rel_0000000000000000000000000000000a",
     ] {
         assert_eq!(
-            preview_commit_live(&serve, LABEL, 0, bad, ID_A, ReleaseState::Uploading),
+            commit(&serve, 0, bad, ID_A, ReleaseState::Uploading),
             Err(PreviewCommitRefusal::ScriptMismatch),
             "{bad:?}"
         );
     }
-    assert_eq!(
-        preview_commit_live(
-            &serve,
-            "PV7Q2",
-            0,
-            &script("PV7Q2", ID_A),
-            ID_A,
-            ReleaseState::Uploading
-        ),
-        Err(PreviewCommitRefusal::ScriptMismatch)
-    );
+    // A slot whose label isn't a label can't be made at all, so it never serves anything.
+    assert!(PreviewSlot::from_stored(SLOT, "PV7Q2", 0, serve.clone()).is_none());
 }
 
 #[test]
@@ -294,7 +293,7 @@ fn an_ended_or_unready_preview_release_never_goes_live() {
     let serve = PreviewServe::new();
     let a = script(LABEL, ID_A);
     for state in ReleaseState::ALL {
-        let result = preview_commit_live(&serve, LABEL, 0, &a, ID_A, state);
+        let result = commit(&serve, 0, &a, ID_A, state);
         if state == ReleaseState::Uploading {
             assert!(result.is_ok());
         } else {
@@ -310,8 +309,7 @@ fn an_ended_or_unready_preview_release_never_goes_live() {
 fn a_stale_completion_changes_nothing() {
     let serve = serving(ID_A);
     let b = script(LABEL, ID_B);
-    let (live, mark) =
-        preview_commit_live(&serve, LABEL, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
+    let (live, mark) = commit(&serve, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
     let a = script(LABEL, ID_A);
     assert_eq!(
         preview_confirm_served(&live, &mark, &a).unwrap_err(),
@@ -366,13 +364,8 @@ fn deleting_a_preview_serves_nothing_raises_both_epochs_deletes_its_scripts_and_
     let a = script(LABEL, ID_A);
     let b = script(LABEL, ID_B);
     let serve = serving(ID_A);
-    let (live, _) =
-        preview_commit_live(&serve, LABEL, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
-    let slot = PreviewSlot {
-        label: LABEL.to_owned(),
-        access_epoch: 4,
-        serve: live,
-    };
+    let (live, _) = commit(&serve, 0, &b, ID_B, ReleaseState::Uploading).unwrap();
+    let slot = slot_of(4, live);
     let deletion = delete_preview(&slot);
     assert!(deletion.serve.hosts().iter().all(|h| h.script.is_none()));
     assert!(deletion.serve.in_flight().is_none());
@@ -384,11 +377,7 @@ fn deleting_a_preview_serves_nothing_raises_both_epochs_deletes_its_scripts_and_
 
 #[test]
 fn deleting_a_preview_whose_access_epoch_is_spent_still_takes_everything_down() {
-    let slot = PreviewSlot {
-        label: LABEL.to_owned(),
-        access_epoch: MAX_ACCESS_EPOCH,
-        serve: serving(ID_A),
-    };
+    let slot = slot_of(MAX_ACCESS_EPOCH, serving(ID_A));
     let deletion = delete_preview(&slot);
     assert_eq!(deletion.access_epoch, MAX_ACCESS_EPOCH);
     assert!(deletion.serve.hosts().iter().all(|h| h.script.is_none()));
@@ -397,14 +386,10 @@ fn deleting_a_preview_whose_access_epoch_is_spent_still_takes_everything_down() 
 #[test]
 fn a_commit_that_started_before_a_deletion_never_goes_live_after_it() {
     let b = script(LABEL, ID_B);
-    let slot = PreviewSlot {
-        label: LABEL.to_owned(),
-        access_epoch: 0,
-        serve: serving(ID_A),
-    };
+    let slot = slot_of(0, serving(ID_A));
     let deleted = delete_preview(&slot).serve;
     assert_eq!(
-        preview_commit_live(&deleted, LABEL, 0, &b, ID_B, ReleaseState::Uploading),
+        commit(&deleted, 0, &b, ID_B, ReleaseState::Uploading),
         Err(PreviewCommitRefusal::Commit(CommitLiveRefusal::EpochMoved))
     );
 }
@@ -605,14 +590,7 @@ fn property_random_walks_keep_the_slot_under_its_own_label_with_the_last_working
                         production_label
                     };
                     let s = script(label, id);
-                    match preview_commit_live(
-                        &serve,
-                        LABEL,
-                        serve.epoch(),
-                        &s,
-                        id,
-                        ReleaseState::Uploading,
-                    ) {
+                    match commit(&serve, serve.epoch(), &s, id, ReleaseState::Uploading) {
                         Ok((next_serve, m)) => {
                             assert_eq!(label, LABEL);
                             if mark.is_none() {
@@ -678,11 +656,7 @@ fn property_random_walks_keep_the_slot_under_its_own_label_with_the_last_working
                     }
                 }
                 Step::Delete => {
-                    let slot = PreviewSlot {
-                        label: LABEL.to_owned(),
-                        access_epoch: 0,
-                        serve: serve.clone(),
-                    };
+                    let slot = slot_of(0, serve.clone());
                     let deletion = delete_preview(&slot);
                     serve = deletion.serve;
                     mark = None;
@@ -733,4 +707,73 @@ fn a_previews_serve_state_is_a_type_of_its_own() {
     let (after, _) = unpublish(&production);
     assert_eq!(preview.serving(), Some(script(LABEL, ID_A)));
     assert!(after.hosts[0].script.is_none());
+}
+
+// --- the slot's own record (M8 step 4's security review) ---------------------------------------------------------------
+
+#[test]
+fn a_slot_is_made_only_with_its_own_id_and_label_and_starts_at_epoch_zero() {
+    let slot = PreviewSlot::new(SLOT, LABEL).unwrap();
+    assert_eq!(slot.id(), SLOT);
+    assert_eq!(slot.label(), LABEL);
+    assert_eq!(slot.access_epoch(), 0);
+    assert_eq!(slot.serve(), &PreviewServe::new());
+    for bad_id in [
+        "",
+        "pvs_0123456789abcdef0123456789abcdef",
+        "pvw_0123456789ABCDEF0123456789abcdef",
+        "pvw_0123",
+    ] {
+        assert!(PreviewSlot::new(bad_id, LABEL).is_none(), "{bad_id:?}");
+        assert!(
+            PreviewSlot::from_stored(bad_id, LABEL, 0, PreviewServe::new()).is_none(),
+            "{bad_id:?}"
+        );
+    }
+    for bad_label in ["", "PV7Q2", "pv-7", &"a".repeat(27)] {
+        assert!(PreviewSlot::new(SLOT, bad_label).is_none(), "{bad_label:?}");
+    }
+    // An epoch no entry can carry is no slot's.
+    assert!(PreviewSlot::from_stored(SLOT, LABEL, MAX_ACCESS_EPOCH, PreviewServe::new()).is_some());
+    assert!(
+        PreviewSlot::from_stored(SLOT, LABEL, MAX_ACCESS_EPOCH + 1, PreviewServe::new()).is_none()
+    );
+    assert!(is_slot_id(SLOT) && is_slot_id(OTHER_SLOT));
+}
+
+#[test]
+fn a_slots_access_epoch_only_moves_forward_and_its_id_and_label_never_change() {
+    let slot = slot_of(4, serving(ID_A));
+    let raised = slot.raise_access_epoch().unwrap();
+    assert_eq!(raised.access_epoch(), 5);
+    assert_eq!(raised.id(), SLOT);
+    assert_eq!(raised.label(), LABEL);
+    assert_eq!(raised.serve(), slot.serve());
+    let spent = slot_of(MAX_ACCESS_EPOCH, PreviewServe::new());
+    assert_eq!(spent.raise_access_epoch(), Err(EpochExhausted));
+    // A new serve state keeps the slot's id, label and epoch.
+    let moved = raised.with_serve(PreviewServe::new());
+    assert_eq!(
+        (moved.id(), moved.label(), moved.access_epoch()),
+        (SLOT, LABEL, 5)
+    );
+    // Committing keeps them too.
+    let (after, _) = preview_commit_live(
+        &raised,
+        0,
+        &script(LABEL, ID_B),
+        ID_B,
+        ReleaseState::Uploading,
+    )
+    .unwrap();
+    assert_eq!(
+        (after.id(), after.label(), after.access_epoch()),
+        (SLOT, LABEL, 5)
+    );
+}
+
+#[test]
+fn a_deletion_names_the_slot_it_retired() {
+    let deletion = delete_preview(&slot_of(2, serving(ID_A)));
+    assert_eq!(deletion.retire_slot, SLOT);
 }

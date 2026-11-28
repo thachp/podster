@@ -389,12 +389,16 @@ for (const schema of ["RoomPreview", "Preview", "PreviewHostnameView", "PreviewR
   const approve = operations.get("approveRelease")?.op;
   if (approve?.requestBody?.required !== false || approve?.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ApproveRelease") problems.push("approveRelease: its body must be the optional ApproveRelease");
 }
-// The serve entries' preview form (the plan's 3.1): its mark, the epoch's grammar, and vectors that cross, so a
+// The serve entries' preview form (the plan's 3.1): its mark, the slot's ID, the epoch's grammar, and vectors that cross, so a
 // production host never reads a preview entry and a preview host never reads a production one.
 {
   const fixture = JSON.parse(readFileSync(new URL("serve-entry.fixture.json", import.meta.url), "utf8"));
   if (fixture.preview_mark !== "preview:") problems.push("serve-entry.fixture.json: the preview mark must be preview:");
   const epoch = new RegExp(fixture.preview_epoch_pattern ?? "$^");
+  // M8 step 4's security review: the entry names its preview slot, so a token for one slot is never honoured on a host
+  // a later slot holds. The ID is `podster_core::preview::is_slot_id`'s form.
+  const slot = new RegExp(fixture.preview_slot_pattern ?? "$^");
+  if (fixture.preview_slot_pattern !== "^pvw_[0-9a-f]{32}$" || slot.test("pvw_0123456789ABCDEF0123456789abcdef")) problems.push("serve-entry.fixture.json: the preview slot's ID must be pvw_ and 32 lower-case hexadecimal characters");
   // The largest epoch the pattern takes must be exact as a JavaScript number, and the next digit count refused.
   if (!epoch.test("0") || epoch.test("01") || epoch.test("-1") || !epoch.test("9".repeat(15)) || epoch.test("1".repeat(16))) problems.push("serve-entry.fixture.json: the epoch must be 0 or an unpadded decimal of at most 15 digits");
   const missing = (values, lists) => values.filter((value) => !lists.some((list) => (fixture[list] ?? []).includes(value)));
@@ -409,9 +413,8 @@ for (const schema of ["RoomPreview", "Preview", "PreviewHostnameView", "PreviewR
     for (const value of missing(values ?? [], lists)) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} is ${what}, and isn't in ${lists.join(" or ")}`);
   }
   for (const value of [...(fixture.valid_preview_entries ?? []), ...(fixture.valid_preview_custom_entries ?? [])]) {
-    const rest = value.slice(fixture.preview_mark.length);
-    const ep = rest.slice(0, rest.indexOf(":"));
-    if (!value.startsWith(fixture.preview_mark) || !epoch.test(ep) || !Number.isSafeInteger(Number(ep))) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} isn't the mark and an exact epoch`);
+    const [pvw, ep] = value.slice(fixture.preview_mark.length).split(":");
+    if (!value.startsWith(fixture.preview_mark) || !slot.test(pvw ?? "") || !epoch.test(ep ?? "") || !Number.isSafeInteger(Number(ep))) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} isn't the mark, a slot's ID and an exact epoch`);
   }
 }
 

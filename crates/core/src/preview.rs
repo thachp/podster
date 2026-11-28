@@ -229,14 +229,92 @@ impl PreviewServe {
     }
 }
 
-/// A room's one preview slot (the plan's 3.2; `preview_slot`, Workspace step 60): its preview label, drawn from the
-/// same never-reused space as production's and never one of them, kept across replacements and retired when the
-/// preview is deleted; its access epoch (the plan's 5.6); and its serve state.
+/// Before a preview slot's ID. **Proposed** here: the plan names `pvw` as a claim but no form for its value.
+pub const SLOT_ID_PREFIX: &str = "pvw_";
+
+/// A preview slot's ID: `pvw_` and 32 lower-case hexadecimal characters (**Proposed**;
+/// `serve-entry.fixture.json`'s `preview_slot_pattern`). Drawn at random for each new slot and never reused, so a
+/// slot made after another was deleted has another ID.
+pub fn is_slot_id(text: &str) -> bool {
+    text.strip_prefix(SLOT_ID_PREFIX).is_some_and(|hex| {
+        hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// A room's one preview slot (the plan's 3.2; `preview_slot`, Workspace step 60): its ID, which its hosts' entries
+/// and every ticket and session for it name; its preview label, drawn from the same never-reused space as
+/// production's and never one of them, kept across replacements and retired when the preview is deleted; its access
+/// epoch (the plan's 5.6); and its serve state.
+///
+/// **Its fields are private** (M8 step 4's security review): a slot is made only by [`PreviewSlot::new`] or
+/// [`PreviewSlot::from_stored`], which check the ID's and label's forms; its ID and label never change; and its access
+/// epoch only moves forward ([`PreviewSlot::raise_access_epoch`]). Since the entry and every token name the slot's ID
+/// (`crate::preview_access::check_claims`), a host claimed again by a later slot whose epoch starts lower honours none
+/// of the earlier slot's tokens.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewSlot {
-    pub label: String,
-    pub access_epoch: u64,
-    pub serve: PreviewServe,
+    id: String,
+    label: String,
+    access_epoch: u64,
+    serve: PreviewServe,
+}
+
+impl PreviewSlot {
+    /// A new slot: its ID and preview label, drawn by the caller; access epoch 0; serving nothing. `None` if either
+    /// isn't its form.
+    pub fn new(id: &str, label: &str) -> Option<PreviewSlot> {
+        Self::from_stored(id, label, 0, PreviewServe::new())
+    }
+
+    /// A slot as the room stored it. `None` for an ID or label not of its form, or an epoch past
+    /// [`MAX_ACCESS_EPOCH`], so a damaged row is never served.
+    pub fn from_stored(
+        id: &str,
+        label: &str,
+        access_epoch: u64,
+        serve: PreviewServe,
+    ) -> Option<PreviewSlot> {
+        (is_slot_id(id) && is_label(label) && access_epoch <= MAX_ACCESS_EPOCH).then(|| {
+            PreviewSlot {
+                id: id.to_owned(),
+                label: label.to_owned(),
+                access_epoch,
+                serve,
+            }
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn access_epoch(&self) -> u64 {
+        self.access_epoch
+    }
+
+    pub fn serve(&self) -> &PreviewServe {
+        &self.serve
+    }
+
+    /// The same slot, its ID, label and epoch unchanged, with a serve state a preview command returned.
+    pub fn with_serve(&self, serve: PreviewServe) -> PreviewSlot {
+        PreviewSlot {
+            serve,
+            ..self.clone()
+        }
+    }
+
+    /// The same slot with its access epoch one higher ([`raise_access_epoch`]): the only way it moves.
+    pub fn raise_access_epoch(&self) -> Result<PreviewSlot, EpochExhausted> {
+        Ok(PreviewSlot {
+            access_epoch: raise_access_epoch(self.access_epoch)?,
+            ..self.clone()
+        })
+    }
 }
 
 /// Why the room refused to commit a preview release live.
@@ -262,28 +340,32 @@ impl PreviewCommitRefusal {
 
 /// The room's commit of a preview release live (the plan's 3.2, "A replacement goes live only when its marker comes
 /// back"): production's [`commit_live`] on the slot's own state, after checking that `script` is exactly the slot's
-/// preview `label`, a `.`, and this release's own ID. Every open preview host goes to the script; the release waits
+/// own preview label, a `.`, and this release's own ID. Every open preview host goes to the script; the release waits
 /// for its marker; what was served before is kept in the mark for a set-back. A second replacement while one is in
-/// flight is refused (`preview_in_flight`), never queued.
+/// flight is refused (`preview_in_flight`), never queued. The slot's ID, label and epoch are unchanged.
 pub fn preview_commit_live(
-    serve: &PreviewServe,
-    label: &str,
+    slot: &PreviewSlot,
     release_epoch: u64,
     script: &str,
     release_id: &str,
     release: ReleaseState,
-) -> Result<(PreviewServe, CommitMark), PreviewCommitRefusal> {
-    let own = is_label(label)
-        && matches!(
-            script_owner(script),
-            ScriptOwner::Podster { label: l, release_id: r } if l == label && r == release_id
-        );
+) -> Result<(PreviewSlot, CommitMark), PreviewCommitRefusal> {
+    let own = matches!(
+        script_owner(script),
+        ScriptOwner::Podster { label, release_id: r } if label == slot.label && r == release_id
+    );
     if !own {
         return Err(PreviewCommitRefusal::ScriptMismatch);
     }
-    commit_live(&serve.state, release_epoch, script, release_id, release)
-        .map(|(state, mark)| (PreviewServe { state }, mark))
-        .map_err(PreviewCommitRefusal::Commit)
+    commit_live(
+        &slot.serve.state,
+        release_epoch,
+        script,
+        release_id,
+        release,
+    )
+    .map(|(state, mark)| (slot.with_serve(PreviewServe { state }), mark))
+    .map_err(PreviewCommitRefusal::Commit)
 }
 
 /// What a preview release's marker coming back does.
@@ -495,6 +577,8 @@ pub struct PreviewDeletion {
     pub delete_scripts: Vec<String>,
     /// The preview label, retired and never drawn again.
     pub retire_label: String,
+    /// The slot's ID, retired with it: a later slot gets another, so its hosts honour none of this slot's tokens.
+    pub retire_slot: String,
 }
 
 /// Deleting the room's preview (the plan's 3.2, "Deleting the preview"): exactly as an unpublish takes production down
@@ -507,6 +591,7 @@ pub fn delete_preview(slot: &PreviewSlot) -> PreviewDeletion {
         access_epoch: raise_access_epoch(slot.access_epoch).unwrap_or(slot.access_epoch),
         delete_scripts,
         retire_label: slot.label.clone(),
+        retire_slot: slot.id.clone(),
     }
 }
 

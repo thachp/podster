@@ -378,6 +378,37 @@ fn a_build_whose_parts_arent_their_forms_has_no_id() {
         build_id_with_form(&form, &static_inputs(&f)).unwrap_err(),
         BuildRefusal::Form
     );
+    // A space would let one part run into the next on the form's line, so it is no form either.
+    for part in ["2026 11 01", " 2026-11-01", "2026-11-01\t", ""] {
+        let form = UploadFormVersion {
+            compatibility_date: part,
+            ..UPLOAD_FORM
+        };
+        assert_eq!(
+            build_id_with_form(&form, &static_inputs(&f)).unwrap_err(),
+            BuildRefusal::Form,
+            "{part:?}"
+        );
+    }
+    for form in [
+        UploadFormVersion {
+            store_binding_name: "STORE X",
+            ..UPLOAD_FORM
+        },
+        UploadFormVersion {
+            module_upload_type: "application/javascript +module",
+            ..UPLOAD_FORM
+        },
+        UploadFormVersion {
+            assets_config: "{\"a\": 1}",
+            ..UPLOAD_FORM
+        },
+    ] {
+        assert_eq!(
+            build_id_with_form(&form, &static_inputs(&f)).unwrap_err(),
+            BuildRefusal::Form
+        );
+    }
     for refusal in BuildRefusal::ALL {
         assert!(refusal.code().starts_with("build_"), "{refusal:?}");
     }
@@ -550,6 +581,19 @@ fn an_approval_is_valid_only_for_its_releases_own_build() {
         Err(ApprovalBuildRefusal::BuildChanged)
     );
     // A release not made from a preview takes no body, as now.
+    // Equal but malformed is still no build: the form is checked, not only equality.
+    for malformed in [
+        "bld_x",
+        "",
+        "BLD_0000000000000000000000000000000B",
+        "bld_0000000000000000000000000000000B",
+    ] {
+        assert_eq!(
+            approval_build(Some(malformed), Some(malformed)),
+            Err(ApprovalBuildRefusal::BuildChanged),
+            "{malformed:?}"
+        );
+    }
     assert_eq!(approval_build(None, None), Ok(()));
     assert_eq!(
         approval_build(None, Some(BUILD_B)),

@@ -813,3 +813,249 @@ fn a_host_entry_naming_no_slot_honours_nothing() {
         );
     }
 }
+
+// --- the wire form (M8 step 7) -------------------------------------------------------------------------------------------
+
+/// Decodes base64url with no padding, for checking what the encoder wrote.
+fn unbase64url(text: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let values: Vec<u32> = text
+        .bytes()
+        .map(|b| ALPHABET.iter().position(|a| *a == b).unwrap() as u32)
+        .collect();
+    let mut out = Vec::new();
+    for chunk in values.chunks(4) {
+        let mut n = 0u32;
+        for (i, v) in chunk.iter().enumerate() {
+            n |= v << (18 - 6 * i);
+        }
+        let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&bytes[..chunk.len() - 1]);
+    }
+    out
+}
+
+#[test]
+fn base64url_is_rfc_4648s_url_alphabet_with_no_padding() {
+    assert_eq!(base64url(b""), "");
+    assert_eq!(base64url(b"f"), "Zg");
+    assert_eq!(base64url(b"fo"), "Zm8");
+    assert_eq!(base64url(b"foo"), "Zm9v");
+    assert_eq!(base64url(b"foob"), "Zm9vYg");
+    assert_eq!(base64url(&[0xfb, 0xff, 0xfe]), "-__-");
+    let mut seed = 7u64;
+    for len in 0..70 {
+        let bytes: Vec<u8> = (0..len).map(|_| next(&mut seed) as u8).collect();
+        let text = base64url(&bytes);
+        assert!(!text.contains('='));
+        assert_eq!(unbase64url(&text), bytes, "{len} bytes");
+    }
+}
+
+#[test]
+fn a_tickets_payload_is_its_claims_in_a_fixed_order_with_times_in_milliseconds() {
+    let claims = ticket_claims(&ask()).unwrap();
+    let payload = token_payload(&claims).unwrap();
+    let json = String::from_utf8(unbase64url(&payload)).unwrap();
+    assert_eq!(
+        json,
+        format!(
+            r#"{{"typ":"ticket","kid":"{KID}","aud":"{HOST}","pvw":"{SLOT}","sid":"{SID}","ep":3,"iat":{NOW},"exp":{},"st":"{ST}"}}"#,
+            NOW + TICKET_TTL_MS
+        )
+    );
+    let session = token_payload(&session_claims(&ask()).unwrap()).unwrap();
+    let json = String::from_utf8(unbase64url(&session)).unwrap();
+    assert!(json.starts_with(r#"{"typ":"session","#));
+    assert!(json.contains(&format!(r#""exp":{}"#, NOW + SESSION_MAX_TTL_MS)));
+}
+
+#[test]
+fn a_marker_tokens_payload_has_no_session_or_state() {
+    let claims = marker_claims(KID, HOST, SLOT, 9, NOW).unwrap();
+    let json = String::from_utf8(unbase64url(&token_payload(&claims).unwrap())).unwrap();
+    assert_eq!(
+        json,
+        format!(
+            r#"{{"typ":"marker","kid":"{KID}","aud":"{HOST}","pvw":"{SLOT}","ep":9,"iat":{NOW},"exp":{}}}"#,
+            NOW + MARKER_TTL_MS
+        )
+    );
+}
+
+#[test]
+fn claims_that_arent_their_form_are_never_given_a_payload() {
+    let good = ticket_claims(&ask()).unwrap();
+    let broken: Vec<(&str, Claims)> = vec![
+        (
+            "kid",
+            Claims {
+                kid: "k 1".into(),
+                ..good.clone()
+            },
+        ),
+        (
+            "kid empty",
+            Claims {
+                kid: String::new(),
+                ..good.clone()
+            },
+        ),
+        (
+            "aud upper",
+            Claims {
+                aud: "PV7Q2.podster.site".into(),
+                ..good.clone()
+            },
+        ),
+        (
+            "aud quote",
+            Claims {
+                aud: "a\".podster.site".into(),
+                ..good.clone()
+            },
+        ),
+        (
+            "pvw",
+            Claims {
+                pvw: "pvw_1".into(),
+                ..good.clone()
+            },
+        ),
+        (
+            "sid",
+            Claims {
+                sid: Some("pvs_\"".into()),
+                ..good.clone()
+            },
+        ),
+        (
+            "no sid",
+            Claims {
+                sid: None,
+                ..good.clone()
+            },
+        ),
+        (
+            "st",
+            Claims {
+                st: Some("not a hash".into()),
+                ..good.clone()
+            },
+        ),
+        (
+            "no st",
+            Claims {
+                st: None,
+                ..good.clone()
+            },
+        ),
+        (
+            "ep",
+            Claims {
+                ep: u64::MAX,
+                ..good.clone()
+            },
+        ),
+        (
+            "exp before iat",
+            Claims {
+                exp: good.iat,
+                ..good.clone()
+            },
+        ),
+        (
+            "too long",
+            Claims {
+                exp: good.iat + TICKET_TTL_MS + 1,
+                ..good.clone()
+            },
+        ),
+        (
+            "marker with sid",
+            Claims {
+                typ: TokenType::Marker,
+                ..good.clone()
+            },
+        ),
+    ];
+    for (what, claims) in broken {
+        assert_eq!(token_payload(&claims), None, "{what}");
+    }
+}
+
+#[test]
+fn the_signature_is_over_a_fixed_label_and_the_payload_and_the_token_joins_them_with_a_dot() {
+    assert_eq!(TOKEN_SIGNING_PREFIX, "podster-preview-token/v1.");
+    assert_eq!(signing_input("abc"), "podster-preview-token/v1.abc");
+    assert_eq!(token("abc", &[0xfb, 0xff, 0xfe]), "abc.-__-");
+}
+
+#[test]
+fn the_browser_is_sent_to_the_exchange_page_with_both_tokens_only_after_the_hash() {
+    let at = enter_location(HOST, "p.s", "q.t", "/a/b?x=1&y=2#z").unwrap();
+    assert_eq!(
+        at,
+        format!("https://{HOST}/__podster/enter#t=p.s&s=q.t&r=%2Fa%2Fb%3Fx%3D1%26y%3D2%23z")
+    );
+    let (before, _) = at.split_once('#').unwrap();
+    assert!(!before.contains('?'), "nothing in a query");
+    assert!(
+        !before.contains("p.s") && !before.contains("q.t"),
+        "nothing in the path"
+    );
+    assert_eq!(ENTER_PATH, "/__podster/enter");
+    // `+`, `%` and spaces' stand-ins come back exactly under URLSearchParams.
+    assert!(enter_location(HOST, "a", "b", "/%2B+")
+        .unwrap()
+        .ends_with("r=%2F%252B%2B"));
+}
+
+#[test]
+fn the_exchange_location_refuses_a_host_or_return_path_not_of_its_form() {
+    for host in [
+        "",
+        "PV.podster.site",
+        "pv.podster.site.",
+        "a b",
+        "pv.podster.site/x",
+        "https://pv.podster.site",
+    ] {
+        assert_eq!(enter_location(host, "a", "b", "/"), None, "{host:?}");
+    }
+    for r in ["", "x", "//evil.example", "/\\evil", "/a b", "/\n"] {
+        assert_eq!(enter_location(HOST, "a", "b", r), None, "{r:?}");
+    }
+    for t in ["", "a#b", "a&b", "a=b", "a b"] {
+        assert_eq!(enter_location(HOST, t, "b", "/"), None, "ticket {t:?}");
+        assert_eq!(enter_location(HOST, "a", t, "/"), None, "session {t:?}");
+    }
+}
+
+// --- one person's share of a room's hour (M8 step 7's review) -------------------------------------------------------------
+
+#[test]
+fn one_person_gets_at_most_60_tickets_an_hour_in_one_room_so_the_rooms_300_takes_five_people() {
+    assert_eq!(PER_PERSON_IN_ROOM_PER_HOUR, 60);
+    const { assert!(PER_PERSON_IN_ROOM_PER_HOUR * 5 <= PER_ROOM_PER_HOUR) };
+    let given: Vec<i64> = (0..59).map(|i| NOW - i * 1000).collect();
+    assert_eq!(person_in_room_allowed(&given, NOW), Ok(()));
+    assert_eq!(person_in_room_retry_after_ms(&given, NOW), None);
+    let mut full = given.clone();
+    full.push(NOW);
+    assert_eq!(
+        person_in_room_allowed(&full, NOW),
+        Err(AccessLimit::PersonInRoom)
+    );
+    assert_eq!(AccessLimit::PersonInRoom.code(), "preview_access_limit");
+    // The oldest, 58 seconds back, leaves at the hour.
+    assert_eq!(
+        person_in_room_retry_after_ms(&full, NOW),
+        Some(PER_ROOM_WINDOW_MS - 58_000)
+    );
+    // An hour on, every one has left.
+    assert_eq!(
+        person_in_room_allowed(&full, NOW + PER_ROOM_WINDOW_MS + 1),
+        Ok(())
+    );
+}

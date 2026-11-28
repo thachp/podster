@@ -522,9 +522,7 @@ fn every_change_that_can_shrink_who_may_view_has_a_named_raise() {
             "role_lowered",
             "owner_changed",
             "visibility_changed",
-            "person_invitation_revoked",
             "preview_deleted",
-            "operator_suspension",
             "organization_departure",
         ]
     );

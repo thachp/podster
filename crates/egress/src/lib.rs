@@ -4,6 +4,7 @@
 pub mod app_key;
 pub mod endpoint;
 pub mod nudge;
+pub mod preview_key;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

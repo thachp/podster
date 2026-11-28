@@ -8,6 +8,11 @@
 //! reconcile tells operators by the finding `script_binding_foreign`, by the script's name, with why in `detail`. Only
 //! an operator lifts it. Suspending an app already suspended changes nothing.
 //!
+//! **Preview scripts too** (M8 step 6): the hourly pass reads a preview namespace script's bindings through the preview
+//! provider and asks the same question with `namespace: "preview"`; only a preview label's script answers it, judged
+//! against that label's own store, and a binding it may not hold suspends the app exactly as production's does, which
+//! also deletes the preview (`takedown::set`).
+//!
 //! **Any of the room's labels, current or retired** (the coordinator's ruling on PR #420's review): a script left
 //! under a label the room retired is still the room's, and a binding it may not hold suspends the room's app, the
 //! cautious side, as an operator's suspension of any label does (`takedown::app_suspended` reads every label). The
@@ -83,10 +88,18 @@ pub(super) fn check_script(sql: &SqlStorage, body: &Value, now: i64) -> R<Option
     let ScriptOwner::Podster { label, .. } = script_owner(script) else {
         return Ok(None);
     };
+    // The label must be the room's, **of the namespace's environment** (M8 step 6): a script listed in the preview
+    // namespace is judged only as a preview label's, one in production's only as a production label's, so a script in
+    // the wrong namespace is no question here, and the store it is judged against is its own environment's.
+    let wanted = if body["namespace"] == "preview" {
+        "preview"
+    } else {
+        "production"
+    };
     if rows(
         sql,
-        "SELECT label FROM app_label WHERE label = ?",
-        vec![label.into()],
+        "SELECT label FROM app_label WHERE label = ? AND kind = ?",
+        vec![label.into(), wanted.into()],
     )?
     .is_empty()
     {

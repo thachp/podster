@@ -572,7 +572,7 @@ async fn entry(
     let raw = provider.read_raw_entry(host).await;
     // **A preview host's entry** (M8 step 6): a default host whose entry is in the preview form is asked of its room as
     // one, with the value as written, and the room's preview applier's record answers it. Production's forms are read
-    // exactly as before.
+    // exactly as before, and so is a preview-form value the room doesn't know as a preview host's.
     if let Raw::Value(value) = &raw {
         if value.starts_with(podster_core::serve_entry::PREVIEW_MARK)
             && provider.default_host_label(host).is_some()
@@ -586,12 +586,13 @@ async fn entry(
             else {
                 return Err(Stopped::Unanswered);
             };
-            let now = now_ms();
-            counts.take(sql, &answer, now)?;
-            if answer["known"] != true {
-                counts.finding(sql, "entry_without_room", host, now)?;
+            // Known as one of the room's preview hosts: answered. **Not known as one,** it may be a production host
+            // holding a value in the preview form: production's own question below decides it, as for any value it
+            // could never want, so production's applier writes its entry again.
+            if answer["known"] == true {
+                counts.take(sql, &answer, now_ms())?;
+                return Ok(());
             }
-            return Ok(());
         }
     }
     let found = match provider.entry_of(host, &raw) {
@@ -880,6 +881,11 @@ fn settle_kept_slots(sql: &SqlStorage, id: &str, judged: &Value) -> R<()> {
 /// counts it. An answer longer than the read's bound is sent as `bindings_oversized`, which the room judges foreign.
 /// **The question says whether the ceiling allows one more suspension now** (`may_suspend`); a room the ceiling held
 /// suspends nothing and says so.
+///
+/// **The preview namespace's scripts take the same step** (M8 step 6; `preview`, with the preview provider): the same
+/// bindings read, the same question with `namespace: "preview"`, which the room answers only for a preview label's
+/// script, and the same findings and handling.
+#[allow(clippy::too_many_arguments)]
 async fn one_script(
     sql: &SqlStorage,
     env: &Env,
@@ -888,6 +894,7 @@ async fn one_script(
     id: &str,
     listed_at: i64,
     counts: &mut Counts,
+    preview: bool,
 ) -> Step {
     let now = now_ms();
     if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
@@ -918,21 +925,19 @@ async fn one_script(
         } else {
             None
         };
-        let Some(answer) = ask_room(
-            env,
-            &room,
-            json!({
-                "kind": "script", "script": id, "listed_at": listed_at,
-                "bindings": bindings, "bindings_oversized": oversized,
-                "serve_entries": provider.serve_entries_namespace(),
-                "may_suspend": reserved.is_some(),
-                // Whether the ceiling was asked for this script at all: one asked without a slot, only because its
-                // bindings need the room's record to judge, isn't held by the ceiling, and is asked again with one.
-                "offered": offer,
-            }),
-        )
-        .await
-        else {
+        let mut question = json!({
+            "kind": "script", "script": id, "listed_at": listed_at,
+            "bindings": bindings, "bindings_oversized": oversized,
+            "serve_entries": provider.serve_entries_namespace(),
+            "may_suspend": reserved.is_some(),
+            // Whether the ceiling was asked for this script at all: one asked without a slot, only because its
+            // bindings need the room's record to judge, isn't held by the ceiling, and is asked again with one.
+            "offered": offer,
+        });
+        if preview {
+            question["namespace"] = "preview".into();
+        }
+        let Some(answer) = ask_room(env, &room, question).await else {
             // The slot reserved for it, if any, is kept: the room may have suspended the app before its answer was
             // lost. It is freed when the room next answers that nothing was suspended since.
             if let Some(slot) = reserved {
@@ -1308,7 +1313,17 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let step = one_script(sql, env, &provider, &ceiling, id, listed_at, &mut counts).await;
+        let step = one_script(
+            sql,
+            env,
+            &provider,
+            &ceiling,
+            id,
+            listed_at,
+            &mut counts,
+            false,
+        )
+        .await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
@@ -1328,7 +1343,7 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
     // The preview namespace's scripts (M8 step 6), after production's, each asked of its own room by its preview label.
-    let previews = preview_scripts(sql, env, deadline, &mut counts).await;
+    let previews = preview_scripts(sql, env, &ceiling, deadline, &mut counts).await;
     // The store reconcile (S5's second PR), after every script's step, so a takedown never waits on it (review standard
     // 4). It tells operators and fails nothing: its summary is its own.
     let stores = crate::store_reconcile::pass(sql, env).await;
@@ -1345,11 +1360,13 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
 /// namespaces"), in the hourly pass after production's, by the same rule (`podster_core::release::reconcile_script`):
 /// each listed script is asked of the room its preview label names, and only that room's state decides; the room's own
 /// delete job, through the preview provider, does the deleting. A name Podster didn't make, or one no room claims, is
-/// told to operators and left. Rule 3(b)'s bindings check isn't asked of a preview script yet. A slice a pass, from where
+/// told to operators and left, and rule 3(b)'s bindings check is asked of it exactly as of production's ([`one_script`]),
+/// its bindings read through the preview provider. A slice a pass, from where
 /// the last stopped, its place kept in `reconcile_preview_cursor`. Answers the step's code.
 async fn preview_scripts(
     sql: &SqlStorage,
     env: &Env,
+    ceiling: &Ceiling,
     deadline: i64,
     counts: &mut Counts,
 ) -> &'static str {
@@ -1396,7 +1413,7 @@ async fn preview_scripts(
             break;
         }
         cursor = Some(id.clone());
-        let step = one_preview_script(sql, env, id, listed_at, counts).await;
+        let step = one_script(sql, env, &provider, ceiling, id, listed_at, counts, true).await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
@@ -1409,39 +1426,6 @@ async fn preview_scripts(
     );
     counts.skipped(kept);
     code
-}
-
-/// One script listed in the preview namespace: whose it is, and what its room says.
-async fn one_preview_script(
-    sql: &SqlStorage,
-    env: &Env,
-    id: &str,
-    listed_at: i64,
-    counts: &mut Counts,
-) -> Step {
-    let now = now_ms();
-    if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
-        return Ok(counts.finding(sql, "preview_script_foreign_name", id, now)?);
-    }
-    let label = id.split('.').next().unwrap_or_default();
-    let Some(room) = crate::releases::room_for_label(env, label).await? else {
-        return Ok(counts.finding(sql, "preview_script_without_room", id, now)?);
-    };
-    let Some(answer) = ask_room(
-        env,
-        &room,
-        json!({ "kind": "script", "namespace": "preview", "script": id, "listed_at": listed_at }),
-    )
-    .await
-    else {
-        return Err(Stopped::Unanswered);
-    };
-    let now = now_ms();
-    counts.take(sql, &answer, now)?;
-    if answer["known"] != true {
-        counts.finding(sql, "preview_script_without_room", id, now)?;
-    }
-    Ok(())
 }
 
 /// The pass's summary with the store step's own beside it, as `stores`.

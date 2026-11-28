@@ -551,6 +551,28 @@ describe("deleting a preview (M8 step 6, the plan's 3.2 and 3.3)", () => {
   });
 });
 
+describe("unpublish epochs, kept apart by environment (M8 step 6)", () => {
+  it("never attaches a preview script to a production unpublish, nor holds that unpublish's files open", async () => {
+    const r = await room();
+    const asked = await request(r);
+    await alarmPass(stub(r.id));
+    expect((await pass(r)).outcome).toBe("next");
+    expect((await pass(r)).outcome).toBe("next");
+    const s = await slot(r);
+    const script = `${s.label}.${asked.body.id}`;
+    // The room made private: production is unpublished, and the preview survives, but its release on its way, asked
+    // under the epoch the unpublish left, is ended.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${r.id}/visibility`, { visibility: "private" })).status).toBe(200);
+    expect(await releaseOf(r, asked.body.id)).toMatchObject({ state: "failed" });
+    expect(await all(r.id, "SELECT script_name, unpublish_epoch FROM script_delete WHERE script_name = ?", script)).toEqual([{ script_name: script, unpublish_epoch: null }]);
+    expect((await slot(r)).current).toBe(1);
+    // Production's unpublish is done with its files once production's are gone, whatever the preview's script does.
+    await alarmPass(stub(r.id));
+    const unpublished = await all(r.id, "SELECT cause, scripts_gone_at IS NOT NULL AS done FROM unpublish");
+    expect(unpublished).toEqual([{ cause: "release_needs_public_room", done: 1 }]);
+  });
+});
+
 describe("what production's code assumed of a label that isn't current (the plan's 9.4, for step 6)", () => {
   it("never retires a live preview label by the operator's retire, and names production's label in its findings", async () => {
     const r = await room();
@@ -603,6 +625,51 @@ describe("the reconciles over both namespaces (M8 step 6)", () => {
     expect(state.previewScripts).toEqual([]);
     expect(state.scripts).toContain(r.prodScript);
     expect(await productionNamespaceCalls()).toEqual([]);
+  });
+
+  it("hold a preview script to rule 3(b) as production's: only its own label's STORE, and any other binding suspends the app", async () => {
+    const OWN_ID = "0123abcd-4567-89ef-0123-456789abcdef";
+    const storeBinding = { type: "d1", name: "STORE", id: OWN_ID };
+    const reconcileScripts = async () => (await (await moderation().fetch("https://do/reconcile/scripts", { method: "POST" })).json()) as { previews: string };
+    const freshCeiling = () => inModeration((sql) => { sql.exec("DELETE FROM binding_suspension"); sql.exec("DELETE FROM binding_unread"); sql.exec("DELETE FROM takedown_finding"); });
+    const recordStore = (r: Room, label: string) => inRoom(r.id, (sql) => sql.exec(
+      "INSERT INTO app_store (label, kind, store_name, store_id, recorded_at, create_sent_at, made_at, updated_at) VALUES (?, 'd1', ?, ?, 1, 1, 2, 2)",
+      label, `podster-store-${crypto.randomUUID().replace(/-/g, "")}`.slice(0, 46), OWN_ID));
+    const foreign = () => inModeration((sql) => sql.exec("SELECT subject, detail FROM takedown_finding WHERE code = 'script_binding_foreign'").toArray());
+    // Clean: its own label's store, and nothing else.
+    const clean = await room();
+    const cleanPreview = await served(clean);
+    await recordStore(clean, cleanPreview.label);
+    await freshCeiling();
+    await control("/seed", { previewScripts: [cleanPreview.script], bindings: { [cleanPreview.script]: [storeBinding] } });
+    expect((await reconcileScripts()).previews).toBe("ok");
+    expect(await foreign()).toEqual([]);
+    expect((await slot(clean)).current).toBe(1);
+    // Another binding beside it: caught, told by the script's name, and the app suspended as an operator's suspension,
+    // which takes production down and deletes the preview.
+    const r = await room();
+    const preview = await served(r);
+    await recordStore(r, preview.label);
+    await freshCeiling();
+    await control("/seed", { previewScripts: [preview.script], bindings: { [preview.script]: [storeBinding, { type: "service", name: "API", service: "podster-api" }] } });
+    expect((await reconcileScripts()).previews).toBe("ok");
+    expect(await foreign()).toEqual([{ subject: preview.script, detail: "other_binding" }]);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT suspended_at IS NOT NULL AS suspended, suspension_reason FROM app_label WHERE label = ?", preview.label).one())).toEqual({ suspended: 1, suspension_reason: "other" });
+    expect(await all(r.id, "SELECT cause FROM unpublish")).toEqual([{ cause: "app_suspended" }]);
+    expect((await slot(r)).current).toBeNull();
+    expect(await inModeration((sql) => sql.exec("SELECT count(*) AS n FROM binding_suspension").one().n)).toBe(1);
+    // A preview label's script listed in production's namespace is no question for rule 3(b) there.
+    const ask = await stub(r.id).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script: preview.script, listed_at: Date.now(), serve_entries: "x", bindings: [], bindings_oversized: false, may_suspend: true }) });
+    expect(((await ask.json()) as { bindings?: unknown }).bindings ?? null).toBeNull();
+  });
+
+  it("fall through to production's own check when a production host holds a preview-form value, so its applier writes it again", async () => {
+    const r = await room();
+    await control("/seed", { entries: { [r.prodHost]: `preview:pvw_${"1".repeat(32)}:0:${r.prodScript}` } });
+    await moderation().fetch("https://do/reconcile/entries", { method: "POST" });
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT applied_version, last_code FROM serve_apply WHERE host = ?", r.prodHost).one())).toEqual({ applied_version: null, last_code: "reconcile_differs" });
+    await alarmPass(stub(r.id));
+    expect((await fakeState()).entries[r.prodHost]).toBe(r.prodScript);
   });
 
   it("walk the preview namespace in the hourly pass, asking each script's room by its preview label", async () => {

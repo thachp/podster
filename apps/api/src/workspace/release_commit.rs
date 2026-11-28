@@ -232,8 +232,13 @@ pub(super) fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, n
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
     };
-    // Whichever path ends the release, an unpublish that came after it began owes this script's deletion.
+    // Whichever path ends the release, an unpublish that came after it began owes this script's deletion. **Only a
+    // production script's** (M8 step 6): an unpublish is production's, and a preview's script never holds one open,
+    // whichever epoch its release was asked under, so the epochs stay apart by environment.
+    let preview_script = super::preview::label_kind(sql, label)?
+        == Some(podster_core::preview::Environment::Preview);
     let under = match under {
+        _ if preview_script => None,
         Some(epoch) => Some(epoch),
         None => owing_unpublish(sql, script)?,
     };
@@ -264,12 +269,15 @@ pub(super) fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, n
 /// after the release began. The release was there to be taken down by it, so the unpublish isn't done with its files
 /// until this script is gone, **whichever path queues the script:** the unpublish's own bookkeeping, an upload past
 /// its hour, a failed recheck, or the reconcile finding it. `None` for a release that began after the room's last
-/// unpublish, and for a script no release of this room is named after.
+/// unpublish, for a script no release of this room is named after, and for a preview release's script (M8 step 6).
 pub(super) fn owing_unpublish(sql: &SqlStorage, script: &str) -> R<Option<i64>> {
     Ok(rows(
         sql,
-        "SELECT max(u.release_epoch) AS epoch FROM unpublish u JOIN release r ON r.release_epoch < u.release_epoch
-           WHERE r.script_name = ? AND r.script_release_id = r.id",
+        &format!(
+            "SELECT max(u.release_epoch) AS epoch FROM unpublish u JOIN release r ON r.release_epoch < u.release_epoch
+               WHERE r.script_name = ? AND r.script_release_id = r.id AND {}",
+            super::preview::NOT_PREVIEW_R
+        ),
         vec![script.into()],
     )?
     .first()

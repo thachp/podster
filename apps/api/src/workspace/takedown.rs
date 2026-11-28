@@ -1692,6 +1692,7 @@ pub(super) async fn delete_script(
            AND NOT EXISTS (SELECT 1 FROM script_delete d WHERE d.unpublish_epoch = unpublish.release_epoch AND d.gone_at IS NULL)
            AND NOT EXISTS (SELECT 1 FROM release r WHERE r.state IN ('uploading', 'uncertain') AND r.script_name IS NOT NULL
              AND r.script_release_id = r.id AND r.release_epoch < unpublish.release_epoch
+             AND r.id NOT IN (SELECT release_id FROM release_environment WHERE environment = 'preview')
              AND NOT EXISTS (SELECT 1 FROM script_delete q WHERE q.script_name = r.script_name))",
         vec![now.into(), script.into()],
     )

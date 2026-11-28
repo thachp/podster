@@ -19,6 +19,7 @@ const FIXED = 1_000;
 export const FAKE_ID_BLOCKS = {
   "app-store": { block: 13, tag: "as" },
   "merge-task": { block: 1, tag: "mt" },
+  "preview": { block: 14, tag: "pw" },
   "provisioning": { block: 2, tag: "pv" },
   "release-driver": { block: 3, tag: "rd" },
   "release-marker": { block: 9, tag: "rm" },

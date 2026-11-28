@@ -96,6 +96,9 @@ pub(crate) const RELEASE_PATH_COMPLETE: bool = true;
 /// are an answer about too long ago, and the command asks again.
 pub(super) const MAX_READ_AGE_MS: i64 = 5_000;
 
+/// What starting a preview's upload waits by while its label isn't in D1's lookup table yet (M8 step 6).
+pub(super) const PREVIEW_LABEL_PENDING: &str = "preview_label_not_indexed";
+
 /// The applier's code for a host whose script belongs to a release the room hasn't recorded live.
 pub(super) const NOT_CONFIRMED: &str = "release_not_confirmed";
 
@@ -107,6 +110,47 @@ pub(super) fn label_current(sql: &SqlStorage, label: &str) -> R<bool> {
         vec![label.into()],
     )?
     .is_empty())
+}
+
+/// Whether a release's label is still the one it may be uploaded and committed under: for production, the room's
+/// current label; for a preview, the room's live preview label, its current slot's (M8 step 6). A label of the other
+/// kind is never either.
+pub(super) fn label_live(sql: &SqlStorage, release_id: &str, label: &str) -> R<bool> {
+    match super::preview::environment_of(sql, release_id)? {
+        podster_core::preview::Environment::Production => label_current(sql, label),
+        podster_core::preview::Environment::Preview => {
+            super::preview_commit::label_live(sql, label)
+        }
+    }
+}
+
+/// The audit action and the event a release's change of state is recorded under, and who hears of it: a production
+/// release's own names, told to the room's managers; a preview release's (M8 step 6; the preview plan's 9.3) as
+/// `preview.*`, told to the room's owner and its admins who are people, with only `preview.failed`, `preview.served` and
+/// `preview.replaced` raised as events. `None` for the event when none is raised.
+pub(super) fn names_for(
+    sql: &SqlStorage,
+    kind: &str,
+    release_id: &str,
+) -> R<(String, Option<String>, Vec<String>)> {
+    if !super::preview::is_preview(sql, release_id)? {
+        return Ok((
+            kind.to_owned(),
+            Some(kind.to_owned()),
+            roles::room_managers(sql, moderation::PODSTER)?,
+        ));
+    }
+    let action = kind.replacen("release.", "preview.", 1);
+    let event = matches!(
+        kind,
+        "release.failed" | "release.served" | "release.replaced"
+    )
+    .then(|| action.clone());
+    Ok((
+        action,
+        event,
+        super::preview::told(sql, moderation::PODSTER)?,
+    ))
 }
 
 /// Writes the room's serve state back whole, as core decided it: each host's script and version, the flight's mark
@@ -188,8 +232,13 @@ pub(super) fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, n
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
     };
-    // Whichever path ends the release, an unpublish that came after it began owes this script's deletion.
+    // Whichever path ends the release, an unpublish that came after it began owes this script's deletion. **Only a
+    // production script's** (M8 step 6): an unpublish is production's, and a preview's script never holds one open,
+    // whichever epoch its release was asked under, so the epochs stay apart by environment.
+    let preview_script = super::preview::label_kind(sql, label)?
+        == Some(podster_core::preview::Environment::Preview);
     let under = match under {
+        _ if preview_script => None,
         Some(epoch) => Some(epoch),
         None => owing_unpublish(sql, script)?,
     };
@@ -220,12 +269,15 @@ pub(super) fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, n
 /// after the release began. The release was there to be taken down by it, so the unpublish isn't done with its files
 /// until this script is gone, **whichever path queues the script:** the unpublish's own bookkeeping, an upload past
 /// its hour, a failed recheck, or the reconcile finding it. `None` for a release that began after the room's last
-/// unpublish, and for a script no release of this room is named after.
+/// unpublish, for a script no release of this room is named after, and for a preview release's script (M8 step 6).
 pub(super) fn owing_unpublish(sql: &SqlStorage, script: &str) -> R<Option<i64>> {
     Ok(rows(
         sql,
-        "SELECT max(u.release_epoch) AS epoch FROM unpublish u JOIN release r ON r.release_epoch < u.release_epoch
-           WHERE r.script_name = ? AND r.script_release_id = r.id",
+        &format!(
+            "SELECT max(u.release_epoch) AS epoch FROM unpublish u JOIN release r ON r.release_epoch < u.release_epoch
+               WHERE r.script_name = ? AND r.script_release_id = r.id AND {}",
+            super::preview::NOT_PREVIEW_R
+        ),
         vec![script.into()],
     )?
     .first()
@@ -339,15 +391,19 @@ fn end_failed(
                 write_state(sql, &loaded.hosts, &back.state, now)?;
             }
         }
+        // A preview release's flight is the preview slot's, never production's (M8 step 6): its hosts go back there, so
+        // a failed replacement leaves the last working preview serving.
+        super::preview_commit::set_back(sql, release_id, now)?;
         if release["script_release_id"].as_str() == Some(release_id) {
             queue_script(sql, &script, under, now)?;
         }
     }
+    let (action, event, managers) = names_for(sql, "release.failed", release_id)?;
     audit_as(
         sql,
         moderation::PODSTER,
         moderation::PODSTER_KIND,
-        "release.failed",
+        &action,
         release_id,
         Some(json!({ "state": state.name() }).to_string()),
         Some(
@@ -360,9 +416,12 @@ fn end_failed(
         now,
     )?;
     // The event names the release it is about, by its ID, and the reason, by its code.
+    let Some(event) = event else {
+        return Ok(());
+    };
     store::record_event_about(
         sql,
-        "release.failed",
+        &event,
         moderation::PODSTER,
         Some(release_id),
         None,
@@ -370,10 +429,7 @@ fn end_failed(
             reason: Some(reason),
             ..Transition::NONE
         },
-        match told {
-            Some(told) => told,
-            None => roles::room_managers(sql, moderation::PODSTER)?,
-        },
+        told.unwrap_or(managers),
         now,
     )
 }
@@ -512,24 +568,28 @@ pub(super) fn record(
     to: &str,
     now: i64,
 ) -> R<()> {
+    let (action, event, told) = names_for(sql, kind, release_id)?;
     audit_as(
         sql,
         moderation::PODSTER,
         moderation::PODSTER_KIND,
-        kind,
+        &action,
         release_id,
         Some(json!({ "state": from }).to_string()),
         Some(json!({ "state": to }).to_string()),
         now,
     )?;
+    let Some(event) = event else {
+        return Ok(());
+    };
     store::record_event_about(
         sql,
-        kind,
+        &event,
         moderation::PODSTER,
         Some(release_id),
         None,
         &Transition::NONE,
-        roles::room_managers(sql, moderation::PODSTER)?,
+        told,
         now,
     )
 }
@@ -590,9 +650,35 @@ pub(super) fn start_upload(
         ));
     }
     let label = text(&release["label"]).unwrap_or_default();
-    if !label_current(sql, &label)? {
+    if !label_live(sql, release_id, &label)? {
         let reason = UploadFailure::LabelRetired.code();
         return Ok(with_script(failed(sql, release_id, reason, now)?, None));
+    }
+    // **A preview's label must be this room's in D1's lookup table before anything is uploaded under it** (M8 step 6),
+    // as a production release's label must be before its approval queues it (`release_approval::address`): the room's
+    // alarm indexes it, and until then the release waits; a row another room holds fails it, as an approval refuses.
+    if super::preview::is_preview(sql, release_id)? {
+        let indexed = rows(
+            sql,
+            "SELECT indexed_at FROM app_label WHERE label = ?",
+            vec![label.as_str().into()],
+        )?
+        .first()
+        .and_then(|row| row["indexed_at"].as_i64());
+        match indexed {
+            Some(at) if at > 0 => {}
+            Some(_) => {
+                return Ok(with_script(
+                    failed(sql, release_id, "release_label_taken", now)?,
+                    None,
+                ))
+            }
+            None => {
+                let mut waiting = with_script(answer(&release, true, None), None);
+                waiting["waiting"] = PREVIEW_LABEL_PENDING.into();
+                return Ok(waiting);
+            }
+        }
     }
     // Its own script; or, for a rollback that may switch back by the room's rows now, the kept script it switches to.
     let (script, named_after) = release_rollback::script_at_start(sql, release_id, &label)?;
@@ -778,7 +864,11 @@ pub(super) fn upload_ready(
         let reason = UploadFailure::ScriptDeleted.code();
         return ended(failed(sql, release_id, reason, now)?);
     }
-    if !label_current(sql, &text(&release["label"]).unwrap_or_default())? {
+    if !label_live(
+        sql,
+        release_id,
+        &text(&release["label"]).unwrap_or_default(),
+    )? {
         let reason = UploadFailure::LabelRetired.code();
         return ended(failed(sql, release_id, reason, now)?);
     }
@@ -939,11 +1029,12 @@ pub(super) fn record_upload(
             now.into(),
         ],
     )?;
+    let (action, event, told) = names_for(sql, "release.uploaded", release_id)?;
     audit_as(
         sql,
         moderation::PODSTER,
         moderation::PODSTER_KIND,
-        "release.uploaded",
+        &action,
         release_id,
         None,
         Some(
@@ -952,14 +1043,17 @@ pub(super) fn record_upload(
         ),
         now,
     )?;
+    let Some(event) = event else {
+        return Ok(());
+    };
     store::record_event_about(
         sql,
-        "release.uploaded",
+        &event,
         moderation::PODSTER,
         Some(release_id),
         None,
         &Transition::NONE,
-        roles::room_managers(sql, moderation::PODSTER)?,
+        told,
         now,
     )
 }
@@ -1036,9 +1130,13 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
         .in_flight
         .as_ref()
         .is_some_and(|flight| flight.release_id == release_id);
+    // Production's own: a preview's uncertain release is in another namespace, and holds only previews (M8 step 6).
     let uncertain: Vec<String> = rows(
         sql,
-        "SELECT id FROM release WHERE state = ?",
+        &format!(
+            "SELECT id FROM release WHERE state = ? AND {}",
+            super::preview::NOT_PREVIEW
+        ),
         vec![ReleaseState::Uncertain.name().into()],
     )?
     .iter()
@@ -1237,7 +1335,10 @@ impl Workspace {
             }
             None => false,
         };
-        let switch = if switching {
+        // A preview release stages on and confirms against the preview slot's own serve state, never production's
+        // (M8 step 6; `preview_commit`). A preview has no rollback, so it never switches back.
+        let preview = super::preview::is_preview(&self.state.storage().sql(), &release_id)?;
+        let switch = if switching && !preview {
             match self.switch_reads(&release_id, &release, lease).await? {
                 Ok(reads) => Some(reads),
                 Err(answer) => return Ok(answer),
@@ -1257,6 +1358,7 @@ impl Workspace {
             let now = release_now(sql);
             let outcome = match &switch {
                 Some(reads) => release_rollback::stage(sql, &id, reads, now)?,
+                None if preview => super::preview_commit::stage(sql, &id, now)?,
                 None => stage(sql, &id, now)?,
             };
             if let Staged::Answer(answer) = outcome {
@@ -1282,6 +1384,9 @@ impl Workspace {
         self.release_transaction(move |sql| {
             if !may_go_on(sql, confirming.as_ref()) {
                 return lease_lost(sql, &release_id);
+            }
+            if preview {
+                return super::preview_commit::confirm(sql, &release_id, &reads, release_now(sql));
             }
             confirm(sql, &release_id, &reads, release_now(sql))
         })

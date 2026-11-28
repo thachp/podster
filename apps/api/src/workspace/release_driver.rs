@@ -75,6 +75,8 @@ pub(crate) const INTERNAL_RELEASE_DRIVE: &str = "/internal/release-drive";
 
 /// `last_code` while the driver does nothing: the deployment doesn't allow release, or the release path is closed.
 const IDLE: &str = podster_core::release_driver::DRIVER_IDLE;
+/// `last_code` while a preview's line idles because previews aren't on for the deployment (M8 step 6).
+const PREVIEWS_IDLE: &str = "previews_off";
 /// `last_code` while an upload waits for the room's hourly upload attempts to leave room for it.
 const UPLOAD_ATTEMPTS: &str = podster_core::release_driver::UPLOAD_ATTEMPTS_WAITING;
 /// What a step answers, as `waiting`, when its lease ran out before it was done: it asked nothing more and wrote
@@ -149,8 +151,11 @@ pub(super) fn test_at(sql: &SqlStorage, point: &str) {
     }
 }
 
-/// The release at the head of the room's line: its oldest that is queued, uploading or `uncertain`. An `uncertain` one
-/// holds the line until it is settled or ends: nothing behind it is started or committed meanwhile.
+/// The release at the head of one of the room's two lines, production's and the preview's (M8 step 6): its oldest that
+/// is queued, uploading or `uncertain`. An `uncertain` one holds its own line until it is settled or ends: nothing
+/// behind it is started or committed meanwhile. **The lines are apart,** as the flights are, so a preview never waits
+/// behind a production release, or the reverse; they share only the room's hourly upload attempts and the read budget,
+/// which previews share by decision 257.
 struct Head {
     id: String,
     state: ReleaseState,
@@ -159,11 +164,18 @@ struct Head {
     next_attempt_at: Option<i64>,
 }
 
-fn head(sql: &SqlStorage) -> R<Option<Head>> {
+fn head(sql: &SqlStorage, preview: bool) -> R<Option<Head>> {
+    let line = if preview {
+        "r.id IN (SELECT release_id FROM release_environment WHERE environment = 'preview')"
+    } else {
+        super::preview::NOT_PREVIEW_R
+    };
     let Some(release) = rows(
         sql,
-        "SELECT r.id, r.state, r.script_name, j.attempts, j.next_attempt_at FROM release r LEFT JOIN release_job j ON j.release_id = r.id
-           WHERE r.state IN ('queued', 'uploading', 'uncertain') ORDER BY r.seq LIMIT 1",
+        &format!(
+            "SELECT r.id, r.state, r.script_name, j.attempts, j.next_attempt_at FROM release r LEFT JOIN release_job j ON j.release_id = r.id
+               WHERE r.state IN ('queued', 'uploading', 'uncertain') AND {line} ORDER BY r.seq LIMIT 1"
+        ),
         vec![],
     )?
     .into_iter()
@@ -334,11 +346,17 @@ pub(super) fn next_due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
 pub(super) fn due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
     let failures = drive_failures(sql)?;
     let now = release_now(sql);
-    let mut due: Option<i64> = head(sql)?.map(|head| head.next_attempt_at.unwrap_or(now));
-    // The release in flight's marker, beside the head's steps.
-    if let Some(flight) = release_marker::flight(sql)? {
-        let at = flight.next_attempt_at.unwrap_or(now);
-        due = Some(due.map_or(at, |head| head.min(at)));
+    let mut due: Option<i64> = None;
+    // Each line's head, and each flight's marker beside it: production's and the preview's.
+    for preview in [false, true] {
+        if let Some(head) = head(sql, preview)? {
+            let at = head.next_attempt_at.unwrap_or(now);
+            due = Some(due.map_or(at, |d| d.min(at)));
+        }
+        if let Some(flight) = release_marker::flight_for(sql, preview)? {
+            let at = flight.next_attempt_at.unwrap_or(now);
+            due = Some(due.map_or(at, |d| d.min(at)));
+        }
     }
     let started = rows(
         sql,
@@ -384,12 +402,13 @@ enum Leased {
 /// attempt, with when the release is next due: the read share's, for a queued release.
 fn lease(
     sql: &SqlStorage,
+    preview: bool,
     idle: Option<&'static str>,
     uncounted: Option<(&'static str, i64)>,
     now: i64,
 ) -> R<Leased> {
     end_stale(sql, now)?;
-    let Some(head) = head(sql)? else {
+    let Some(head) = head(sql, preview)? else {
         return Ok(Leased::Nothing(
             json!({ "release_id": null, "outcome": "none" }),
         ));
@@ -412,9 +431,14 @@ fn lease(
     };
     // Before the cap: another release's flight is waited for, counting no attempt (the driver's ruling 7). It ends by
     // its own marker's bounds, and its end wakes this release.
-    let flight = rows(sql, "SELECT in_flight_release FROM release_config", vec![])?
-        .first()
-        .and_then(|row| text(&row["in_flight_release"]));
+    // Its own line's flight only: the preview slot's for a preview, production's for a release (M8 step 6).
+    let flight = if preview {
+        super::preview_commit::flight_any(sql)?
+    } else {
+        rows(sql, "SELECT in_flight_release FROM release_config", vec![])?
+            .first()
+            .and_then(|row| text(&row["in_flight_release"]))
+    };
     if waits_in_flight(&head.id, flight.as_deref(), step) {
         let at = in_flight_due(now);
         set_job(sql, &head.id, Some(at), Some(IN_FLIGHT_WAITING), now)?;
@@ -653,20 +677,42 @@ impl Workspace {
         if !expired.is_empty() {
             bookkeeping(&self.state);
         }
-        // The release in flight's marker goes first, when it is due: it is what ends the flight others wait on.
-        let flight_due = release_marker::flight(&sql)?
-            .is_some_and(|flight| flight.next_attempt_at.is_none_or(|at| at <= now));
-        let head_due = head(&sql)?.filter(|head| head.next_attempt_at.is_none_or(|at| at <= now));
-        if !flight_due && head_due.is_none() {
+        // A release in flight's marker goes first, when it is due: it is what ends the flight others wait on. Production's
+        // line before the preview's, each with its own flight and head (M8 step 6).
+        let flight_due = |preview: bool| -> R<bool> {
+            Ok(release_marker::flight_for(&sql, preview)?
+                .is_some_and(|flight| flight.next_attempt_at.is_none_or(|at| at <= now)))
+        };
+        let head_due = |preview: bool| -> R<Option<Head>> {
+            Ok(head(&sql, preview)?.filter(|head| head.next_attempt_at.is_none_or(|at| at <= now)))
+        };
+        // (a flight is due, the flight is the preview's, the head due, the head is the preview's)
+        let (flight_due, flight_preview, head_due, head_preview) = if flight_due(false)? {
+            (true, false, None, false)
+        } else if flight_due(true)? {
+            (true, true, None, false)
+        } else if let Some(head) = head_due(false)? {
+            (false, false, Some(head), false)
+        } else if let Some(head) = head_due(true)? {
+            (false, false, Some(head), true)
+        } else {
             return Ok(json!({ "outcome": "not_due" }));
-        }
+        };
+        let previewing = (flight_due && flight_preview) || head_preview;
         // Behind `RELEASES`, exactly `true`, and the gate on the release path. With release allowed, a deployment with no
         // content provider idles too: every upload would wait for one, and none would be worth an attempt.
         let idle = if !(crate::releases::setting(&self.env).await.allows_release()
             && self.release_path_open().await.is_ok())
         {
             Some(IDLE)
-        } else if self.upload_provider().is_none() {
+        } else if previewing && !crate::previews::setting(&self.env).await.allows_previews() {
+            // A preview's line idles while previews aren't on for the deployment, as a release's does while release
+            // isn't: nothing is counted, and nothing is deleted unless the setting is exactly `false` (M8 step 6).
+            Some(PREVIEWS_IDLE)
+        } else if (previewing && super::preview_apply::provider(&self.env, &sql).is_none())
+            || (!previewing && self.upload_provider().is_none())
+        {
+            // Each line's own provider: a preview's is the preview namespace's.
             Some(NO_PROVIDER)
         } else {
             None
@@ -685,6 +731,7 @@ impl Workspace {
             transaction_sync(&self.state, move || {
                 *slot.borrow_mut() = Some(release_marker::lease(
                     &store,
+                    flight_preview,
                     idle,
                     stopped,
                     release_now(&store),
@@ -717,7 +764,13 @@ impl Workspace {
         let slot = leased.clone();
         let store = sql.clone();
         transaction_sync(&self.state, move || {
-            *slot.borrow_mut() = Some(lease(&store, idle, uncounted, release_now(&store))?);
+            *slot.borrow_mut() = Some(lease(
+                &store,
+                head_preview,
+                idle,
+                uncounted,
+                release_now(&store),
+            )?);
             Ok(())
         })?;
         let leased = leased.borrow_mut().take();

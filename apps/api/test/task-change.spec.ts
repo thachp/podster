@@ -1092,6 +1092,8 @@ describe("a task's release status (M5 step 8)", () => {
       checks: { state: null, counts: null, observed_at: null, commit_sha: null },
       merge: { state: "not_requested", reason: null, observed_at: null, sha: null, requested_by: null },
       release: { exists: false },
+      // M8 step 6: the preview part, `{ exists: false }` while release or previews are off, as release is.
+      preview: { exists: false },
     });
     // The refresh reads the head's checks where the App has been given them: a failed status, a passing run, one still running.
     await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_reads_checks (x INTEGER)"));
@@ -1207,7 +1209,7 @@ describe("a task's release status (M5 step 8)", () => {
     expect(await seen(OTHER)).toEqual([200, "ok"]);
     // And then only that: nothing of the pull request or its checks, which its view of the task's change doesn't show.
     const theirs = (await status(OTHER, r.id, r.task)).body;
-    expect(theirs).toEqual({ task_id: r.task, linked: true, pull_request: null, checks: null, merge: { state: "failed", reason: "provider_refused", observed_at: 90, sha: null, requested_by: OTHER.id }, release: { exists: false } });
+    expect(theirs).toEqual({ task_id: r.task, linked: true, pull_request: null, checks: null, merge: { state: "failed", reason: "provider_refused", observed_at: 90, sha: null, requested_by: OTHER.id }, release: { exists: false }, preview: { exists: false } });
     // The owner, shown the change, gets all of it.
     expect((await status(OWNER, r.id, r.task)).body).toMatchObject({ pull_request: { pr_number: 7 }, checks: { state: "success", commit_sha: HEAD } });
     // A public-claim participant who can't see the task, a task that doesn't exist, and someone outside the room.
@@ -1219,7 +1221,7 @@ describe("a task's release status (M5 step 8)", () => {
     // A task with no pull request on record answers with nothing observed.
     const plain = await accepted(r.id);
     await inRoom(r.id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 0 WHERE id = ?", plain.task));
-    expect((await status(OWNER, r.id, plain.task)).body).toEqual({ task_id: plain.task, linked: false, pull_request: null, checks: { state: null, counts: null, observed_at: null, commit_sha: null }, merge: { state: "not_requested", reason: null, observed_at: null, sha: null, requested_by: null }, release: { exists: false } });
+    expect((await status(OWNER, r.id, plain.task)).body).toEqual({ task_id: plain.task, linked: false, pull_request: null, checks: { state: null, counts: null, observed_at: null, commit_sha: null }, merge: { state: "not_requested", reason: null, observed_at: null, sha: null, requested_by: null }, release: { exists: false }, preview: { exists: false } });
   });
 
   it("doesn't exist with managed repositories off: it answers exactly as a read that was never there", async () => {
@@ -1250,7 +1252,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 18"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE hostname_provider"); sql.exec("UPDATE schema_version SET version = version - 19"); sql.exec("DROP TABLE release_uncertain"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");

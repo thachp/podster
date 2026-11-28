@@ -46,7 +46,7 @@ fn not_taken() -> ApiError {
 fn label_row(sql: &SqlStorage, label: &str) -> R<Option<Value>> {
     Ok(rows(
         sql,
-        "SELECT label, current, retired_at, indexed_at FROM app_label WHERE label = ?",
+        "SELECT label, kind, current, retired_at, indexed_at FROM app_label WHERE label = ?",
         vec![label.into()],
     )?
     .into_iter()
@@ -71,13 +71,23 @@ fn never_approved(sql: &SqlStorage, row: &Value, label: &str) -> R<bool> {
 
 /// The answer: `{ label, retired, retired_at }`.
 fn answer(row: &Value) -> Value {
-    json!({ "label": row["label"], "retired": row["current"].is_null(), "retired_at": row["retired_at"] })
+    // Retired is `retired_at` set, for either kind: a preview label is never current, and is live until then.
+    json!({ "label": row["label"], "retired": !row["retired_at"].is_null(), "retired_at": row["retired_at"] })
 }
 
 /// In the room's transaction, with what D1 said of the label read just before it: the checks again on the room's rows,
 /// then the retirement. Answers as [`answer`].
 fn retire(sql: &SqlStorage, label: &str, taken: bool, reason: &str, now: i64) -> R<Value> {
     let row = label_row(sql, label)?.ok_or_else(ApiError::not_found)?;
+    // **A preview label is never current and is live until retired** (M8 step 6; room schema step 64), so "not current"
+    // doesn't mean retired for it. This command retires production's current label only: a preview label is retired by
+    // deleting the preview, its owner's or a trigger's, and is answered here as not taken while it is live.
+    if row["kind"].as_str() == Some("preview") {
+        if row["retired_at"].is_null() {
+            return Err(not_taken());
+        }
+        return Ok(answer(&row));
+    }
     if row["current"].is_null() {
         return Ok(answer(&row));
     }
@@ -162,6 +172,14 @@ impl Workspace {
         let Some(row) = label_row(&sql, &label)? else {
             return Err(ApiError::not_found());
         };
+        // A preview label (M8 step 6): retired only by deleting the preview, so a live one is not taken here.
+        if row["kind"].as_str() == Some("preview") {
+            return if row["retired_at"].is_null() {
+                Err(not_taken())
+            } else {
+                Ok(answer(&row))
+            };
+        }
         if row["current"].is_null() {
             return Ok(answer(&row));
         }

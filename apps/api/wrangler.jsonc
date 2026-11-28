@@ -83,6 +83,14 @@
         // undecided and takes nothing down (docs/staging.md, "Switching release off for the deployment"). Nothing is
         // served until the owner also sets the content provider's secrets. Production needs its own yes.
         "RELEASES": "true",
+        // PREVIEWS switches workroom previews on (M8, decisions 250 to 259; docs/m8-preview-plan.md, 3.3 and section 8),
+        // and CONTENT_PREVIEW_NAMESPACE names the preview dispatch namespace, a plain setting since a name grants
+        // nothing. **Both pending the owner's wizard (decision 258)**, which makes the namespace, sets the ticket key and
+        // configures the content Worker: until then neither is set here or anywhere, every preview route answers
+        // `previews_off` behind RELEASES, and nothing is uploaded to any namespace for a preview. Exactly "true" is on;
+        // exactly "false" deletes every preview; anything else, or unset, is undecided and deletes nothing.
+        // "PREVIEWS": "true",
+        // "CONTENT_PREVIEW_NAMESPACE": "<the preview dispatch namespace's name, from the owner's wizard>",
         // The DNS-over-HTTPS resolver a custom hostname's proof and recheck ask (M6 step 8), staging only: a test fails
         // if the top level or any other environment sets it. Ruled by the architect on 2026-11-23 (#565, after spike G).
         // The Public Suffix List isn't a setting: it is compiled in from third_party/public-suffix-list.

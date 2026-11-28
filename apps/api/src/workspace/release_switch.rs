@@ -147,8 +147,10 @@ pub(super) fn has_anything_up(sql: &SqlStorage) -> R<bool> {
         &format!(
             "SELECT 1 AS up WHERE EXISTS (SELECT 1 FROM serve_state WHERE script_name IS NOT NULL)
                OR EXISTS (SELECT 1 FROM release_config WHERE kept_previous IS NOT NULL OR in_flight_release IS NOT NULL)
-               OR EXISTS (SELECT 1 FROM release r, release_config c WHERE r.state IN ({}) AND r.release_epoch = c.release_epoch)",
-            open.join(", ")
+               OR EXISTS (SELECT 1 FROM release r, release_config c WHERE r.state IN ({}) AND r.release_epoch = c.release_epoch AND {})",
+            open.join(", "),
+            // Production's own: a preview is deleted by its own triggers (M8 step 6), and never counts as up here.
+            super::preview::NOT_PREVIEW_R
         ),
         vec![],
     )?;
@@ -172,6 +174,8 @@ pub(super) fn has_current_label(sql: &SqlStorage) -> R<bool> {
 /// suspended, or one that never went live, too. Answers whether it unpublished.
 pub(super) fn apply_deployment_off(sql: &SqlStorage, now: i64) -> R<bool> {
     if !has_anything_up(sql)? {
+        // The preview goes with it (M8 step 6; the preview plan's 3.3), whatever production has up.
+        super::preview::on_unpublish(sql, UnpublishTrigger::ReleaseOffForDeployment, now)?;
         takedown::retire_current_label(sql, now)?;
         return Ok(false);
     }
@@ -258,6 +262,22 @@ impl Workspace {
         &self,
         setting: podster_core::release::DeploymentRelease,
     ) {
+        // `PREVIEWS` read as exactly `false` deletes the room's preview (M8 step 6; the preview plan's 3.3), read wherever
+        // `RELEASES` is, by the same rule: on or undecided, nothing happens here.
+        let previews = crate::previews::setting(&self.env).await;
+        if previews.deletes_previews() {
+            let store = self.state.storage().sql();
+            if let Err(error) = transaction_sync(&self.state, move || {
+                super::preview::apply_deployment(&store, previews, now_ms())
+            }) {
+                let sql = self.state.storage().sql();
+                console_error!(
+                    "preview: the deployment's switch wasn't applied: room={} code={}",
+                    room_id(&sql),
+                    error.code().unwrap_or("internal_error")
+                );
+            }
+        }
         if !setting.unpublishes() {
             return;
         }

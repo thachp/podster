@@ -62,15 +62,47 @@ pub(super) struct Flight {
     switched_at: Option<i64>,
 }
 
+/// Production's flight: the release `release_config`'s flight is for, while it is `live`.
 pub(super) fn flight(sql: &SqlStorage) -> R<Option<Flight>> {
-    let Some(row) = rows(
+    flight_row(
         sql,
-        "SELECT r.id, j.attempts, j.next_attempt_at, j.live_at, j.switched_at FROM release_config c
-           JOIN release r ON r.id = c.in_flight_release LEFT JOIN release_job j ON j.release_id = r.id WHERE r.state = 'live'",
-        vec![],
-    )?
-    .into_iter()
-    .next() else {
+        rows(
+            sql,
+            "SELECT r.id, j.attempts, j.next_attempt_at, j.live_at, j.switched_at FROM release_config c
+               JOIN release r ON r.id = c.in_flight_release LEFT JOIN release_job j ON j.release_id = r.id WHERE r.state = 'live'",
+            vec![],
+        )?,
+    )
+}
+
+/// **The preview slot's flight** (M8 step 6): the preview release its serve state's flight is for, while it is
+/// `live`. Its own, apart from production's, so a preview's marker never waits on production's, or the reverse.
+pub(super) fn preview_flight(sql: &SqlStorage) -> R<Option<Flight>> {
+    let Some(id) = super::preview_commit::flight_release(sql)? else {
+        return Ok(None);
+    };
+    flight_row(
+        sql,
+        rows(
+            sql,
+            "SELECT r.id, j.attempts, j.next_attempt_at, j.live_at, j.switched_at FROM release r
+               LEFT JOIN release_job j ON j.release_id = r.id WHERE r.id = ? AND r.state = 'live'",
+            vec![id.into()],
+        )?,
+    )
+}
+
+/// The flight of production's (`false`) or of the preview's (`true`).
+pub(super) fn flight_for(sql: &SqlStorage, preview: bool) -> R<Option<Flight>> {
+    if preview {
+        preview_flight(sql)
+    } else {
+        flight(sql)
+    }
+}
+
+fn flight_row(_sql: &SqlStorage, found: Vec<Value>) -> R<Option<Flight>> {
+    let Some(row) = found.into_iter().next() else {
         return Ok(None);
     };
     Ok(Some(Flight {
@@ -83,7 +115,15 @@ pub(super) fn flight(sql: &SqlStorage) -> R<Option<Flight>> {
 }
 
 /// Whether the room's applier has switched the default host to the flight: core's `marker_switched`, on the room's
-/// rows. A room with no default host, or no flight, isn't switched.
+/// rows. A room with no default host, or no flight, isn't switched. For the preview's flight, the preview applier's
+/// own record of the default preview host (`preview_commit::switched`).
+fn switched_for(sql: &SqlStorage, preview: bool) -> R<bool> {
+    if preview {
+        return super::preview_commit::switched(sql);
+    }
+    switched(sql)
+}
+
 fn switched(sql: &SqlStorage) -> R<bool> {
     let found = rows(
         sql,
@@ -142,6 +182,10 @@ fn stop_cause(sql: &SqlStorage, stopped: bool) -> R<Option<&'static str>> {
 /// still exactly this release's, under its epoch, with the default host still at what its commit wrote. `false` and
 /// nothing written otherwise.
 fn serve(sql: &SqlStorage, release_id: &str, now: i64) -> R<bool> {
+    // A preview release is served on the preview slot, and replaces only a preview (M8 step 6).
+    if super::preview::is_preview(sql, release_id)? {
+        return super::preview_commit::serve(sql, release_id, now);
+    }
     let Some(loaded) = takedown::load(sql)? else {
         return Ok(false);
     };
@@ -177,10 +221,13 @@ fn serve(sql: &SqlStorage, release_id: &str, now: i64) -> R<bool> {
         served.name(),
         now,
     )?;
-    // The release this one replaces, and any other still recorded as serving.
+    // The release this one replaces, and any other still recorded as serving: production's own, never a preview.
     for other in rows(
         sql,
-        "SELECT id, state FROM release WHERE state IN ('live', 'served') AND id != ? ORDER BY seq",
+        &format!(
+            "SELECT id, state FROM release WHERE state IN ('live', 'served') AND id != ? AND {} ORDER BY seq",
+            super::preview::NOT_PREVIEW
+        ),
         vec![release_id.into()],
     )? {
         let (Some(id), Ok(from)) = (text(&other["id"]), state_of(&other)) else {
@@ -212,12 +259,13 @@ pub(super) type Leased = std::result::Result<(String, u32), Value>;
 /// the app is held or the domain stopped:** the release ends with that stop's cause instead.
 pub(super) fn lease(
     sql: &SqlStorage,
+    preview: bool,
     idle: Option<&'static str>,
     stopped: bool,
     now: i64,
 ) -> R<Leased> {
     end_stale(sql, now)?;
-    let Some(flight) = flight(sql)? else {
+    let Some(flight) = flight_for(sql, preview)? else {
         return Ok(Err(json!({ "release_id": null, "outcome": "none" })));
     };
     let answer = |outcome: &str, code: Option<&str>, next: Option<i64>| {
@@ -250,7 +298,7 @@ pub(super) fn lease(
             now
         }
     };
-    let switched_at = if switched(sql)? {
+    let switched_at = if switched_for(sql, preview)? {
         Some(match flight.switched_at {
             Some(at) => at,
             None => {
@@ -301,6 +349,22 @@ pub(super) fn lease(
 /// switched back to the kept script, the release that script was uploaded for. `None` otherwise, and nothing is
 /// fetched.
 fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, String, String)>> {
+    // A preview release's marker is fetched through its own default preview host, on the content domain (M8 step 6).
+    if super::preview::is_preview(sql, release_id)? {
+        let Some(domain) = crate::content_provider::content_domain(env) else {
+            return Ok(None);
+        };
+        return Ok(
+            super::preview_commit::target(sql, release_id)?.filter(|(host, _, _)| {
+                crate::content_provider::default_host_label_on(&domain, host).is_some_and(|label| {
+                    release_row(sql, release_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|row| row["label"].as_str() == Some(label))
+                })
+            }),
+        );
+    }
     let Some(release) = release_row(sql, release_id)? else {
         return Ok(None);
     };
@@ -394,7 +458,8 @@ fn record(
         set_job(sql, release_id, Some(now), Some(MOVED), now)?;
         return Ok(json!({ "release_id": release_id, "outcome": "moved", "code": MOVED }));
     }
-    let still_flight = flight(sql)?.is_some_and(|flight| flight.id == release_id);
+    let preview = super::preview::is_preview(sql, release_id)?;
+    let still_flight = flight_for(sql, preview)?.is_some_and(|flight| flight.id == release_id);
     let (name, code, next) = if !still_flight {
         // It is no longer the live release in flight: unpublished, or ended some other way. Nothing is the job's.
         set_job(sql, release_id, None, None, now)?;

@@ -80,7 +80,11 @@ pub(super) fn handle(
     end_stale(sql, now)?;
     let target = rows(
         sql,
-        "SELECT state, task_id, commit_sha, environment, served_at FROM release WHERE id = ?",
+        // Production's own releases only (M8 step 6): a preview release is never one production rolls back to.
+        &format!(
+            "SELECT state, task_id, commit_sha, environment, served_at FROM release WHERE id = ? AND {}",
+            super::preview::NOT_PREVIEW
+        ),
         vec![target_id.into()],
     )?
     .into_iter()
@@ -303,7 +307,10 @@ pub(super) fn stage(
     }
     let uncertain: Vec<String> = rows(
         sql,
-        "SELECT id FROM release WHERE state = ?",
+        &format!(
+            "SELECT id FROM release WHERE state = ? AND {}",
+            super::preview::NOT_PREVIEW
+        ),
         vec![ReleaseState::Uncertain.name().into()],
     )?
     .iter()

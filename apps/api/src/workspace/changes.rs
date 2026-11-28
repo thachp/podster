@@ -1339,6 +1339,8 @@ fn apply_checks(sql: &SqlStorage, task_id: &str, head: &str, seen: &ChecksSeen, 
 /// `served`, since nothing else could be shown served; unasked, it reads as stopped.
 pub(super) struct ReleaseFacts {
     pub(super) switched_on: bool,
+    /// The deployment's `PREVIEWS`, exactly `true` (M8 step 6): the task's preview part is shown only then.
+    pub(super) previews_on: bool,
     pub(super) domain: Option<String>,
     pub(super) stop: StopSeen,
 }
@@ -1384,6 +1386,7 @@ impl Workspace {
         };
         Ok(ReleaseFacts {
             switched_on,
+            previews_on: switched_on && crate::previews::setting(&self.env).await.allows_previews(),
             domain: crate::content_provider::content_domain(&self.env),
             stop,
         })
@@ -1416,7 +1419,10 @@ fn served_attempt(sql: &SqlStorage, task_id: &str) -> R<bool> {
     };
     Ok(!rows(
         sql,
-        "SELECT id FROM release WHERE task_id = ? AND commit_sha = ? AND state = 'served' LIMIT 1",
+        &format!(
+            "SELECT id FROM release WHERE task_id = ? AND commit_sha = ? AND state = 'served' AND {} LIMIT 1",
+            super::preview::NOT_PREVIEW
+        ),
         vec![task_id.into(), commit.as_str().into()],
     )?
     .is_empty())
@@ -1442,7 +1448,11 @@ fn release_part(sql: &SqlStorage, task_id: &str, facts: &ReleaseFacts, whole: bo
     };
     let attempts = rows(
         sql,
-        "SELECT id, state, script_name, updated_at, failure_code FROM release WHERE task_id = ? AND commit_sha = ? ORDER BY seq",
+        // Production's own releases: a preview of the commit is the preview part's (M8 step 6).
+        &format!(
+            "SELECT id, state, script_name, updated_at, failure_code FROM release WHERE task_id = ? AND commit_sha = ? AND {} ORDER BY seq",
+            super::preview::NOT_PREVIEW
+        ),
         vec![task_id.into(), commit.as_str().into()],
     )?;
     let host = rows(
@@ -1566,6 +1576,14 @@ pub(super) fn release_status(
     // Whoever asked for the merge and isn't shown the task's change gets how the merge went, and nothing of the pull
     // request or its checks: never more than their view of the change shows.
     let release = release_part(sql, task_id, facts, whole)?;
+    // The preview part (M8 step 6; the preview plan's 9.2): its state and commit only, never a host or a link.
+    let preview = super::preview::task_part(
+        sql,
+        task_id,
+        merged_commit(sql, task_id)?.as_deref(),
+        facts.previews_on && room_release_on(sql)?,
+        whole,
+    )?;
     let (pull, checks) = if whole {
         (pull, checks)
     } else {
@@ -1582,5 +1600,6 @@ pub(super) fn release_status(
             "requested_by": row.as_ref().map_or(Value::Null, |row| row["merge_requested_by"].clone()),
         },
         "release": release,
+        "preview": preview,
     }))
 }

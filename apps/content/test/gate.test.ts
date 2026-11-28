@@ -145,9 +145,9 @@ describe("the gate: a session, bound to the state cookie on every request", () =
       ["a lifetime past an hour", token({ typ: "session", iat: NOW - 1000, exp: NOW - 1000 + 3_600_001 }), RANDOM],
       ["a key this Worker doesn't hold", token({ typ: "session", kid: "other-kid" }), RANDOM],
       ["a forged signature", token({ typ: "session" }, otherSigner), RANDOM],
-      ["claims in another spelling", signed(json({ typ: "session" }).replace(`"ep":${EPOCH}`, `"ep":${EPOCH}.0`)), RANDOM],
-      ["claims with a key added", signed(json({ typ: "session" }).replace("}", ',"x":1}')), RANDOM],
-      ["claims in another order", signed(json({ typ: "session" }).replace(`{"typ":"session","kid":"${KID}"`, `{"kid":"${KID}","typ":"session"`)), RANDOM],
+      ["claims in another spelling", signed(json({ typ: "session" }).replaceAll(`"ep":${EPOCH}`, `"ep":${EPOCH}.0`)), RANDOM],
+      ["claims with a key added", signed(`${json({ typ: "session" }).slice(0, -1)},"x":1}`), RANDOM],
+      ["claims in another order", signed(json({ typ: "session" }).replaceAll(`{"typ":"session","kid":"${KID}"`, `{"kid":"${KID}","typ":"session"`)), RANDOM],
       ["a state hash for another state", token({ typ: "session", st: sha(OTHER_RANDOM) }), RANDOM],
     ];
     for (const [title, made, state] of cases) {

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import fixture from "../../../packages/contracts/serve-entry.fixture.json";
 import { sandboxPolicy } from "../src/handle";
 import * as preview from "../src/preview";
-import { accessOriginFromSetting, base64url, checkClaims, type Claims, type Presented, cookiePairs, fromBase64url, gateCookies, isPodsterPath, isStateHash, nextRound, payloadJson, PREVIEW_SANDBOX, previewEntry, previewSandboxPolicy, publicKeysFromSetting, readPayload, readState, refusalCode, returnPathOk, stateHash, verifiedClaims, webCryptoKeys, writeAllowed, writeState } from "../src/preview";
+import { accessOriginFromSetting, base64url, checkClaims, constantTimeEqual, type Claims, type Presented, cookiePairs, fromBase64url, gateCookies, isPodsterPath, isStateHash, nextRound, payloadJson, PREVIEW_SANDBOX, previewEntry, previewSandboxPolicy, publicKeysFromSetting, readPayload, readState, refusalCode, returnPathOk, stateHash, verifiedClaims, webCryptoKeys, writeAllowed, writeState } from "../src/preview";
 
 // `src/preview.ts` is a mirror of `podster_core::preview_access` and of `serve_entry`'s preview form (M8 step 8). The
 // first block binds it to the Rust source, constant by constant, so neither can change alone; the rest runs core's own
@@ -13,6 +13,7 @@ import { accessOriginFromSetting, base64url, checkClaims, type Claims, type Pres
 const RUST = readFileSync(new URL("../../../crates/core/src/preview_access.rs", import.meta.url), "utf8");
 const RUST_PREVIEW = readFileSync(new URL("../../../crates/core/src/preview.rs", import.meta.url), "utf8");
 const RUST_ENTRY = readFileSync(new URL("../../../crates/core/src/serve_entry.rs", import.meta.url), "utf8");
+const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const RUST_TREE = readFileSync(new URL("../../../crates/core/src/release_tree.rs", import.meta.url), "utf8");
 
 const rustConst = (source: string, name: string) => {
@@ -84,13 +85,19 @@ describe("bound to the Rust source", () => {
     expect(payloadJson(marker)).toBe(`{"typ":"marker","kid":"k1","aud":"abc.apps.example","pvw":"pvw_${"0".repeat(32)}","ep":3,"iat":1800000000000,"exp":1800000060000}`);
     expect(readPayload(payloadJson(marker))).toEqual(marker);
     // Any other spelling of the same claims is no payload.
-    for (const other of [json.replace('"ep":3', '"ep":3.0'), json.replace('"ep":3', '"ep": 3'), json.replace("}", ',"x":1}'), `${json} `, json.replace('"typ":"ticket"', '"typ":"Ticket"'), payloadJson({ ...claims, typ: "marker" }), payloadJson({ ...marker, typ: "session" }), json.replace('"ep":3', '"ep":-1'), json.replace("k1", "k 1"), json.replace("abc.apps.example", "ABC.apps.example")]) {
+    for (const other of [json.replaceAll('"ep":3', '"ep":3.0'), json.replaceAll('"ep":3', '"ep": 3'), `${json.slice(0, -1)},"x":1}`, `${json} `, json.replaceAll('"typ":"ticket"', '"typ":"Ticket"'), payloadJson({ ...claims, typ: "marker" }), payloadJson({ ...marker, typ: "session" }), json.replaceAll('"ep":3', '"ep":-1'), json.replaceAll("k1", "k 1"), json.replaceAll("abc.apps.example", "ABC.apps.example")]) {
       expect(readPayload(other), other).toBeNull();
     }
   });
 });
 
 describe("forms", () => {
+  it("compares a state hash in constant time, as core does, and exactly", () => {
+    expect(RUST).toContain("constant_time_eq(sent.as_bytes(), signed.as_bytes())");
+    expect(read("src/preview.ts")).toContain("!constantTimeEqual(presented.stateHash, claims.st)");
+    for (const [a, b, same] of [["", "", true], ["abc", "abc", true], ["abc", "abd", false], ["xbc", "abc", false], ["ab", "abc", false]] as const) expect(constantTimeEqual(a, b), `${a} ${b}`).toBe(same);
+  });
+
   it("reads base64url in its one canonical spelling only", () => {
     for (const length of [0, 1, 2, 3, 31, 32, 33, 64]) {
       const bytes = Uint8Array.from({ length }, (_, i) => (i * 37 + 11) & 255);

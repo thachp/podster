@@ -1059,3 +1059,14 @@ fn one_person_gets_at_most_60_tickets_an_hour_in_one_room_so_the_rooms_300_takes
         Ok(())
     );
 }
+
+#[test]
+fn the_state_hash_is_compared_in_constant_time_and_exactly() {
+    use podster_core::preview_access::constant_time_eq;
+    assert!(constant_time_eq(b"", b""));
+    assert!(constant_time_eq(ST.as_bytes(), ST.as_bytes()));
+    assert!(!constant_time_eq(ST.as_bytes(), ST2.as_bytes()));
+    assert!(!constant_time_eq(b"ab", b"abc"));
+    assert!(!constant_time_eq(b"abc", b"abd"));
+    assert!(!constant_time_eq(b"xbc", b"abc"));
+}

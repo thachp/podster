@@ -1069,10 +1069,21 @@ if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.bind
   else
     fail "podster-content has a deployed binding PREVIEW_APPS, but the configuration names no preview namespace"
   fi
+  # Previews' two variables, as the deployed Worker holds them: each plain text, exactly the configuration's, or, with
+  # previews off, neither there at all. The keys are public halves and the origin a host, so both may be read back.
+  if jq -e --argjson on "$previews" --arg k "$preview_keys" --arg o "$preview_origin" '[.result.bindings[] | select(type == "object")] as $b
+      | ([$b[] | select(.name == "PREVIEW_PUBLIC_KEYS")] == (if $on then [{"type": "plain_text", "name": "PREVIEW_PUBLIC_KEYS", "text": $k}] else [] end))
+      and ([$b[] | select(.name == "PREVIEW_ACCESS_ORIGIN")] == (if $on then [{"type": "plain_text", "name": "PREVIEW_ACCESS_ORIGIN", "text": $o}] else [] end))' "$work/body" > /dev/null; then
+    if [ "$previews" = true ]; then pass "podster-content's deployed PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN are the configuration's"; else pass "podster-content has no deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN: previews are off"; fi
+  elif [ "$previews" = true ]; then
+    fail "podster-content's deployed settings don't hold PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN as the configuration's, as plain text"
+  else
+    fail "podster-content has a deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN, but the configuration names no preview namespace"
+  fi
 else
   not_shown "whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
   not_shown "whether podster-content's deployed limits are $cpu_ms CPU ms and $subrequests subrequests: its settings couldn't be read"
-  if [ "$previews" = true ]; then not_shown "whether podster-content's deployed binding PREVIEW_APPS names the preview namespace: its settings couldn't be read"; fi
+  if [ "$previews" = true ]; then not_shown "whether podster-content's deployed binding PREVIEW_APPS names the preview namespace and its two preview variables are the configuration's: its settings couldn't be read"; fi
 fi
 cf "/accounts/$account/workers/domains"
 if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then

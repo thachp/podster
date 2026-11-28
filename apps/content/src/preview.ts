@@ -232,6 +232,17 @@ export function refusalCode(refusal: TokenRefusal | null): "preview_session_expi
   return refusal === "Expired" ? "preview_session_expired" : "preview_access_required";
 }
 
+/**
+ * `podster_core::preview_access::constant_time_eq`: equal strings, in time that depends on their lengths only, never on
+ * where they first differ, so how long a refusal takes says nothing of how much of a state hash was right.
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 /** `podster_core::preview_access::check_claims`, in its order. */
 export function checkClaims(claims: Claims, expected: TokenType, presented: Presented): TokenRefusal | null {
   const lifetime = claims.exp - claims.iat;
@@ -248,7 +259,7 @@ export function checkClaims(claims: Claims, expected: TokenType, presented: Pres
   if (presented.now >= claims.exp) return "Expired";
   if (!(claims.ep >= presented.entryEpoch)) return "EpochBelow";
   if (isBrowsers(claims.typ)) {
-    if (presented.stateHash === null || presented.stateHash !== claims.st) return "StateMismatch";
+    if (presented.stateHash === null || claims.st === null || !constantTimeEqual(presented.stateHash, claims.st)) return "StateMismatch";
   } else if (!(presented.path === `/${MARKER_PATH}` && presented.method === "GET")) {
     return "MarkerOnly";
   }

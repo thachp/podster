@@ -33,12 +33,19 @@
 //! ([`approval_build`]); and the production job recomputes the build from what it fetched and goes live only on a match
 //! ([`publish_build_check`]). Replacing the preview never moves a pending approval, since none of these reads the slot.
 //!
-//! **Codes.** Every `code()` here is marked `reasons`: no route answers with one yet (M8 steps 6 and 9 will).
+//! **What the job records** (M8 step 9): [`build_id_of`] names the build from what the job's first pass fetched and
+//! checked, as the upload will send it; [`names_browser_storage`] is the plan's storage warning (5.2.1), a string search
+//! of the build's text that never blocks; and [`STORAGE_WARNING_NOTICE`] and [`PREVIEW_DIFFERENCES_NOTICE`] are the
+//! words the approval dialog shows (the plan's section 10).
+//!
+//! **Codes.** A refusal of a publish or of an approval's build reaches a caller as `error.code`
+//! (`requestRelease`, `approveRelease`), so those are marked `errors`; the rest are reasons.
 
 use sha2::{Digest, Sha256};
 
 use crate::app_code::{
-    module_name_form, ASSETS_CONFIG, COMPATIBILITY_DATE, MODULE_UPLOAD_TYPE, STORE_BINDING_NAME,
+    module_name_form, UploadForm, ASSETS_CONFIG, COMPATIBILITY_DATE, MODULE_UPLOAD_TYPE,
+    STORE_BINDING_NAME,
 };
 use crate::preview::Environment;
 use crate::release::ReleaseState;
@@ -59,6 +66,20 @@ pub struct UploadFormVersion<'a> {
     pub assets_config: &'a str,
     pub store_binding_name: &'a str,
     pub module_upload_type: &'a str,
+}
+
+impl UploadFormVersion<'_> {
+    /// Its four parts, joined by single spaces, as the form's line of [`build_text`] has them: what the room records
+    /// beside a build (`release_build.form_version`).
+    pub fn text(&self) -> String {
+        [
+            self.compatibility_date,
+            self.assets_config,
+            self.store_binding_name,
+            self.module_upload_type,
+        ]
+        .join(" ")
+    }
 }
 
 /// The upload form every script is written with now, from [`crate::app_code`]'s constants.
@@ -344,7 +365,7 @@ impl PreviewPublishRefusal {
         PreviewPublishRefusal::CommitMismatch,
     ];
 
-    // codes: reasons
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             PreviewPublishRefusal::NotPreview => "preview_release_not_found",
@@ -406,7 +427,7 @@ pub enum ApprovalBuildRefusal {
 }
 
 impl ApprovalBuildRefusal {
-    // codes: reasons
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             ApprovalBuildRefusal::BuildChanged => "release_build_changed",
@@ -457,3 +478,107 @@ pub fn publish_build_check(recorded: &str, recomputed: &str) -> Result<(), Build
         Err(BuildMismatch)
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What the job records of a build (M8 step 9; the plan's 4.1 and 5.2.1), and the dialog's words (section 10)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// One file as the job's first pass fetched it and checked it against the tree: its path relative to the release
+/// directory, its manifest hash and the SHA-256 of its bytes, 64 lower-case hexadecimal characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FetchedFile<'a> {
+    pub path: &'a str,
+    pub manifest_hash: &'a str,
+    pub sha256: &'a str,
+}
+
+/// **The build of what the job fetched, as its upload will send it** (the plan's 4.1): under Podster's upload form now,
+/// every file a static release has; for one with code, its static files by their manifest hashes, its modules by the
+/// SHA-256 of their bytes, its entry and whether it asks for its store, and never its manifest, which is neither served
+/// nor a module. A file the form names that the job didn't fetch has no build: [`BuildRefusal::Path`] for a static
+/// file, [`BuildRefusal::ModuleHash`] for a module.
+pub fn build_id_of(
+    form: &UploadForm,
+    commit: &str,
+    tree: &str,
+    fetched: &[FetchedFile],
+) -> Result<String, BuildRefusal> {
+    let find = |path: &str| fetched.iter().find(|file| file.path == path);
+    match form {
+        UploadForm::Static => {
+            let files: Vec<BuildFile> = fetched
+                .iter()
+                .map(|file| BuildFile {
+                    path: file.path,
+                    manifest_hash: file.manifest_hash,
+                })
+                .collect();
+            build_id(&BuildInputs {
+                commit,
+                tree,
+                files: &files,
+                modules: &[],
+                main: None,
+                store: false,
+            })
+        }
+        UploadForm::Code(release) => {
+            let files = release
+                .static_files
+                .iter()
+                .map(|planned| {
+                    find(&planned.path)
+                        .map(|file| BuildFile {
+                            path: file.path,
+                            manifest_hash: file.manifest_hash,
+                        })
+                        .ok_or(BuildRefusal::Path)
+                })
+                .collect::<Result<Vec<BuildFile>, BuildRefusal>>()?;
+            let modules = release
+                .modules
+                .iter()
+                .map(|module| {
+                    find(&module.file.path)
+                        .map(|file| BuildModule {
+                            name: &module.name,
+                            sha256: file.sha256,
+                        })
+                        .ok_or(BuildRefusal::ModuleHash)
+                })
+                .collect::<Result<Vec<BuildModule>, BuildRefusal>>()?;
+            build_id(&BuildInputs {
+                commit,
+                tree,
+                files: &files,
+                modules: &modules,
+                main: Some(&release.main),
+                store: release.wants_store,
+            })
+        }
+    }
+}
+
+/// The names the storage warning searches a build's text for (the plan's 5.2.1).
+pub const STORAGE_NAMES: [&str; 5] = [
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "document.cookie",
+    "caches.open",
+];
+
+/// **Whether a file of the build may use browser storage** (the plan's 5.2.1): a file that is UTF-8 text and names one of
+/// [`STORAGE_NAMES`], exactly. A string search of agent content, treated as data and never as an instruction: it never
+/// blocks anything, will miss storage reached another way, and will flag a name that is only mentioned.
+pub fn names_browser_storage(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .is_ok_and(|text| STORAGE_NAMES.iter().any(|name| text.contains(name)))
+}
+
+/// What the Ship panel and the approval dialog say of a build that may use browser storage (the plan's 5.2.1 and 10).
+pub const STORAGE_WARNING_NOTICE: &str =
+    "This build may use browser storage, which production apps don't have.";
+
+/// What the approval dialog says of every release made from a preview (the plan's section 10; decision 255).
+pub const PREVIEW_DIFFERENCES_NOTICE: &str = "This build ran in the preview with browser storage and its own origin. In production it runs sandboxed, with neither, so anything that worked only because of them will break.";

@@ -514,7 +514,11 @@ pub fn check_claims(
         return Err(TokenRefusal::EpochBelow);
     }
     if claims.typ.is_browsers() {
-        if presented.state_hash.is_none() || presented.state_hash != claims.st.as_deref() {
+        let bound = match (presented.state_hash, claims.st.as_deref()) {
+            (Some(sent), Some(signed)) => constant_time_eq(sent.as_bytes(), signed.as_bytes()),
+            _ => false,
+        };
+        if !bound {
             return Err(TokenRefusal::StateMismatch);
         }
     } else {
@@ -524,6 +528,15 @@ pub fn check_claims(
         }
     }
     Ok(())
+}
+
+/// Whether two byte strings are equal, in time that depends on their lengths only, never on where they first differ:
+/// so how long a refusal takes says nothing of how much of a state hash was right (M8 step 8's review).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

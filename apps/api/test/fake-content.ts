@@ -319,20 +319,32 @@ async function fakeUpload(request: Request, url: URL, from: ContentPartition): P
 // the upload part holds, as the content Worker would once a serve entry names that script; a body of its own; a status;
 // or, said nothing, not-found. Every fetch is counted, and a gate can hold the next one.
 // ---------------------------------------------------------------------------------------------------------------------
-type MarkerHost = { script?: string; body?: string; status?: number; fetches: number; credentialed: number; gates: Gate[] };
+type MarkerHost = { script?: string; body?: string; status?: number; fetches: number; credentialed: number; gates: Gate[]; markerTokens: string[]; refusedNoToken: number };
 const markerHosts = new Map<string, MarkerHost>();
 const markerHost = (host: string) => {
   let found = markerHosts.get(host);
-  if (!found) { found = { fetches: 0, credentialed: 0, gates: [] }; markerHosts.set(host, found); }
+  if (!found) { found = { fetches: 0, credentialed: 0, gates: [], markerTokens: [], refusedNoToken: 0 }; markerHosts.set(host, found); }
   return found;
 };
 const MARKER_FILE = "/.well-known/podster-release.json";
 
-async function fakeAppHost(request: Request, url: URL): Promise<Response> {
+/** The header the content Worker's gate reads a marker token from (`MARKER_HEADER`, apps/content/src/preview.ts). */
+const MARKER_TOKEN_HEADER = "x-podster-marker-token";
+
+async function fakeAppHost(request: Request, url: URL, from: ContentPartition): Promise<Response> {
   const held = markerHost(url.hostname);
   if (url.pathname !== MARKER_FILE || request.method !== "GET") return new Response("not found", { status: 404 });
   held.fetches += 1;
   if (request.headers.get("authorization") !== null || request.headers.get("cookie") !== null) held.credentialed += 1;
+  // A preview host is gated, as the content Worker gates it (M8 step 8): its marker is answered only to a request that
+  // carries a marker token, which is kept for the spec to check; without one it is `401`, as the gate answers. Whether
+  // the token verifies is the spec's to check, with the public key, and the content Worker's own tests' to enforce.
+  const token = request.headers.get(MARKER_TOKEN_HEADER);
+  if (token !== null) held.markerTokens.push(token);
+  if (stateOf(from).entries.get(url.hostname)?.startsWith("preview:") && token === null) {
+    held.refusedNoToken += 1;
+    return new Response("preview_access_required\n", { status: 401 });
+  }
   await passGate("marker", held.gates);
   if (held.status !== undefined) return new Response(held.body ?? "", { status: held.status });
   if (held.body !== undefined) return new Response(held.body, { status: 200, headers: { "content-type": "application/json" } });
@@ -348,10 +360,10 @@ async function fakeAppHost(request: Request, url: URL): Promise<Response> {
  */
 export async function fakeContent(request: Request, from: ContentPartition = "default"): Promise<Response | null> {
   const url = new URL(request.url);
-  if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url);
+  if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url, from);
   // A custom hostname a test said serves a marker (M6 step 8e): as the content Worker would for that host once its
   // entry names a script, which here a test says outright. Only a host a test named, so no other call is taken for one.
-  if (url.pathname === MARKER_FILE && markerHosts.has(url.hostname) && !partitionNamed("control", url.hostname)) return fakeAppHost(request, url);
+  if (url.pathname === MARKER_FILE && markerHosts.has(url.hostname) && !partitionNamed("control", url.hostname)) return fakeAppHost(request, url, from);
   // The marker and upload parts are kept by host and by script, not by partition, so any control host reaches them.
   const control = partitionNamed("control", url.hostname);
   if (control && url.pathname.startsWith("/marker-")) {
@@ -362,6 +374,8 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
       return json({ ok: true });
     }
     if (url.pathname === "/marker-state") return json({ fetches: held.fetches, credentialed: held.credentialed, expiredGates: held.gates.filter((gate) => gate.expired).length });
+    // The marker tokens a host was sent, and how often a gated host refused a fetch with none (M8 step 8).
+    if (url.pathname === "/marker-tokens") return json({ markerTokens: held.markerTokens, refusedNoToken: held.refusedNoToken, credentialed: held.credentialed });
     if (url.pathname === "/marker-gate") { held.gates.push(newGate("marker")); return json({ id: held.gates.length - 1 }); }
     const gate = held.gates[Number(url.searchParams.get("id") ?? -1)];
     if (url.pathname === "/marker-arrived" && gate) { await gate.arrived; return json({ ok: true }); }

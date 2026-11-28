@@ -225,6 +225,7 @@ case "$url" in
       /zones/*/rulesets/*/rules/*) key=ratelimit-update ;;
       /zones/*/rulesets/*/rules) key=ratelimit-add ;;
       /zones/*/rulesets) key=ratelimit-create ;;
+      /accounts/*/workers/dispatch/namespaces/podster-previews) key=namespace-preview ;;
       /accounts/*/workers/dispatch/namespaces/*) key=namespace ;;
       /accounts/*/storage/kv/namespaces/*) key=kv ;;
       *) echo "stand-in curl: unexpected API path $path" >&2; exit 97 ;;
@@ -335,6 +336,7 @@ healthy() {
   api outbound-subdomain 200 '{"success":true,"result":{"enabled":false,"previews_enabled":false}}'
   api content-settings 200 "$CONTENT_SETTINGS_OK"
   api namespace 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'
+  api namespace-preview 200 '{"success":true,"result":{"namespace_name":"podster-previews"}}'
   api kv 200 "{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
   api ratelimit 200 "$RL_OK"
   api ratelimit-create 200 ECHO
@@ -395,6 +397,14 @@ fresh() {
 }
 config() { # config ACCOUNT DOMAIN KV NAMESPACE: writes the owner's configuration file
   printf '{"account_id":"%s","content_domain":"%s","kv_namespace_id":"%s","dispatch_namespace":"%s"}\n' "$@" > "$secrets/content-deploy.json"
+  chmod 600 "$secrets/content-deploy.json"
+}
+# Previews' three keys (M8 step 8): a preview namespace, two public keys (a fake's, by two IDs) and the application host.
+PREVIEW_KEYS="pv-new:$(printf 'ab%.0s' $(seq 32)),pv-old:$(printf 'CD%.0s' $(seq 32))"
+PREVIEW_ORIGIN=https://app-staging.podster.dev
+preview_config() { # preview_config NAMESPACE KEYS ORIGIN: the owner's configuration, with previews
+  jq -c -n --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" --arg pn "$1" --arg k "$2" --arg o "$3" \
+    '{account_id: $a, content_domain: $d, kv_namespace_id: $kv, dispatch_namespace: "podster-apps", preview_namespace: $pn, preview_public_keys: $k, preview_access_origin: $o}' > "$secrets/content-deploy.json"
   chmod 600 "$secrets/content-deploy.json"
 }
 
@@ -635,6 +645,35 @@ bad_config "a domain in capitals is refused" "content_domain isn't a domain name
 bad_config "podster.dev as the content domain is refused" "content_domain is podster.dev's" "{\"account_id\":\"$ACCOUNT\",\"content_domain\":\"podster.dev\",\"kv_namespace_id\":\"$KV\",\"dispatch_namespace\":\"a\"}"
 bad_config "a name under podster.dev is refused" "content_domain is podster.dev's" "{\"account_id\":\"$ACCOUNT\",\"content_domain\":\"apps.podster.dev\",\"kv_namespace_id\":\"$KV\",\"dispatch_namespace\":\"a\"}"
 bad_config "the committed placeholder is refused" "content_domain is the committed placeholder" "{\"account_id\":\"$ACCOUNT\",\"content_domain\":\"content-domain.invalid\",\"kv_namespace_id\":\"$KV\",\"dispatch_namespace\":\"a\"}"
+
+# --- previews' configuration, read only when present (M8 step 8) ---
+bad_preview() { # bad_preview TITLE REASON NAMESPACE KEYS ORIGIN
+  fresh
+  preview_config "$3" "$4" "$5"
+  dc 1 "${files[@]}" || true
+  check "$1" refused "$2"
+}
+bad_config "half a preview configuration is refused" "the configuration must be a JSON object with exactly account_id, content_domain, dispatch_namespace and kv_namespace_id, and for previews preview_namespace, preview_public_keys and preview_access_origin as well \\(all three or none\\)" "{\"account_id\":\"$ACCOUNT\",\"content_domain\":\"$DOMAIN\",\"kv_namespace_id\":\"$KV\",\"dispatch_namespace\":\"a\",\"preview_namespace\":\"p\"}"
+bad_config "  and two of the three" "the configuration must be a JSON object" "{\"account_id\":\"$ACCOUNT\",\"content_domain\":\"$DOMAIN\",\"kv_namespace_id\":\"$KV\",\"dispatch_namespace\":\"a\",\"preview_namespace\":\"p\",\"preview_public_keys\":\"k:00\"}"
+bad_preview "a preview namespace that isn't a name is refused" "preview_namespace isn't a namespace's name" "a b" "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"
+bad_preview "the dispatch namespace as the preview namespace is refused" "preview_namespace is the dispatch namespace" podster-apps "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"
+bad_preview "a public key of 63 hex is refused" "preview_public_keys isn't one or two public keys" podster-previews "k1:$(printf 'a%.0s' $(seq 63))" "$PREVIEW_ORIGIN"
+bad_preview "a private key's form, <kid>:<seed> with spaces, is refused" "preview_public_keys isn't one or two public keys" podster-previews "k1: $(printf 'ab%.0s' $(seq 32))" "$PREVIEW_ORIGIN"
+bad_preview "three public keys are refused" "preview_public_keys isn't one or two public keys" podster-previews "$PREVIEW_KEYS,k3:$(printf 'ab%.0s' $(seq 32))" "$PREVIEW_ORIGIN"
+bad_preview "one key ID twice is refused" "preview_public_keys names one key ID twice" podster-previews "k1:$(printf 'ab%.0s' $(seq 32)),k1:$(printf 'cd%.0s' $(seq 32))" "$PREVIEW_ORIGIN"
+bad_preview "an application host over http is refused" "preview_access_origin isn't https:// and a host" podster-previews "$PREVIEW_KEYS" "http://app-staging.podster.dev"
+bad_preview "an application host with a path is refused" "preview_access_origin isn't https:// and a host" podster-previews "$PREVIEW_KEYS" "https://app-staging.podster.dev/"
+bad_preview "an application host on the content domain is refused" "preview_access_origin is on the content domain" podster-previews "$PREVIEW_KEYS" "https://abc.$DOMAIN"
+bad_preview "  and the content domain itself" "preview_access_origin is on the content domain" podster-previews "$PREVIEW_KEYS" "https://$DOMAIN"
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; api namespace-preview 404 '{"success":false,"errors":[]}'; dc 1 "${files[@]}" || true
+check "a preview namespace that isn't on the account is refused" refused "the preview namespace wasn't found on that account \\(HTTP 404\\)"
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; api namespace-preview 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'; dc 1 "${files[@]}" || true
+check "an answer naming another namespace is refused" refused "the answer about the preview namespace isn't that namespace"
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; dc 0 "${files[@]}" || true
+check "a report with previews: exit 0, the namespace read, and what it would bind said, the keys by ID only" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   the preview namespace exists$' '$tmp/out' && grep -q '^Previews on: the binding PREVIEW_APPS to the preview namespace podster-previews, naming podster-outbound as outbound, 2 public key(s) by ID (pv-new pv-old), and the application host $PREVIEW_ORIGIN.$' '$tmp/out' && ! grep -q 'abababab' '$tmp/out' && grep -q '^curl GET /accounts/$ACCOUNT/workers/dispatch/namespaces/podster-previews ' '$fix/calls'"
+check "  no deploy, no probe, the token nowhere" unchanged
+fresh; dc 0 "${files[@]}" || true
+check "a report without previews: exit 0, it says previews stay off, and it never asks about a preview namespace" bash -c "[ $LAST -eq 0 ] && grep -q '^ok   the configuration names no preview namespace: previews stay off$' '$tmp/out' && grep -q '^Previews off: no binding PREVIEW_APPS, no public key and no application host.$' '$tmp/out' && ! grep -q 'podster-previews' '$fix/calls'"
 
 # --- the account isn't the one that holds podster.dev ---
 fresh; dc 1 "CLOUDFLARE_ACCOUNT_ID=$ACCOUNT" "${files[@]}" || true
@@ -896,6 +935,29 @@ check "  it says what it can't show: a host two labels deep" said "^NOT SHOWN a 
 check "  the token is in no argument and no output" no_token
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
+check "  with no preview configuration, no PREVIEW_APPS deployed, and it checked there is none" said "^PASS    podster-content has no deployed binding PREVIEW_APPS: previews are off"
+check "  nor either preview variable" said "^PASS    podster-content has no deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN: previews are off"
+
+# --- a deploy with previews (M8 step 8) ---
+PREVIEW_SETTINGS=$(jq -c --arg k "$PREVIEW_KEYS" --arg o "$PREVIEW_ORIGIN" '.result.bindings += [{"type":"dispatch_namespace","name":"PREVIEW_APPS","namespace":"podster-previews","outbound":{"worker":{"service":"podster-outbound","environment":"production"},"params":[]}},{"type":"plain_text","name":"PREVIEW_PUBLIC_KEYS","text":$k},{"type":"plain_text","name":"PREVIEW_ACCESS_ORIGIN","text":$o}]' <<< "$CONTENT_SETTINGS_OK")
+# The same with the binding but the variables not as configured: an old key list, and no origin.
+PREVIEW_SETTINGS_STALE=$(jq -c '.result.bindings |= (map(if .name == "PREVIEW_PUBLIC_KEYS" then .text = "pv-old:'"$(printf 'cd%.0s' $(seq 32))"'" else . end) | map(select(.name != "PREVIEW_ACCESS_ORIGIN")))' <<< "$PREVIEW_SETTINGS")
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; api content-settings 200 "$PREVIEW_SETTINGS"; at_terminal 0 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "--deploy with previews: exit 0, and the success line" bash -c "[ $LAST -eq 0 ] && grep -q 'deploy-content: deployed podster-outbound .* and every probe passed' '$tmp/out'"
+check "  its configuration adds exactly the binding PREVIEW_APPS, naming the outbound Worker, and the two variables" \
+  quiet jq -e --arg d "$DOMAIN" --arg k "$PREVIEW_KEYS" --arg o "$PREVIEW_ORIGIN" '.dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps", "outbound": {"service": "podster-outbound"}}, {"binding": "PREVIEW_APPS", "namespace": "podster-previews", "outbound": {"service": "podster-outbound"}}] and .vars == {"CONTENT_DOMAIN": $d, "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50", "PREVIEW_PUBLIC_KEYS": $k, "PREVIEW_ACCESS_ORIGIN": $o} and (keys == ["account_id", "compatibility_date", "dispatch_namespaces", "durable_objects", "kv_namespaces", "main", "migrations", "name", "preview_urls", "routes", "vars", "workers_dev"])' "$fix/deployed-podster-content.json"
+check "  it checked the deployed binding PREVIEW_APPS by the API" said "^PASS    podster-content's deployed binding PREVIEW_APPS names the preview namespace and podster-outbound as its outbound Worker"
+check "  and the two deployed preview variables" said "^PASS    podster-content's deployed PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN are the configuration's"
+check "  every API call was a GET with the token on stdin, and the token is nowhere" bash -c "[ -z \"\$(grep '^curl ' '$fix/calls' | grep -v -E '^curl GET /[^ ]* auth=ok q_first=yes env=none$')\" ]" 
+check "  the token is in no argument and no output" no_token
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "--deploy with previews whose deployed settings lack PREVIEW_APPS: exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    podster-content.s deployed settings have no binding PREVIEW_APPS to the preview namespace naming podster-outbound as outbound' '$tmp/out'"
+fresh; preview_config podster-previews "$PREVIEW_KEYS" "$PREVIEW_ORIGIN"; api content-settings 200 "$PREVIEW_SETTINGS_STALE"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "--deploy with previews whose deployed variables aren't the configuration's: exit 4, the binding still passing" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    podster-content.s deployed settings don.t hold PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN as the configuration.s, as plain text' '$tmp/out' && grep -q '^PASS    podster-content.s deployed binding PREVIEW_APPS names' '$tmp/out'"
+fresh; api content-settings 200 "$(jq -c '.result.bindings += [{"type":"plain_text","name":"PREVIEW_ACCESS_ORIGIN","text":"https://x.example"}]' <<< "$CONTENT_SETTINGS_OK")"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "--deploy without previews whose deployed settings still hold a preview variable: exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    podster-content has a deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN, but the configuration names no preview namespace' '$tmp/out'"
+fresh; api content-settings 200 "$PREVIEW_SETTINGS"; at_terminal 4 "$DOMAIN" -- "${files[@]}" --deploy || true
+check "--deploy without previews whose deployed settings still hold PREVIEW_APPS: exit 4" bash -c "[ $LAST -eq 4 ] && grep -q '^FAIL    podster-content has a deployed binding PREVIEW_APPS, but the configuration names no preview namespace' '$tmp/out'"
 
 fresh; touch "$fix/deploy-fails-podster-content"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "a failed wrangler deploy of the content Worker: exit 3, stopped part-way, saying the outbound Worker is deployed" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy of the content Worker exited with status 1' '$tmp/out' && grep -q 'podster-outbound is deployed' '$tmp/out' && grep -q 'keeps serving as it was deployed: every deploy by this script names podster-outbound' '$tmp/out'"

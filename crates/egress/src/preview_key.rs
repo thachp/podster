@@ -17,7 +17,7 @@
 //! (ed25519-dalek's `zeroize`).
 
 use ed25519_dalek::{Signer, SigningKey};
-use podster_core::preview_access::is_key_id;
+use podster_core::preview_access::{is_key_id, marker_claims, signing_input, token, token_payload};
 
 /// The length of an Ed25519 seed, in bytes.
 const SEED_BYTES: usize = 32;
@@ -76,6 +76,20 @@ impl PreviewKey {
     /// The Ed25519 signature over `message`.
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
         self.signing.sign(message).to_bytes()
+    }
+
+    /// **A marker token** (M8 step 8; the preview plan's 3.2): what the release job's marker fetch carries through a
+    /// gated preview host. Core's [`marker_claims`]: bound to `host` and the preview slot `slot`, at access epoch
+    /// `epoch`, valid for 60 seconds from `now` (milliseconds), with no session and no state. The content Worker
+    /// accepts it for the marker's path with `GET` and nothing else. `None` for any part not of its form, so nothing
+    /// malformed is ever signed.
+    pub fn marker_token(&self, host: &str, slot: &str, epoch: u64, now: i64) -> Option<String> {
+        let claims = marker_claims(&self.kid, host, slot, epoch, now).ok()?;
+        let payload = token_payload(&claims)?;
+        Some(token(
+            &payload,
+            &self.sign(signing_input(&payload).as_bytes()),
+        ))
     }
 }
 
@@ -138,6 +152,55 @@ mod tests {
         assert!(other_public.verify(message, &signature).is_err());
         // Ed25519 is deterministic: the same key and message sign the same.
         assert_eq!(key.sign(message), key.sign(message));
+    }
+
+    fn unbase64url(text: &str) -> Vec<u8> {
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut bits = 0u32;
+        let mut held = 0;
+        let mut out = Vec::new();
+        for c in text.bytes() {
+            bits = (bits << 6) | alphabet.iter().position(|a| *a == c).unwrap() as u32;
+            held += 6;
+            if held >= 8 {
+                held -= 8;
+                out.push((bits >> held) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_marker_token_is_signed_over_the_label_and_its_payload_bound_to_the_host_and_slot() {
+        let key = PreviewKey::parse(&test_secret("k1")).unwrap();
+        let slot = "pvw_0123456789abcdef0123456789abcdef";
+        let made = key
+            .marker_token("pv7q2.apps.example", slot, 4, 1_800_000_000_000)
+            .unwrap();
+        let (payload, signature) = made.split_once('.').unwrap();
+        let json = String::from_utf8(unbase64url(payload)).unwrap();
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"typ":"marker","kid":"k1","aud":"pv7q2.apps.example","pvw":"{slot}","ep":4,"iat":1800000000000,"exp":1800000060000}}"#
+            )
+        );
+        let public = VerifyingKey::from_bytes(&key.public_key()).unwrap();
+        let signature = Signature::from_bytes(&unbase64url(signature).try_into().unwrap());
+        assert!(public
+            .verify(
+                format!("podster-preview-token/v1.{payload}").as_bytes(),
+                &signature
+            )
+            .is_ok());
+        // Nothing is signed for a host, slot or epoch not of its form.
+        assert!(key.marker_token("Pv7q2.apps.example", slot, 4, 1).is_none());
+        assert!(key
+            .marker_token("pv7q2.apps.example", "pvw_x", 4, 1)
+            .is_none());
+        assert!(key
+            .marker_token("pv7q2.apps.example", slot, 1_000_000_000_000_000, 1)
+            .is_none());
     }
 
     #[test]

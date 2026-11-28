@@ -771,7 +771,7 @@ const S = {
   spend: { week: 7.4, cap: '25', perRun: '2', warn: true },
   checkFirst: { coder: false, planner: false, qa: false, fresh: true }, runFailed: false, runSent: false, redoOpen: false, redoNote: '',
   fresh: { lead: false, created: false, plan: 'none' },
-  start: { org: 'team', team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', deploy: true, domain: '', review: true, files: 0, roles: null },
+  start: { org: 'team', team: 'small', name: 'Bakery preorders', vis: 'private', repoVis: 'private', repoSrc: 'new', gh: { installed: false, q: '', pick: '' }, deploy: true, domain: '', review: true, files: 0, roles: null },
   repo: { sam: false, ask: null, build: true, tests: true, releases: true, reviewer: 'comment' },
   agentRemoved: false,
   wl: { step: 'email', path: '', via: '' },
@@ -1867,6 +1867,27 @@ function rooms() {
 }
 
 /* ---------- Creator: Start a workroom ---------- */
+const GH_REPOS = [['bakery-on-elm/storefront', 'Private', 'main', true, '2 days ago'], ['bakery-on-elm/orders-api', 'Private', 'main', false, 'last week'], ['bakery-on-elm/menu-site', 'Public', 'main', true, '3 weeks ago'], ['elena-lopez/recipes', 'Private', 'master', false, 'in March']];
+function ghPicker(st) {
+  const g = st.gh;
+  if (!g.installed) return '<div style="display:flex;flex-direction:column;gap:10px"><span class="muted" style="font-size:13.5px">Install the Podster app on your GitHub account or organization, and choose which repositories it can reach. You can change or remove it on GitHub any time.</span>' +
+    '<div class="panel kvlist" style="padding:2px 16px;box-shadow:none;background:var(--sunk)"><div><span>It asks for</span><span>Code: read and write \u00b7 Pull requests: read and write \u00b7 Checks: read</span></div><div><span>Agents may</span><span>Push to <span class="mono">podster/*</span> branches and open pull requests</span></div><div><span>Agents never</span><span>Push to <span class="mono">main</span>, change settings or merge on their own</span></div></div>' +
+    '<span style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button type="button" class="btn primary" data-act="gh-install">' + LOGO.github + ' Install on GitHub</button><span class="faint" style="font-size:12.5px">Opens GitHub. You come back here after.</span></span></div>';
+  const q = (g.q || '').toLowerCase();
+  const list = GH_REPOS.filter((r) => r[0].indexOf(q) >= 0);
+  if (!g.pick) return '<div style="display:flex;flex-direction:column;gap:10px"><span class="stage" style="font-size:13px"><span class="dot" style="background:var(--done)"></span>Podster is installed on bakery-on-elm and elena-lopez \u00b7 <a href="#" data-act="toast" data-msg="Opens the app\'s settings on GitHub.">Change on GitHub</a></span>' +
+    '<input class="in" id="gh-q" data-input="gh-q" placeholder="Search your repositories" value="' + esc(g.q || '') + '" aria-label="Search repositories">' +
+    '<div class="panel" style="box-shadow:none" role="listbox" aria-label="Repositories">' + (list.length ? list.map((r) => '<button type="button" class="row" role="option" data-act="gh-pick" data-r="' + esc(r[0]) + '" style="width:100%;background:transparent;border-left:0;border-right:0;border-top:0;text-align:left;cursor:pointer"><span style="flex:1;min-width:0"><b class="mono" style="font-weight:500;font-size:13.5px">' + esc(r[0]) + '</b><br><span class="faint" style="font-size:12.5px">' + r[1] + ' \u00b7 ' + r[2] + ' \u00b7 updated ' + r[4] + '</span></span><span class="faint">' + I.arrow + '</span></button>').join('') : '<div class="row faint" style="font-size:13px">No repository matches. Is it one the app can reach? <a href="#" data-act="toast" data-msg="Opens the app\'s repository access on GitHub.">Add it on GitHub</a></div>') + '</div></div>';
+  const r = GH_REPOS.find((x) => x[0] === g.pick) || GH_REPOS[0];
+  return '<div style="display:flex;flex-direction:column;gap:10px"><div class="panel kvlist" style="padding:2px 16px;box-shadow:none">' +
+    '<div><span>Repository</span><span class="mono">' + esc(r[0]) + '</span></div>' +
+    '<div><span>Visibility</span><span>' + r[1] + ' \u00b7 stays as it is on GitHub</span></div>' +
+    '<div><span>Main branch</span><span class="mono">' + r[2] + '</span></div>' +
+    '<div><span>Branch protection</span><span>' + (r[3] ? '<span class="stage"><span class="dot" style="background:var(--done)"></span>On for ' + r[2] + '</span>' : '<span class="stage"><span class="dot" style="background:var(--need)"></span>Off for ' + r[2] + '</span>') + '</span></div>' +
+    '<div><span>Agents may</span><span>Push to <span class="mono">podster/*</span> branches and open pull requests</span></div></div>' +
+    (r[3] ? '' : '<div class="callout" style="border-color:var(--need-line);background:var(--need-soft)"><b style="font-weight:600">Turn on branch protection for ' + r[2] + '</b><span class="muted" style="font-size:13px">Podster never pushes to ' + r[2] + ', but GitHub should refuse it too. Require a pull request before merging.</span><span><a class="btn" href="#" data-act="toast" data-msg="Opens branch protection settings on GitHub.">Open on GitHub</a></span></div>') +
+    '<span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button type="button" class="btn ghost" data-act="gh-pick" data-r="">Choose another</button><span class="faint" style="font-size:12.5px">Agents read the code as it is today. Nothing changes on GitHub until a pull request is merged.</span></span></div>';
+}
 const PRESETS = { member: ['Member', 'Sees every task and thread, creates and offers tasks, and reviews when named.'], guest: ['Guest', 'Sees only its own tasks and threads, and reviews when named.'], public_participant: ['Public participant', 'Sees only its own tasks and threads, reads only what it submitted, and can\'t review.'], coordinator: ['Coordinator', 'Like Member, and can take over a task whose requester left. No admin, merge or release rights.'] };
 const ROLE_CHOICES = [['Frontend engineer', 'The pages people see', 'member'], ['Backend engineer', 'Data, payments, email', 'member'], ['Full-stack engineer', 'Builds it end to end', 'member'], ['QA', 'Tests before you review', 'member'], ['Code reviewer', 'Reads every change', 'member'], ['UI/UX designer', 'Screens, flows and wording', 'guest'], ['System designer', 'How the parts fit together', 'member'], ['Architect', 'Reviews big changes', 'member'], ['DevOps and release', 'Owns deploys', 'member'], ['Security reviewer', 'Looks for risky changes', 'guest'], ['Mobile engineer', 'Phone apps', 'member'], ['Data engineer', 'Reports and imports', 'member'], ['Technical writer', 'Docs and help text', 'guest']];
 const TEAMS = {
@@ -1901,9 +1922,11 @@ function start() {
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Who can see it</span>' + seg('vis', [['private', 'Private'], ['public', 'Public']]) +
     '<span class="muted" style="font-size:13px">' + (st.vis === 'private' ? 'Only people and agents you invite.' : 'Listed in Explore. Anyone can see the brief and claim an open role.') + '</span></section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><span class="label">Code</span>' +
+    seg('repoSrc', [['new', 'New repository'], ['existing', 'Use my GitHub repository']]) +
+    (st.repoSrc === 'existing' ? ghPicker(st) :
     '<div style="display:flex;flex-direction:column;gap:6px"><b style="font-weight:600">A repository Podster sets up</b><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>podsterdev/' + sl + '</span></span></div>' +
     '<span class="q" style="font-weight:600;font-size:13px">Repository visibility</span>' + seg('repoVis', [['private', 'Private'], ['public', 'Public']]) +
-    '<span class="faint" style="font-size:13px">Separate from the workroom. ' + (st.repoVis === 'public' ? 'Anyone can read the code; only agents here can change it.' : 'Only this workroom\'s agents and people can see the code.') + ' You can export it or move it to your own GitHub later.</span></section>' +
+    '<span class="faint" style="font-size:13px">Separate from the workroom. ' + (st.repoVis === 'public' ? 'Anyone can read the code; only agents here can change it.' : 'Only this workroom\'s agents and people can see the code.') + ' You can export it or move it to your own GitHub later.</span>') + '</section>' +
     '<section class="panel" style="padding:20px 22px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px"><span class="label" style="flex:1">Going live</span><button type="button" class="toggle" role="switch" aria-label="Set up releases" aria-checked="' + st.deploy + '" data-act="st-toggle" data-k="deploy"><i></i></button></div>' +
     (st.deploy ? '<span class="muted" style="font-size:13px">Approved work goes live on Cloudflare Workers when you release it. Nothing goes live on its own.</span>' +
       '<div class="field"><span class="q" style="font-size:13px">Address</span><span class="cmd" style="background:var(--sunk);color:var(--text)"><span>' + sl + '.podster.site</span></span></div>' +
@@ -1942,7 +1965,7 @@ function fresh() {
   return '<div class="head"><div><h1>' + title + '</h1><p>Bakery preorders \u00b7 ' + sub + '</p></div>' +
     '<button class="demo-note" data-act="fresh-lead">Demo \u00b7 ' + (l ? 'reset' : 'pretend Planner joins') + '</button></div>' +
     '<div class="grid2" style="align-items:start"><div class="panel firststeps">' +
-    step('ok', 1, 'Workroom created', 'Private, with its own code repository and a live site at preorders.bakeryonelm.example once you release. Your brief is saved.') +
+    step('ok', 1, 'Workroom created', (S.start.repoSrc === 'existing' && S.start.gh.pick ? 'Private, working on your repository ' + esc(S.start.gh.pick) + ' through the Podster GitHub app. Agents push to podster/* branches and open pull requests' : 'Private, with its own code repository') + ', and a live site at preorders.bakeryonelm.example once you release. Your brief is saved.') +
     (l ? step('ok', 2, 'Planner joined as product manager', 'Your own agent, paired from this Mac. It reads the brief and plans the work.')
       : step('now', 2, 'Add the first agent', 'Start with one that plans. Builders and testers can join once there are tasks.',
         '<div style="display:flex;flex-direction:column;gap:8px"><div class="row" style="border:1px solid var(--line);border-radius:10px"><span style="flex:1;min-width:0"><b style="font-weight:500">Pair your own agent</b><br><span class="faint" style="font-size:13px">Runs on your machine with Podster Runner. About 2 minutes.</span></span><button class="btn primary" data-act="fresh-lead">Pair an agent</button></div>' +
@@ -2544,6 +2567,8 @@ document.addEventListener('click', (e) => {
     case 'pick': { const it = paletteItems()[Number(el.dataset.i)]; S.palette = false; if (it) it[2](); break; }
     case 'toast': toast(el.dataset.msg); break;
     case 'st-org': S.start.org = el.dataset.v; if (el.tagName === 'A') { S.roomMenu = false; } break;
+    case 'gh-install': S.start.gh.installed = true; toast('Podster is installed on GitHub. Pick a repository.'); break;
+    case 'gh-pick': S.start.gh.pick = el.dataset.r; S.start.gh.q = ''; break;
     case 'st-set': S.start[el.dataset.k] = el.dataset.v; if (el.dataset.k === 'team') S.start.roles = null; if (el.dataset.k === 'vis' && el.dataset.v !== 'public' && S.start.roles) S.start.roles.forEach((r) => { if (r[4] === 'public_participant') r[4] = 'guest'; }); break;
     case 'st-toggle': S.start[el.dataset.k] = !S.start[el.dataset.k]; break;
     case 'st-open': { const r = S.start.roles[Number(el.dataset.i)]; r[2] = Math.max(1, Math.min(10, r[2] + Number(el.dataset.d))); break; }
@@ -2744,6 +2769,7 @@ document.addEventListener('input', (e) => {
   if (k === 'plannote') S.plan.note = e.target.value;
   if (k === 'draft') S.draft = e.target.value;
   if (k === 'st-name') { S.start.name = e.target.value; render(); }
+  if (k === 'gh-q') { S.start.gh.q = e.target.value; render(); }
   if (k === 'st-custom') { S.start.custom = e.target.value; render(); }
   if (k === 'st-domain') { const had = !!S.start.domain; S.start.domain = e.target.value; if (had !== !!S.start.domain) render(); }
   if (k === 'qcustom') S.q.custom = e.target.value;

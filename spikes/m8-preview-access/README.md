@@ -1,6 +1,6 @@
 # M8 spike P1: browser facts for the preview gate
 
-**Status, 2026-11-27: run locally, once for each engine, in Playwright's Chromium, Firefox and WebKit.** Nothing was deployed. No DNS, Cloudflare account, staging resource or secret was touched. Nothing builds on this folder: the real gate is M8 step 8. The results are in [the plan's spike P1 section](../../docs/m8-preview-plan.md#spike-p1-results-2026-11-27), and every value is in `results/<browser>.json`.
+**Status, 2026-11-28 UTC: run locally, once for each engine, between 05:56 and 06:01 UTC, in Playwright's Chromium, Firefox and WebKit.** Nothing was deployed. No DNS, Cloudflare account, staging resource or secret was touched. Nothing builds on this folder: the real gate is M8 step 8. The results are in [the plan's spike P1 section](../../docs/m8-preview-plan.md#spike-p1-results-2026-11-28-utc), and every value is in `results/<browser>.json`.
 
 It answers the browser half of [M8 build step 2](../../docs/m8-preview-plan.md#12-build-order), the facts that [section 5](../../docs/m8-preview-plan.md#5-access-control-on-preview-hosts) of the plan reasons about without having seen them.
 
@@ -44,7 +44,7 @@ Nothing in 1 to 4 blocks M8 steps 3 to 7. The plan's step 12 staging run covers 
 
 ## Results
 
-[Spike P1 results](../../docs/m8-preview-plan.md#spike-p1-results-2026-11-27) in the plan has the table, and `results/<browser>.json` has every value. In short, the three engines differ in four places:
+[Spike P1 results](../../docs/m8-preview-plan.md#spike-p1-results-2026-11-28-utc) in the plan has the table, and `results/<browser>.json` has every value. In short, the three engines differ in four places:
 
 - WebKit stores and sends a sibling's case-variant `__HOST-` cookie.
 - Chromium and Firefox evict Podster's pair after 179 Secure domain cookies. WebKit didn't at 1,000.

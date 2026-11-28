@@ -20,6 +20,7 @@ import {
   ENTER_CSP, ENTER_SCRIPT, SESSION, SESSION_SECONDS, STATE, TICKET_SECONDS,
   check, gateCookies, newState, previewPolicy, productionPolicy, sameHostPath, sign, stateHash,
 } from "./pure.mjs";
+import { childEnv } from "../../e2e/child-env.mjs";
 
 export const A = "a.pv.test";
 export const B = "b.pv.test";
@@ -41,7 +42,7 @@ function certificate() {
   ].join("\n"));
   const key = join(dir, "key.pem");
   const cert = join(dir, "cert.pem");
-  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config", config, "-keyout", key, "-out", cert], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-config", config, "-keyout", key, "-out", cert], { stdio: ["ignore", "ignore", "pipe"], env: childEnv({ OPENSSL_CONF: config }) });
   const pair = { key: readFileSync(key), cert: readFileSync(cert) };
   rmSync(dir, { recursive: true, force: true });
   return pair;

@@ -359,7 +359,7 @@ Each step is one PR. **C** changes `packages/contracts`; **M** adds a migration.
 | --- | --- | --- | --- | --- | --- |
 | 0 | This plan and the ADR note | | quick | done | |
 | 1 | Owner answers recorded as decisions 250 on; ADR note accepted or changed | | quick | 0.5 | Owner |
-| 2 | **Spike P1** ([run locally 2026-11-27](#spike-p1-results-2026-11-27); the edge part is still owed), browser facts on `podster.site` test hosts: cookies under `sandbox allow-scripts` with and without `allow-same-origin`; `__Host-` against a sibling's tossing in Chromium, Firefox and WebKit; **case-variant (`__HOST-`, `__host-`) and nameless-cookie tossing** from a sibling; jar eviction; SameSite on the redirect chain; the fragment surviving the `303` and `history.replaceState` removing it from history; `Origin-Agent-Cluster`; WebKit's tracking prevention on a cookie set through a redirect | | quick | 1.5 | Owner: a test Worker on the content zone, as spike D had |
+| 2 | **Spike P1** ([run locally 2026-11-28 UTC](#spike-p1-results-2026-11-28-utc); the edge part is still owed), browser facts on `podster.site` test hosts: cookies under `sandbox allow-scripts` with and without `allow-same-origin`; `__Host-` against a sibling's tossing in Chromium, Firefox and WebKit; **case-variant (`__HOST-`, `__host-`) and nameless-cookie tossing** from a sibling; jar eviction; SameSite on the redirect chain; the fragment surviving the `303` and `history.replaceState` removing it from history; `Origin-Agent-Cluster`; WebKit's tracking prevention on a cookie set through a redirect | | quick | 1.5 | Owner: a test Worker on the content zone, as spike D had |
 | 3 | Contracts: routes, schemas, events, `get_task_release_status` fields, the serve-entry fixture's preview form | **C** | quick | 1 | 1 |
 | 4 | Core and policy, pure: environment, preview slot `ServeState`, build ID, publish binding, `may_view`, ticket claims and limits, epoch rules, hostname roles | | **Deep** | 3 | 3 |
 | 5 | Workspace steps 59 to 63, the hostname object's step, D1 `0010` | **M** | quick | 1 | 4 |
@@ -374,7 +374,7 @@ Each step is one PR. **C** changes `packages/contracts`; **M** adds a migration.
 
 **About 28 builder-days** before the security review's fixes, with 4 and 8 and 10 able to run beside 6 and 7. Steps 3 and 5 merge alone, in that order, after any other contract or migration PR open at the time. Deploys to staging go through `scripts/deploy-staging`; the content Worker's deploy, with its new binding and keys, is the owner's at a terminal (`CLAUDE.md`, "Scripts agents must use").
 
-### Spike P1 results, 2026-11-27
+### Spike P1 results, 2026-11-28 UTC
 
 **Run locally, once in each engine,** between 05:56 and 06:01 UTC on 2026-11-28: Playwright's Chromium 156.0.8078.4, Firefox 157.0 and WebKit 27.2, all at Playwright 1.64.1. The harness is in [`spikes/m8-preview-access/`](../spikes/m8-preview-access/README.md). It uses real TLS through a local proxy to `*.pv.test` hosts. `.test` isn't on the Public Suffix List, so these hosts are one site, as `*.podster.site` hosts are before the entry. A working stand-in of the gate in 5.3 sits on one of those hosts, and the application host is another site. Every value is in `results/<browser>.json`. **Nothing was deployed, and nothing touched `podster.site`, DNS, Cloudflare or a secret.** "Seen" below means seen in this local run, not on the edge.
 

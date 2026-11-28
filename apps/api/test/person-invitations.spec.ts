@@ -391,13 +391,13 @@ describe("room schema step 57", () => {
   it("adds the addressee's record to a room made before it, runs again safely, and keeps a pending invitation whole", async () => {
     const id = await room();
     const latest = await inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
-    await inRoom(id, (sql) => { sql.exec("DROP TABLE invitation_invitee"); sql.exec("UPDATE schema_version SET version = version - 2"); });
+    await inRoom(id, (sql) => { sql.exec("DROP TABLE invitation_invitee"); sql.exec("UPDATE schema_version SET version = version - 8"); });
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(latest);
     // An organization's invitation from before the step is still one: it has no addressee row.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/invitations`)).body.invitations.every((i: any) => i.invitee_kind === "organization")).toBe(true);
     const made = await invite(id, ADDRESS);
-    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 1"));
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 8"));
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect((await invitationRows(id)).find((r) => r.id === made.body.id)).toMatchObject({ kind: "person", email: ADDRESS });
   });

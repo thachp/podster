@@ -310,13 +310,18 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
       seed(sql);
       // A label recorded as a preview slot's while also the current production label can't be rebuilt as either.
       sql.exec("INSERT INTO preview_slot (id, label, created_at, deleted_at, updated_at) VALUES (?, ?, 1, 1, 1)", SLOT(1), LABEL);
+      // The room records, in the same request, whether references were still deferred once the migration failed.
+      sql.exec("CREATE TABLE report_migration_deferral (deferred INTEGER NOT NULL)");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
     expect(await api("GET", `/v1/workspaces/${id}`)).not.toBe(200);
     expect(await inRoom(id, (sql) => [sql.exec("SELECT version FROM schema_version").one().version, sql.exec("SELECT label FROM app_label").toArray(), sql.exec("SELECT count(*) AS n FROM release").one().n]))
       .toEqual([latest - 1, [{ label: LABEL }], 2]);
-    // Step 64 failed after deferring references: the migration still turned deferred checking off.
+    // Step 64 failed after deferring references, and the migration still turned deferred checking off before the
+    // request went on: seen in that same request, and after it.
+    expect(await inRoom(id, (sql) => sql.exec("SELECT deferred FROM report_migration_deferral").toArray())).toEqual([{ deferred: 0 }]);
     expect(await inRoom(id, (sql) => sql.exec("PRAGMA defer_foreign_keys").one().defer_foreign_keys)).toBe(0);
+    await inRoom(id, (sql) => sql.exec("DROP TABLE report_migration_deferral"));
     // Without the stray row the step runs.
     await inRoom(id, (sql) => sql.exec("DELETE FROM preview_slot"));
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);

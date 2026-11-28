@@ -197,6 +197,25 @@ impl Workspace {
         self.held_clear.set(false);
         let counting = sql.clone();
         let failures = transaction_sync(&self.state, move || {
+            // Test builds only: a room holding this table records whether references were still deferred when the
+            // failed migration came back, in the same request, which is where a deferral left on would bite.
+            #[cfg(feature = "failpoints")]
+            if !rows(
+                &counting,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'report_migration_deferral'",
+                vec![],
+            )?
+            .is_empty()
+            {
+                let deferred = rows(&counting, "PRAGMA defer_foreign_keys", vec![])?
+                    .first()
+                    .map_or(-1, |row| int(&row["defer_foreign_keys"]));
+                exec(
+                    &counting,
+                    "INSERT INTO report_migration_deferral (deferred) VALUES (?)",
+                    vec![deferred.into()],
+                )?;
+            }
             exec(&counting, HELD_SCHEMA, vec![])?;
             exec(&counting, "INSERT INTO migration_failure (id, failures, last_failed_at, failing) VALUES (1, 1, ?, 1)
               ON CONFLICT (id) DO UPDATE SET failures = failures + 1, last_failed_at = excluded.last_failed_at, failing = 1", vec![now_ms().into()])

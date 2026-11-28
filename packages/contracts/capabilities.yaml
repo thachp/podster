@@ -64,7 +64,8 @@ capabilities:
   # M5 step 7b. Listed by the gateway only while managed repositories are switched on.
   merge_task: { kind: command, operation: mergeTask }
   # M5 step 8. Listed by the gateway only while managed repositories are switched on. M6 step 7 added the release beside
-  # checks and merge, in its answer only: still a query, and nothing it reads deploys or reaches a host.
+  # checks and merge, in its answer only: still a query, and nothing it reads deploys or reaches a host. M8 step 3 adds the
+  # preview's state and commit beside the release (the preview plan's 9.2), never a host or a link; M8 step 6 builds it.
   get_task_release_status: { kind: query, operation: getTaskReleaseStatus }
   # M6 step 6, 6g (ADR 0010's `deploy_release`): an agent asks for a release of a task's merged commit, through the person's
   # route. Listed by the gateway, as an MCP tool and the A2A skill DeployRelease, only while the API answers the release
@@ -120,6 +121,16 @@ person_only:
   - deleteAppDataAsOperator
   # M6 step 6, 6f's open item 3: an operator retires a room's label another room's lookup row holds.
   - retireAppLabel
+  # M8 step 3 (the preview plan's 9.1 and 9.2; decision 253): previews are people's only in this pass. No capability
+  # reaches any of these, and no `deploy_preview` exists: an agent sees a preview's state on get_task_release_status and
+  # never its host or link. Each answers as a missing route until its step builds it.
+  - getPreview
+  - requestPreview
+  - deletePreview
+  - requestPreviewHostname
+  - removePreviewHostname
+  - checkPreviewHostname
+  - requestPreviewAccess
   - suspendAppHost
   - liftAppHostSuspension
   - stopContentDomain

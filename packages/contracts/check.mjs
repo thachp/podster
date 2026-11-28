@@ -206,7 +206,7 @@ if (capabilities[AGENT_RELEASE.capability]?.operation !== AGENT_RELEASE.operatio
 for (const [name, cap] of Object.entries(capabilities)) {
   if (name === AGENT_RELEASE.capability && cap.operation === AGENT_RELEASE.operation) continue;
   const found = operations.get(cap.operation);
-  if (/deploy|release[-_]?config|app[-_]?host|content[-_]?domain/i.test(`${name} ${cap.operation} ${found?.path ?? ""}`) || /\/releases(\/|$)/.test(found?.path ?? "") || releaseOperations[cap.operation] !== undefined) problems.push(`${name}: no capability but ${AGENT_RELEASE.capability} may reach a release, a deployment or an app's hosts`);
+  if (/deploy|release[-_]?config|app[-_]?host|content[-_]?domain|preview/i.test(`${name} ${cap.operation} ${found?.path ?? ""}`) || /\/releases(\/|$)/.test(found?.path ?? "") || releaseOperations[cap.operation] !== undefined) problems.push(`${name}: no capability but ${AGENT_RELEASE.capability} may reach a release, a deployment or an app's hosts`);
 }
 // The closed sets are `crates/core`'s, never restated here: core-sets.mjs reads them from its source, and the contract's
 // enums and the room's column checks must each equal them, value for value and in core's order. So a state, a trigger or
@@ -307,10 +307,102 @@ for (const id of ["approveRelease", "declineRelease"]) {
   if (operations.get(id)?.path && api.paths[operations.get(id).path].parameters?.find((p) => p.name === "release")?.schema?.pattern !== idPattern) problems.push(`${id}: its release parameter must be ${idPattern}`);
 }
 if (api.components.parameters.appLabel?.schema?.pattern !== `^[a-z0-9]{1,${core.maxLabelLen}}$`) problems.push(`appLabel: must be at most ${core.maxLabelLen} lower-case letters and digits`);
+// M8 step 3 named fields that later steps build. Each is in its schema's properties and not yet required, so the contract
+// never says the API answers a field it doesn't; the step that builds one takes it off this list and makes it required.
+const PENDING = {
+  TaskReleaseStatus: ["preview"], // M8 step 6
+  ReleaseApproval: ["from_preview", "build_id", "preview_served_at"], // M8 step 9
+};
+for (const [schema, names] of Object.entries(PENDING)) {
+  const found = api.components.schemas[schema];
+  for (const name of names) {
+    if (!found?.properties?.[name]) problems.push(`${schema}.${name}: pending, but not in its properties`);
+    if (found?.required?.includes(name)) problems.push(`${schema}.${name}: required, so take it off PENDING`);
+    if (!/\*\*not built/i.test(`${found?.properties?.[name]?.description ?? ""}`)) problems.push(`${schema}.${name}: pending, so its description must say it isn't built`);
+  }
+}
 for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "ReleaseApproval", "ReleaseApprovalList", "AppHostnameRequest", "AppHostname", "SetAppHostname"]) {
   const found = api.components.schemas[schema];
   if (found?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
+  const named = Object.keys(found?.properties ?? {}).filter((name) => !(PENDING[schema] ?? []).includes(name));
+  if ((found?.required ?? []).slice().sort().join() !== named.sort().join()) problems.push(`${schema}: must require exactly its properties`);
+}
+
+// Previews (M8 step 3: the preview plan's section 9, ADR 0010's revision on previews, decisions 250 to 257). The contract
+// only: every operation is a person's (decision 253), names only what its path may, and says it isn't built and what it
+// answers until it is. No capability reaches one (the check on capabilities above refuses `preview`), and a preview's
+// states are core's release states, never awaiting approval or declined, since a preview is queued when asked.
+const previewOperations = { getPreview: "ws", requestPreview: "ws,t", deletePreview: "ws", requestPreviewHostname: "ws", removePreviewHostname: "ws", checkPreviewHostname: "ws", requestPreviewAccess: "" };
+for (const [id, params] of Object.entries(previewOperations)) {
+  const found = operations.get(id);
+  if (!found) { problems.push(`${id}: the preview operation is missing`); continue; }
+  if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params || "nothing"}`);
+  if (!personOnly.includes(id)) problems.push(`${id}: must be person_only (decision 253)`);
+  if (!found.op.summary?.includes("**Not built (M8 step") || !found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say it isn't built, and that it answers \`not_found\` until it is`);
+  if (!found.op.summary?.includes("never an agent") && !found.op.summary?.includes("every agent") && !found.op.summary?.includes("Never an agent")) problems.push(`${id}: its summary must say no agent may`);
+  // Each command but the access ticket keeps an idempotency key; a ticket is never stored for a replay.
+  const hasKey = (found.op.parameters ?? []).some((p) => p.$ref?.endsWith("/idempotencyKey"));
+  if (found.method !== "get" && hasKey !== (id !== "requestPreviewAccess")) problems.push(`${id}: ${hasKey ? "takes" : "lacks"} an idempotency key`);
+}
+for (const schema of ["RoomPreview", "Preview", "PreviewRelease", "RequestPreview", "PreviewAccessRequest", "PreviewAccess", "ApproveRelease", "TaskPreview"]) {
+  const found = api.components.schemas[schema];
+  if (found?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
   if ((found?.required ?? []).slice().sort().join() !== Object.keys(found?.properties ?? {}).sort().join()) problems.push(`${schema}: must require exactly its properties`);
+}
+{
+  const schemas = api.components.schemas;
+  const without = (set) => set.filter((state) => state !== "awaiting_approval" && state !== "declined").join();
+  if (schemas.PreviewRelease?.properties?.state?.enum?.join() !== without(core.releaseStates)) problems.push(`PreviewRelease.state: must be exactly core's ${without(core.releaseStates)}`);
+  if (schemas.TaskPreview?.properties?.state?.enum?.join() !== without(core.releaseStatusStates)) problems.push(`TaskPreview.state: must be exactly core's ${without(core.releaseStatusStates)}`);
+  const buildId = "^bld_[0-9a-f]{32}$";
+  for (const [at, pattern] of [["PreviewRelease.build_id", schemas.PreviewRelease?.properties?.build_id?.pattern], ["ApproveRelease.build", schemas.ApproveRelease?.properties?.build?.pattern], ["ReleaseApproval.build_id", schemas.ReleaseApproval?.properties?.build_id?.pattern]]) {
+    if (pattern !== buildId) problems.push(`${at}: must be ${buildId}`);
+  }
+  for (const at of ["PreviewRelease.id", "TaskPreview.release_id", "RequestRelease.from_preview", "ReleaseApproval.from_preview"]) {
+    const [schema, field] = at.split(".");
+    if (schemas[schema]?.properties?.[field]?.pattern !== idPattern) problems.push(`${at}: must be ${idPattern}`);
+  }
+  for (const at of ["PreviewRelease.commit_sha", "TaskPreview.commit_sha", "RequestPreview.commit_sha"]) {
+    const [schema, field] = at.split(".");
+    if (schemas[schema]?.properties?.[field]?.pattern !== "^[0-9a-f]{40}$") problems.push(`${at}: must be 40 lower-case hexadecimal characters`);
+  }
+  // What an agent reads of a preview is its state and commit: never a host, a label or a link (the plan's 9.2).
+  if (Object.keys(schemas.TaskPreview?.properties ?? {}).join() !== "exists,release_id,commit_sha,state,observed_at,failure_code,served") problems.push("TaskPreview: must hold exactly exists, release_id, commit_sha, state, observed_at, failure_code and served, and never a host or a link");
+  const preview = schemas.TaskReleaseStatus?.properties?.preview;
+  const shapes = (preview?.oneOf ?? []).map((v) => v.$ref ?? JSON.stringify(v));
+  if (shapes.join("|") !== [JSON.stringify({ type: "null" }), JSON.stringify({ type: "object", additionalProperties: false, required: ["exists"], properties: { exists: { type: "boolean", enum: [false] } } }), "#/components/schemas/TaskPreview"].join("|")) problems.push("TaskReleaseStatus.preview: must be null, { exists: false } or a TaskPreview");
+  // The access request takes exactly the host, the state's hash and the return path, each required: only the preview host
+  // starts a flow, so no `st` is `invalid_argument`.
+  const access = schemas.PreviewAccessRequest?.properties;
+  if (Object.keys(access ?? {}).join() !== "host,st,r" || access?.st?.pattern !== "^[A-Za-z0-9_-]{43}$") problems.push("PreviewAccessRequest: must take exactly host, st (a base64url SHA-256) and r");
+  // A preview is optional before publishing (decision 254), so a release's request doesn't need one, and the approval's
+  // body is optional, required by the room only for a release made from a preview.
+  if (schemas.RequestRelease?.required?.includes("from_preview")) problems.push("RequestRelease.from_preview: must be optional (decision 254)");
+  const approve = operations.get("approveRelease")?.op;
+  if (approve?.requestBody?.required !== false || approve?.requestBody?.content?.["application/json"]?.schema?.$ref !== "#/components/schemas/ApproveRelease") problems.push("approveRelease: its body must be the optional ApproveRelease");
+}
+// The serve entries' preview form (the plan's 3.1): its mark, the epoch's grammar, and vectors that cross, so a
+// production host never reads a preview entry and a preview host never reads a production one.
+{
+  const fixture = JSON.parse(readFileSync(new URL("serve-entry.fixture.json", import.meta.url), "utf8"));
+  if (fixture.preview_mark !== "preview:") problems.push("serve-entry.fixture.json: the preview mark must be preview:");
+  const epoch = new RegExp(fixture.preview_epoch_pattern ?? "$^");
+  if (!epoch.test("0") || epoch.test("01") || epoch.test("1".repeat(16)) || !Number.isSafeInteger(Number("9".repeat(15)))) problems.push("serve-entry.fixture.json: the epoch must be 0 or an unpadded decimal of at most 15 digits");
+  const missing = (values, lists) => values.filter((value) => !lists.some((list) => (fixture[list] ?? []).includes(value)));
+  const crosses = [
+    [fixture.valid_preview_entries, ["invalid_script_names", "invalid_code_entries"], "a valid preview entry a production default host might read"],
+    [fixture.valid_preview_custom_entries, ["invalid_custom_entries", "invalid_code_custom_entries"], "a valid preview custom entry a production custom host might read"],
+    [[...fixture.valid_script_names, ...fixture.valid_code_entries], ["invalid_preview_entries"], "a valid production default entry a preview host might read"],
+    [[...fixture.valid_custom_entries, ...fixture.valid_code_custom_entries], ["invalid_preview_custom_entries"], "a valid production custom entry a preview custom host might read"],
+  ];
+  for (const [values, lists, what] of crosses) {
+    if (!values?.length) problems.push(`serve-entry.fixture.json: no vectors for ${what}`);
+    for (const value of missing(values ?? [], lists)) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} is ${what}, and isn't in ${lists.join(" or ")}`);
+  }
+  for (const value of [...(fixture.valid_preview_entries ?? []), ...(fixture.valid_preview_custom_entries ?? [])]) {
+    const rest = value.slice(fixture.preview_mark.length);
+    if (!value.startsWith(fixture.preview_mark) || !epoch.test(rest.slice(0, rest.indexOf(":")))) problems.push(`serve-entry.fixture.json: ${JSON.stringify(value)} isn't the mark and an epoch`);
+  }
 }
 
 // `Error.code` lists exactly the codes error-codes.mjs's scan finds in the REST error body of the API and the gateway.

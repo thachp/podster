@@ -140,7 +140,7 @@ __t.S.as = 'elena'; __t.S.palette = false; __t.S.modal = null; __t.S.drawer = nu
   P.serving = null; P.host = null; want(['>None<', 'Make a preview'], 'none'); if (html.indexOf('Open preview') >= 0 || html.indexOf('Publish this build') >= 0) throw new Error('preview none offers open/publish');
   P.next = { task: 16, commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13' }; want(['>Building<', "It isn't served yet"], 'building');
   P.serving = sv; want(['>Replacing<', 'keeps showing'], 'replacing'); if (html.indexOf('data-act="prev-ask"') >= 0) throw new Error('preview controls while replacing');
-  P.next = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'marker_timeout' }; want(['Replacement failed', 'failed: the new build', 'The preview still shows'], 'failed');
+  P.next = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'release_marker_missing' }; want(['Replacement failed', 'failed: the new build didn', 'The preview still shows'], 'failed');
   P.failed = null; P.deleting = true; want(['>Deleting<'], 'deleting'); P.deleting = false;
   P.ask = 'delete'; want(['Delete the preview?'], 'delete ask'); P.ask = 'replace'; want(['Replace the preview with'], 'replace ask'); P.ask = 'publish'; want(['Ask to publish build bld_7c1e94a0'], 'publish ask'); P.ask = null;
   P.priv = true; want(['Only a public workroom can publish'], 'private'); if (html.indexOf('Publish this build') >= 0) throw new Error('private room offers publish'); P.priv = false;

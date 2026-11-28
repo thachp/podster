@@ -1345,7 +1345,7 @@ function setTheme(t) { S.theme = t; try { localStorage.setItem('podster-theme', 
 const PREV_DIFF = 'A preview can use browser storage and its own address. Production apps can\'t: they run with no cookies or browser storage.';
 const PREV_STORAGE = 'This build may use browser storage, which production apps don\'t have.';
 const PREV_NOTICE = 'This build ran in the preview with browser storage and its own origin. In production it runs sandboxed, with neither, so anything that worked only because of them will break.';
-const PREV_REASONS = { marker_timeout: 'the new build didn\'t answer on the preview host within 2 minutes', build_failed: 'the build failed' };
+const PREV_REASONS = { release_marker_missing: 'the new build didn\'t answer on the preview host in time', build_failed: 'the build failed' };
 const shortBld = (b) => b ? b.slice(0, 12) : '';
 const prevChip = (label, need) => '<span class="stage"' + (need ? ' style="color:var(--need)"' : '') + '><span class="dot" style="background:' + (need ? 'var(--need)' : label === 'Ready' ? 'var(--done)' : label === 'None' ? 'var(--faint)' : 'var(--build)') + '"></span>' + label + '</span>';
 function previewState() {
@@ -2564,7 +2564,7 @@ document.addEventListener('click', (e) => {
       const id = Number(P.pick); const commit = ({ 16: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', 15: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a' })[id] || 'c0ffee12ab34cd56ef7890ab12cd34ef56ab7890';
       P.failed = null; P.next = { task: id, commit }; render();
       setTimeout(() => {
-        if (S.trouble.preview && P.serving) { P.failed = { commit, reason: 'marker_timeout' }; P.next = null; toast('The replacement failed. The preview still shows the last build that worked.'); render(); return; }
+        if (S.trouble.preview && P.serving) { P.failed = { commit, reason: 'release_marker_missing' }; P.next = null; toast('The replacement failed. The preview still shows the last build that worked.'); render(); return; }
         P.serving = { task: id, commit, build: 'bld_' + (id === 16 ? '2d9f6b18c4e07a35b1f8d2c6e9a04b7d' : '7c1e94a03f5b2d8e6a9c0f1b3d5e7a92'), at: 'just now', storage: id !== 16, by: 'You' }; P.next = null; toast('The preview shows ' + commit.slice(0, 7) + '.'); render();
       }, 2200);
       return;

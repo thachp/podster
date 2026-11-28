@@ -700,6 +700,26 @@ INSERT INTO app_label (label, kind, current, created_at, retired_at, indexed_at,
   SELECT label, CASE WHEN label IN (SELECT label FROM preview_slot) THEN 'preview' ELSE 'production' END,
     current, created_at, retired_at, indexed_at, suspended_at, suspension_reason FROM app_label_copy;
 DROP TABLE app_label_copy;
+",
+// Step 65 (M8 step 6; the preview plan's 3.1 and 3.2): what the room's preview applier last confirmed at each preview
+// host, as `serve_apply` is for production's hosts, which a preview host can never be (its label is never `current`, so
+// `serve_state` can't name its script). One row a host, made with the slot that holds the host and kept after the slot
+// is deleted until the host's entry is confirmed absent. `confirmed` is 1 only when the entry was read back exactly as
+// `applied_value`, or read back absent with `applied_value` null; what the room wants is worked out from the slot by
+// `podster_core::serve_entry`, never stored, so a value here that isn't it is simply owed again. A new table, so the
+// step runs again safely; it writes no row, since no room before it has a preview.
+"
+CREATE TABLE IF NOT EXISTS preview_apply (host TEXT PRIMARY KEY CHECK (length(host) BETWEEN 4 AND 253 AND host NOT GLOB '*[^a-z0-9.-]*' AND host GLOB '*?.?*'
+    AND host NOT GLOB '.*' AND host NOT GLOB '*.' AND host NOT GLOB '*..*'),
+  slot_id TEXT NOT NULL REFERENCES preview_slot (id),
+  applied_value TEXT CHECK (applied_value IS NULL OR (length(applied_value) BETWEEN 1 AND 512 AND substr(applied_value, 1, 8) = 'preview:')),
+  confirmed INTEGER NOT NULL DEFAULT 0 CHECK (confirmed IN (0, 1)),
+  applied_at INTEGER CHECK (applied_at IS NULL OR typeof(applied_at) = 'integer'),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
+  next_attempt_at INTEGER CHECK (next_attempt_at IS NULL OR typeof(next_attempt_at) = 'integer'),
+  last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64),
+  updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer'),
+  CHECK (confirmed = 0 OR applied_at IS NOT NULL)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

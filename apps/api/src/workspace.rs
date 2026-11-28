@@ -89,6 +89,10 @@ mod outputs;
 mod person_invitations;
 mod plan;
 mod planned;
+mod preview;
+mod preview_apply;
+mod preview_commit;
+mod preview_request;
 mod provenance;
 mod provisioning;
 mod public;
@@ -3996,6 +4000,15 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A preview host's entry to write or remove, or a preview script to delete (M8 step 6). Nothing while no preview
+        // provider is configured.
+        if let Some(next) = migrated
+            .then(|| preview_apply::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // An app's data owed a deletion (S4 of the store plan). Nothing while no store provider is configured.
         if let Some(next) = migrated
             .then(|| store_delete::next_due(&sql, &self.env))
@@ -4572,6 +4585,8 @@ impl Workspace {
                 | ["releases"]
                 | ["releases", _, "approve" | "decline" | "rollback"]
                 | ["apps", _, "delete-data"]
+                | ["preview"]
+                | ["tasks", _, "preview"]
         ) && crate::releases::switched_on(&self.env).await;
         // The `deploy` action of the grant route (M6 step 6) is there only while release is switched on, as every M6
         // route. The route itself is M5's, and is there while managed repositories are.
@@ -4602,6 +4617,8 @@ impl Workspace {
                 | (Method::Post, ["releases", _, "approve" | "decline"])
                 // Deleting the app's data only takes away (S4 of the store plan).
                 | (Method::Post, ["apps", _, "delete-data"])
+                // Deleting the preview only takes down (M8 step 6), in an archived room too.
+                | (Method::Delete, ["preview"])
                 // Leaving only takes away, as a removal does.
                 | (Method::Post, ["leave"])
                 | (
@@ -4692,6 +4709,29 @@ impl Workspace {
                     crate::content_provider::content_domain(&self.env).as_deref(),
                 ),
                 ["release-approvals"] if release_route_on => release_approvals::read(&sql, &who),
+                // The room's preview (M8 step 6): whoever may view it, then whether previews are on, after who.
+                ["preview"] if release_route_on => {
+                    let previews = crate::previews::setting(&self.env).await;
+                    // The caller's place was held against the gateway's assertion as they were resolved: their
+                    // organization, or their accepted invitation's (decision 30). Only a public claim is left to ask.
+                    let standing = podster_policy::preview::ViewStanding {
+                        through_public_claim: public_claims::is_public_participant(
+                            &sql,
+                            &who.caller.id,
+                        )?,
+                        place_holds: true,
+                    };
+                    podster_policy::preview::authorize_preview_read(
+                        &who.caller,
+                        standing,
+                        previews,
+                    )
+                    .map_err(preview::denied)?;
+                    preview::view(
+                        &sql,
+                        crate::content_provider::content_domain(&self.env).as_deref(),
+                    )
+                }
                 _ => Err(ApiError::not_found()),
             };
         }
@@ -4769,6 +4809,45 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| merges::request(sql, who, &target, &body, &asked, now),
+                )
+            }
+            // Asking for a preview of a task's merged commit (M8 step 6): who first, by the room's rows, then the release
+            // path's gate and what it needs from outside, and the transaction decides again, on every attempt.
+            (Method::Post, ["tasks", task, "preview"]) if release_route_on => {
+                preview_request::may_ask(&who)?;
+                let reads = Rc::new(self.preview_reads(&identity.id).await?);
+                let again = reads.clone();
+                let task = (*task).to_owned();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql: &SqlStorage, who: &Participant| {
+                        preview_request::standing(sql, who, &again)
+                    },
+                    move |sql, who, _| preview_request::handle(sql, who, &task, &body, &reads),
+                )
+            }
+            // Deleting the room's preview (M8 step 6): who first, by the room's rows, then the caller's own record; no
+            // gate, since it only takes down. A stored answer goes only to someone who may still delete.
+            (Method::Delete, ["preview"]) if release_route_on => {
+                preview::delete_standing(&sql, &who, Some(true))?;
+                let asked = self.still_holds(Some(&identity.id), true).await?;
+                let id = identity.id.clone();
+                let domain = crate::content_provider::content_domain(&self.env);
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql: &SqlStorage, who: &Participant| {
+                        let holds = release_recheck::settled(sql, &asked, Some(&id), true)?;
+                        preview::delete_standing(sql, who, holds)
+                    },
+                    move |sql, who, _| preview::handle_delete(sql, who, domain.as_deref()),
                 )
             }
             (Method::Post, ["tasks", _, _]) => {
@@ -5712,6 +5791,11 @@ impl DurableObject for Workspace {
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());
+        }
+        // The preview hosts' entries and the preview namespace's scripts (M8 step 6), right after production's, each
+        // through its own provider: neither ever touches the other's.
+        if let Err(error) = preview_apply::upkeep(&self.state, &self.env).await {
+            console_error!("preview upkeep failed: {:?}", error.code());
         }
         // A custom host's marker (M6 step 8e), right after the applier has written what it wants.
         if let Err(error) = self.custom_marker_upkeep().await {

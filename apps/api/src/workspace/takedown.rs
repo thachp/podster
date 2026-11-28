@@ -193,11 +193,13 @@ pub(super) fn load(sql: &SqlStorage) -> R<Option<Loaded>> {
     }))
 }
 
-/// Whether a label is one of this room's, current or retired.
+/// Whether a label is one of this room's production labels, current or retired.
 fn own_label(sql: &SqlStorage, label: &str) -> R<bool> {
+    // Production's labels only (M8 step 6): everything here is about production's hosts and scripts, and a preview
+    // label's host or script is never one of them.
     Ok(!rows(
         sql,
-        "SELECT label FROM app_label WHERE label = ?",
+        "SELECT label FROM app_label WHERE label = ? AND kind = 'production'",
         vec![label.into()],
     )?
     .is_empty())
@@ -229,6 +231,9 @@ pub(super) fn unpublish_for(
     details: Value,
     now: i64,
 ) -> R<bool> {
+    // The room's preview goes with every such trigger but the room made private (M8 step 6; the preview plan's 3.3), in
+    // this same transaction, whether or not there is anything of production's to unpublish.
+    super::preview::on_unpublish(sql, trigger, now)?;
     if !unpublish_app(sql, trigger, None, now)? {
         return Ok(false);
     }
@@ -372,7 +377,10 @@ pub(super) fn unpublish_app(
     )?;
     for release in rows(
         sql,
-        "SELECT id, state FROM release WHERE state IN ('live', 'served')",
+        &format!(
+            "SELECT id, state FROM release WHERE state IN ('live', 'served') AND {}",
+            super::preview::NOT_PREVIEW
+        ),
         vec![],
     )? {
         let from = release["state"]
@@ -506,6 +514,8 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
                 vec![now.into(), reason.name().into(), label.into()],
             )?;
             unpublish_app(sql, UnpublishTrigger::AppSuspended, Some(label), now)?;
+            // An app suspended, on any of its labels, deletes its preview too (M8 step 6; the preview plan's 3.3).
+            super::preview::on_unpublish(sql, UnpublishTrigger::AppSuspended, now)?;
         } else {
             exec(
                 sql,
@@ -712,7 +722,7 @@ fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
     // code. No room's ID and no error's text. A room with no app has no label, and nothing to keep.
     let mut found: Vec<Value> = rows(
         sql,
-        "SELECT (SELECT label FROM app_label ORDER BY (current IS NOT NULL) DESC, created_at DESC LIMIT 1) AS subject, last_code AS detail
+        "SELECT (SELECT label FROM app_label WHERE kind = 'production' ORDER BY (current IS NOT NULL) DESC, created_at DESC LIMIT 1) AS subject, last_code AS detail
            FROM release_bookkeeping WHERE failures >= ?",
         vec![release_commit::BOOKKEEPING_TOLD.into()],
     )?
@@ -914,7 +924,11 @@ fn check_script(
     let ScriptOwner::Podster { label, release_id } = script_owner(script) else {
         return Ok((false, false));
     };
-    if !own_label(sql, label)? {
+    // Only a production label's script is this question's: a preview label's is never in production's namespace, and
+    // is never queued from it (M8 step 6).
+    if super::preview::label_kind(sql, label)?
+        != Some(podster_core::preview::Environment::Production)
+    {
         return Ok((false, false));
     }
     let named = !rows(
@@ -1008,6 +1022,24 @@ fn check_script(
 pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let (known, changed) = match body["kind"].as_str() {
         Some("wake") => (true, false),
+        // A preview host's entry, as written (M8 step 6): the preview applier's record is asked, never production's.
+        Some("entry") if body["preview"] == true => super::preview_apply::check_entry(
+            sql,
+            body["host"]
+                .as_str()
+                .ok_or_else(ApiError::invalid_argument)?,
+            body["found_value"].as_str(),
+            now,
+        )?,
+        // A script listed in the preview namespace (M8 step 6).
+        Some("script") if body["namespace"] == "preview" => super::preview_apply::check_script(
+            sql,
+            body["script"]
+                .as_str()
+                .ok_or_else(ApiError::invalid_argument)?,
+            body["listed_at"].as_i64(),
+            now,
+        )?,
         Some("entry") => check_entry(
             sql,
             body["host"]
@@ -1055,8 +1087,11 @@ pub(super) fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
 /// A host refused at the version it has now isn't one of them: there is nothing more the applier will do for it until
 /// the room moves its version, so it neither wakes the room nor holds the room's script deletes back.
 const PENDING_HOSTS: &str = "FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE (a.applied_version IS NULL OR a.applied_version != s.version) AND (a.refused_version IS NULL OR a.refused_version != s.version)";
-/// Scripts whose delete nothing in the room's own state forbids: no host, kept script or flight names them.
-const UNNAMED: &str = "NOT EXISTS (SELECT 1 FROM serve_state n WHERE n.script_name = d.script_name OR n.flight_before = d.script_name)
+/// Scripts whose delete nothing in the room's own state forbids: no host, kept script or flight names them. **Only a
+/// production label's:** a preview label's script is in the preview namespace, and only `preview_apply`'s job, through
+/// the preview provider, ever deletes it (M8 step 6).
+const UNNAMED: &str = "d.label IN (SELECT label FROM app_label WHERE kind = 'production')
+    AND NOT EXISTS (SELECT 1 FROM serve_state n WHERE n.script_name = d.script_name OR n.flight_before = d.script_name)
     AND NOT EXISTS (SELECT 1 FROM release_config c WHERE c.kept_previous = d.script_name OR c.in_flight_script = d.script_name)";
 /// When a pending host is next due. A wait counts only for the version whose attempt failed: once the room has moved
 /// the host's version, whoever moved it and why, the host is due at once. So no writer has to remember to clear a
@@ -1579,8 +1614,15 @@ fn answer_code(prefix: &str, answer: Option<ScriptAnswer>) -> String {
     }
 }
 
-/// One queued script: deleted, and counted as gone only on the provider's own word.
-async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R<()> {
+/// One queued script: deleted, and counted as gone only on the provider's own word. `may` says whether nothing can still
+/// name it: production's [`may_delete`] for a production label's script, with production's provider; the preview
+/// applier's own for a preview label's, with the preview provider (`preview_apply`, M8 step 6).
+pub(super) async fn delete_script(
+    sql: &SqlStorage,
+    provider: &Provider,
+    script: &str,
+    may: fn(&SqlStorage, &str) -> R<bool>,
+) -> R<()> {
     let retry = |code: &str| -> R<()> {
         let attempts = rows(
             sql,
@@ -1608,7 +1650,7 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
             vec![until.into(), script.into()],
         );
     }
-    if !may_delete(sql, script)? {
+    if !may(sql, script)? {
         // Nothing was asked of the provider, so no attempt is counted and no wait is set. It asks for no wake
         // either ([`next_due`]): the pass that applies the last pending host deletes it.
         return exec(
@@ -1680,7 +1722,8 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     let due_scripts = |sql: &SqlStorage, now: i64| -> R<Vec<String>> {
         Ok(rows(
             sql,
-            "SELECT script_name FROM script_delete WHERE gone_at IS NULL AND next_attempt_at <= ? ORDER BY queued_at, script_name LIMIT ?",
+            "SELECT script_name FROM script_delete WHERE gone_at IS NULL AND next_attempt_at <= ?
+               AND label IN (SELECT label FROM app_label WHERE kind = 'production') ORDER BY queued_at, script_name LIMIT ?",
             vec![now.into(), (BATCH as i64).into()],
         )?
         .iter()
@@ -1718,7 +1761,7 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
         if now_ms() > deadline {
             break;
         }
-        if let Err(error) = delete_script(&sql, &provider, script).await {
+        if let Err(error) = delete_script(&sql, &provider, script, may_delete).await {
             console_error!(
                 "takedown: a script wasn't deleted: code={}",
                 error.code().unwrap_or("internal_error")

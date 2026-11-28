@@ -74,19 +74,24 @@ fn trail(
     code: &str,
     now: i64,
 ) -> R<()> {
+    // A preview release's trail is `preview.*`, told to people only (M8 step 6).
+    let (action, event, told) = release_commit::names_for(sql, kind, release_id)?;
     audit_as(
         sql,
         moderation::PODSTER,
         moderation::PODSTER_KIND,
-        kind,
+        &action,
         release_id,
         Some(json!({ "state": from.name() }).to_string()),
         Some(json!({ "state": to.name(), "reason": code }).to_string()),
         now,
     )?;
+    let Some(event) = event else {
+        return Ok(());
+    };
     store::record_event_about(
         sql,
-        kind,
+        &event,
         moderation::PODSTER,
         Some(release_id),
         None,
@@ -94,7 +99,7 @@ fn trail(
             reason: Some(code),
             ..Transition::NONE
         },
-        roles::room_managers(sql, moderation::PODSTER)?,
+        told,
         now,
     )
 }
@@ -347,7 +352,7 @@ impl Workspace {
         if !may_go_on(&sql, lease) {
             return lease_lost(&sql, &release_id);
         }
-        let Some(provider) = self.upload_provider() else {
+        let Some(provider) = self.upload_provider_for(&release_id)? else {
             let mut out = upload_answer(&sql, &release, false)?;
             out["waiting"] = NO_PROVIDER.into();
             return Ok(out);

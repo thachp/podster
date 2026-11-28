@@ -15,6 +15,7 @@ mod hostname_claim;
 mod hostname_proof;
 mod moderation;
 mod objects;
+mod previews;
 mod principal;
 mod provider;
 mod public;

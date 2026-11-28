@@ -188,7 +188,8 @@ async function fresh() {
   await moderation().fetch("https://do/takedown-findings");
   await inModeration((sql) => { for (const table of ["takedown_finding", "reconcile_pass", "reconcile_failure"]) sql.exec(`DELETE FROM ${table}`); sql.exec("DROP TABLE IF EXISTS test_reconcile_budget"); });
 }
-const listCalls = async (op: string) => (await held()).calls.filter((call) => call.op === op).length;
+/** A list's calls in production's namespace and the serve entries' (the hourly pass lists the preview namespace too, M8 step 6). */
+const listCalls = async (op: string) => (await held()).calls.filter((call) => call.op === op && call.namespace !== "preview").length;
 
 const suspend = (label: string, who: Who = OPERATOR, reason = "abuse") => api(who, "POST", `/v1/moderation/apps/${label}/suspend`, { reason });
 const lift = (label: string, who: Who = OPERATOR, reason = "other") => api(who, "POST", `/v1/moderation/apps/${label}/lift`, { reason });
@@ -1487,10 +1488,13 @@ describe("what step 4(a) adds to the room and the Worker", () => {
 
   it("binds no provider and no token in any environment, and gives each the reconciles' two schedules", () => {
     const names = [...new Set([...(BINDINGS.TEST_CONTENT_PROVIDER_SOURCE as string).matchAll(/const [A-Z_]+: &str = "(CONTENT_[A-Z_]+)";/g)].map((match) => match[1]))].sort();
-    expect(names).toEqual(["CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_DOMAIN", "CONTENT_KV_NAMESPACE_ID", "CONTENT_ROUTING_TOKEN", "CONTENT_SCRIPTS_TOKEN"]);
+    expect(names).toEqual(["CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_DOMAIN", "CONTENT_KV_NAMESPACE_ID", "CONTENT_PREVIEW_NAMESPACE", "CONTENT_ROUTING_TOKEN", "CONTENT_SCRIPTS_TOKEN"]);
     const wrangler: string = BINDINGS.TEST_WRANGLER;
-    // Not as a variable, not in a comment, not under another spelling: the file doesn't hold the word.
-    expect(wrangler).not.toMatch(/CONTENT_/);
+    // Not as a variable, not in a comment, not under another spelling: the file doesn't hold the word. One exception (M8
+    // step 6): the preview namespace's name, a plain setting, named only in staging's comment as pending the owner's
+    // wizard (decision 258), and never bound.
+    expect([...wrangler.matchAll(/CONTENT_[A-Z_]*/g)].map((match) => match[0])).toEqual(["CONTENT_PREVIEW_NAMESPACE", "CONTENT_PREVIEW_NAMESPACE"]);
+    expect(wrangler.replace(/^\s*\/\/.*$/gm, "")).not.toMatch(/CONTENT_/);
     for (const name of ["dispatch_namespaces", "kv_namespaces"]) expect(wrangler, name).not.toContain(`"${name}"`);
     const config = JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, ""));
     expect(config.build.command).toBe("worker-build --release");
@@ -2162,12 +2166,14 @@ describe("the two reconciles", () => {
     expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 0]);
     await scheduled(SCRIPTS_CRON);
     expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 1]);
+    // The hourly pass lists the preview namespace too, apart (M8 step 6).
+    expect((await held()).calls.filter((call) => call.op === "script.list" && call.namespace === "preview").length).toBe(1);
     expect(await calls()).toBe(before + 2);
     // And the same with release switched on.
     await switchedOn(() => scheduled(ENTRIES_CRON));
     expect(await calls()).toBe(before + 3);
     // Each list is asked with its own token: the stand-in refuses the other.
-    expect((await held()).calls.filter((call) => call.op.endsWith(".list")).map((call) => call.status)).toEqual([200, 200, 200]);
+    expect((await held()).calls.filter((call) => call.op.endsWith(".list") && call.namespace !== "preview").map((call) => call.status)).toEqual([200, 200, 200]);
     await inModeration((sql) => void sql.exec("DROP TABLE test_reconcile_calls"));
     // The schedules the handler knows are the two the plan names, and the two `wrangler.jsonc` gives every
     // environment, as the test of what step 4(a) binds shows.

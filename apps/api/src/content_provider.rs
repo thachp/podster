@@ -64,6 +64,12 @@ const KV_NAMESPACE: &str = "CONTENT_KV_NAMESPACE_ID";
 const DOMAIN: &str = "CONTENT_DOMAIN";
 const SCRIPTS_TOKEN: &str = "CONTENT_SCRIPTS_TOKEN";
 const ROUTING_TOKEN: &str = "CONTENT_ROUTING_TOKEN";
+/// The preview dispatch namespace's name (M8 step 6; the preview plan's 3.1 and section 8; decision 258): a plain
+/// setting, not a secret, since a name grants nothing. **Set nowhere:** the namespace is the owner's to make through a
+/// wizard, and staging's `wrangler.jsonc` names this setting only in a comment until then. With it unset, or not a
+/// namespace's name, or the same name as production's, there is no preview provider ([`Provider::for_previews`]), and
+/// nothing is uploaded to, deleted from or listed in any namespace for a preview.
+pub(crate) const PREVIEW_NAMESPACE: &str = "CONTENT_PREVIEW_NAMESPACE";
 
 /// No list this module reads is longer. A longer one is no list: the reconcile says so and tries again later.
 const MAX_LIST_BYTES: usize = 1024 * 1024;
@@ -203,6 +209,18 @@ pub(crate) enum Entry {
     /// The provider answered with a value, and it isn't a script's name Rust made. Something else wrote it.
     Foreign,
     /// Anything else: no answer, an error, or an answer that isn't one of the three above. Never read as absent.
+    Unknown,
+}
+
+/// A serve entry read back as written (M8 step 6), for a preview host, whose value the room compares whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Raw {
+    Value(String),
+    /// The provider answered with a value that isn't text: something else wrote it.
+    NotText,
+    /// The provider said, in so many words, that the host has no entry.
+    Absent,
+    /// No answer that says either. Never read as absent.
     Unknown,
 }
 
@@ -402,6 +420,21 @@ impl Provider {
             domain,
             scripts_token: well_formed(secret(env, SCRIPTS_TOKEN), token)?,
             routing_token: well_formed(secret(env, ROUTING_TOKEN), token)?,
+        })
+    }
+
+    /// **The preview provider** (M8 step 6; the preview plan's 3.1, "Namespace"): production's provider in every way
+    /// but its dispatch namespace, which is the preview namespace named by [`PREVIEW_NAMESPACE`]. So a preview's script
+    /// is uploaded, read, listed and deleted only there, and never in production's namespace. The tokens are shared,
+    /// since neither can be scoped below the account (the plan's section 8). `None` when production's provider isn't
+    /// configured, when the setting is unset or isn't a namespace's name, **and when it names production's own
+    /// namespace,** which fails closed rather than ever mixing the two.
+    pub(crate) fn for_previews(env: &Env) -> Option<Provider> {
+        let production = Provider::from_env(env)?;
+        let namespace = well_formed(crate::setting(env, PREVIEW_NAMESPACE), namespace_name)?;
+        (namespace != production.namespace).then_some(Provider {
+            namespace,
+            ..production
         })
     }
 
@@ -690,35 +723,75 @@ impl Provider {
             .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
     }
 
-    /// Reads a host's serve entry back.
-    pub(crate) async fn read_entry(&self, host: &str) -> Entry {
+    /// **Writes a default preview host's serve entry** (M8 step 6; the preview plan's 3.1, "Serve entry"), exactly
+    /// `value`, which must be a preview entry ([`podster_core::serve_entry::preview_entry_script`]) whose script is
+    /// under the host's own label: so this never writes a production form, and never a script of another label, under
+    /// any host. `true` only when the provider said it was written. **The room's preview applier is its only caller**
+    /// (`workspace::preview_apply`), with the value core wrote for the room's own slot.
+    pub(crate) async fn write_preview_entry(&self, host: &str, value: &str) -> bool {
+        let Some(label) = self.default_host_label(host) else {
+            return false;
+        };
+        let own = podster_core::serve_entry::preview_entry_script(value).is_some_and(|entry| {
+            matches!(script_owner(entry.script), ScriptOwner::Podster { label: owner, .. } if owner == label)
+        });
+        let Some(url) = self.entry_url(host).filter(|_| own) else {
+            return false;
+        };
+        call(
+            Method::Put,
+            url,
+            &self.routing_token,
+            Some(value.to_owned()),
+        )
+        .await
+        .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
+    }
+
+    /// Reads a host's serve entry back as written, for a preview host: [`Raw::Value`] with the text, which the caller
+    /// compares whole with what it wants, [`Raw::Absent`] only on the provider's own word, and [`Raw::Unknown`]
+    /// otherwise.
+    pub(crate) async fn read_raw_entry(&self, host: &str) -> Raw {
         let Some(url) = self.entry_url(host) else {
-            return Entry::Unknown;
+            return Raw::Unknown;
         };
         let Some(answer) = call(Method::Get, url, &self.routing_token, None).await else {
-            return Entry::Unknown;
+            return Raw::Unknown;
         };
         match answer.status {
-            // Read in the form written for this host: a default host's script alone, a custom hostname's naming that
-            // very host, either after the mark that it carries code. Anything else there is foreign, a value in the
-            // other form among it, and so is anything that looks like a mark but isn't exactly it.
-            200 => match String::from_utf8(answer.body) {
-                Ok(value) => {
-                    let read = if self.on_content_domain(host) {
-                        default_entry_script(&value)
-                    } else {
-                        custom_entry_script_kind(host, &value)
-                    };
-                    match read {
-                        Some((HostKind::Static, script)) => Entry::Present(script.to_owned()),
-                        Some((HostKind::Code, script)) => Entry::Code(script.to_owned()),
-                        None => Entry::Foreign,
-                    }
+            200 => String::from_utf8(answer.body).map_or(Raw::NotText, Raw::Value),
+            404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => Raw::Absent,
+            _ => Raw::Unknown,
+        }
+    }
+
+    /// Reads a host's serve entry back.
+    pub(crate) async fn read_entry(&self, host: &str) -> Entry {
+        let raw = self.read_raw_entry(host).await;
+        self.entry_of(host, &raw)
+    }
+
+    /// A serve entry read back as written, read as production's forms for `host`: a default host's script alone, a
+    /// custom hostname's naming that very host, either after the mark that it carries code. Anything else there is
+    /// foreign, a value in the other form among it, a preview entry included, and so is anything that looks like a
+    /// mark but isn't exactly it.
+    pub(crate) fn entry_of(&self, host: &str, raw: &Raw) -> Entry {
+        match raw {
+            Raw::Value(value) => {
+                let read = if self.on_content_domain(host) {
+                    default_entry_script(value)
+                } else {
+                    custom_entry_script_kind(host, value)
+                };
+                match read {
+                    Some((HostKind::Static, script)) => Entry::Present(script.to_owned()),
+                    Some((HostKind::Code, script)) => Entry::Code(script.to_owned()),
+                    None => Entry::Foreign,
                 }
-                Err(_) => Entry::Foreign,
-            },
-            404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => Entry::Absent,
-            _ => Entry::Unknown,
+            }
+            Raw::NotText => Entry::Foreign,
+            Raw::Absent => Entry::Absent,
+            Raw::Unknown => Entry::Unknown,
         }
     }
 }

@@ -418,6 +418,13 @@ fn gather(
     let requester_holds = settled(sql, &reads.requester, Some(&requester), false)?;
     let giver_holds = settled(sql, &reads.giver, giver.as_deref(), true)?;
     let mut room = room_facts(sql, deployment_on, org_may_release)?;
+    // **A preview release (M8 step 6)** is held to everything a release is held to **but a public room**: a private room
+    // may have a preview (decision 251). Its requester is its approver, the room's owner or an admin as a person, with
+    // no grant (decision 253). Everything else below is production's recheck, unchanged.
+    let preview = super::preview::is_preview(sql, id)?;
+    if preview {
+        room.public = true;
+    }
     let link_repo_id = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
         .first()
         .map_or(0, |link| int(&link["provider_repo_id"]));
@@ -507,8 +514,28 @@ fn gather(
         agent_connected,
         now,
     };
-    let requester_may_release_now = may_release_now(&requester, kind, role, &standing).is_ok()
-        && requester_holds.unwrap_or(true);
+    let requester_may_release_now = if preview {
+        // Who may make a preview now (`podster_policy::preview::authorize_preview_change`, `Request`): `PREVIEWS` is the
+        // driver's and the trigger's to apply, never a recheck failure, so it is taken as on here.
+        let caller = Caller {
+            id: requester.clone(),
+            kind,
+            role,
+            scopes: Scopes::PUBLIC_PARTICIPANT,
+        };
+        podster_policy::preview::authorize_preview_change(
+            &caller,
+            requester_holds.unwrap_or(true),
+            podster_core::preview::DeploymentPreviews::On,
+            &release_room,
+            podster_policy::preview::PreviewChange::Request,
+        )
+        .is_ok()
+            && !standing.through_public_claim
+    } else {
+        may_release_now(&requester, kind, role, &standing).is_ok()
+            && requester_holds.unwrap_or(true)
+    };
     // Unknown matters only where the answer would be yes on everything that is known.
     if requester_may_release_now && (requester_holds.is_none() || giver_holds.is_none()) {
         unknown = true;

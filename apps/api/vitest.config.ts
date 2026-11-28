@@ -250,6 +250,9 @@ const pool = (partition: ContentPartition) =>
           // binds any of these names, and the real ones are the owner's to set.
           CONTENT_ACCOUNT_ID: FAKE_CONTENT.account,
           CONTENT_DISPATCH_NAMESPACE: CONTENT_PARTITIONS[partition].namespace,
+          // The preview dispatch namespace (M8 step 6), apart from production's in every partition. A test value: no
+          // environment binds this name; the real namespace is the owner's to make (decision 258).
+          CONTENT_PREVIEW_NAMESPACE: CONTENT_PARTITIONS[partition].previewNamespace,
           CONTENT_KV_NAMESPACE_ID: CONTENT_PARTITIONS[partition].kvNamespace,
           CONTENT_DOMAIN: FAKE_CONTENT.domain,
           CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
@@ -315,6 +318,7 @@ const OWN_PARTITION: Record<Exclude<ContentPartition, "default">, string> = {
   "serve-entry": "test/serve-entry.spec.ts",
   "custom-routing": "test/custom-routing.spec.ts",
   "custom-marker": "test/custom-marker.spec.ts",
+  preview: "test/preview.spec.ts",
 };
 // bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
 const shared = { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] };

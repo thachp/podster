@@ -45,10 +45,13 @@ export const FAKE_CONTENT = {
  * What stays shared: the upload part and the app hosts below, which were already kept by script and by host.
  */
 export const CONTENT_PARTITIONS = {
-  default: { namespace: FAKE_CONTENT.namespace, kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" },
-  "serve-entry": { namespace: "podster-test-apps-serve-entry", kvNamespace: "d2".repeat(16), control: "serve-entry.content-fake.example.com" },
-  "custom-routing": { namespace: "podster-test-apps-custom-routing", kvNamespace: "d3".repeat(16), control: "custom-routing.content-fake.example.com" },
-  "custom-marker": { namespace: "podster-test-apps-custom-marker", kvNamespace: "d4".repeat(16), control: "custom-marker.content-fake.example.com" },
+  default: { namespace: FAKE_CONTENT.namespace, previewNamespace: "podster-test-previews", kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" },
+  "serve-entry": { namespace: "podster-test-apps-serve-entry", previewNamespace: "podster-test-previews-serve-entry", kvNamespace: "d2".repeat(16), control: "serve-entry.content-fake.example.com" },
+  "custom-routing": { namespace: "podster-test-apps-custom-routing", previewNamespace: "podster-test-previews-custom-routing", kvNamespace: "d3".repeat(16), control: "custom-routing.content-fake.example.com" },
+  "custom-marker": { namespace: "podster-test-apps-custom-marker", previewNamespace: "podster-test-previews-custom-marker", kvNamespace: "d4".repeat(16), control: "custom-marker.content-fake.example.com" },
+  // M8 step 6: the room's previews, with a preview dispatch namespace of its own beside its production one, so a test
+  // can show a preview's script never reaches production's namespace, and production's never the preview's.
+  preview: { namespace: "podster-test-apps-preview", previewNamespace: "podster-test-previews-preview", kvNamespace: "d5".repeat(16), control: "preview.content-fake.example.com" },
 } as const;
 export type ContentPartition = keyof typeof CONTENT_PARTITIONS;
 
@@ -68,10 +71,13 @@ type Gate = { op: Op | UploadOp | "marker"; taken: boolean; expired: boolean; ar
 /** Everything a partition holds: what a reset clears, a state read reads, and the lists answer from. */
 type State = {
   scripts: Set<string>;
+  /** The preview dispatch namespace's scripts (M8 step 6), apart from production's. */
+  previewScripts: Set<string>;
   /** What a script's bindings read answers as its `result`, by script; anything a test seeds, as it is. */
   bindings: Map<string, unknown>;
   entries: Map<string, string>;
-  calls: { op: Op; name: string; status: number }[];
+  /** Every call, with the dispatch namespace it named for a script's: `production` or `preview` (M8 step 6). */
+  calls: { op: Op; name: string; status: number; namespace?: "production" | "preview" }[];
   faults: Fault[];
   /** When set, the scripts' list says there are this many more scripts than it holds. */
   scriptsUnlisted: number;
@@ -79,10 +85,10 @@ type State = {
   keysNoInfo: boolean;
   gates: Gate[];
 };
-const empty = (): State => ({ scripts: new Set(), bindings: new Map(), entries: new Map(), calls: [], faults: [], scriptsUnlisted: 0, keysNoInfo: false, gates: [] });
+const empty = (): State => ({ scripts: new Set(), previewScripts: new Set(), bindings: new Map(), entries: new Map(), calls: [], faults: [], scriptsUnlisted: 0, keysNoInfo: false, gates: [] });
 const states = new Map<string, State>(Object.keys(CONTENT_PARTITIONS).map((name) => [name, empty()]));
 const stateOf = (name: string) => states.get(name)!;
-const partitionNamed = (field: "namespace" | "kvNamespace" | "control", value: string) =>
+const partitionNamed = (field: "namespace" | "previewNamespace" | "kvNamespace" | "control", value: string) =>
   Object.entries(CONTENT_PARTITIONS).find(([, p]) => p[field] === value)?.[0];
 /** Well under the provider module's call limit, `CALL_TIMEOUT_MS`, which a test pins against this. */
 export const GATE_LIMIT_MS = 2000;
@@ -148,6 +154,8 @@ type UploadFault = {
 };
 type Manifest = Record<string, { hash: string; size: number }>;
 type Upload = {
+  /** The dispatch namespace each session and write named, in order (M8 step 6): `production` or `preview`. */
+  namespaces: ("production" | "preview")[];
   /** The files held under this script's name, by hash: the provider remembers them for the script. */
   held: Map<string, { type: string; base64: string }>;
   calls: { op: UploadOp; status: number; hashes?: string[]; manifest?: Manifest; query?: string; parts?: string[]; bytes?: number }[];
@@ -173,7 +181,7 @@ type Upload = {
 const uploads = new Map<string, Upload>();
 const upload = (script: string) => {
   let found = uploads.get(script);
-  if (!found) { found = { held: new Map(), calls: [], faults: [], gates: [], bucketSize: 2 }; uploads.set(script, found); }
+  if (!found) { found = { namespaces: [], held: new Map(), calls: [], faults: [], gates: [], bucketSize: 2 }; uploads.set(script, found); }
   return found;
 };
 const sessions = new Map<string, { script: string; manifest: Manifest; needed: string[]; got: Set<string>; bucketsSent: number; buckets: number }>();
@@ -189,11 +197,14 @@ const html = () => new Response("<!doctype html><title>Sign in</title>", { statu
 /** An upload is this part's only in the calling partition's own namespace; any other is unexpected, below. */
 async function fakeUpload(request: Request, url: URL, from: ContentPartition): Promise<Response | null> {
   const bearer = request.headers.get("authorization");
-  const own = `(${CONTENT_PARTITIONS[from].namespace})`;
+  // The partition's own namespaces: production's and, since M8 step 6, the preview one. Which one a call named is kept.
+  const own = `(${CONTENT_PARTITIONS[from].namespace}|${CONTENT_PARTITIONS[from].previewNamespace})`;
+  const nsOf = (name: string): "production" | "preview" => (name === CONTENT_PARTITIONS[from].previewNamespace ? "preview" : "production");
   const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${own}/scripts/([^/]+)/assets-upload-session$`));
   if (session && request.method === "POST") {
     const script = decodeURIComponent(session[2]);
     const held = upload(script);
+    held.namespaces.push(nsOf(session[1]));
     const done = (status: number, response: Response, manifest?: Manifest) => { held.calls.push({ op: "session", status, manifest }); return response; };
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
     if (request.headers.get("content-type") !== "application/json") return done(415, failure(415, 10415, "the session takes JSON"));
@@ -247,7 +258,8 @@ async function fakeUpload(request: Request, url: URL, from: ContentPartition): P
   }
   const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${own}/scripts/([^/]+)$`));
   // A script the partition's own set holds is read below, from that set.
-  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[2])) && !stateOf(from).scripts.has(decodeURIComponent(script[2]))) {
+  const seeded = (name: string) => (nsOf(script?.[1] ?? "") === "preview" ? stateOf(from).previewScripts : stateOf(from).scripts).has(name);
+  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[2])) && !seeded(decodeURIComponent(script[2]))) {
     const name = decodeURIComponent(script[2]);
     const held = upload(name);
     const done = (status: number, response: Response) => { held.calls.push({ op: "read", status }); return response; };
@@ -264,6 +276,7 @@ async function fakeUpload(request: Request, url: URL, from: ContentPartition): P
   if (script && request.method === "PUT") {
     const name = decodeURIComponent(script[2]);
     const held = upload(name);
+    held.namespaces.push(nsOf(script[1]));
     const form = await request.formData();
     const parts = [...form.keys()];
     const done = (status: number, response: Response) => { held.calls.push({ op: "script", status, query: url.search, parts }); return response; };
@@ -361,7 +374,7 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
     if (url.pathname === "/upload-bucket-size") { upload(name).bucketSize = Number(url.searchParams.get("size")); return json({ ok: true }); }
     if (url.pathname === "/upload-state") {
       const held = upload(name);
-      return json({ calls: held.calls, held: [...held.held.keys()].sort(), written: held.written ?? null, expiredGates: held.gates.filter((gate) => gate.expired).length });
+      return json({ calls: held.calls, namespaces: held.namespaces, held: [...held.held.keys()].sort(), written: held.written ?? null, expiredGates: held.gates.filter((gate) => gate.expired).length });
     }
     if (url.pathname === "/upload-gate") {
       const held = upload(name);
@@ -391,7 +404,8 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
-      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean; bindings?: Record<string, unknown> };
+      const body = (await request.json()) as { scripts?: string[]; previewScripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean; bindings?: Record<string, unknown> };
+      for (const name of body.previewScripts ?? []) state.previewScripts.add(name);
       for (const [name, list] of Object.entries(body.bindings ?? {})) state.bindings.set(name, list);
       if (body.keysNoInfo !== undefined) state.keysNoInfo = body.keysNoInfo;
       if (body.scriptsUnlisted !== undefined) state.scriptsUnlisted = body.scriptsUnlisted;
@@ -416,7 +430,7 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
       gate.release();
       return json({ ok: true });
     }
-    if (url.pathname === "/state") return json({ scripts: [...state.scripts].sort(), entries: Object.fromEntries([...state.entries].sort()), calls: state.calls, expiredGates: state.gates.filter((gate) => gate.expired).length });
+    if (url.pathname === "/state") return json({ scripts: [...state.scripts].sort(), previewScripts: [...state.previewScripts].sort(), entries: Object.fromEntries([...state.entries].sort()), calls: state.calls, expiredGates: state.gates.filter((gate) => gate.expired).length });
     return json({ error: "unknown" }, 404);
   }
   if (url.hostname !== "api.cloudflare.com") return null;
@@ -427,10 +441,14 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
   // none, is unexpected, and told to the caller.
   const scriptsPath = url.pathname.match(new RegExp(`^${account}/workers/dispatch/namespaces/([^/]+)/scripts(?:/([^/]+)(/bindings)?)?$`));
   const keysPath = url.pathname.match(new RegExp(`^${account}/storage/kv/namespaces/([^/]+)/(?:keys|values/([^/]+))$`));
-  const { namespace, kvNamespace } = CONTENT_PARTITIONS[from];
-  const partition = (scriptsPath?.[1] === namespace || keysPath?.[1] === kvNamespace) ? from : undefined;
-  const { scripts, bindings, entries, calls, faults, gates } = stateOf(from);
-  const unexpected = (status: number) => calls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status });
+  const { namespace, previewNamespace, kvNamespace } = CONTENT_PARTITIONS[from];
+  const preview = scriptsPath?.[1] === previewNamespace;
+  const partition = (scriptsPath?.[1] === namespace || preview || keysPath?.[1] === kvNamespace) ? from : undefined;
+  const { bindings, entries, calls: allCalls, faults, gates } = stateOf(from);
+  // A script's call is held to the namespace it named: the preview one's set apart from production's (M8 step 6).
+  const scripts = preview ? stateOf(from).previewScripts : stateOf(from).scripts;
+  const calls = { push: (call: { op: Op; name: string; status: number }) => allCalls.push(partition && scriptsPath ? { ...call, namespace: preview ? "preview" : "production" } : call) };
+  const unexpected = (status: number) => allCalls.push({ op: "script.get", name: `unexpected ${request.method} ${url.pathname.replace(/[0-9a-f]{32}/g, "<id>")}`, status });
   const script = partition && scriptsPath?.[2] !== undefined && !scriptsPath[3] ? scriptsPath : null;
   const entry = partition && keysPath?.[2] !== undefined ? keysPath : null;
   const bound = partition && scriptsPath?.[3] ? scriptsPath : null;
@@ -440,7 +458,7 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
   };
 
   // The two lists. Each takes its own token only, as the calls on one script and one entry do.
-  if (partition && url.pathname === `${account}/workers/dispatch/namespaces/${namespace}/scripts` && request.method === "GET") {
+  if (partition && (url.pathname === `${account}/workers/dispatch/namespaces/${namespace}/scripts` || url.pathname === `${account}/workers/dispatch/namespaces/${previewNamespace}/scripts`) && request.method === "GET") {
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.list", "", failure(403, 10000, "Authentication error"));
     await passGate("script.list", gates);
     const fault = takeFault(faults, "script.list");
@@ -487,11 +505,15 @@ export async function fakeContent(request: Request, from: ContentPartition = "de
     const fault = takeFault(faults, op);
     if (fault && !fault.lost) return answer(op, name, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "script.get") {
-      const body = envelope({ namespace_id: "ns-test", namespace_name: namespace, script: scripts.has(name) ? { id: name, tag: "tag-test" } : null });
+      const body = envelope({ namespace_id: "ns-test", namespace_name: preview ? previewNamespace : namespace, script: scripts.has(name) ? { id: name, tag: "tag-test" } : null });
       return answer(op, name, json(body));
     }
     if (url.searchParams.get("force") !== "true") return answer(op, name, failure(400, 10400, "force is required"));
-    const was = scripts.delete(name);
+    // A script a preview upload wrote is gone from the preview namespace once deleted there (M8 step 6), so a read
+    // after reads it gone, as spike A saw. Production's uploads are kept as they were, apart from the set above.
+    const uploadedHere = preview && uploads.get(name)?.written !== undefined && uploads.get(name)!.namespaces.includes("preview");
+    if (uploadedHere) uploads.get(name)!.written = undefined;
+    const was = scripts.delete(name) || uploadedHere;
     if (fault?.lost) return answer(op, name, failure(fault.status ?? 502, 10001, "the answer was lost"));
     return answer(op, name, was ? json(envelope(null)) : failure(404, 10007, "This Worker does not exist on your account."));
   }

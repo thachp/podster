@@ -54,6 +54,9 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
         // "Check now" on the room's pending custom hostname (2026-11-27).
         ["v1", "workspaces", _, "app-hostname", "check"] if post => Some(Audience::Person),
         ["v1", "workspaces", _, "apps", _, "delete-data"] if post => Some(Audience::Person),
+        // The room's preview, read, asked for and deleted (M8 step 6). A person's: no agent reaches one (decision 253).
+        ["v1", "workspaces", _, "preview"] if get || delete => Some(Audience::Person),
+        ["v1", "workspaces", _, "tasks", _, "preview"] if post => Some(Audience::Person),
         ["v1", "app-reports"] if post => Some(Audience::Person),
         ["v1", "moderation", "apps", _, "suspend" | "lift" | "delete-data" | "retire"] if post => {
             Some(Audience::Operator)
@@ -75,8 +78,8 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
 /// Whether an M6 route is built in the room that it names, and so goes to that room like any other room route: the room's
 /// release configuration, read and set (step 6), its custom hostname, read, asked for, removed and checked now (step 8;
 /// 2026-11-27), and its
-/// releases awaiting approval, read (step 10(b)), and asking for a release, approving and declining one (step 6). The
-/// room answers each only while release is switched on.
+/// releases awaiting approval, read (step 10(b)), and asking for a release, approving and declining one (step 6); and its
+/// preview, read, asked for and deleted (M8 step 6). The room answers each only while release is switched on.
 pub(crate) fn room_route(parts: &[&str]) -> bool {
     matches!(
         parts,
@@ -94,6 +97,8 @@ pub(crate) fn room_route(parts: &[&str]) -> bool {
             "approve" | "decline" | "rollback"
         ] | ["v1", "workspaces", _, "apps", _, "delete-data"]
             | ["v1", "workspaces", _, "app-hostname", "check"]
+            | ["v1", "workspaces", _, "preview"]
+            | ["v1", "workspaces", _, "tasks", _, "preview"]
     )
 }
 

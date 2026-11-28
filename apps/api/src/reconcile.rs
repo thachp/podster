@@ -26,7 +26,7 @@
 //! Logs carry codes and counts. Never a host, a label, a script's name or a room's ID. What operators read is state,
 //! in this object, and names the host or the script it is about.
 use crate::content_provider::Bindings;
-use crate::content_provider::{Entry, Provider};
+use crate::content_provider::{Entry, Provider, Raw};
 use crate::content_stop;
 use crate::error::ApiError;
 use crate::forward;
@@ -62,7 +62,8 @@ pub(crate) const FINDING_OPEN_PATH: &str = "/takedown-finding-open";
 ///
 /// `takedown_finding`: what an operator should know, one row for each code and subject, counted and dated each time
 /// it is seen again. The subject is a host, a script's name or a key, as the provider or a room gave it: data, never
-/// read as anything else. `reconcile_pass`: where each pass got to.
+/// read as anything else. `reconcile_pass`: where each pass got to. `reconcile_preview_cursor` (M8 step 6): where the
+/// hourly pass's walk of the preview namespace got to.
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS takedown_finding (code TEXT NOT NULL CHECK (length(code) BETWEEN 1 AND 64), subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 253),
   detail TEXT CHECK (detail IS NULL OR length(detail) BETWEEN 1 AND 64), first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
@@ -76,6 +77,8 @@ CREATE TABLE IF NOT EXISTS reconcile_failure (kind TEXT NOT NULL CHECK (kind IN 
 CREATE TABLE IF NOT EXISTS binding_suspension (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
 CREATE TABLE IF NOT EXISTS binding_slot_kept (seq INTEGER PRIMARY KEY, script TEXT NOT NULL CHECK (length(script) BETWEEN 1 AND 253),
   at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE TABLE IF NOT EXISTS reconcile_preview_cursor (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  cursor TEXT CHECK (cursor IS NULL OR length(cursor) BETWEEN 1 AND 253)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS binding_unread (script TEXT PRIMARY KEY CHECK (length(script) BETWEEN 1 AND 253),
   passes INTEGER NOT NULL CHECK (typeof(passes) = 'integer' AND passes >= 1), last_at INTEGER NOT NULL CHECK (typeof(last_at) = 'integer')) WITHOUT ROWID;
 ";
@@ -566,7 +569,32 @@ async fn entry(
     let Some(room) = room else {
         return Ok(counts.finding(sql, "entry_without_room", host, now_ms())?);
     };
-    let found = match provider.read_entry(host).await {
+    let raw = provider.read_raw_entry(host).await;
+    // **A preview host's entry** (M8 step 6): a default host whose entry is in the preview form is asked of its room as
+    // one, with the value as written, and the room's preview applier's record answers it. Production's forms are read
+    // exactly as before.
+    if let Raw::Value(value) = &raw {
+        if value.starts_with(podster_core::serve_entry::PREVIEW_MARK)
+            && provider.default_host_label(host).is_some()
+        {
+            let Some(answer) = ask_room(
+                env,
+                &room,
+                json!({ "kind": "entry", "preview": true, "host": host, "found_value": value }),
+            )
+            .await
+            else {
+                return Err(Stopped::Unanswered);
+            };
+            let now = now_ms();
+            counts.take(sql, &answer, now)?;
+            if answer["known"] != true {
+                counts.finding(sql, "entry_without_room", host, now)?;
+            }
+            return Ok(());
+        }
+    }
+    let found = match provider.entry_of(host, &raw) {
         // Gone since it was listed: nothing to ask about.
         Entry::Absent => return Ok(()),
         // Marked as carrying code or not, the script names its app and so its room, which is asked about it, with the
@@ -1299,15 +1327,121 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         counts.skipped(told);
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
+    // The preview namespace's scripts (M8 step 6), after production's, each asked of its own room by its preview label.
+    let previews = preview_scripts(sql, env, deadline, &mut counts).await;
     // The store reconcile (S5's second PR), after every script's step, so a takedown never waits on it (review standard
     // 4). It tells operators and fails nothing: its summary is its own.
     let stores = crate::store_reconcile::pass(sql, env).await;
     let woken = wake(sql, env, &mut counts).await;
     let code = finish(sql, "scripts", code, &counts);
-    Ok(with_stores(
-        summary("scripts", code, ids.len(), &counts, woken),
-        stores,
-    ))
+    let mut done = with_stores(summary("scripts", code, ids.len(), &counts, woken), stores);
+    if let Value::Object(fields) = &mut done {
+        fields.insert("previews".into(), Value::from(previews));
+    }
+    Ok(done)
+}
+
+/// **The preview namespace's scripts against their rooms** (M8 step 6; the preview plan's 3.4, "reconcile over both
+/// namespaces"), in the hourly pass after production's, by the same rule (`podster_core::release::reconcile_script`):
+/// each listed script is asked of the room its preview label names, and only that room's state decides; the room's own
+/// delete job, through the preview provider, does the deleting. A name Podster didn't make, or one no room claims, is
+/// told to operators and left. Rule 3(b)'s bindings check isn't asked of a preview script yet. A slice a pass, from where
+/// the last stopped, its place kept in `reconcile_preview_cursor`. Answers the step's code.
+async fn preview_scripts(
+    sql: &SqlStorage,
+    env: &Env,
+    deadline: i64,
+    counts: &mut Counts,
+) -> &'static str {
+    if content_stop::provider(env, sql).is_none() {
+        return "no_provider";
+    }
+    let Some(provider) = Provider::for_previews(env) else {
+        return "no_preview_provider";
+    };
+    let listed_at = now_ms();
+    let Some(list) = provider.list_scripts().await else {
+        return "list_failed";
+    };
+    let mut code = "ok";
+    if !list.complete {
+        let told = counts.finding(
+            sql,
+            "preview_script_list_incomplete",
+            "preview-namespace",
+            now_ms(),
+        );
+        counts.skipped(told);
+        code = "list_incomplete";
+    }
+    let mut ids = list.ids;
+    ids.sort();
+    ids.dedup();
+    let after = rows(sql, "SELECT cursor FROM reconcile_preview_cursor", vec![])
+        .ok()
+        .and_then(|found| found.first().and_then(|row| text(&row["cursor"])))
+        .unwrap_or_default();
+    let todo: Vec<&String> = ids
+        .iter()
+        .filter(|id| id.as_str() > after.as_str())
+        .take(SCRIPT_BATCH)
+        .collect();
+    let mut reached_end =
+        ids.iter().filter(|id| id.as_str() > after.as_str()).count() <= SCRIPT_BATCH;
+    let mut cursor = Some(after);
+    for id in todo {
+        if now_ms() > deadline {
+            reached_end = false;
+            code = "out_of_time";
+            break;
+        }
+        cursor = Some(id.clone());
+        let step = one_preview_script(sql, env, id, listed_at, counts).await;
+        counts.settled(sql, "script", id, step, now_ms());
+    }
+    if reached_end {
+        cursor = None;
+    }
+    let kept = exec(
+        sql,
+        "INSERT INTO reconcile_preview_cursor (singleton, cursor) VALUES (1, ?) ON CONFLICT (singleton) DO UPDATE SET cursor = excluded.cursor",
+        vec![cursor.filter(|c| !c.is_empty()).map_or(worker::SqlStorageValue::Null, worker::SqlStorageValue::from)],
+    );
+    counts.skipped(kept);
+    code
+}
+
+/// One script listed in the preview namespace: whose it is, and what its room says.
+async fn one_preview_script(
+    sql: &SqlStorage,
+    env: &Env,
+    id: &str,
+    listed_at: i64,
+    counts: &mut Counts,
+) -> Step {
+    let now = now_ms();
+    if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
+        return Ok(counts.finding(sql, "preview_script_foreign_name", id, now)?);
+    }
+    let label = id.split('.').next().unwrap_or_default();
+    let Some(room) = crate::releases::room_for_label(env, label).await? else {
+        return Ok(counts.finding(sql, "preview_script_without_room", id, now)?);
+    };
+    let Some(answer) = ask_room(
+        env,
+        &room,
+        json!({ "kind": "script", "namespace": "preview", "script": id, "listed_at": listed_at }),
+    )
+    .await
+    else {
+        return Err(Stopped::Unanswered);
+    };
+    let now = now_ms();
+    counts.take(sql, &answer, now)?;
+    if answer["known"] != true {
+        counts.finding(sql, "preview_script_without_room", id, now)?;
+    }
+    Ok(())
 }
 
 /// The pass's summary with the store step's own beside it, as `stores`.

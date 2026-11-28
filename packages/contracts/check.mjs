@@ -310,7 +310,6 @@ if (api.components.parameters.appLabel?.schema?.pattern !== `^[a-z0-9]{1,${core.
 // M8 step 3 named fields that later steps build. Each is in its schema's properties and not yet required, so the contract
 // never says the API answers a field it doesn't; the step that builds one takes it off this list and makes it required.
 const PENDING = {
-  TaskReleaseStatus: ["preview"], // M8 step 6
   ReleaseApproval: ["from_preview", "build_id", "preview_served_at"], // M8 step 9
 };
 for (const [schema, names] of Object.entries(PENDING)) {
@@ -330,7 +329,7 @@ for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "ReleaseAp
 
 // Previews (M8 step 3: the preview plan's section 9, ADR 0010's revision on previews, decisions 250 to 259). The contract
 // only: every operation is a person's (decision 253), names only what its path may, and says it isn't built and what it
-// answers until it is. No capability reaches one (the check on capabilities above refuses `preview`), and a preview's
+// answers until it is, or, for the three M8 step 6 built, that it is built behind the switch and what it answers while off. No capability reaches one (the check on capabilities above refuses `preview`), and a preview's
 // states are core's release states, never awaiting approval or declined, since a preview is queued when asked.
 const previewOperations = { getPreview: "ws", requestPreview: "ws,t", deletePreview: "ws", getPreviewHostname: "ws", requestPreviewHostname: "ws", removePreviewHostname: "ws", checkPreviewHostname: "ws", requestPreviewAccess: "" };
 for (const [id, params] of Object.entries(previewOperations)) {
@@ -338,7 +337,9 @@ for (const [id, params] of Object.entries(previewOperations)) {
   if (!found) { problems.push(`${id}: the preview operation is missing`); continue; }
   if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params || "nothing"}`);
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only (decision 253)`);
-  if (!found.op.summary?.includes("**Not built (M8 step") || !found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say it isn't built, and that it answers \`not_found\` until it is`);
+  // M8 step 6 built the room's preview, read, asked for and deleted, which the room itself answers behind the switch.
+  const previewBuilt = ["getPreview", "requestPreview", "deletePreview"].includes(id);
+  if (previewBuilt ? found.op.summary?.includes("Not built") || !found.op.summary?.includes("Built behind the switch") || !found.op.summary?.includes("`not_found`") : !found.op.summary?.includes("**Not built (M8 step") || !found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say ${previewBuilt ? "it is built behind the switch, and not that it isn't, and what it answers while release is off (`not_found`)" : "it isn't built, and that it answers `not_found` until it is"}`);
   // While previews are off the room answers who first, as release switched off does; deleting and removing pass no gate,
   // and the access route asks no room.
   if (!["deletePreview", "removePreviewHostname", "requestPreviewAccess"].includes(id) && !found.op.summary?.includes("**`previews_off` comes after who is asking,**")) problems.push(`${id}: its summary must say \`previews_off\` comes after who is asking`);

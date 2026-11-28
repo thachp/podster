@@ -74,7 +74,10 @@ pub(super) fn owed(sql: &SqlStorage) -> R<Option<String>> {
     }
     Ok(repo_unpublish_owed(
         status,
-        release_switch::has_anything_up(sql)? || release_switch::has_current_label(sql)?,
+        release_switch::has_anything_up(sql)?
+            || release_switch::has_current_label(sql)?
+            // A preview is deleted by a repository lost too (M8 step 6; the preview plan's 3.3).
+            || super::preview::current(sql)?.is_some(),
     )
     .then(|| reason.unwrap_or_else(|| status.name().to_owned())))
 }
@@ -271,6 +274,11 @@ impl Workspace {
             if let Some(reason) = owed(&store)? {
                 // Nothing up, only a current label: it is retired, its store owed, and nothing is unpublished.
                 if !release_switch::has_anything_up(&store)? {
+                    super::preview::on_unpublish(
+                        &store,
+                        UnpublishTrigger::RepositoryNotReady,
+                        now_ms(),
+                    )?;
                     return takedown::retire_current_label(&store, now_ms());
                 }
                 takedown::unpublish_for(

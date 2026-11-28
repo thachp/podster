@@ -32,13 +32,16 @@ describe("the content provider's stand-in, one partition per spec file", () => {
   it("names at least two partitions, the default first, each with its own namespaces and control host", () => {
     expect(partitions.length).toBeGreaterThanOrEqual(2);
     expect(partitions[0][0]).toBe("default");
-    expect(a).toEqual({ namespace: FAKE_CONTENT.namespace, kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" });
-    for (const field of ["namespace", "kvNamespace", "control"] as const) {
+    expect(a).toEqual({ namespace: FAKE_CONTENT.namespace, previewNamespace: "podster-test-previews", kvNamespace: FAKE_CONTENT.kvNamespace, control: "content-fake.example.com" });
+    // M8 step 6: each partition's preview namespace is its own, and never any partition's production namespace.
+    expect(new Set(partitions.flatMap(([, p]) => [p.namespace, p.previewNamespace])).size).toBe(partitions.length * 2);
+    for (const field of ["namespace", "previewNamespace", "kvNamespace", "control"] as const) {
       expect(new Set(partitions.map(([, p]) => p[field])).size, field).toBe(partitions.length);
     }
     for (const [name, p] of partitions) {
       // What the provider module accepts: a namespace's name, and 32 lower-case hexadecimal digits for KV's.
       expect(p.namespace).toMatch(/^[a-z0-9_-]{1,63}$/);
+      expect(p.previewNamespace).toMatch(/^[a-z0-9_-]{1,63}$/);
       expect(p.kvNamespace).toMatch(/^[0-9a-f]{32}$/);
       // The control host exactly: the default's own, and each other partition's named for it beneath that.
       expect(p.control).toBe(name === "default" ? "content-fake.example.com" : `${name}.content-fake.example.com`);

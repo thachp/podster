@@ -159,7 +159,8 @@ pub(super) fn store_unreachable(sql: &SqlStorage, label: &str) -> R<bool> {
         vec![label.into()],
     )?
     .is_empty();
-    Ok(!bound)
+    // A preview label's store is reached through its preview hosts (M8 step 6), which `serve_state` never holds.
+    Ok(!bound && !super::preview_apply::label_reachable(sql, label)?)
 }
 
 /// Who may ask, by the room's rows alone, before anything outside the room is read: the owner or an admin, as a person.

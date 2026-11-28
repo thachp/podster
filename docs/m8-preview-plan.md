@@ -312,6 +312,8 @@ Built in step 5 (PR 643), with these changes from the table first proposed, acce
 
 **For step 6:** before step 64, a label that wasn't `current` was always retired, and some code still assumes it. A live preview label breaks that assumption: `apps/api/src/workspace/label_retire.rs` (it reads `current` and `retired_at` to retire a label), `apps/api/src/workspace/takedown.rs:715` (it picks the latest label by `current IS NOT NULL`) and `apps/api/src/workspace/release_approval.rs:499` and `:674` (they index any label with `indexed_at IS NULL`). Step 6 must handle `kind = 'preview'` in each of these.
 
+**Built in step 6,** with one step beyond this table, accepted by its builder and owed the architect's look: **Workspace step 65, `preview_apply`**, what the preview applier last confirmed at each preview host, as `serve_apply` is for production's hosts. A preview host can't be a `serve_state` row, whose label must be `current`, so the applier's record needed a table of its own. Each of the four sites above now reads `kind`: the operator's retire refuses a live preview label (`app_label_not_taken`), the bookkeeping finding names production's label, and the label index writes a preview label's kind to D1's `app_label_kind`.
+
 ## 10. UI: the Ship panel
 
 The demo (`apps/demo`) is the UI's source of truth since 2026-11-24, so the screen is mocked there first, then built in `apps/web`. Under **Ship** (`docs/spec/DESIGN.md:27`), proposed:

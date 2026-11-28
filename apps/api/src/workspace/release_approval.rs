@@ -504,12 +504,30 @@ pub(super) fn label_index_due(sql: &SqlStorage) -> R<bool> {
 }
 
 /// Writes a label's row in D1's lookup table, if none is there, and reads back whose it is. A row another room holds
-/// is never replaced: a label is one room's for ever. A row not read back is [`Holder::Unknown`].
-async fn index_label(db: &D1Database, room: &str, label: &str, now: i64) -> R<Holder> {
+/// is never replaced: a label is one room's for ever. A row not read back is [`Holder::Unknown`]. **A preview label**
+/// (M8 step 6; D1 `0010_app_label_kind.sql`) also gets its kind's row, written once and never changed, and only for a
+/// label whose lookup row this room holds; a production label gets none, since no row there is production. The kind
+/// only routes the reconciles: it never authorizes and never decides what is served.
+async fn index_label(
+    db: &D1Database,
+    room: &str,
+    label: &str,
+    kind: podster_core::preview::Environment,
+    now: i64,
+) -> R<Holder> {
     db.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, ?) ON CONFLICT (label) DO NOTHING")
         .bind(&[label.into(), room.into(), JsValue::from_f64(now as f64)])?
         .run()
         .await?;
+    if kind == podster_core::preview::Environment::Preview {
+        db.prepare(
+            "INSERT INTO app_label_kind (label, kind) SELECT ?1, 'preview' WHERE EXISTS
+               (SELECT 1 FROM app_label_index WHERE label = ?1 AND workspace_id = ?2) ON CONFLICT (label) DO NOTHING",
+        )
+        .bind(&[label.into(), room.into()])?
+        .run()
+        .await?;
+    }
     let holder = db
         .prepare("SELECT workspace_id FROM app_label_index WHERE label = ?")
         .bind(&[label.into()])?
@@ -591,10 +609,17 @@ impl Workspace {
         .and_then(|row| text(&row["label"]));
         let holder = match unindexed {
             Some(label) => {
+                // An approval is only ever of a production release, so its label is production's.
                 let asked = match self.env.d1("DB") {
-                    Ok(db) => index_label(&db, &objects::room_id(&sql)?, &label, release_now(&sql))
-                        .await
-                        .unwrap_or(Holder::Unknown),
+                    Ok(db) => index_label(
+                        &db,
+                        &objects::room_id(&sql)?,
+                        &label,
+                        podster_core::preview::Environment::Production,
+                        release_now(&sql),
+                    )
+                    .await
+                    .unwrap_or(Holder::Unknown),
                     Err(_) => Holder::Unknown,
                 };
                 if asked == Holder::Taken {
@@ -669,16 +694,25 @@ impl Workspace {
         let db = self.env.d1("DB")?;
         let room = objects::room_id(sql)?;
         let mut unread = false;
-        let labels: Vec<String> = rows(
+        // Both kinds of label (M8 step 6): a preview label is indexed with its kind, so the reconciles can tell a preview
+        // host's room by it as they tell a production host's.
+        let labels: Vec<(String, podster_core::preview::Environment)> = rows(
             sql,
-            "SELECT label FROM app_label WHERE indexed_at IS NULL ORDER BY created_at, label LIMIT ?",
+            "SELECT label, kind FROM app_label WHERE indexed_at IS NULL ORDER BY created_at, label LIMIT ?",
             vec![INDEX_BATCH.into()],
         )?
         .iter()
-        .filter_map(|row| text(&row["label"]))
+        .filter_map(|row| {
+            Some((
+                text(&row["label"])?,
+                row["kind"]
+                    .as_str()
+                    .and_then(podster_core::preview::Environment::parse)?,
+            ))
+        })
         .collect();
-        for label in labels {
-            let holder = index_label(&db, &room, &label, release_now(sql)).await?;
+        for (label, kind) in labels {
+            let holder = index_label(&db, &room, &label, kind, release_now(sql)).await?;
             let mark = match holder {
                 Holder::Ours => release_now(sql),
                 Holder::Taken => {

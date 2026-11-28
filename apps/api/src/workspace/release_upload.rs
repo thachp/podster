@@ -87,6 +87,14 @@ use podster_core::release_uncertain::{script_write_outcome, WriteOutcome};
 /// The room's path for uploading a release's files. Nothing outside the Worker reaches it; the job's driver asks the
 /// same command directly.
 pub(crate) const INTERNAL_RELEASE_UPLOAD: &str = "/internal/release-upload";
+/// Whether a release may bind the store of `label`: only when the label's kind is the release's own environment
+/// (`podster_core::preview::store_belongs`). A label the room doesn't have, or a release in no environment, may not.
+fn store_environment_matches(sql: &SqlStorage, release_id: &str, label: &str) -> R<bool> {
+    let release = super::preview::environment_of(sql, release_id)?;
+    Ok(super::preview::label_kind(sql, label)?
+        .is_some_and(|store| podster_core::preview::store_belongs(release, store).is_ok()))
+}
+
 /// `waiting`, when the deployment has no provider to upload to; and the driver's code while it idles for that.
 pub(super) const NO_PROVIDER: &str = podster_core::release_driver::NO_CONTENT_PROVIDER;
 /// `waiting`, when the provider gave no answer to go on, at the session, a bucket or the script.
@@ -475,6 +483,29 @@ impl Workspace {
         takedown::provider(&self.env, &sql)
     }
 
+    /// The provider a release's script goes to: **a preview release's only to the preview namespace**
+    /// (`Provider::for_previews`; M8 step 6, the preview plan's 3.1), production's only to production's
+    /// ([`Workspace::upload_provider`]). A release whose environment can't be read goes nowhere. Test builds only: a room
+    /// a test gave `test_release_upload_provider` uploads a preview to the test Worker's preview provider, as it does a
+    /// release to its production one.
+    pub(super) fn upload_provider_for(&self, release_id: &str) -> R<Option<Provider>> {
+        let sql = self.state.storage().sql();
+        if !super::preview::is_preview(&sql, release_id)? {
+            return Ok(self.upload_provider());
+        }
+        #[cfg(feature = "failpoints")]
+        if rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_upload_provider'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
+        {
+            return Ok(Provider::for_previews(&self.env));
+        }
+        Ok(super::preview_apply::provider(&self.env, &sql))
+    }
+
     /// **The gate for apps with code** (`podster_core::app_code::CODE_RELEASES_COMPLETE`), alone: open everywhere while
     /// it is true, as it is since 2026-11-25; closed while it is false, whatever the providers, `RELEASES` and the
     /// release path's own gate say, so a release that carries code fails `release_code_not_available` before any store
@@ -554,6 +585,16 @@ impl Workspace {
             let now = release_now(sql);
             let ready = match upload_ready(sql, &id, &reads, true, now)? {
                 UploadReady::Answer(answer) => WriteReady::Answer(answer),
+                // A script binds only its own environment's store (M8 step 6; the preview plan's 3.1, "Store", and
+                // section 8): the store is its label's, and a label's kind is its environment.
+                UploadReady::Go { .. } if !store_environment_matches(sql, &id, &label)? => {
+                    WriteReady::Answer(upload_failed(
+                        sql,
+                        &id,
+                        podster_core::preview::StoreEnvironmentMismatch.code(),
+                        now,
+                    )?)
+                }
                 UploadReady::Go { .. } => {
                     match release_store::script_binding_for(sql, &id, &label, wants_store)? {
                         Err(why) => WriteReady::Answer(upload_failed(sql, &id, why.code(), now)?),
@@ -671,7 +712,7 @@ impl Workspace {
         if let Some(outcome) = self.store_settle_first(&release_id, &label, lease).await? {
             return self.store_answer(&release_id, outcome).await;
         }
-        let Some(provider) = self.upload_provider() else {
+        let Some(provider) = self.upload_provider_for(&release_id)? else {
             return self.upload_waiting(&release_id, NO_PROVIDER, None);
         };
         let Some(app) = ReleaseApp::from_env(&self.env) else {

@@ -487,7 +487,11 @@ pub(super) fn record(
     });
     let pending = rows(
         sql,
-        "SELECT state FROM release WHERE commit_sha = ?",
+        // Production's own: a preview of the same commit holds nothing pending for a release (M8 step 6).
+        &format!(
+            "SELECT state FROM release WHERE commit_sha = ? AND {}",
+            super::preview::NOT_PREVIEW
+        ),
         vec![asked.commit_sha.into()],
     )?
     .iter()

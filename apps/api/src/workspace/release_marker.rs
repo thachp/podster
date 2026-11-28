@@ -518,7 +518,7 @@ impl Workspace {
         );
         let seen = match target(&sql, &self.env, release_id)? {
             Some((host, commit, marked)) if !stopped && lease.holds(&sql) => {
-                let fetched = crate::content_provider::fetch_marker(&host).await;
+                let fetched = crate::content_provider::fetch_marker(&self.env, &host).await;
                 marker_seen(
                     fetched
                         .as_ref()

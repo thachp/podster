@@ -176,6 +176,7 @@ const at = (r: Room, now: number) => inRoom(r.id, (sql) => void sql.exec("UPDATE
 const slot = (r: Room) => inRoom(r.id, (sql) => sql.exec("SELECT * FROM preview_slot ORDER BY current IS NULL, deleted_at DESC LIMIT 1").toArray()[0] ?? null);
 const releaseOf = (r: Room, id: string) => inRoom(r.id, (sql) => sql.exec("SELECT state, failure_code, label, approved_by, script_name FROM release WHERE id = ?", id).one());
 const previewHost = (label: string) => `${label}.${FAKE.domain}`;
+const fromB64url = (text: string) => Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4)), (c) => c.charCodeAt(0));
 
 /** A preview of `task` asked for, its label indexed, and the job taken through its upload and commit: live, its flight open. */
 async function live(r: Room, task = TASK_A, commit = COMMIT_A) {
@@ -408,6 +409,45 @@ describe("the release job with an environment (M8 step 6, the plan's 3.2 and 3.4
     expect(read.body.preview.replacement).toMatchObject({ id: second.id, state: "failed", failure_code: "release_marker_missing" });
     expect(await production(r)).toEqual(before);
     expect(await productionNamespaceCalls()).toEqual([]);
+  });
+
+  it("fetches a preview's marker through the gate with a marker token: signed, for that host and slot, its epoch, 60 seconds (M8 step 8)", async () => {
+    const r = await room();
+    const preview = await served(r);
+    const host = previewHost(preview.label);
+    const state = (await (await control("/marker-tokens", undefined, `?host=${host}`)).json()) as { markerTokens: string[]; refusedNoToken: number; credentialed: number };
+    // Every marker fetch carried one, so the gated host answered it, and the preview reached `served` above.
+    expect([state.markerTokens.length > 0, state.refusedNoToken, state.credentialed]).toEqual([true, 0, 0]);
+    const s = await slot(r);
+    const entry = (await fakeState()).entries[host];
+    expect(entry.startsWith(`preview:${s.id}:${s.access_epoch}:`)).toBe(true);
+    const publicKey = await crypto.subtle.importKey("raw", fromB64url(BINDINGS.TEST_PREVIEW_TICKET_PUBLIC), { name: "Ed25519" }, false, ["verify"]);
+    for (const token of state.markerTokens) {
+      const [payload, signature, ...rest] = token.split(".");
+      expect(rest).toEqual([]);
+      expect(await crypto.subtle.verify("Ed25519", publicKey, fromB64url(signature), new TextEncoder().encode(`podster-preview-token/v1.${payload}`)), "signature").toBe(true);
+      const claims = JSON.parse(new TextDecoder().decode(fromB64url(payload)));
+      expect(Object.keys(claims)).toEqual(["typ", "kid", "aud", "pvw", "ep", "iat", "exp"]);
+      expect(claims).toMatchObject({ typ: "marker", kid: "test-run", aud: host, pvw: s.id, ep: s.access_epoch });
+      expect(claims.exp - claims.iat).toBe(60_000);
+    }
+  });
+
+  it("refuses to reach `served` through a gated host that answers no marker token, as the content Worker would", async () => {
+    const r = await room();
+    const preview = await live(r);
+    await alarmPass(stub(r.id)); // the preview applier writes the entry
+    await serveMarker(previewHost(preview.label), preview.script);
+    // The owner's key gone: the API can't sign a marker token, so the gated host refuses the fetch.
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_preview_key_off (x)").run();
+    try {
+      const marked = await pass(r);
+      expect(marked.outcome).not.toBe("served");
+      const state = (await (await control("/marker-tokens", undefined, `?host=${previewHost(preview.label)}`)).json()) as { refusedNoToken: number };
+      expect(state.refusedNoToken).toBeGreaterThan(0);
+    } finally {
+      await BINDINGS.DB.prepare("DROP TABLE IF EXISTS test_preview_key_off").run();
+    }
   });
 
   it("replaces a served preview with one whose marker comes back, and deletes the script it replaced from the preview namespace", async () => {

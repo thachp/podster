@@ -137,6 +137,13 @@ No flag or environment variable skips that.
 --config-file  the deploy-time configuration, the same rules, as JSON with exactly these keys:
                {"account_id": "<32 hex>", "content_domain": "<the content domain>",
                 "kv_namespace_id": "<32 hex>", "dispatch_namespace": "<name>"}
+               and, for previews (M8 step 8, decision 258), these three as well, all or none:
+               {"preview_namespace": "<name>", "preview_public_keys": "<kid>:<64 hex>[,<kid>:<64 hex>]",
+                "preview_access_origin": "https://<the application host>"}
+               With none of them the content Worker has no preview binding and previews are off. With
+               them, the preview namespace must differ from the dispatch namespace and exist on the
+               account, the keys are the public halves of PREVIEW_TICKET_KEY (one, or two while a
+               rotation's old key lasts its hour), and the origin is off the content domain.
 Both paths must be absolute.
 
 The token is never an argument, never printed, never written to a file by this script, and held in
@@ -183,7 +190,8 @@ It refuses, before changing anything, unless:
       the token sees exactly one account, the configuration's
       the token sees no zone named podster.dev
       the content domain is one active zone, on that account
-      the dispatch namespace and the KV namespace exist on that account
+      the dispatch namespace and the KV namespace exist on that account, and the preview namespace,
+      when the configuration names one
       the account's Worker scripts can be listed (it says whether podster-outbound exists yet)
       no route on the content domain's zone names podster-outbound, or any Worker but podster-content
       podster-content has no route on that zone but the two it deploys (a route that runs no
@@ -340,8 +348,12 @@ redact() {
 }
 
 config=$(cat "$config_file")
-jq -e 'type == "object" and (keys == ["account_id", "content_domain", "dispatch_namespace", "kv_namespace_id"]) and all(.[]; type == "string")' <<< "$config" > /dev/null 2>&1 \
-  || refuse "the configuration must be a JSON object with exactly account_id, content_domain, dispatch_namespace and kv_namespace_id, each a string"
+# The four keys every deploy has, and for previews (M8 step 8) three more, read only when present, and then all three:
+# half a preview configuration is refused, never deployed as previews off or on.
+jq -e 'type == "object" and ((keys == ["account_id", "content_domain", "dispatch_namespace", "kv_namespace_id"])
+    or (keys == ["account_id", "content_domain", "dispatch_namespace", "kv_namespace_id", "preview_access_origin", "preview_namespace", "preview_public_keys"]))
+    and all(.[]; type == "string")' <<< "$config" > /dev/null 2>&1 \
+  || refuse "the configuration must be a JSON object with exactly account_id, content_domain, dispatch_namespace and kv_namespace_id, and for previews preview_namespace, preview_public_keys and preview_access_origin as well (all three or none), each a string"
 account=$(jq -r .account_id <<< "$config")
 domain=$(jq -r .content_domain <<< "$config")
 kv=$(jq -r .kv_namespace_id <<< "$config")
@@ -354,6 +366,28 @@ case "$domain" in
   podster.dev | *.podster.dev) refuse "content_domain is podster.dev's. The content domain is never Podster's own." ;;
   content-domain.invalid) refuse "content_domain is the committed placeholder" ;;
 esac
+# Previews (M8 step 8): the preview namespace's binding PREVIEW_APPS and two plain variables, exactly what the content
+# Worker reads (`publicKeysFromSetting` and `accessOriginFromSetting`, apps/content/src/preview.ts). None of them is a
+# secret: the keys are public halves, which check a token and can't make one.
+previews=false preview_namespace="" preview_keys="" preview_origin=""
+if jq -e 'has("preview_namespace")' <<< "$config" > /dev/null; then
+  previews=true
+  preview_namespace=$(jq -r .preview_namespace <<< "$config")
+  preview_keys=$(jq -r .preview_public_keys <<< "$config")
+  preview_origin=$(jq -r .preview_access_origin <<< "$config")
+  [[ "$preview_namespace" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || refuse "preview_namespace isn't a namespace's name"
+  [ "$preview_namespace" != "$namespace" ] || refuse "preview_namespace is the dispatch namespace. Previews have a namespace of their own (decision 258): a preview script must never be in production's."
+  key='[A-Za-z0-9_-]{1,64}:[0-9a-fA-F]{64}'
+  [[ "$preview_keys" =~ ^$key(,$key)?$ ]] || refuse "preview_public_keys isn't one or two public keys, each <kid>:<64 hex>, separated by a comma"
+  case "$preview_keys" in
+    *,*) [ "${preview_keys%%:*}" != "$(cut -d, -f2 <<< "$preview_keys" | cut -d: -f1)" ] || refuse "preview_public_keys names one key ID twice" ;;
+  esac
+  [[ "$preview_origin" =~ ^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] && [ "${#preview_origin}" -le 261 ] \
+    || refuse "preview_access_origin isn't https:// and a host in lower case, with no path or port"
+  case "${preview_origin#https://}" in
+    "$domain" | *".$domain") refuse "preview_access_origin is on the content domain. A viewer is sent for a ticket to the application host, never to an app's." ;;
+  esac
+fi
 
 # --- the account isn't the one that holds podster.dev ---
 if [ "$(lower "$DC_CALLER_ACCOUNT")" = "$account" ]; then
@@ -557,6 +591,14 @@ cf "/accounts/$account/storage/kv/namespaces/$kv"
 [ "$status" = 200 ] || refuse "the KV namespace wasn't found on that account (HTTP $status)"
 shaped '(.result | type) == "object" and (.result.id | ascii_downcase) == $k' --arg k "$kv" || refuse "the answer about the KV namespace isn't that namespace"
 echo "ok   the KV namespace exists"
+if [ "$previews" = true ]; then
+  cf "/accounts/$account/workers/dispatch/namespaces/$preview_namespace"
+  [ "$status" = 200 ] || refuse "the preview namespace wasn't found on that account (HTTP $status)"
+  shaped '(.result | type) == "object" and .result.namespace_name == $n' --arg n "$preview_namespace" || refuse "the answer about the preview namespace isn't that namespace"
+  echo "ok   the preview namespace exists"
+else
+  echo "ok   the configuration names no preview namespace: previews stay off"
+fi
 
 # The outbound Worker: whether it exists yet, and that no route on the content domain's zone runs it. A deploy with no
 # route leaves a script's existing routes alone, so one made by hand would outlive every deploy: it is refused here.
@@ -759,6 +801,13 @@ jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< 
     durable_objects: $c.durable_objects,
     migrations: $c.migrations
   }' > "$work/wrangler.json"
+# Previews, only when configured: the preview namespace's binding, with the same outbound Worker, and its two variables.
+if [ "$previews" = true ]; then
+  jq --arg pn "$preview_namespace" --arg keys "$preview_keys" --arg origin "$preview_origin" --arg outbound "$OUTBOUND" '
+    .dispatch_namespaces += [{ binding: "PREVIEW_APPS", namespace: $pn, outbound: { service: $outbound } }]
+    | .vars += { PREVIEW_PUBLIC_KEYS: $keys, PREVIEW_ACCESS_ORIGIN: $origin }' "$work/wrangler.json" > "$work/wrangler.json.next"
+  mv "$work/wrangler.json.next" "$work/wrangler.json"
+fi
 # The outbound Worker's: name, entry point and compatibility date from its file, the owner's account, both public
 # addresses off, and nothing else. No route, no binding, no variable.
 jq -n --argjson c "$outbound_committed" --arg main "$root/apps/outbound/$(jq -r .main <<< "$outbound_committed")" --arg account "$account" '{
@@ -774,6 +823,11 @@ echo "on the routes $route_default and $route_all, both on the content domain's 
 echo "the dispatch binding APPS naming $OUTBOUND as the namespace's outbound Worker,"
 echo "and its write counter (migration v1, the class WriteCounter) with a cap of $writes writes per $window_ms ms for each app."
 echo "Each dispatch to an app with code is limited to $cpu_ms CPU ms and $subrequests subrequests."
+if [ "$previews" = true ]; then
+  echo "Previews on: the binding PREVIEW_APPS to the preview namespace $preview_namespace, naming $OUTBOUND as outbound, $(tr -cd , <<< "$preview_keys" | wc -c | awk '{print $1 + 1}') public key(s) by ID ($(tr ',' '\n' <<< "$preview_keys" | cut -d: -f1 | paste -sd ' ' -)), and the application host $preview_origin."
+else
+  echo "Previews off: no binding PREVIEW_APPS, no public key and no application host."
+fi
 echo "Before either Worker, it would make sure the zone holds $route_acme and $route_pki, each running no Worker."
 echo "Before either Worker, too, it would make sure the zone's rate limiting rule $RL_REF is $RL_REQUESTS requests per $RL_PERIOD s per IP, blocked for $RL_TIMEOUT s, outside the two validation folders ($rl_state now)."
 echo "No other route, no workers.dev address and no preview address."
@@ -1001,9 +1055,35 @@ if [ "$status" = 200 ] && shaped '(.result | type) == "object" and (.result.bind
   else
     fail "podster-content's deployed settings don't hold APP_LIMIT_CPU_MS $cpu_ms and APP_LIMIT_SUBREQUESTS $subrequests as plain text"
   fi
+  # The preview binding, as configured: there with the preview namespace and the same outbound Worker, or not at all.
+  preview_binding=$(jq -c '[.result.bindings[] | select(type == "object" and .name == "PREVIEW_APPS")]' "$work/body")
+  if [ "$previews" = true ]; then
+    if jq -e --arg n "$preview_namespace" --arg o "$OUTBOUND" 'length == 1 and (.[0] | .type == "dispatch_namespace" and .namespace == $n
+        and (.outbound | type) == "object" and (.outbound.worker | type) == "object" and .outbound.worker.service == $o)' <<< "$preview_binding" > /dev/null; then
+      pass "podster-content's deployed binding PREVIEW_APPS names the preview namespace and $OUTBOUND as its outbound Worker"
+    else
+      fail "podster-content's deployed settings have no binding PREVIEW_APPS to the preview namespace naming $OUTBOUND as outbound"
+    fi
+  elif [ "$preview_binding" = "[]" ]; then
+    pass "podster-content has no deployed binding PREVIEW_APPS: previews are off"
+  else
+    fail "podster-content has a deployed binding PREVIEW_APPS, but the configuration names no preview namespace"
+  fi
+  # Previews' two variables, as the deployed Worker holds them: each plain text, exactly the configuration's, or, with
+  # previews off, neither there at all. The keys are public halves and the origin a host, so both may be read back.
+  if jq -e --argjson on "$previews" --arg k "$preview_keys" --arg o "$preview_origin" '[.result.bindings[] | select(type == "object")] as $b
+      | ([$b[] | select(.name == "PREVIEW_PUBLIC_KEYS")] == (if $on then [{"type": "plain_text", "name": "PREVIEW_PUBLIC_KEYS", "text": $k}] else [] end))
+      and ([$b[] | select(.name == "PREVIEW_ACCESS_ORIGIN")] == (if $on then [{"type": "plain_text", "name": "PREVIEW_ACCESS_ORIGIN", "text": $o}] else [] end))' "$work/body" > /dev/null; then
+    if [ "$previews" = true ]; then pass "podster-content's deployed PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN are the configuration's"; else pass "podster-content has no deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN: previews are off"; fi
+  elif [ "$previews" = true ]; then
+    fail "podster-content's deployed settings don't hold PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN as the configuration's, as plain text"
+  else
+    fail "podster-content has a deployed PREVIEW_PUBLIC_KEYS or PREVIEW_ACCESS_ORIGIN, but the configuration names no preview namespace"
+  fi
 else
   not_shown "whether podster-content's deployed binding names $OUTBOUND as outbound: its settings couldn't be read in the shape expected (HTTP $status). Check it in the dashboard."
   not_shown "whether podster-content's deployed limits are $cpu_ms CPU ms and $subrequests subrequests: its settings couldn't be read"
+  if [ "$previews" = true ]; then not_shown "whether podster-content's deployed binding PREVIEW_APPS names the preview namespace and its two preview variables are the configuration's: its settings couldn't be read"; fi
 fi
 cf "/accounts/$account/workers/domains"
 if [ "$status" = 200 ] && shaped "$DOMAINS_SHAPE"; then

@@ -507,6 +507,18 @@ A secret takes effect without a deploy. Taking one away is `npx wrangler secret 
 
 **To stop serving and be able to undo it, use the stop for the whole content domain** (M6 step 4(a)), an operator's command. Lifting the stop serves again what was up. *Decided by the architect on 2026-11-13 ([the step 6 plan](m6-step6-plan.md)), confirmed by the owner on 2026-11-14 ([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)).*
 
+## Setting up previews (M8)
+
+*Written 2026-11-28, for decision 258.* Workroom previews ([the M8 plan](m8-preview-plan.md)) need three things only the owner can make, done with `scripts/wizards/preview-setup.sh`, run at a terminal from a clean checkout detached at `origin/main` (its last stage runs `scripts/deploy-content`, which refuses anything else). `--help` says what it needs. It refuses unless `wrangler` is signed in to the staging account in `~/.podster/cloudflare-account-id.staging`, and never prints that ID or the content account's.
+
+1. **A preview dispatch namespace** on the content account, made in the dashboard (Workers for Platforms → Create namespace), never production's own. The wizard asks its name, `podster-previews` by default.
+2. **The ticket key.** The wizard makes an Ed25519 pair with node's crypto and sets the private half on `podster-api-staging` as the secret `PREVIEW_TICKET_KEY` (`<kid>:<64 hex seed>`), piped to `wrangler secret put` from a temporary file of mode 0600 that is deleted straight after. The seed is never printed. Rotating means running it again with a new key ID; it offers to keep the old public half in the content Worker for the hour a session lasts.
+3. **The content Worker's configuration:** `preview_namespace`, `preview_public_keys` (`<kid>:<64 hex public key>`) and `preview_access_origin` (`https://app-staging.podster.dev`) added to `~/.config/podster/content-deploy.json` ([docs/content-deploy.md](content-deploy.md)), then `scripts/deploy-content`, its report first and `--deploy` only on the owner's yes.
+
+The wizard remembers the namespace's name and the key's ID and public half, none of them secret, in `~/.podster/preview-setup.staging`.
+
+**Previews stay off after it.** `PREVIEWS` (`"true"`) and `CONTENT_PREVIEW_NAMESPACE` (the namespace's name) under `env.staging` in `apps/api/wrangler.jsonc` are read as plain settings, never secrets, so they are a code change: the architect's PR after the wizard, which uncomments the two lines, updates `takedown.spec.ts`'s check that the file names `CONTENT_PREVIEW_NAMESPACE` only in a comment, and deploys through `scripts/deploy-staging`.
+
 ## Operators
 
 `OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`. **Since 2026-11-11 it also says who may ask for a repository on staging:** the API's `REPOSITORY_REQUESTERS` there holds the entry `operators`, so each person named here may ask for a room's repository in a room they own or administer, and removing someone here takes that away ([above](#who-may-ask-for-a-repository-on-staging)).

@@ -90,6 +90,18 @@ mkdir -p ~/.config/podster && chmod 700 ~/.config/podster
   }
   ```
 
+  **For previews** (M8 step 8, decision 258), three more keys, all three or none; half of them is refused. None is a secret. With none, the content Worker gets no preview binding and previews are off: every preview host is not-found, and every other host answers as before.
+
+  ```json
+  {
+    "preview_namespace": "<the preview dispatch namespace's name, never the dispatch namespace>",
+    "preview_public_keys": "<kid>:<64 hex>[,<kid>:<64 hex>]",
+    "preview_access_origin": "https://<the application host, off the content domain>"
+  }
+  ```
+
+  The keys are the Ed25519 public halves of the API's `PREVIEW_TICKET_KEY` (and, for the hour after a rotation, of the key before it), each by the `kid` the API's secret names. The script checks the preview namespace exists on the account, deploys it as `{ "binding": "PREVIEW_APPS", "namespace": <it>, "outbound": { "service": "podster-outbound" } }` and the other two as the variables `PREVIEW_PUBLIC_KEYS` and `PREVIEW_ACCESS_ORIGIN`, and after a deploy checks the binding by Cloudflare's API. The report names the keys by ID only.
+
 The script builds wrangler's two configurations from that file, from `apps/content/wrangler.jsonc` and from `apps/outbound/wrangler.jsonc`. Both are written to a temporary folder, used, and deleted. The content Worker's routes are `*.<content domain>/*` and `*/*`, both on that zone, and its dispatch binding is `{ "binding": "APPS", "namespace": <the namespace>, "outbound": { "service": "podster-outbound" } }`, the shape in Cloudflare's [outbound Workers](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/outbound-workers/) and [wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/#dispatch-namespace-bindings-workers-for-platforms) pages, with no `parameters`. The outbound Worker's has no route and no binding. Both public addresses are off for both.
 
 **The outbound Worker's committed file supplies only** its name, `podster-outbound`, its entry point and its compatibility date. The file must hold exactly those, its placeholder account and both public addresses off; anything else in it, a route, a binding, a variable, another name or an address switched on, is refused before anything changes. Its package must pass the same checks as the content Worker's: no `.wrangler/deploy/config.json`, no `.env` file of any name, and its own pinned wrangler at 4.157.0, which is the one that deploys it.

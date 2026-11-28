@@ -64,6 +64,8 @@ export default {
       stop,
       domain: DOMAIN,
       codeApps: false,
+      previews: null,
+      random: () => new Uint8Array(32),
       // No limits: with the switch off here no app with code is asked.
       limits: null,
       // No counter: with the switch off no write reaches one, and this run has no Durable Object.

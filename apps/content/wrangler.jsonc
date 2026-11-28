@@ -34,6 +34,10 @@
   "vars": { "CONTENT_DOMAIN": "content-domain.invalid", "WRITE_BUDGET_WRITES": "300", "WRITE_BUDGET_WINDOW_MS": "600000", "APP_LIMIT_CPU_MS": "50", "APP_LIMIT_SUBREQUESTS": "50" },
   // Its bindings: the serve entries, to read, the namespace that holds each release's script, and its own write
   // counter. Nothing to the gateway, the API, D1 or R2, and no secret.
+  //
+  // Previews (M8 step 8) add the binding PREVIEW_APPS and the variables PREVIEW_PUBLIC_KEYS and PREVIEW_ACCESS_ORIGIN,
+  // never here: only `scripts/deploy-content` adds them, from the owner's configuration, once the owner's wizard made
+  // the preview namespace and the ticket key (decision 258). Without them previews are off.
   "kv_namespaces": [{ "binding": "SERVE", "id": "00000000000000000000000000000000" }],
   "dispatch_namespaces": [{ "binding": "APPS", "namespace": "placeholder-no-such-namespace" }],
   // The write counter (stage 1, S6): one object for each app, this Worker's own class (no `script_name`), SQLite-backed,

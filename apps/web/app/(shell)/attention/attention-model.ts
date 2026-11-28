@@ -33,8 +33,45 @@ export function describeEvent(event: Pick<InboxEvent, "type" | "actor_id">, me: 
   return `${who} ${SENTENCES[event.type] ?? "made a change"}`;
 }
 
-/** A release awaiting a person's approval, as `listReleaseApprovals` gives it (M6 step 10(b)). IDs, a commit and a time only. */
-export type ReleaseApproval = { id: string; task_id: string | null; commit_sha: string; state: "awaiting_approval"; requested_by: string; requested_at: number };
+/**
+ * A release awaiting a person's approval, as `listReleaseApprovals` gives it (M6 step 10(b)). IDs, a commit and a time
+ * only. M8 step 9 adds, for a release made from a preview, the preview release, its exact build, when that build reached
+ * the preview, its storage warning, whether the preview now shows another build, and Podster's fixed words for both
+ * (`podster_core::preview_build`). Each is null for a release not made from one, and absent from an older answer.
+ */
+export type ReleaseApproval = {
+  id: string;
+  task_id: string | null;
+  commit_sha: string;
+  state: "awaiting_approval";
+  requested_by: string;
+  requested_at: number;
+  from_preview?: string | null;
+  build_id?: string | null;
+  preview_served_at?: number | null;
+  storage_warning?: boolean | null;
+  preview_replaced?: boolean | null;
+  preview_notice?: string | null;
+  storage_notice?: string | null;
+};
+
+/** The build an approval must send back, only for a release made from a preview. Null means approving takes no body. */
+export const approvalBuild = (release: ReleaseApproval) => (release.from_preview ? (release.build_id ?? null) : null);
+
+const optional = (value: unknown, check: (value: unknown) => boolean) => value === undefined || value === null || check(value);
+const isText = (value: unknown) => typeof value === "string";
+const isFlag = (value: unknown) => typeof value === "boolean";
+
+/** A release made from a preview names a well-formed preview release and its build, or the row isn't one this page can approve. */
+const previewFieldsFine = (r: Record<string, unknown>) =>
+  optional(r.from_preview, (value) => typeof value === "string" && /^rel_[0-9a-f]{32}$/.test(value)) &&
+  optional(r.build_id, (value) => typeof value === "string" && /^bld_[0-9a-f]{32}$/.test(value)) &&
+  (r.from_preview === undefined || r.from_preview === null || typeof r.build_id === "string") &&
+  optional(r.preview_served_at, (value) => typeof value === "number") &&
+  optional(r.storage_warning, isFlag) &&
+  optional(r.preview_replaced, isFlag) &&
+  optional(r.preview_notice, isText) &&
+  optional(r.storage_notice, isText);
 export type ApprovalItem = { workspace: string; workspaceName: string; release: ReleaseApproval };
 
 /** Only the room's owner and admins are answered the list; anyone else would be refused, so isn't asked. Display only: the room decides. */
@@ -51,7 +88,8 @@ const isApproval = (value: unknown): value is ReleaseApproval => {
     /^[0-9a-f]{40}$/.test(r.commit_sha) &&
     r.state === "awaiting_approval" &&
     typeof r.requested_by === "string" &&
-    typeof r.requested_at === "number"
+    typeof r.requested_at === "number" &&
+    previewFieldsFine(r)
   );
 };
 

@@ -252,6 +252,24 @@ wr() {
   (cd "$PREVIEW_REPO/apps/api" && CLOUDFLARE_ACCOUNT_ID="$STAGING_ACCOUNT" npx --no-install wrangler "$@")
 }
 
+# wr_put_secret NAME FILE: `wrangler secret put` with the value on standard input, and with every wrangler and Node
+# debug or log setting of the caller's shell taken away, so nothing about the call is written to a log at debug level.
+wr_put_secret() {
+  (cd "$PREVIEW_REPO/apps/api" \
+    && unset WRANGLER_LOG WRANGLER_LOG_PATH WRANGLER_LOG_SANITIZE WRANGLER_OUTPUT_FILE_PATH WRANGLER_OUTPUT_FILE_DIRECTORY DEBUG NODE_DEBUG NODE_OPTIONS \
+    && CLOUDFLARE_ACCOUNT_ID="$STAGING_ACCOUNT" npx --no-install wrangler secret put "$1" --env staging < "$2")
+}
+
+# tty_confirm "question": confirm, refused unless standard input and output are a terminal, so no pipe or script can
+# answer yes for the owner.
+tty_confirm() {
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    warn "This needs a person at a terminal: standard input and output must both be one."
+    return 1
+  fi
+  confirm "$1"
+}
+
 # secret_names: the API Worker's secret names on staging, one a line. Fails if the list can't be read.
 secret_names() {
   local out
@@ -289,7 +307,7 @@ if (( $# )); then
   return 2
 fi
 
-mkdir -p "$HOME/.podster"
+mkdir -p -m 700 "$HOME/.podster"
 ENV_FILE="$HOME/.podster/preview-setup.staging"
 TOTAL_STAGES=6
 
@@ -438,7 +456,7 @@ if [[ "$MAKE_KEY" == yes ]]; then
     break
   done
   write_env PREVIEW_KID "$PREVIEW_KID"
-  confirm "Set $PREVIEW_SECRET on $PREVIEW_WORKER now, as key $PREVIEW_KID?" || { warn "Nothing was set."; return 1; }
+  tty_confirm "Set $PREVIEW_SECRET on $PREVIEW_WORKER now, as key $PREVIEW_KID?" || { warn "Nothing was set."; return 1; }
   PREVIEW_TMP=$(umask 077 && mktemp -d)
   # node writes `<kid>:<64 hex seed>` to the file, created new at mode 0600, and prints only `<kid>:<64 hex public>`.
   if ! NEW_PUBLIC=$(umask 077 && node -e '
@@ -462,7 +480,7 @@ if [[ "$MAKE_KEY" == yes ]]; then
     warn "The key didn't come out in its form. Nothing was set."
     return 1
   fi
-  if wr secret put "$PREVIEW_SECRET" --env staging < "$PREVIEW_TMP/key" >/dev/null 2>"$PREVIEW_TMP/err"; then
+  if wr_put_secret "$PREVIEW_SECRET" "$PREVIEW_TMP/key" >/dev/null 2>"$PREVIEW_TMP/err"; then
     preview_cleanup
     printf '  %s✓ set%s %s on %s\n' "$GREEN" "$RESET" "$PREVIEW_SECRET" "$PREVIEW_WORKER"
   else
@@ -476,6 +494,12 @@ if [[ "$MAKE_KEY" == yes ]]; then
 else
   NEW_PUBLIC="$OLD_PUBLIC"
   OLD_PUBLIC=""
+  # The kept public half comes from a file, so it is checked before anything is written from it.
+  if [[ ! "$NEW_PUBLIC" =~ ^[A-Za-z0-9_-]{1,64}:[0-9a-f]{64}$ ]]; then
+    NEW_PUBLIC=""
+    warn "The public key kept in $ENV_FILE isn't <kid>:<64 hex>. Run again and make a new key. Nothing was changed."
+    return 1
+  fi
 fi
 if names=$(secret_names) && grep -qx "$PREVIEW_SECRET" <<<"$names"; then
   note "  ✓ $PREVIEW_WORKER lists $PREVIEW_SECRET (by name; its value can't be read back)"
@@ -502,12 +526,24 @@ note "  preview_namespace:     $PREVIEW_NAMESPACE"
 note "  preview_public_keys:   key ID(s) $(tr ',' '\n' <<<"$PUBLIC_KEYS" | cut -d: -f1 | paste -sd ' ' -)"
 note "  preview_access_origin: $PREVIEW_ACCESS_ORIGIN"
 note "The four keys already there are kept as they are."
-confirm "Write them to $PREVIEW_CONFIG_FILE?" || { warn "The configuration wasn't changed."; return 1; }
+tty_confirm "Write them to $PREVIEW_CONFIG_FILE?" || { warn "The configuration wasn't changed."; return 1; }
 config_next=$(jq --arg n "$PREVIEW_NAMESPACE" --arg k "$PUBLIC_KEYS" --arg o "$PREVIEW_ACCESS_ORIGIN" \
   '. + { preview_namespace: $n, preview_public_keys: $k, preview_access_origin: $o }' "$PREVIEW_CONFIG_FILE")
-# Written in place, so the file keeps its mode, owner and inode, as deploy-content requires.
-printf '%s\n' "$config_next" > "$PREVIEW_CONFIG_FILE"
+# Written atomically: a new file in the same folder, mode 0600 and yours, as deploy-content requires of the file
+# (it checks the owner, the mode, that it's no link, and its folder), then moved over the old one.
+config_tmp=$(umask 077 && mktemp "$(dirname "$PREVIEW_CONFIG_FILE")/.content-deploy.json.XXXXXX")
+chmod 600 "$config_tmp"
+if ! printf '%s\n' "$config_next" > "$config_tmp" || ! mv -f "$config_tmp" "$PREVIEW_CONFIG_FILE"; then
+  rm -f "$config_tmp"
+  config_next=""
+  warn "Couldn't write $PREVIEW_CONFIG_FILE. The old file is unchanged."
+  return 1
+fi
 config_next=""
+if ! private_file "$PREVIEW_CONFIG_FILE"; then
+  warn "$PREVIEW_CONFIG_FILE isn't yours and mode 0600 after the write. Fix it before deploying."
+  return 1
+fi
 printf '  %s✓ wrote%s the three preview keys → %s\n' "$GREEN" "$RESET" "$PREVIEW_CONFIG_FILE"
 pause "Press Enter to continue"
 

@@ -310,9 +310,8 @@ for (const id of ["approveRelease", "declineRelease"]) {
 if (api.components.parameters.appLabel?.schema?.pattern !== `^[a-z0-9]{1,${core.maxLabelLen}}$`) problems.push(`appLabel: must be at most ${core.maxLabelLen} lower-case letters and digits`);
 // M8 step 3 named fields that later steps build. Each is in its schema's properties and not yet required, so the contract
 // never says the API answers a field it doesn't; the step that builds one takes it off this list and makes it required.
-const PENDING = {
-  ReleaseApproval: ["from_preview", "build_id", "preview_served_at"], // M8 step 9
-};
+// M8 step 9 built ReleaseApproval's, the last of them, so none is pending now.
+const PENDING = {};
 for (const [schema, names] of Object.entries(PENDING)) {
   const found = api.components.schemas[schema];
   for (const name of names) {

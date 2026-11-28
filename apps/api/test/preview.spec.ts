@@ -19,7 +19,7 @@ import { fakeIds } from "./fake-ids";
 const BINDINGS = env as any;
 const FAKE = JSON.parse(BINDINGS.TEST_FAKE_CONTENT) as { domain: string; control: string; namespace: string; previewNamespace: string };
 let key: any;
-type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[] };
+type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[]; linker?: { person: string; since: number } };
 const ORG = "org_pw";
 const OWNER: Who = { id: "per_pw_owner", kind: "person", org: ORG, adminOrgs: [ORG] };
 const ADMIN: Who = { id: "per_pw_admin", kind: "person", org: ORG };
@@ -31,7 +31,7 @@ const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_ops" }
 async function assertion(who: Who) {
   const now = Math.floor(Date.now() / 1000);
   const claims = who.kind === "agent"
-    ? { kind: "agent", org: who.org, gen: 1 }
+    ? { kind: "agent", org: who.org, gen: 1, ...(who.linker ? { linker: who.linker } : {}) }
     : { kind: "person", org: who.org, orgs: [who.org], admin_orgs: who.adminOrgs ?? [], org_since: { [who.org]: 1 } };
   return new SignJWT(claims)
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
@@ -70,6 +70,8 @@ const COMMIT_A = "a5".repeat(20);
 const COMMIT_B = "b5".repeat(20);
 const DIR_A = "da".repeat(20);
 const DIR_B = "db".repeat(20);
+// B's page names browser storage, so its build carries the storage warning (M8 step 9; the plan's 5.2.1). A's doesn't.
+const B_PAGE = "<p>preview B</p><script>localStorage.setItem('seen', '1')</script>\n";
 const github = (path: string, body?: unknown) => fetch(`https://github-release-fake.example.com${path}?repo=${REPO}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
 const bytes = (text: string) => new TextEncoder().encode(text);
 const blobSha = (content: Uint8Array) => createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
@@ -86,7 +88,7 @@ function repository() {
   const top = (dir: string) => ({ tree: [{ path: "README.md", mode: "100644", type: "blob", sha: sha(1), size: 10 }, { path: "site", mode: "040000", type: "tree", sha: dir }] });
   return {
     repo: REPO,
-    trees: { [COMMIT_A]: top(DIR_A), [COMMIT_B]: top(DIR_B), [DIR_A]: { tree: tree({ "index.html": "<p>preview A</p>\n" }, blobs) }, [DIR_B]: { tree: tree({ "index.html": "<p>preview B</p>\n" }, blobs) } },
+    trees: { [COMMIT_A]: top(DIR_A), [COMMIT_B]: top(DIR_B), [DIR_A]: { tree: tree({ "index.html": "<p>preview A</p>\n" }, blobs) }, [DIR_B]: { tree: tree({ "index.html": B_PAGE }, blobs) } },
     blobs,
   };
 }
@@ -720,5 +722,267 @@ describe("the reconciles over both namespaces (M8 step 6)", () => {
     const done = (await (await moderation().fetch("https://do/reconcile/scripts", { method: "POST" })).json()) as { previews: string };
     expect(done.previews).toBe("ok");
     expect(await all(r.id, "SELECT script_name FROM script_delete WHERE gone_at IS NULL")).toEqual([{ script_name: stray }]);
+  });
+});
+
+// --- M8 step 9: publishing from a preview (the plan's 4.3 and section 10; decisions 254, 255 and 259) ---------------------
+const PREVIEW_NOTICE = "This build ran in the preview with browser storage and its own origin. In production it runs sandboxed, with neither, so anything that worked only because of them will break.";
+const STORAGE_NOTICE = "This build may use browser storage, which production apps don't have.";
+const OTHER_BUILD = `bld_${"0f".repeat(16)}`;
+const grantDeploy = (r: Room, who: Who = OWNER) => inRoom(r.id, (sql) => sql.exec(
+  "INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES (?, ?, 'github', ?, 'deploy', ?, 1)",
+  `pgr_pp_${who.id}`, who.id, REPO, OWNER.id));
+const publish = (r: Room, from: string, opts: { who?: Who; task?: string; commit?: string } = {}) =>
+  api(opts.who ?? OWNER, "POST", `/v1/workspaces/${r.id}/releases`, { task_id: opts.task ?? TASK_B, commit_sha: opts.commit ?? COMMIT_B, from_preview: from });
+const approve = (r: Room, id: string, body?: unknown, who: Who = OWNER) => api(who, "POST", `/v1/workspaces/${r.id}/releases/${id}/approve`, body);
+const buildOf = async (r: Room, id: string) => (await all(r.id, "SELECT build_id FROM release_build WHERE release_id = ?", id))[0]?.build_id as string | undefined;
+const approvals = async (r: Room) => (await api(OWNER, "GET", `/v1/workspaces/${r.id}/release-approvals`)).body.releases as any[];
+/** An approved production release driven by the job to its commit: `live`, or the state the job ended it in. */
+async function driveProduction(r: Room, id: string) {
+  // The room's hourly uploads are shared by previews and releases (decision 257): emptied, so a test needn't wait out
+  // the hour its earlier uploads began.
+  await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+  for (let i = 0; i < 6 && ["queued", "uploading"].includes((await releaseOf(r, id)).state); i++) await pass(r);
+  return releaseOf(r, id);
+}
+/** [`driveProduction`], then the applier's entry and production's marker through its host: served. */
+async function publishServed(r: Room, id: string) {
+  expect(await driveProduction(r, id)).toMatchObject({ state: "live" });
+  await alarmPass(stub(r.id));
+  const script = `${r.prodLabel}.${id}`;
+  expect((await fakeState()).entries[r.prodHost]).toBe(script);
+  await serveMarker(r.prodHost, script);
+  await at(r, T + 5_000);
+  for (let i = 0; i < 4 && (await releaseOf(r, id)).state !== "served"; i++) await pass(r);
+  expect(await releaseOf(r, id)).toMatchObject({ state: "served" });
+}
+
+describe("publishing from a preview (M8 step 9, the plan's 4.3)", () => {
+  it("records every preview's build and its storage warning, from what the job fetched", async () => {
+    const r = await room();
+    const a = await served(r);
+    const readA = (await getPreview(r)).body.preview.serving;
+    expect(readA.build_id).toMatch(/^bld_[0-9a-f]{32}$/);
+    expect(readA.storage_warning).toBe(false);
+    expect(await all(r.id, "SELECT tree_sha, form_version FROM release_build WHERE release_id = ?", a.id)).toEqual([{ tree_sha: DIR_A, form_version: expect.stringMatching(/^\S+ \S+ STORE \S+$/) }]);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const readB = (await getPreview(r)).body.preview.serving;
+    expect(readB).toMatchObject({ id: b.id, storage_warning: true });
+    expect(readB.build_id).toMatch(/^bld_[0-9a-f]{32}$/);
+    expect(readB.build_id).not.toBe(readA.build_id);
+    // The same commit uploaded again is the same build: a build is named by what was fetched, never by its script.
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+    const again = await served(r, TASK_A, COMMIT_A);
+    expect(await buildOf(r, again.id)).toBe(readA.build_id);
+  });
+
+  it("publishes the exact build: the request names the preview release, the approval sends its build, and production goes live on it", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    expect(asked.body).toMatchObject({ state: "awaiting_approval", commit_sha: COMMIT_B });
+    expect(await all(r.id, "SELECT preview_release_id, build_id FROM release_from_preview WHERE release_id = ?", asked.body.id)).toEqual([{ preview_release_id: b.id, build_id: build }]);
+    const trail = JSON.parse((await all(r.id, "SELECT new_json FROM audit_event WHERE action = 'release.requested' AND target_id = ?", asked.body.id))[0].new_json);
+    expect(trail).toMatchObject({ from_preview: b.id, build });
+    // The approval dialog's data: the build in full, when it reached the preview, its storage warning and Podster's words.
+    const listed = (await approvals(r)).find((x) => x.id === asked.body.id);
+    expect(listed).toEqual({
+      id: asked.body.id, task_id: TASK_B, commit_sha: COMMIT_B, state: "awaiting_approval", requested_by: OWNER.id, requested_at: T,
+      from_preview: b.id, build_id: build, preview_served_at: T, storage_warning: true, preview_replaced: false,
+      preview_notice: PREVIEW_NOTICE, storage_notice: STORAGE_NOTICE,
+    });
+    // The body: required for a release made from a preview, exactly its build, and nothing else. Each refusal writes nothing.
+    expect((await approve(r, asked.body.id)).code).toBe("invalid_argument");
+    expect((await approve(r, asked.body.id, { build: OTHER_BUILD })).code).toBe("release_build_changed");
+    expect((await approve(r, asked.body.id, { build, note: "x" })).code).toBe("invalid_argument");
+    expect((await approve(r, asked.body.id, { build: 7 })).code).toBe("invalid_argument");
+    expect(await releaseOf(r, asked.body.id)).toMatchObject({ state: "awaiting_approval", approved_by: null });
+    const approved = await approve(r, asked.body.id, { build });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(approved.body.state).toBe("queued");
+    await publishServed(r, asked.body.id);
+    // Production recomputed the build from what it fetched: the very build tested.
+    expect(await buildOf(r, asked.body.id)).toBe(build);
+    expect(await releaseOf(r, PROD)).toMatchObject({ state: "replaced" });
+    // The production upload went to production's namespace alone; the preview's script is untouched.
+    expect((await uploadState(`${r.prodLabel}.${asked.body.id}`)).namespaces.every((ns) => ns === "production")).toBe(true);
+    expect((await getPreview(r)).body.preview.serving.id).toBe(b.id);
+  });
+
+  it("keeps an approval on its own build when the preview is replaced, and refuses to move it to the new one (decision 259)", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const buildB = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    // The preview is replaced with A before anyone approves.
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+    const a = await served(r, TASK_A, COMMIT_A);
+    const buildA = (await buildOf(r, a.id))!;
+    expect(buildA).not.toBe(buildB);
+    expect(await releaseOf(r, b.id)).toMatchObject({ state: "replaced" });
+    const listed = (await approvals(r)).find((x) => x.id === asked.body.id);
+    expect(listed).toMatchObject({ from_preview: b.id, build_id: buildB, preview_replaced: true, preview_notice: PREVIEW_NOTICE });
+    // What the preview shows now is refused; the build that was tested still approves.
+    expect((await approve(r, asked.body.id, { build: buildA })).code).toBe("release_build_changed");
+    expect(await all(r.id, "SELECT build_id FROM release_from_preview WHERE release_id = ?", asked.body.id)).toEqual([{ build_id: buildB }]);
+    expect((await approve(r, asked.body.id, { build: buildB })).body.state).toBe("queued");
+    await publishServed(r, asked.body.id);
+    expect(await buildOf(r, asked.body.id)).toBe(buildB);
+    expect(await all(r.id, "SELECT commit_sha FROM release WHERE id = ?", asked.body.id)).toEqual([{ commit_sha: COMMIT_B }]);
+    // The preview still shows A.
+    expect((await getPreview(r)).body.preview.serving.id).toBe(a.id);
+  });
+
+  it("doesn't call the preview replaced when a newer preview release shows the identical build", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    // The same commit made the preview again: another preview release, the very same build.
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+    const again = await served(r, TASK_B, COMMIT_B);
+    expect(again.id).not.toBe(b.id);
+    expect(await releaseOf(r, b.id)).toMatchObject({ state: "replaced" });
+    expect(await buildOf(r, again.id)).toBe(build);
+    expect((await approvals(r)).find((x) => x.id === asked.body.id)).toMatchObject({ from_preview: b.id, build_id: build, preview_replaced: false });
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+  });
+
+  it("publishes the pinned build after the preview is deleted, fetching the commit again, or fails cleanly if it differs", async () => {
+    // Deleted after the request: the commit is fetched again, and the build that was tested goes live.
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    expect((await deletePreview(r)).status).toBe(200);
+    expect(await releaseOf(r, b.id)).toMatchObject({ state: "unpublished" });
+    expect((await approvals(r)).find((x) => x.id === asked.body.id)).toMatchObject({ build_id: build, preview_replaced: true });
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+    await publishServed(r, asked.body.id);
+    expect(await buildOf(r, asked.body.id)).toBe(build);
+    // Deleted before the request: a deleted preview's tested build may still be published, and if what GitHub now
+    // answers for the commit isn't that build, the publish fails `build_mismatch` and production stays as it was.
+    const other = await room();
+    await grantDeploy(other);
+    const ob = await served(other, TASK_B, COMMIT_B);
+    const obuild = (await buildOf(other, ob.id))!;
+    expect((await deletePreview(other)).status).toBe(200);
+    const late = await publish(other, ob.id);
+    expect(late.status, JSON.stringify(late.body)).toBe(200);
+    expect((await approve(other, late.body.id, { build: obuild })).body.state).toBe("queued");
+    const before = await production(other);
+    const changed = repository();
+    const blobs: Record<string, string> = { ...changed.blobs };
+    changed.trees[DIR_B] = { tree: tree({ "index.html": "<p>changed since</p>\n" }, blobs) };
+    await github("/reset", {});
+    await github("/seed", { ...changed, blobs });
+    expect(await driveProduction(other, late.body.id)).toMatchObject({ state: "failed", failure_code: "build_mismatch" });
+    expect((await uploadState(`${other.prodLabel}.${late.body.id}`)).namespaces).toEqual([]);
+    const after = await production(other);
+    expect([after.entry, after.rows.serve]).toEqual([before.entry, before.rows.serve]);
+    expect(await releaseOf(other, PROD)).toMatchObject({ state: "served" });
+  });
+
+  it("fails a publish whose fetched build isn't the one tested, before anything is uploaded, and production stays live", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+    const before = await production(r);
+    // What GitHub answers for the commit is no longer what was tested.
+    const changed = repository();
+    const blobs: Record<string, string> = { ...changed.blobs };
+    changed.trees[DIR_B] = { tree: tree({ "index.html": "<p>something else</p>\n" }, blobs) };
+    await github("/reset", {});
+    await github("/seed", { ...changed, blobs });
+    expect(await driveProduction(r, asked.body.id)).toMatchObject({ state: "failed", failure_code: "build_mismatch" });
+    expect(await buildOf(r, asked.body.id)).toBeUndefined();
+    expect((await uploadState(`${r.prodLabel}.${asked.body.id}`)).namespaces).toEqual([]);
+    const after = await production(r);
+    expect(after.entry).toBe(before.entry);
+    expect(after.rows.serve).toEqual(before.rows.serve);
+    expect(await releaseOf(r, PROD)).toMatchObject({ state: "served" });
+  });
+
+  it("checks the build again at the commit live: a recorded build that isn't the one named never goes live", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect((await approve(r, asked.body.id, { build })).body.state).toBe("queued");
+    const before = await production(r);
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM release_upload_attempt"));
+    expect((await pass(r)).outcome).toBe("next"); // start
+    expect((await pass(r)).outcome).toBe("next"); // upload, its build recorded
+    expect(await buildOf(r, asked.body.id)).toBe(build);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE release_build SET build_id = ? WHERE release_id = ?", OTHER_BUILD, asked.body.id));
+    await pass(r); // the commit
+    expect(await releaseOf(r, asked.body.id)).toMatchObject({ state: "failed", failure_code: "build_mismatch" });
+    const after = await production(r);
+    expect([after.entry, after.rows.serve]).toEqual([before.entry, before.rows.serve]);
+    expect(await releaseOf(r, PROD)).toMatchObject({ state: "served" });
+  });
+
+  it("refuses a publish from anything but a tested preview of the very task and commit, and from an agent", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    // A preview live but whose marker never came back: never tested.
+    const a = await live(r);
+    expect((await publish(r, a.id, { task: TASK_A, commit: COMMIT_A })).code).toBe("preview_not_served");
+    await alarmPass(stub(r.id));
+    await serveMarker(previewHost(a.label), a.script);
+    expect((await pass(r)).outcome).toBe("served");
+    // Production's own release, and one the room doesn't have, are answered alike.
+    expect((await publish(r, PROD, { task: TASK_A, commit: COMMIT_A })).code).toBe("preview_release_not_found");
+    expect((await publish(r, `rel_${"9".repeat(32)}`, { task: TASK_A, commit: COMMIT_A })).code).toBe("preview_release_not_found");
+    expect((await publish(r, "rel_nope", { task: TASK_A, commit: COMMIT_A })).code).toBe("invalid_argument");
+    expect((await publish(r, a.id, { task: TASK_B, commit: COMMIT_B })).code).toBe("preview_task_mismatch");
+    expect((await publish(r, a.id, { task: TASK_A, commit: COMMIT_B })).code).toBe("preview_commit_mismatch");
+    // A preview whose build was never recorded.
+    await inRoom(r.id, (sql) => { sql.exec("DELETE FROM release_build_storage WHERE release_id = ?", a.id); sql.exec("DELETE FROM release_build WHERE release_id = ?", a.id); });
+    expect((await publish(r, a.id, { task: TASK_A, commit: COMMIT_A })).code).toBe("preview_build_missing");
+    // An agent that may ask for a release may not name a preview (decision 253).
+    const agent: Who = { ...AGENT, linker: { person: OWNER.id, since: 1 } };
+    await grantDeploy(r, agent);
+    expect((await publish(r, a.id, { who: agent, task: TASK_A, commit: COMMIT_A })).code).toBe("invalid_argument");
+    expect(await all(r.id, "SELECT release_id FROM release_from_preview")).toEqual([]);
+  });
+
+  it("keeps approval a person's, and a release not made from a preview takes no build", async () => {
+    const r = await room();
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    const build = (await buildOf(r, b.id))!;
+    const asked = await publish(r, b.id);
+    expect((await approve(r, asked.body.id, { build }, AGENT)).code).toBe("not_allowed");
+    expect((await approve(r, asked.body.id, { build }, MEMBER)).code).toBe("not_allowed");
+    expect((await approve(r, asked.body.id, { build }, OUTSIDER)).code).toBe("workspace_not_found");
+    expect(await releaseOf(r, asked.body.id)).toMatchObject({ state: "awaiting_approval" });
+    expect((await approve(r, asked.body.id, { build }, ADMIN)).body.state).toBe("queued");
+    // A release asked for as before has nulls for the dialog's preview fields, and refuses a build.
+    const plain = await api(OWNER, "POST", `/v1/workspaces/${r.id}/releases`, { task_id: TASK_A, commit_sha: COMMIT_A });
+    expect(plain.status, JSON.stringify(plain.body)).toBe(200);
+    expect((await approvals(r)).find((x) => x.id === plain.body.id)).toMatchObject({ from_preview: null, build_id: null, preview_served_at: null, storage_warning: null, preview_replaced: null, preview_notice: null, storage_notice: null });
+    expect((await approve(r, plain.body.id, { build })).code).toBe("invalid_argument");
+    expect((await approve(r, plain.body.id, {})).body.state).toBe("queued");
+  });
+
+  it("can't publish a private room's preview: the room must be public, as for any release (decision 251)", async () => {
+    const r = await room({ visibility: "private" });
+    await grantDeploy(r);
+    const b = await served(r, TASK_B, COMMIT_B);
+    expect((await publish(r, b.id)).code).toBe("release_needs_public_room");
   });
 });

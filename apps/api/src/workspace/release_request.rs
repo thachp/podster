@@ -193,19 +193,23 @@ fn refused(refusal: RequestRefusal) -> ApiError {
     ApiError::api(status, code)
 }
 
-/// What the request names: `{ task_id, commit_sha }`, and `environment` only if it is the one there is. Nothing else.
+/// What the request names: `{ task_id, commit_sha }`, `environment` only if it is the one there is, and `from_preview`
+/// for a publish of a preview's build (M8 step 9). Nothing else.
 struct Named {
     task_id: String,
     commit_sha: String,
     environment: String,
+    from_preview: Option<String>,
 }
 
 fn parse(body: &Value) -> R<Named> {
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
-    if fields
-        .keys()
-        .any(|key| !matches!(key.as_str(), "task_id" | "commit_sha" | "environment"))
-    {
+    if fields.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "task_id" | "commit_sha" | "environment" | "from_preview"
+        )
+    }) {
         return Err(ApiError::invalid_argument());
     }
     let task_id = body["task_id"]
@@ -219,10 +223,22 @@ fn parse(body: &Value) -> R<Named> {
         None => podster_core::release::ENVIRONMENT,
         Some(value) => value.as_str().ok_or_else(ApiError::invalid_argument)?,
     };
+    // A preview release's ID, by its form; anything else names nothing.
+    let from_preview = match body.get("from_preview") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|id| podster_core::release::is_release_id(id))
+                .ok_or_else(ApiError::invalid_argument)?
+                .to_owned(),
+        ),
+    };
     Ok(Named {
         task_id: task_id.to_owned(),
         commit_sha: commit_sha.to_owned(),
         environment: environment.to_owned(),
+        from_preview,
     })
 }
 
@@ -434,15 +450,35 @@ pub(super) fn handle(
     // ended, so it neither holds its commit pending nor is offered for approval.
     release_commit::end_stale(sql, now)?;
     let named = parse(body)?;
+    // A publish of a preview's build is a person's, as everything of a preview is (decision 253): an agent's request
+    // naming one is refused as a field its route doesn't take, with the rest of the body's form.
+    if named.from_preview.is_some() && who.caller.kind != PrincipalKind::Person {
+        return Err(ApiError::invalid_argument());
+    }
     // The task, as the caller may see it: one they can't see is one that isn't there.
     let task = load_task(sql, &named.task_id)?
         .filter(|task| can_see_task(&who.caller, task))
         .ok_or_else(ApiError::task_not_found)?;
+    // A publish of a preview's build (M8 step 9; the plan's 4.3): the preview release, which must have reached `served`
+    // with its build recorded, of this very task and commit. Every rule of a request still applies after this, a public
+    // room among them (decision 251).
+    let from_preview = match &named.from_preview {
+        None => None,
+        Some(id) => Some(super::release_build::preview_source(
+            sql,
+            id,
+            &task.id,
+            &named.commit_sha,
+        )?),
+    };
     let asked = AskedFor {
         task_id: Some(&task.id),
         commit_sha: &named.commit_sha,
         environment: &named.environment,
         rollback_to: None,
+        from_preview: from_preview
+            .as_ref()
+            .map(|(id, build)| (id.as_str(), build.as_str())),
     };
     record(sql, who, &asked, reads, now)
 }
@@ -456,6 +492,8 @@ pub(super) struct AskedFor<'a> {
     pub(super) commit_sha: &'a str,
     pub(super) environment: &'a str,
     pub(super) rollback_to: Option<&'a str>,
+    /// For a publish of a preview's build: the preview release and its build, recorded beside the release.
+    pub(super) from_preview: Option<(&'a str, &'a str)>,
 }
 
 /// Core's decision on what is asked, then the release recorded `awaiting_approval`, in the caller's transaction, with
@@ -583,6 +621,11 @@ pub(super) fn record(
             vec![id.as_str().into(), target.into()],
         )?;
         trail["rollback_to"] = target.into();
+    }
+    if let Some((preview, build)) = asked.from_preview {
+        super::release_build::record_source(sql, &id, preview, build)?;
+        trail["from_preview"] = preview.into();
+        trail["build"] = build.into();
     }
     audit(
         sql,

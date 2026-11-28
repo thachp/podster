@@ -62,7 +62,8 @@ const REL = (n: number) => `rel_${String(n).padStart(32, "0")}`;
 const SLOT = (n: number) => `pvw_${String(n).padStart(32, "0")}`;
 const SESSION = (n: number) => `pvs_${String(n).padStart(32, "0")}`;
 const BUILD = `bld_${"b".repeat(32)}`;
-const TABLES = ["release_environment", "preview_slot", "release_build", "release_from_preview", "preview_session", "preview_access_ask", "custom_hostname_role"];
+// Step 66 (M8 step 9), the build's storage warning, is held here with step 61's tables it sits beside.
+const TABLES = ["release_environment", "preview_slot", "release_build", "release_from_preview", "preview_session", "preview_access_ask", "custom_hostname_role", "release_build_storage"];
 
 /** A production label with two releases, and an open custom hostname request, as a room before previews holds them. */
 function seed(sql: any) {
@@ -86,7 +87,7 @@ describe("room schema steps 59 to 64 (M8 step 5)", () => {
     await inRoom(id, (sql) => {
       seed(sql);
       for (const table of TABLES) sql.exec(`DROP TABLE ${table}`);
-      sql.exec("UPDATE schema_version SET version = version - 7");
+      sql.exec("UPDATE schema_version SET version = version - 8");
     });
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
     expect(await schemaVersion(id)).toBe(latest);
@@ -98,12 +99,13 @@ describe("room schema steps 59 to 64 (M8 step 5)", () => {
       sql.exec("INSERT INTO preview_slot (id, label, current, access_epoch, default_release_id, default_version, created_at, updated_at) VALUES (?, ?, 1, 3, ?, 1, 1, 1)", SLOT(1), PREVIEW_LABEL, REL(1));
       sql.exec("INSERT INTO release_build (release_id, build_id, tree_sha, form_version) VALUES (?, ?, ?, 'form/1')", REL(1), BUILD, "d".repeat(40));
       sql.exec("INSERT INTO release_from_preview (release_id, preview_release_id, build_id) VALUES (?, ?, ?)", REL(2), REL(1), BUILD);
+      sql.exec("INSERT INTO release_build_storage (release_id, names_storage) VALUES (?, 1)", REL(1));
       sql.exec("INSERT INTO preview_session (sid, person_id, created_at, expires_at) VALUES (?, ?, 1000, 3601000)", SESSION(1), OWNER.id);
       sql.exec("INSERT INTO preview_access_ask (at) VALUES (5)");
       sql.exec("INSERT INTO custom_hostname_role (request_id, role) VALUES ('hnr_ps_1', 'preview')");
       return TABLES.map((t) => sql.exec(`SELECT * FROM ${t}`).toArray());
     });
-    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 7"));
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 8"));
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
     expect(await schemaVersion(id)).toBe(latest);
     expect(await inRoom(id, (sql) => TABLES.map((t) => sql.exec(`SELECT * FROM ${t}`).toArray()))).toEqual(rows);
@@ -237,7 +239,7 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
       sql.exec("INSERT INTO app_label SELECT * FROM app_label_was");
       sql.exec("DROP TABLE app_label_was");
       sql.exec("PRAGMA defer_foreign_keys = OFF");
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
       return naming(sql);
     });
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
@@ -258,14 +260,14 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
     const latest = await schemaVersion(id);
     await inRoom(id, (sql) => {
       sql.exec("CREATE TABLE fail_migration_reference (x INTEGER)");
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(500);
     expect(await inRoom(id, (sql) => [
       sql.exec("SELECT version FROM schema_version").one().version,
       sql.exec("SELECT count(*) AS n FROM script_delete").one().n,
       sql.exec("PRAGMA defer_foreign_keys").one().defer_foreign_keys,
-    ])).toEqual([latest - 2, 0, 0]);
+    ])).toEqual([latest - 3, 0, 0]);
     // Without the failpoint the same migration runs.
     await inRoom(id, (sql) => sql.exec("DROP TABLE fail_migration_reference"));
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
@@ -297,7 +299,7 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
     });
     expect(result).toEqual({ current: [{ label: LABEL }], previewCurrent: true, productionLive: true, badKind: true, reused: true, retired: false });
     const rows = await inRoom(id, (sql) => [labels(sql), naming(sql)]);
-    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 2"));
+    await inRoom(id, (sql) => sql.exec("UPDATE schema_version SET version = version - 3"));
     expect(await api("GET", `/v1/workspaces/${id}`)).toBe(200);
     expect(await schemaVersion(id)).toBe(latest);
     expect(await inRoom(id, (sql) => [labels(sql), naming(sql)])).toEqual(rows);
@@ -312,11 +314,11 @@ describe("room schema step 64: a preview label is a row of app_label (M8 step 5)
       sql.exec("INSERT INTO preview_slot (id, label, created_at, deleted_at, updated_at) VALUES (?, ?, 1, 1, 1)", SLOT(1), LABEL);
       // The room records, in the same request, whether references were still deferred once the migration failed.
       sql.exec("CREATE TABLE report_migration_deferral (deferred INTEGER NOT NULL)");
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     expect(await api("GET", `/v1/workspaces/${id}`)).not.toBe(200);
     expect(await inRoom(id, (sql) => [sql.exec("SELECT version FROM schema_version").one().version, sql.exec("SELECT label FROM app_label").toArray(), sql.exec("SELECT count(*) AS n FROM release").one().n]))
-      .toEqual([latest - 2, [{ label: LABEL }], 2]);
+      .toEqual([latest - 3, [{ label: LABEL }], 2]);
     // Step 64 failed after deferring references, and the migration still turned deferred checking off before the
     // request went on: seen in that same request, and after it.
     expect(await inRoom(id, (sql) => sql.exec("SELECT deferred FROM report_migration_deferral").toArray())).toEqual([{ deferred: 0 }]);

@@ -285,13 +285,14 @@ pub(super) fn told(sql: &SqlStorage, actor: &str) -> R<Vec<String>> {
 // What the room shows of its preview (`getPreview`, the plan's 9.1; a task's release status, the plan's 9.2)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// A preview release as the contract's `PreviewRelease` gives it. The build ID and the storage warning are M8 step 9's
-/// and the plan's 5.2.1's, recorded by nothing yet, so each is null until the job has them.
+/// A preview release as the contract's `PreviewRelease` gives it. The build ID and the storage warning are recorded by
+/// the job once it has fetched the build (M8 step 9, `release_build`), so each is null until then.
 fn release_view(sql: &SqlStorage, release_id: &str) -> R<Value> {
     let row = rows(
         sql,
         "SELECT id, task_id, commit_sha, state, requested_by, requested_at, served_at, failure_code, finished_at,
-           (SELECT build_id FROM release_build WHERE release_id = release.id) AS build_id
+           (SELECT build_id FROM release_build WHERE release_id = release.id) AS build_id,
+           (SELECT names_storage FROM release_build_storage WHERE release_id = release.id) AS names_storage
          FROM release WHERE id = ?",
         vec![release_id.into()],
     )?
@@ -300,7 +301,8 @@ fn release_view(sql: &SqlStorage, release_id: &str) -> R<Value> {
     .ok_or_else(|| ApiError::internal("a preview release isn't there"))?;
     Ok(json!({
         "id": row["id"], "task_id": row["task_id"], "commit_sha": row["commit_sha"], "state": row["state"],
-        "build_id": row["build_id"], "storage_warning": Value::Null, "requested_by": row["requested_by"],
+        "build_id": row["build_id"],
+        "storage_warning": row["names_storage"].as_i64().map_or(Value::Null, |flag| Value::from(flag == 1)), "requested_by": row["requested_by"],
         "requested_at": row["requested_at"], "served_at": row["served_at"],
         "failure_code": if row["state"] == "failed" { row["failure_code"].clone() } else { Value::Null },
         "finished_at": row["finished_at"],
@@ -310,6 +312,15 @@ fn release_view(sql: &SqlStorage, release_id: &str) -> R<Value> {
 /// `PreviewRelease`, for the release a request just recorded.
 pub(super) fn view_release(sql: &SqlStorage, release_id: &str) -> R<Value> {
     release_view(sql, release_id)
+}
+
+/// The preview release the room's current slot serves, confirmed by its marker; `None` with no slot or none served.
+/// What an approval of a release made from a preview compares its own preview release with (M8 step 9).
+pub(super) fn serving_now(sql: &SqlStorage) -> R<Option<String>> {
+    match current(sql)? {
+        Some(stored) => serving_release(sql, &stored.slot),
+        None => Ok(None),
+    }
 }
 
 /// The release the slot's hosts serve, confirmed by its marker: the last working preview (core's `serving`), and only

@@ -139,7 +139,7 @@ describe("asking for a release (M6 step 6)", () => {
     for (const table of ["serve_state", "release_job", "release_upload", "script_delete"]) expect(await all(r.room, `SELECT * FROM ${table}`), table).toEqual([]);
     // It is offered to those who may approve it.
     const offered = await switchedOn(() => api(r.owner, "GET", `/v1/workspaces/${r.room}/release-approvals`));
-    expect(offered.body).toEqual({ releases: [{ id, task_id: TASK, commit_sha: SHA, state: "awaiting_approval", requested_by: r.requester.id, requested_at: T }], more: false });
+    expect(offered.body).toEqual({ releases: [{ id, task_id: TASK, commit_sha: SHA, state: "awaiting_approval", requested_by: r.requester.id, requested_at: T, from_preview: null, build_id: null, preview_served_at: null, storage_warning: null, preview_replaced: null, preview_notice: null, storage_notice: null }], more: false });
   });
 
   it("tells people only: an agent holding the admin role hears nothing of a request it could never approve", async () => {

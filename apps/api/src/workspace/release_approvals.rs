@@ -10,6 +10,11 @@
 //! **What** is every release in `awaiting_approval` that started under the room's current release epoch while release is
 //! on in the room: one under an earlier epoch is ended by the room's bookkeeping (`release_commit::end_stale`) and is
 //! never offered. IDs, a commit and times only; nothing an agent wrote. A read: nothing is written or logged.
+//!
+//! **A release made from a preview** (M8 step 9; the preview plan's section 10) also shows what its approval dialog
+//! needs: the preview release and its build, which approving must send back; when that build reached the preview; its
+//! storage warning; whether the room's preview now shows another build; and Podster's fixed words for how a preview
+//! differs from production and for the storage warning. Any other release has nulls there.
 use super::*;
 use podster_core::release::ReleaseState;
 use podster_policy::release::{release_view, ReleaseView};
@@ -31,19 +36,26 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
         vec![awaiting.into(), (LISTED + 1).into()],
     )?;
     let more = found.len() as i64 > LISTED;
-    let releases: Vec<Value> = found
+    let releases = found
         .iter()
         .take(LISTED as usize)
         .map(|row| {
-            json!({
+            let mut release = json!({
                 "id": text(&row["id"]),
                 "task_id": text(&row["task_id"]),
                 "commit_sha": text(&row["commit_sha"]),
                 "state": awaiting,
                 "requested_by": text(&row["requested_by"]),
                 "requested_at": int(&row["requested_at"]),
-            })
+            });
+            // What the approval dialog shows of a release made from a preview (M8 step 9), nulls for any other.
+            let from =
+                super::release_build::approval_view(sql, &text(&row["id"]).unwrap_or_default())?;
+            if let (Some(release), Some(from)) = (release.as_object_mut(), from.as_object()) {
+                release.extend(from.clone());
+            }
+            Ok(release)
         })
-        .collect();
+        .collect::<R<Vec<Value>>>()?;
     Ok(json!({ "releases": releases, "more": more }))
 }

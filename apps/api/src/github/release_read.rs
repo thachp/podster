@@ -152,11 +152,13 @@ pub(crate) fn hash_of(served_type: &str, bytes: &[u8]) -> Option<String> {
     manifest_hash(&format!("{:x}", hasher.finalize()))
 }
 
-/// What a release holds, from the two tree reads: its files in path order, and their bytes in all.
+/// What a release holds, from the two tree reads: its files in path order, their bytes in all, and the git tree SHA of
+/// the release directory, which a build is named by (M8 step 9; `podster_core::preview_build`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReadPlan {
     pub files: Vec<ReadFile>,
     pub total_bytes: u64,
+    pub tree: String,
 }
 
 impl ReadPlan {
@@ -414,6 +416,7 @@ impl<'a> ReleaseReader<'a> {
         Ok(ReadPlan {
             files,
             total_bytes: plan.total_bytes,
+            tree: directory,
         })
     }
 

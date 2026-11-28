@@ -642,3 +642,177 @@ fn the_production_job_goes_live_only_on_the_recorded_build() {
     assert_eq!(publish_build_check("bld_x", "bld_x"), Err(BuildMismatch));
     assert_eq!(publish_build_check("", ""), Err(BuildMismatch));
 }
+
+// --- M8 step 9: the build of what the job fetched, the storage warning and the dialog's words ---------------------------
+
+fn planned(path: &str) -> podster_core::release_tree::PlannedFile {
+    podster_core::release_tree::PlannedFile {
+        path: path.to_owned(),
+        size: 1,
+        sha: "0".repeat(40),
+    }
+}
+
+fn fetched() -> Vec<FetchedFile<'static>> {
+    vec![
+        FetchedFile {
+            path: "index.html",
+            manifest_hash: H1,
+            sha256: M2,
+        },
+        FetchedFile {
+            path: "assets/app.css",
+            manifest_hash: H2,
+            sha256: M2,
+        },
+        FetchedFile {
+            path: "worker/index.js",
+            manifest_hash: H2,
+            sha256: M1,
+        },
+        FetchedFile {
+            path: "worker/lib.mjs",
+            manifest_hash: H1,
+            sha256: M2,
+        },
+        FetchedFile {
+            path: "podster.app.json",
+            manifest_hash: H1,
+            sha256: M1,
+        },
+    ]
+}
+
+fn code_form() -> podster_core::app_code::UploadForm {
+    use podster_core::app_code::{CodeRelease, Module, UploadForm};
+    UploadForm::Code(CodeRelease {
+        main: "worker/index.js".to_owned(),
+        wants_store: true,
+        modules: vec![
+            Module {
+                name: "worker/index.js".to_owned(),
+                file: planned("worker/index.js"),
+            },
+            Module {
+                name: "worker/lib.mjs".to_owned(),
+                file: planned("worker/lib.mjs"),
+            },
+        ],
+        static_files: vec![planned("assets/app.css"), planned("index.html")],
+    })
+}
+
+/// The job's build of a release with code is exactly the build of its served static files, its modules by the SHA-256 of
+/// their bytes, its entry and its store: the manifest is neither a served file nor a module, so it is left out.
+#[test]
+fn the_build_of_what_was_fetched_is_the_build_of_its_served_files_and_modules() {
+    let f = files();
+    let m = modules();
+    assert_eq!(
+        build_id_of(&code_form(), COMMIT, TREE, &fetched()).unwrap(),
+        build_id(&code_inputs(&f, &m)).unwrap()
+    );
+}
+
+#[test]
+fn the_build_of_a_static_release_is_every_file_fetched() {
+    let all = &fetched()[..2];
+    let f = files();
+    assert_eq!(
+        build_id_of(
+            &podster_core::app_code::UploadForm::Static,
+            COMMIT,
+            TREE,
+            all
+        )
+        .unwrap(),
+        build_id(&static_inputs(&f)).unwrap()
+    );
+}
+
+#[test]
+fn a_module_that_was_never_fetched_has_no_build() {
+    let partial: Vec<FetchedFile> = fetched()
+        .into_iter()
+        .filter(|file| file.path != "worker/lib.mjs")
+        .collect();
+    assert_eq!(
+        build_id_of(&code_form(), COMMIT, TREE, &partial),
+        Err(BuildRefusal::ModuleHash)
+    );
+}
+
+#[test]
+fn any_change_to_a_served_byte_or_a_module_changes_the_build() {
+    let base = build_id_of(&code_form(), COMMIT, TREE, &fetched()).unwrap();
+    let mut changed = fetched();
+    changed[0].manifest_hash = "0123456789abcdef0123456789abcdef";
+    assert_ne!(
+        build_id_of(&code_form(), COMMIT, TREE, &changed).unwrap(),
+        base
+    );
+    let mut changed = fetched();
+    changed[3].sha256 = M1;
+    assert_ne!(
+        build_id_of(&code_form(), COMMIT, TREE, &changed).unwrap(),
+        base
+    );
+    // The manifest's own hashes are no part of it: what it decides is the entry, the modules and the store.
+    let mut changed = fetched();
+    changed[4].manifest_hash = H2;
+    assert_eq!(
+        build_id_of(&code_form(), COMMIT, TREE, &changed).unwrap(),
+        base
+    );
+}
+
+#[test]
+fn the_upload_forms_text_is_its_four_parts() {
+    assert_eq!(
+        UPLOAD_FORM.text(),
+        format!(
+            "{} {} {} {}",
+            podster_core::app_code::COMPATIBILITY_DATE,
+            podster_core::app_code::ASSETS_CONFIG,
+            podster_core::app_code::STORE_BINDING_NAME,
+            podster_core::app_code::MODULE_UPLOAD_TYPE
+        )
+    );
+    assert!(UPLOAD_FORM.text().len() <= 256);
+}
+
+/// The plan's 5.2.1: a string search of a build's text files for five names, which never blocks.
+#[test]
+fn the_storage_warning_is_a_search_of_text_for_five_names() {
+    for name in [
+        "localStorage",
+        "sessionStorage",
+        "indexedDB",
+        "document.cookie",
+        "caches.open",
+    ] {
+        assert!(STORAGE_NAMES.contains(&name));
+        let text = format!("<script>window.{name}('x')</script>");
+        assert!(names_browser_storage(text.as_bytes()), "{name}");
+    }
+    assert_eq!(STORAGE_NAMES.len(), 5);
+    assert!(!names_browser_storage(b"<p>preview A</p>\n"));
+    // Case matters, as it does to a browser: these aren't the names.
+    assert!(!names_browser_storage(b"LOCALSTORAGE localstorage"));
+    // A file that isn't text is never searched.
+    let mut binary = b"localStorage".to_vec();
+    binary.push(0xff);
+    assert!(!names_browser_storage(&binary));
+}
+
+#[test]
+fn the_dialogs_words_are_the_plans() {
+    assert_eq!(
+        STORAGE_WARNING_NOTICE,
+        "This build may use browser storage, which production apps don't have."
+    );
+    assert_eq!(
+        PREVIEW_DIFFERENCES_NOTICE,
+        "This build ran in the preview with browser storage and its own origin. In production it runs sandboxed, with neither, so anything that worked only because of them will break."
+    );
+}

@@ -101,6 +101,7 @@ mod public_claims;
 mod readiness_upkeep;
 mod release_approval;
 mod release_approvals;
+mod release_build;
 mod release_commit;
 mod release_config;
 mod release_driver;
@@ -5761,7 +5762,14 @@ impl Workspace {
                             release_approval::approve_standing(sql, who, &again)
                         },
                         move |sql, who, _| {
-                            release_approval::approve(sql, who, &release, &reads, domain.as_deref())
+                            release_approval::approve(
+                                sql,
+                                who,
+                                &release,
+                                &body,
+                                &reads,
+                                domain.as_deref(),
+                            )
                         },
                     )
                 } else {

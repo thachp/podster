@@ -110,6 +110,7 @@ pub(super) fn handle(
             commit_sha: &commit_sha,
             environment: &environment,
             rollback_to: Some(target_id),
+            from_preview: None,
         },
         reads,
         now,

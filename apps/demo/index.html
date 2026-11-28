@@ -872,6 +872,7 @@ function tabs(items, cur, act, o) {
 }
 /* View switch: same content in another layout. items: [[value, label, icon]] with icon in VIEW_ICONS. Sits in the page header next to the main button. */
 const VIEW_ICONS = {
+  map: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8.3 7 15.6 7M7.2 8.2l3.6 7.6M16.9 9.2l-3.7 6.6"/></svg>',
   board: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/></svg>',
   list: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke-width="3"/></svg>',
   timeline: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h9M7 12h10M12 18h9"/></svg>'
@@ -1826,7 +1827,7 @@ const LINKS = {
 function history() {
   const h = S.hist;
   const F = [['all', 'Everything'], ['tasks', 'Tasks'], ['releases', 'Releases'], ['team', 'Team']];
-  const hTabs = '<div class="ctlrow">' + tabs([['list', 'What happened'], ['map', 'Who works with whom']], h.tab, 'hist-tab', { id: 'hist', label: 'History view', key: 't' }) + (h.tab === 'list' ? showFilter(F, h.f, 'hist-f', 'Show') : '') + '</div>';
+  const hCtl = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' + (h.tab === 'list' ? showFilter(F, h.f, 'hist-f', 'Show') : '') + viewSwitch([['list', 'What happened', 'list'], ['map', 'Who works with whom', 'map']], h.tab, 'hist-tab', 'History view') + '</div>';
   let body;
   if (h.tab === 'list') {
     const rows = HIST.filter((e) => h.f === 'all' || e[2] === h.f);
@@ -1843,7 +1844,7 @@ function history() {
       '<div class="panel" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><span class="label">' + l.label + '</span><h2 style="font-size:18px">' + l.a + ' \u2194 ' + l.b + '</h2><span class="muted">' + l.n + '</span><div class="kvlist">' + l.items.map((x) => '<div><span style="color:var(--text)">' + x + '</span></div>').join('') + '</div>' +
       '<div class="chips">' + Object.keys(LINKS).map((k) => '<button class="btn' + (h.link === k ? ' primary' : ' ghost') + '" style="height:28px;font-size:12.5px" data-act="hist-link" data-k="' + k + '">' + LINKS[k].a.split(' ')[0] + ' \u2194 ' + LINKS[k].b.split(' ')[0] + '</button>').join('') + '</div></div></div>';
   }
-  return '<div class="head"><div><h1>History</h1><p>Everything that happened in Customer order tracker.</p></div></div>' + hTabs + tabPanel('hist', h.tab, body);
+  return '<div class="head"><div><h1>History</h1><p>' + (h.tab === 'map' ? 'Who works with whom in Customer order tracker. Click a line to see what passed between them.' : 'Everything that happened in Customer order tracker.') + '</p></div>' + hCtl + '</div>' + body;
 }
 
 /* ---------- Contributor: First time ---------- */
@@ -2820,7 +2821,7 @@ document.addEventListener('click', (e) => {
     case 'brief-pub': S.brief.pubAsk = true; break;
     case 'brief-pub-no': S.brief.pubAsk = false; break;
     case 'brief-pub-yes': S.brief.pub = !S.brief.pub; S.brief.pubAsk = false; toast(S.brief.pub ? 'Public. It\'s listed in Explore.' : 'Private again.'); break;
-    case 'hist-tab': S.hist.tab = el.dataset.t; break;
+    case 'hist-tab': S.hist.tab = el.dataset.v || el.dataset.t; break;
     case 'hist-f': S.hist.f = el.dataset.f; break;
     case 'hist-link': S.hist.link = el.dataset.k; break;
     case 'perm': { const k3 = el.dataset.k; const cur = Object.assign({}, S.perm.saved, S.perm.draft || {}); S.perm.draft = Object.assign({}, S.perm.draft || {}, { [k3]: !cur[k3] }); break; }

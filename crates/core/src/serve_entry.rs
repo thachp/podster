@@ -124,10 +124,9 @@ pub fn custom_entry_script_kind<'a>(host: &str, value: &'a str) -> Option<(HostK
 /// namespace's binding and an unmarked one only through production's, so neither can name the other's script (M8 step
 /// 8). The host's kind comes from its entry, never its name.
 ///
-/// **The code mark stays in one place.** The preview prefix is built and read by [`preview_prefix`] and
-/// [`split_preview`] alone, and what follows it is written and read only by the production functions above, so the
-/// code mark is still put on in [`marked`] and taken off in [`unmarked`] and nowhere else
-/// (`apps/content/test/entries.test.ts` holds that).
+/// **The code mark stays in one place.** What follows the preview prefix is written and read only by the production
+/// functions above, so the code mark is still put on in [`marked`] and taken off in [`unmarked`] and nowhere else
+/// (`apps/content/test/entries.test.ts` counts those two sites).
 pub const PREVIEW_MARK: &str = "preview:";
 
 /// One preview entry, read back: the slot it names, its access epoch, and the kind and script of its production form.
@@ -156,17 +155,13 @@ fn parse_epoch(text: &str) -> Option<u64> {
 /// [`crate::preview::MAX_ACCESS_EPOCH`]; `None` otherwise, so nothing else is ever written.
 fn preview_prefix(slot: &str, epoch: u64) -> Option<String> {
     (crate::preview::is_slot_id(slot) && epoch <= crate::preview::MAX_ACCESS_EPOCH)
-        .then(|| [PREVIEW_MARK, slot, ":", &epoch.to_string(), ":"].concat())
+        .then(|| format!("{PREVIEW_MARK}{slot}:{epoch}:"))
 }
 
 /// The slot, the epoch and the production form left once the mark, the slot and the epoch are taken off: once, from
 /// the start only, each part exactly its written form.
 fn split_preview(value: &str) -> Option<(&str, u64, &str)> {
-    let (mark, rest) = value.split_at_checked(PREVIEW_MARK.len())?;
-    if mark != PREVIEW_MARK {
-        return None;
-    }
-    let (slot, rest) = rest.split_once(':')?;
+    let (slot, rest) = value.strip_prefix(PREVIEW_MARK)?.split_once(':')?;
     let (epoch, rest) = rest.split_once(':')?;
     if !crate::preview::is_slot_id(slot) {
         return None;

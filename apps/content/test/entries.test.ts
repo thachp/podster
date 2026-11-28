@@ -19,10 +19,15 @@ describe("the mark, bound to the Rust source", () => {
 
   it("is taken off as core takes it off: once, from the start only, and only there", () => {
     // Core reads the mark in exactly one place, by `strip_prefix`, and marks a value in exactly one place, before it.
-    expect(RUST.split("strip_prefix(").length - 1).toBe(1);
+    // Counted by the mark itself, so other prefixes in the file (the preview form's, M8) don't count, and any second
+    // site that takes the code mark off or puts it on, by these calls or by naming the constant anywhere else, does.
+    expect(RUST.split("strip_prefix(CODE_MARK").length - 1).toBe(1);
     expect(RUST).toContain("match value.strip_prefix(CODE_MARK) {");
-    expect(RUST.split("format!(").length - 1).toBe(1);
+    expect(RUST.split('format!("{CODE_MARK}').length - 1).toBe(1);
     expect(RUST).toContain('HostKind::Code => format!("{CODE_MARK}{value}"),');
+    // Outside comments, CODE_MARK appears only in its own declaration and those two sites.
+    const code = RUST.split("\n").filter((line) => !line.trimStart().startsWith("//")).join("\n");
+    expect(code.split("CODE_MARK").length - 1).toBe(3);
     for (const word of ["trim", "to_lowercase", "to_ascii_lowercase", "rsplit", "find(CODE_MARK", "replace"]) expect(RUST, word).not.toContain(word);
   });
 });

@@ -163,5 +163,6 @@ if (html.indexOf('Only owners and admins can see live data') < 0 || html.indexOf
 __t.S.as = 'elena'; __t.S.shipTab = 'releases';
 console.log('SHIP-TABS-OK');
 __t.S.shipTab = 'infra'; location.hash = '#ship'; __t.fromHash(); if (html.indexOf('not built yet') < 0) throw new Error('infra planned'); __t.S.shipTab = 'releases';
+location.hash = '#home'; __t.fromHash(); if (html.indexOf('2026 OM.Network, LLC') < 0 || html.indexOf('2026 Podster<') >= 0) throw new Error('footer owner');
 console.log('AUTH-OK');
 process.exit(0);

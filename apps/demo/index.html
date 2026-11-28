@@ -759,6 +759,8 @@ const S = {
   ],
   newOrder: '',
   ship: { live: 3, top: 3, liveDay: 'Tue', phase: null, step: 0, confirm: false, back: false, rbAsk: null, rolledFrom: null },
+  /* M8 preview slot (docs/m8-preview-plan.md, section 10). One preview a room: what it serves, the replacement in flight or failed, its custom hostname. */
+  prev: { serving: { task: 15, commit: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a', build: 'bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92', at: 'Tuesday 5:20 PM', storage: true, by: 'You' }, next: null, failed: null, deleting: false, pick: '16', ask: null, pub: null, priv: false, host: { name: 'preview.bakeryonelm.example', proof: 'ok', tls: 'ok' }, hostDraft: '', label: 'p-7f3k2q9m.podster.site' },
   permReq: { state: 'open', scope: 'task', denyOpen: false, note: '' },
   invite: 'none',
   run: { state: 'request', lines: [], pct: 0, timer: null, invite: 'open' },
@@ -784,7 +786,7 @@ const S = {
   ] },
   q: { state: 'open', answer: '', custom: '' },
   pairing: { step: 1, kind: 'claude', code: 'KX7P-42QD', name: 'Review Agent', key: 'waiting', ask: true, limit: '30', spend: '2', test: 'none', done: false },
-  trouble: { paused: false, check: false, release: false, limit: false, offline: false, removed: false, spend: false },
+  trouble: { paused: false, check: false, release: false, limit: false, offline: false, removed: false, spend: false, preview: false },
   notes: [
     { kind: 'Worth fixing', text: 'The status buttons are `24px` tall. On a phone, people need about **44px** to tap them reliably.', fix: 'Make the status buttons at least 44px tall so they are easy to tap on a phone.', st: 'open' },
     { kind: 'Small thing', text: 'With no orders yet, the list shows a blank area. A short \u201cNo orders yet\u201d line would help.', fix: 'Show \u201cNo orders yet\u201d when the list is empty.', st: 'open' }
@@ -855,10 +857,10 @@ function orderTracker(interactive) {
 /* ---------- Account menu ---------- */
 function me() { return isK() ? { av: 'SR', name: 'Sam Rivera', email: 'sam@example.com' } : S.as === 'marco' ? { av: 'MD', name: 'Marco Diaz', email: 'marco@bakeryonelm.example' } : { av: 'EL', name: 'Elena Lopez', email: 'elena@bakeryonelm.example' }; }
 const member = () => !isK() && S.as === 'marco';
-const OWNER_ACTS = ['release-ask', 'release-go', 'rb-ask', 'rb-go', 'rb-redo', 'pol-toggle', 'pol-set', 'pol-host-rm', 'pol-save', 'repo-toggle', 'repo-ask', 'repo-on', 'repo-sam-no', 'invite-open', 'arch-ask', 'unarchive', 'env-add', 'env-edit', 'env-rm', 'dom-rm', 'dom-check', 'perm-open', 'plan-open', 'org-invite', 'org-role', 'org-edit', 'org-del', 'del-ask'];
+const OWNER_ACTS = ['prev-ask', 'prev-go', 'prev-pub-go', 'pub-open', 'prev-host-rm', 'rb-ask', 'rb-go', 'rb-redo', 'pol-toggle', 'pol-set', 'pol-host-rm', 'pol-save', 'repo-toggle', 'repo-ask', 'repo-on', 'repo-sam-no', 'invite-open', 'arch-ask', 'unarchive', 'env-add', 'env-edit', 'env-rm', 'dom-rm', 'dom-check', 'perm-open', 'plan-open', 'org-invite', 'org-role', 'org-edit', 'org-del', 'del-ask'];
 function memberView(html, what) {
   if (!member()) return html;
-  html = html.replace(new RegExp('data-act="(' + OWNER_ACTS.join('|') + ')"', 'g'), 'disabled aria-disabled="true" title="Only Elena can do this" data-act="$1"').replace(/data-act-change="(pol-sel)"/g, 'disabled data-act-change="$1"').replace(/<form class="row" data-form="(pol-host|dom-add)"/g, '<form class="row" style="display:none" data-form="$1"');
+  html = html.replace(new RegExp('data-act="(' + OWNER_ACTS.join('|') + ')"', 'g'), 'disabled aria-disabled="true" title="Only Elena can do this" data-act="$1"').replace(/data-act-change="(pol-sel)"/g, 'disabled data-act-change="$1"').replace(/<form class="row" data-form="(pol-host|dom-add|prev-host)"/g, '<form class="row" style="display:none" data-form="$1"').replace(/data-act-change="(prev-pick)"/g, 'disabled data-act-change="$1"');
   return '<div class="confirm" style="flex-direction:row;align-items:center;gap:12px;flex-wrap:wrap"><span class="av" style="width:24px;height:24px;font-size:10px">MD</span><span style="flex:1;min-width:200px">You\'re a member here. Only Elena can ' + what + '.</span><button class="btn ghost" style="height:30px" data-act="toast" data-msg="Message sent to Elena.">Ask Elena</button></div>' + html;
 }
 function userMenu() {
@@ -1339,6 +1341,86 @@ function everything() {
 const KEYS = [['\u2318 K', 'Jump to anything, or type a command'], ['J', 'Next thing that needs you (in a task)'], ['\u2318 \u21b5', 'Save what you\'re editing'], ['Esc', 'Close or cancel'], ['\u2191 \u2193', 'Move through \u2318K results'], [']', 'Hide or show the review panel'], ['?', 'This list']];
 function setTheme(t) { S.theme = t; try { localStorage.setItem('podster-theme', t); } catch (err) {} try { if (document.documentElement) { if (t === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t; } } catch (err) {} }
 
+/* ---------- Creator: Ship, the preview (M8, docs/m8-preview-plan.md section 10) ---------- */
+const PREV_DIFF = 'A preview can use browser storage and its own address. Production apps can\'t: they run with no cookies or browser storage.';
+const PREV_STORAGE = 'This build may use browser storage, which production apps don\'t have.';
+const PREV_NOTICE = 'This build ran in the preview with browser storage and its own origin. In production it runs sandboxed, with neither, so anything that worked only because of them will break.';
+const PREV_REASONS = { marker_timeout: 'the new build didn\'t answer on the preview host within 2 minutes', build_failed: 'the build failed' };
+const shortBld = (b) => b ? b.slice(0, 12) : '';
+const prevChip = (label, need) => '<span class="stage"' + (need ? ' style="color:var(--need)"' : '') + '><span class="dot" style="background:' + (need ? 'var(--need)' : label === 'Ready' ? 'var(--done)' : label === 'None' ? 'var(--faint)' : 'var(--build)') + '"></span>' + label + '</span>';
+function previewState() {
+  const P = S.prev;
+  if (P.deleting) return 'deleting';
+  if (P.next) return P.serving ? 'replacing' : 'building';
+  if (!P.serving) return 'none';
+  return P.failed ? 'failed' : 'ready';
+}
+function previewCard() {
+  const P = S.prev; const st = previewState();
+  const label = { none: 'None', building: 'Building', replacing: 'Replacing', ready: 'Ready', failed: 'Replacement failed', deleting: 'Deleting' }[st];
+  const sv = P.serving;
+  const commitLink = (c) => '<a href="#" class="mono" data-act="toast" data-msg="Opens commit ' + esc(c.slice(0, 7)) + ' in the repository." title="' + esc(c) + '">' + esc(c.slice(0, 7)) + '</a>';
+  const taskName = (id) => { const t = T(id); return t ? esc(t.title) : 'Task #' + id; };
+  const picks = S.tasks.filter((t) => t.stage === 'done' && (t.ship === 'ready' || t.ship === 'live'));
+  const mergedOf = (id) => ({ 16: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', 15: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a' })[id] || 'c0ffee12ab34cd56ef7890ab12cd34ef56ab7890';
+  let body = '';
+  if (st === 'none') body = '<span class="muted">This workroom has no preview. Make one from a finished task\'s merged code to try it before customers do. Customers never see a preview.</span>';
+  if (st === 'deleting') body = '<span class="muted">Podster is taking the preview down: its address stops answering, and its data is deleted. Customers keep release ' + S.ship.live + '.</span>';
+  if (st === 'building') body = '<span class="muted">Building ' + taskName(P.next.task) + ' at ' + commitLink(P.next.commit) + '. It isn\'t served yet.</span>';
+  if (sv && st !== 'deleting') {
+    body += '<div class="kvlist">' +
+      '<div><span>Commit</span><span>' + commitLink(sv.commit) + ' · ' + taskName(sv.task) + '</span></div>' +
+      '<div><span>Build</span><span style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="mono" title="' + esc(sv.build) + '">' + esc(shortBld(sv.build)) + '</span><button class="btn ghost" style="height:26px" data-act="toast" data-msg="Copied ' + esc(sv.build) + '." aria-label="Copy the full build ID">Copy</button></span></div>' +
+      '<div><span>On the preview since</span><span>' + esc(sv.at) + '</span></div>' +
+      '<div><span>Address</span><span class="mono">' + esc(P.label) + '</span></div></div>' +
+      '<span class="faint" style="font-size:13px">Opening this address needs access to this room. It signs you in through Podster first.</span>';
+    if (st === 'replacing') body += '<div class="confirm"><b>Replacing with ' + commitLink(P.next.commit) + '…</b><span class="muted">The preview keeps showing ' + commitLink(sv.commit) + ' until the new build answers.</span></div>';
+    if (st === 'failed') body += '<div class="confirm" style="border-color:var(--need-line);background:var(--need-soft)"><b>Replacing with ' + commitLink(P.failed.commit) + ' failed: ' + esc(PREV_REASONS[P.failed.reason] || P.failed.reason) + '.</b><span class="muted">The preview still shows ' + commitLink(sv.commit) + '. Nothing changed for customers.</span></div>';
+    body += '<div class="confirm" style="background:transparent"><b style="font-weight:600">Previews aren\'t production</b><span class="muted">' + PREV_DIFF + '</span>' + (sv.storage ? '<span style="color:var(--need)">' + PREV_STORAGE + ' Podster only searched the code for storage names, so this may be wrong either way.</span>' : '') + '</div>';
+  }
+  // Custom preview hostname, apart from production's domain
+  let host = '';
+  if (sv && st !== 'deleting') {
+    host = P.host
+      ? '<div class="row" style="padding:10px 0;border:0"><span class="mono" style="flex:1;min-width:0">' + esc(P.host.name) + '</span><span class="stage"><span class="dot" style="background:' + (P.host.proof === 'ok' ? 'var(--done)' : 'var(--build)') + '"></span>DNS ' + (P.host.proof === 'ok' ? 'proved' : 'waiting') + '</span><span class="stage"><span class="dot" style="background:' + (P.host.tls === 'ok' ? 'var(--done)' : 'var(--build)') + '"></span>TLS ' + (P.host.tls === 'ok' ? 'active' : 'waiting') + '</span><button class="btn ghost" data-act="prev-host-rm">Disconnect</button></div>'
+      : '<form class="row" data-form="prev-host" style="padding:10px 0;border:0;gap:8px"><input class="in mono" style="flex:1;min-width:180px" data-input="prev-host" placeholder="preview.example.com" value="' + esc(P.hostDraft) + '" aria-label="Custom preview hostname"><button class="btn" type="submit">Connect</button></form>';
+    host = '<div style="display:flex;flex-direction:column;gap:4px"><span class="label">Custom preview hostname</span>' + host + '<span class="faint" style="font-size:13px">Separate from the live site\'s domain. The same name can\'t be both.</span></div>';
+  }
+  // Ask: replace / delete / publish
+  let ask = '';
+  if (P.ask === 'replace' || P.ask === 'create') {
+    const t = T(Number(P.pick));
+    ask = '<div class="confirm"><b>' + (sv ? 'Replace the preview with ' : 'Make a preview of ') + (t ? esc(t.title) : 'this task') + '?</b><span class="muted">Podster builds merged commit ' + commitLink(mergedOf(Number(P.pick))) + ' with its own data, apart from the live site\'s. ' + (sv ? 'The preview keeps showing ' + commitLink(sv.commit) + ' until the new build answers.' : 'Customers never see it.') + '</span><div style="display:flex;gap:8px"><button class="btn primary" data-act="prev-go">' + (sv ? 'Replace preview' : 'Make preview') + '</button><button class="btn ghost" data-act="prev-cancel">Cancel</button></div></div>';
+  } else if (P.ask === 'delete') {
+    ask = '<div class="confirm"><b>Delete the preview?</b><span class="muted">Its address stops answering, its custom hostname is disconnected and its data is deleted. Customers keep release ' + S.ship.live + '. A publish already asked for still waits for approval of its own build.</span><div style="display:flex;gap:8px"><button class="btn need" data-act="prev-go">Delete preview</button><button class="btn ghost" data-act="prev-cancel">Cancel</button></div></div>';
+  } else if (P.ask === 'publish') {
+    ask = '<div class="confirm"><b>Ask to publish build ' + esc(shortBld(sv.build)) + '?</b><span class="muted">Podster puts exactly this build on the live site once the owner or an admin approves it. Replacing the preview afterwards doesn\'t change what is approved.</span><div style="display:flex;gap:8px"><button class="btn primary" data-act="prev-pub-go">Ask to publish</button><button class="btn ghost" data-act="prev-cancel">Cancel</button></div></div>';
+  }
+  const busy = st === 'building' || st === 'replacing' || st === 'deleting';
+  let acts = '';
+  if (!busy && !P.ask) {
+    acts = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+      (sv ? '<a class="btn primary" href="#" data-act="toast" data-msg="Opens https://' + esc(P.label) + '/ in a new tab. It sends you through Podster to check you may see this room, then back.">Open preview</a>' : '') +
+      (picks.length ? '<select class="in" style="width:auto;height:34px" data-act-change="prev-pick" aria-label="Task to preview">' + picks.map((t) => '<option value="' + t.id + '"' + (String(t.id) === P.pick ? ' selected' : '') + '>' + esc(t.title) + ' · ' + mergedOf(t.id).slice(0, 7) + '</option>').join('') + '</select><button class="btn" data-act="prev-ask" data-v="' + (sv ? 'replace' : 'create') + '">' + (sv ? 'Replace preview' : 'Make a preview') + '</button>' : '<span class="faint">No finished task has merged code to preview yet.</span>') +
+      (sv ? '<button class="btn ghost danger" data-act="prev-ask" data-v="delete">Delete preview</button>' : '') + '</div>';
+    if (sv && !P.pub) acts += P.priv
+      ? '<span class="faint" style="font-size:13px">Only a public workroom can publish. This one is private, so its preview can\'t go live. Its owner can make it public under Settings.</span>'
+      : '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" data-act="prev-ask" data-v="publish">Publish this build</button><span class="faint" style="font-size:13px">Puts exactly build ' + esc(shortBld(sv.build)) + ' live, after approval.</span></div>';
+  }
+  const pub = P.pub ? '<div class="row" style="border:1px solid var(--need-line);border-radius:10px"><span class="dot" style="background:var(--need)"></span><span style="flex:1;min-width:0"><b style="font-weight:600">Publish of build ' + esc(shortBld(P.pub.build)) + ' waits for approval</b><br><span class="faint">Asked by ' + esc(P.pub.by) + ' just now' + (sv && sv.build !== P.pub.build ? ' · the preview now shows another build' : '') + '</span></span><button class="btn need" data-act="pub-open">Review and approve</button></div>' : '';
+  return '<section class="panel" aria-label="Preview" style="padding:18px 20px;display:flex;flex-direction:column;gap:12px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="label" style="flex:1">Preview</span>' + prevChip(label, st === 'failed') + '</div>' + body + host + ask + acts + pub +
+    '<button class="btn ghost" style="align-self:flex-start;height:28px;font-size:12.5px" data-act="prev-priv">Demo · see it in a ' + (P.priv ? 'public' : 'private') + ' workroom</button></section>';
+}
+function pubApproveModal() {
+  const P = S.prev; const r = P.pub; if (!r) return '';
+  const replaced = !P.serving || P.serving.build !== r.build;
+  return '<div class="scrim" data-act="close"></div><div class="modal" role="dialog" aria-label="Approve publishing this build"><div style="display:flex;align-items:center"><h2 style="flex:1;font-size:18px">Publish this build to customers?</h2><button class="x" data-act="close" aria-label="Close">' + I.x + '</button></div>' +
+    (replaced ? '<div class="confirm" style="border-color:var(--need-line);background:var(--need-soft)"><b>The preview now shows a different build.</b><span>You are approving ' + esc(r.build) + ', which was tested on ' + esc(r.at) + '.</span></div>' : '') +
+    '<div class="kvlist"><div><span>Build</span><span class="mono" style="word-break:break-all">' + esc(r.build) + '</span></div><div><span>Commit</span><span class="mono">' + esc(r.commit.slice(0, 12)) + '</span></div><div><span>On the preview</span><span>' + esc(r.at) + '</span></div><div><span>Asked by</span><span>' + esc(r.by) + '</span></div></div>' +
+    '<p class="muted" style="margin:0">' + PREV_NOTICE + '</p>' + (r.storage ? '<p style="margin:0;color:var(--need)">' + PREV_STORAGE + '</p>' : '') +
+    '<div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap"><button class="btn ghost" data-act="close">Cancel</button><button class="btn" data-act="pub-decline">Decline</button><button class="btn need" data-act="pub-approve">Approve build ' + esc(shortBld(r.build)) + '</button></div></div>';
+}
+
 /* ---------- Creator: Ship ---------- */
 function ship() {
   const ready = S.tasks.filter((t) => t.ship === 'ready');
@@ -1371,7 +1453,7 @@ function ship() {
   return '<div class="head"><div><h1>Ship</h1><p>Approving puts work in your code. Releasing puts it in front of customers.</p></div><a class="btn" href="#app">App settings</a></div>' +
     '<div class="panel live"><span class="pulse" aria-hidden="true"></span><div style="flex:1;min-width:200px"><b>Release ' + sh.live + ' is live' + (sh.rolledFrom ? ' again' : '') + '</b><div class="faint">orders.bakeryonelm.example \u00b7 ' + (sh.rolledFrom ? 'you went back from release ' + sh.rolledFrom + ' just now' : 'since ' + (sh.liveDay === 'Tue' ? 'Tuesday' : 'just now')) + '</div></div><a class="btn" href="#" data-act="toast" data-msg="Opens the live site in a new tab.">Open live site</a>' +
     (sh.live > 1 && !busy && !sh.rolledFrom ? '<button class="btn ghost" data-act="rb-ask" data-r="' + (sh.live - 1) + '">Something wrong? Go back\u2026</button>' : '') + '</div>' +
-    block +
+    previewCard() + block +
     '<section><span class="label">History</span><div class="panel" style="margin-top:10px">' + hist.map((n) => '<div class="row"><span class="mono" style="width:26px">r' + n + '</span><span style="flex:1">' + (REL_TIME[n] || 'Just now') + '</span>' +
       (n === sh.live ? '<span class="stage"><span class="dot" style="background:var(--done)"></span>Live</span>'
         : n === sh.rolledFrom ? '<span class="stage faint"><span class="dot" style="background:var(--faint)"></span>Taken off \u00b7 changes kept</span>'
@@ -2237,6 +2319,7 @@ function overlays() {
         : '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary lg" data-act="perm-allow">Allow</button><button class="btn lg" data-act="perm-deny-open">Don\'t allow\u2026</button></div>') +
       '<p class="faint" style="font-size:13px;margin:0"><a href="#agent">See everything Coding Agent may do</a></p></aside>';
   }
+  if (S.modal === 'pub-approve') h += pubApproveModal();
   if (S.modal === 'keys') {
     h += '<div class="scrim' + (S.modalEnter ? ' enter' : '') + '" data-act="close"></div><div class="modal' + (S.modalEnter ? ' enter' : '') + '" role="dialog" aria-label="Keyboard shortcuts"><div style="display:flex;align-items:center"><h2 style="flex:1;font-size:18px">Keyboard shortcuts</h2><button class="x" data-act="close" aria-label="Close">' + I.x + '</button></div><div class="kvlist">' +
       KEYS.map((x) => '<div style="align-items:center"><span style="color:var(--text)">' + x[1] + '</span><span>' + x[0].split(' ').map((c) => '<kbd class="kb">' + c + '</kbd>').join(' ') + '</span></div>').join('') + '</div>' +
@@ -2247,6 +2330,7 @@ function overlays() {
       ['paused', 'Sam pauses Coding Agent', 'It still holds \u201cShow order totals per day\u201d. The card turns orange and you can take the task back.', 'board', 'See it on the Board'],
       ['check', 'A check fails after you approve', 'Approving #18 stops with an explanation. Nothing goes into your code.', 'review', 'Try it in Review'],
       ['release', 'A release fails its health check', 'Customers stay on the release they had. Ship explains what happened.', 'ship', 'Try it in Ship'],
+      ['preview', 'A preview replacement fails', 'The new build doesn\'t answer on the preview host. The preview keeps showing the last build that worked, and customers never notice.', 'ship', 'Try it in Ship'],
       ['limit', 'A run hits its time limit', 'Sam\'s run stops at 30 minutes and keeps the work so far. Nothing is submitted.', 'k-home', 'Try it as Sam'],
       ['removed', 'An owner removes your agent', 'Marco removes Planner from his workroom. Sam sees why, and the record stays.', 'k-home', 'Try it as Sam'],
       ['spend', 'You near your spend limit', 'Sam has used $21 of a $25 week. Today and Spend warn before runs stop.', 'k-home', 'Try it as Sam'],
@@ -2470,6 +2554,30 @@ document.addEventListener('click', (e) => {
       const tick = setInterval(() => { sh.step += 1; if (sh.step >= 2) { clearInterval(tick); sh.phase = null; sh.live = target; sh.liveDay = 'now'; sh.rolledFrom = redo ? null : from; toast(redo ? 'Release ' + target + ' is live again.' : 'Customers are back on release ' + target + '.'); } render(); }, 900);
       return;
     }
+    case 'prev-ask': S.prev.ask = el.dataset.v; break;
+    case 'prev-cancel': S.prev.ask = null; break;
+    case 'prev-priv': S.prev.priv = !S.prev.priv; break;
+    case 'prev-host-rm': S.prev.host = null; toast('The preview stops answering on that name. Podster removes it.'); break;
+    case 'prev-go': {
+      const P = S.prev; const kind = P.ask; P.ask = null;
+      if (kind === 'delete') { P.deleting = true; P.failed = null; render(); setTimeout(() => { P.deleting = false; P.serving = null; P.host = null; toast('The preview is deleted. Customers keep release ' + S.ship.live + '.'); render(); }, 1800); return; }
+      const id = Number(P.pick); const commit = ({ 16: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', 15: '4f2a9c1e7b3d5a6f8e0c2b4d6f8a1c3e5b7d9f0a' })[id] || 'c0ffee12ab34cd56ef7890ab12cd34ef56ab7890';
+      P.failed = null; P.next = { task: id, commit }; render();
+      setTimeout(() => {
+        if (S.trouble.preview && P.serving) { P.failed = { commit, reason: 'marker_timeout' }; P.next = null; toast('The replacement failed. The preview still shows the last build that worked.'); render(); return; }
+        P.serving = { task: id, commit, build: 'bld_' + (id === 16 ? '2d9f6b18c4e07a35b1f8d2c6e9a04b7d' : '7c1e94a03f5b2d8e6a9c0f1b3d5e7a92'), at: 'just now', storage: id !== 16, by: 'You' }; P.next = null; toast('The preview shows ' + commit.slice(0, 7) + '.'); render();
+      }, 2200);
+      return;
+    }
+    case 'prev-pub-go': { const P = S.prev; P.ask = null; P.pub = Object.assign({}, P.serving); toast('Asked. It waits for the owner or an admin to approve this exact build.'); break; }
+    case 'pub-open': S.modal = 'pub-approve'; break;
+    case 'pub-decline': S.prev.pub = null; S.modal = null; toast('Declined. Nothing was uploaded.'); break;
+    case 'pub-approve': {
+      const b = S.prev.pub.build; S.prev.pub = null; S.modal = null;
+      S.tasks.forEach((t) => { if (t.ship === 'ready') t.ship = 'live'; });
+      S.ship.live = S.ship.top + 1; S.ship.top = S.ship.live; S.ship.liveDay = 'now'; S.ship.rolledFrom = null;
+      toast('Approved. Podster checked the build matches ' + shortBld(b) + ' and put it live as release ' + S.ship.live + '.'); break;
+    }
     case 'release-ask': S.ship.confirm = true; break;
     case 'release-cancel': S.ship.confirm = false; break;
     case 'release-go': {
@@ -2686,6 +2794,7 @@ document.addEventListener('submit', (e) => {
   if (k === 'invite') { S.invite = 'sent'; toast('Invite sent.'); }
   if (k === 'env-save') { const A = S.app; const F = A.form; const n = F.n.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_'); if (!n) { toast('Give it a name, like SHOP_TIMEZONE.'); render(); return; } if (!F.editing && A.vars.some((x) => x.n === n)) { toast(n + ' already exists. Edit it instead.'); render(); return; } if (!F.live.trim() && !(F.editing && F.wasSecret)) { toast('Add a value for the live site.'); render(); return; } const old = A.vars.find((x) => x.n === n); const v = { n, secret: F.secret, live: F.secret ? 'x' : F.live.trim(), prev: F.prevMode === 'other' ? (F.secret ? 'x' : F.prev.trim()) : '', at: F.editing ? 'changed just now' : 'added just now' }; if (old) Object.assign(old, v); else A.vars.push(v); A.form = null; if (n === 'TEXTING_API_KEY') { const it = S.plan.items.find((x) => x.id === 22); if (it) it.why = 'The texting key is ready. Needs someone to build it.'; } toast(n + (F.editing ? ' saved.' : ' added.') + (n === 'TEXTING_API_KEY' ? ' Planner is told the texting service is ready.' : ' It reaches the live site with the next release.')); }
   if (k === 'dom-add') { const A = S.app; const v = A.domDraft.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) { toast('Type a domain, like shop.bakeryonelm.example.'); render(); return; } A.domains.push([v, 'wait']); A.domDraft = ''; toast('Added. Now set the DNS record shown.'); }
+  if (k === 'prev-host') { const P = S.prev; const v = P.hostDraft.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) { toast('Type one hostname, like preview.bakeryonelm.example.'); render(); return; } if (S.app.domains.some((d) => d[0] === v)) { toast('That name is the live site\'s domain. A name can be one or the other.'); render(); return; } P.host = { name: v, proof: 'wait', tls: 'wait' }; P.hostDraft = ''; toast('Asked for the name. Publish the DNS records Podster shows.'); }
   if (k === 'inl-save') { saveInl(); render(); return; }
   if (k === 'pol-host') { const P = S.policy; const v = P.hostDraft.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''); if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) { toast('Type one exact site, like api.example.com.'); render(); return; } if (P.hosts.some((h) => h[0] === v)) { toast(v + ' is already allowed.'); render(); return; } P.hosts.push([v, 'Always']); P.hostDraft = ''; toast(v + ' added. Agents can reach it from the next run.'); }
   if (k === 'start') { S.fresh = { lead: false, created: true, plan: 'none' }; go('fresh'); toast('Bakery preorders is ready.'); return; }
@@ -2735,6 +2844,7 @@ document.addEventListener('change', (e) => {
   if (c === 'spend-cap') { S.spend.cap = e.target.value; render(); }
   if (c === 'spend-run') S.spend.perRun = e.target.value;
   if (c === 'st-preset') { const r = S.start.roles[Number(e.target.dataset.i)]; if (r && PRESETS[e.target.value] && e.target.value !== 'coordinator') r[4] = e.target.value; render(); }
+  if (c === 'prev-pick') { S.prev.pick = e.target.value; render(); }
   if (c === 'pol-sel') { const P = S.policy; P.draft = Object.assign({}, P.draft || {}, { [e.target.dataset.k]: e.target.value }); render(); }
 });
 document.addEventListener('input', (e) => {
@@ -2748,6 +2858,7 @@ document.addEventListener('input', (e) => {
   if (k === 'st-domain') { const had = !!S.start.domain; S.start.domain = e.target.value; if (had !== !!S.start.domain) render(); }
   if (k === 'qcustom') S.q.custom = e.target.value;
   if (k === 'permnote') S.permReq.note = e.target.value;
+  if (k === 'prev-host') S.prev.hostDraft = e.target.value;
   if (k === 'redonote') S.redoNote = e.target.value;
   if (k === 'polhost') S.policy.hostDraft = e.target.value;
   if (k === 'org-name' && S.org.draft) S.org.draft.name = e.target.value;

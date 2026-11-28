@@ -133,6 +133,27 @@ location.hash = '#home'; __t.fromHash(); if (html.indexOf('href="#all"') < 0) th
 __t.S.view = 'board'; location.hash = '#board'; __t.fromHash(); if (html.indexOf('draggable="true"') < 0 || html.indexOf('data-col="planned"') < 0) throw new Error('drag markup');
 __t.S.modal = 'keys'; __t.render(); if (html.indexOf('Keyboard shortcuts') < 0 || html.indexOf('class="kb"') < 0) throw new Error('keys'); __t.S.modal = null;
 console.log('SIX-OK');
+// M8 preview card on Ship: every state, the controls, and the approval dialog for publishing a preview's build
+__t.S.as = 'elena'; __t.S.palette = false; __t.S.modal = null; __t.S.drawer = null; __t.S.ship.phase = null; __t.S.ship.rbAsk = null;
+{ const P = __t.S.prev; const sv = P.serving; const want = (w, why) => { location.hash = '#ship'; __t.fromHash(); for (const x of [].concat(w)) if (html.indexOf(x) < 0) throw new Error('preview ' + why + ': ' + x); };
+  want(['aria-label="Preview"', '>Ready<', 'bld_7c1e94a0', 'title="bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92"', 'Open preview', 'needs access to this room', "Previews aren't production", 'browser storage, which production apps', 'Publish this build', 'Replace preview', 'Delete preview', 'preview.bakeryonelm.example'], 'ready');
+  P.serving = null; P.host = null; want(['>None<', 'Make a preview'], 'none'); if (html.indexOf('Open preview') >= 0 || html.indexOf('Publish this build') >= 0) throw new Error('preview none offers open/publish');
+  P.next = { task: 16, commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13' }; want(['>Building<', "It isn't served yet"], 'building');
+  P.serving = sv; want(['>Replacing<', 'keeps showing'], 'replacing'); if (html.indexOf('data-act="prev-ask"') >= 0) throw new Error('preview controls while replacing');
+  P.next = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'release_marker_missing' }; want(['Replacement failed', 'failed: the new build didn', 'The preview still shows'], 'failed');
+  P.failed = null; P.deleting = true; want(['>Deleting<'], 'deleting'); P.deleting = false;
+  P.serving = null; P.failed = { commit: '9b3e1d7c2a4f6e8d0b1c3a5e7f9d2b4c6a8e0f13', reason: 'release_marker_missing' }; want(['>Failed<', 'Making a preview of', 'Nothing is served'], 'first failed'); if (html.indexOf('Open preview') >= 0) throw new Error('first failed offers open'); P.serving = sv; P.failed = null;
+  for (const [av, w] of [['unavailable', "aren't available on this Podster deployment"], ['off', 'switched off on this Podster deployment'], ['hidden', 'shown only to people with a role']]) { P.avail = av; want([w, 'data-act="prev-avail"'], av); if (html.indexOf('Open preview') >= 0 || html.indexOf('data-act="prev-ask"') >= 0) throw new Error('preview ' + av + ' offers controls'); }
+  P.avail = 'on';
+  P.ask = 'delete'; want(['Delete the preview?'], 'delete ask'); P.ask = 'replace'; want(['Replace the preview with'], 'replace ask'); P.ask = 'publish'; want(['Ask to publish build bld_7c1e94a0'], 'publish ask'); P.ask = null;
+  P.priv = true; want(['Only a public workroom can publish'], 'private'); if (html.indexOf('Publish this build') >= 0) throw new Error('private room offers publish'); P.priv = false;
+  P.pub = Object.assign({}, sv); want(['waits for approval', 'Review and approve'], 'pending');
+  __t.S.modal = 'pub-approve'; __t.render(); for (const x of ['bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92', 'ran in the preview with browser storage and its own origin', 'browser storage, which production apps', 'Approve build bld_7c1e94a0']) if (html.indexOf(x) < 0) throw new Error('approve dialog ' + x); if (html.indexOf('now shows a different build') >= 0) throw new Error('replaced too soon');
+  P.serving = Object.assign({}, sv, { build: 'bld_2d9f6b18c4e07a35b1f8d2c6e9a04b7d' }); __t.render(); if (html.indexOf('The preview now shows a different build.') < 0 || html.indexOf('You are approving bld_7c1e94a03f5b2d8e6a9c0f1b3d5e7a92, which was tested on') < 0) throw new Error('approve replaced');
+  __t.S.modal = null; P.serving = sv; P.pub = null;
+  __t.S.as = 'marco'; want(['Open preview'], 'marco'); if (html.indexOf('disabled aria-disabled="true" title="Only Elena can do this" data-act="prev-ask"') < 0) throw new Error('marco preview locked'); __t.S.as = 'elena';
+  P.host = { name: '<b>x</b>', proof: 'ok', tls: 'ok' }; want(['&lt;b&gt;x&lt;/b&gt;'], 'escaped'); if (html.indexOf('<b>x</b>') >= 0) throw new Error('host not escaped'); P.host = { name: 'preview.bakeryonelm.example', proof: 'ok', tls: 'ok' }; }
+console.log('PREVIEW-OK');
 __t.S.wl = { step: 'email', path: '', via: '' }; location.hash = '#welcome'; __t.fromHash(); for (const p of ['Continue with Google','Continue with GitHub','Continue with X','Email me a link','data-act="wl-oauth"']) if (html.indexOf(p) < 0) throw new Error('signin ' + p);
 __t.S.wl.step = 'xemail'; __t.render(); if (html.indexOf('data-form="xemail"') < 0 || html.indexOf('didn\'t share an email') < 0) throw new Error('x email step');
 location.hash = '#me'; __t.fromHash(); if (html.indexOf('Ways to sign in') < 0 || html.indexOf('data-act="login-on" data-k="github"') < 0 || html.indexOf('data-act="login-ask" data-k="google"') < 0) throw new Error('account logins');

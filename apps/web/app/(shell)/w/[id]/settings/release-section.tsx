@@ -153,7 +153,7 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived,
 
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-sm">
         <Row term="Approval">The owner or an admin approves each release, as a person. An agent never does.</Row>
-        <Row term="Environment">Production only, from merged and reviewed code. There&apos;s no preview.</Row>
+        <Row term="Environment">Production, from merged and reviewed code. A preview, where this deployment has them, is on Ship.</Row>
         <Row term="App address" mono={config.default_host !== null}>
           {config.default_host ? visibleText(config.default_host) : <span className="font-sans text-muted-foreground">None yet. Podster gives the app its address.</span>}
         </Row>

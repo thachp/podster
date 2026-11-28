@@ -6,6 +6,8 @@ import { routerCalls, setUrl } from "@/test/next-navigation";
 import { WHAT_AN_APP_IS } from "../w/[id]/settings/release-model";
 import type { ApprovalItem } from "./attention-model";
 import type { Approvals } from "./load-attention";
+import { PREVIEW_DIFFERENCES, STORAGE_WARNING } from "../w/[id]/ship/preview-model";
+import { parseApprovals } from "./attention-model";
 import { APPROVAL_ENDED, APPROVALS_UNAVAILABLE, explainApprovalRefusal, ReleaseApprovals } from "./release-approvals";
 
 // M6 step 10(b): release approvals in Needs attention, wired to approveRelease and declineRelease.
@@ -131,6 +133,85 @@ describe("release approvals in Needs attention", () => {
     const rules = { rules: { "color-contrast": { enabled: false } } };
     expect((await axe.run(container, rules)).violations.map((v) => v.id)).toEqual([]);
     await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    expect((await axe.run(await screen.findByRole("alertdialog"), rules)).violations.map((v) => v.id)).toEqual([]);
+  });
+});
+
+// M8 step 11: a release made from a preview is approved for exactly the build the dialog showed.
+const BUILD = `bld_${"b7".repeat(16)}`;
+/** Another build in the same answer: the one the preview shows now, and the one a second row was asked for from. */
+const OTHER_BUILD = `bld_${"e9".repeat(16)}`;
+const PREVIEW_REL = `rel_${"c3".repeat(16)}`;
+const fromPreview = (over: Partial<ApprovalItem["release"]> = {}) =>
+  item({ from_preview: PREVIEW_REL, build_id: BUILD, preview_served_at: Date.UTC(2026, 10, 27, 9, 30), storage_warning: false, preview_replaced: false, preview_notice: "server words", storage_notice: null, ...over });
+
+describe("approving a release made from a preview", () => {
+  it("shows the build in full, the commit, when it reached the preview, who asked, and the differences, then sends that build", async () => {
+    const user = userEvent.setup();
+    show(read([fromPreview()]));
+    expect(screen.getByText("bld_b7b7b7b7")).toHaveAttribute("title", BUILD);
+    await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(`exactly build ${BUILD}`);
+    expect(dialog).toHaveTextContent("a1b2c3d4e5f6");
+    expect(dialog).toHaveTextContent("2026-11-27 09:30 UTC");
+    expect(dialog).toHaveTextContent("Rae");
+    expect(dialog).toHaveTextContent(PREVIEW_DIFFERENCES);
+    expect(dialog).not.toHaveTextContent("server words");
+    expect(dialog).not.toHaveTextContent(STORAGE_WARNING);
+    expect(dialog).not.toHaveTextContent("now shows a different build");
+    await user.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ url: `/api/v1/workspaces/ws_1/releases/${REL}/approve`, method: "POST" });
+    expect(JSON.parse(String(sent[0].body))).toEqual({ build: BUILD });
+  });
+
+  it("warns when the preview has moved on, and repeats the storage warning, still approving the release's own build", async () => {
+    const user = userEvent.setup();
+    const other = { ...fromPreview({ id: `rel_${"d4".repeat(16)}`, commit_sha: "f".repeat(40), build_id: OTHER_BUILD }), workspace: "ws_1" };
+    show(read([fromPreview({ preview_replaced: true, storage_warning: true }), other]));
+    expect(screen.getByText(/the preview now shows a different build/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent(`The preview now shows a different build. You are approving ${BUILD}, which was tested on 2026-11-27.`);
+    expect(dialog).toHaveTextContent(STORAGE_WARNING);
+    expect(dialog).not.toHaveTextContent(OTHER_BUILD);
+    await user.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].url).toBe(`/api/v1/workspaces/ws_1/releases/${REL}/approve`);
+    expect(JSON.parse(String(sent[0].body))).toEqual({ build: BUILD });
+    expect(String(sent[0].body)).not.toContain(OTHER_BUILD);
+  });
+
+  it("says release_build_changed inline, and declining a preview's release still sends no body", async () => {
+    const user = userEvent.setup();
+    reply = () => new Response(JSON.stringify({ error: { code: "release_build_changed" } }), { status: 409 });
+    show(read([fromPreview()]));
+    await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Approve" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/isn't the build this release was asked for.*Nothing changed\./);
+    reply = () => new Response(JSON.stringify({ id: REL, state: "declined" }), { status: 200 });
+    await user.click(screen.getByRole("button", { name: "Decline release of commit a1b2c3d4e5f6" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Decline" }));
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1].body).toBeUndefined();
+  });
+
+  it("reads the preview fields for shape, and refuses a preview release with no build", () => {
+    const base = { id: REL, task_id: "tsk_1", commit_sha: SHA, state: "awaiting_approval", requested_by: "per_r", requested_at: 1 };
+    expect(parseApprovals({ releases: [base], more: false })?.releases).toHaveLength(1);
+    expect(parseApprovals({ releases: [{ ...base, from_preview: null, build_id: null }], more: false })?.releases).toHaveLength(1);
+    expect(parseApprovals({ releases: [{ ...base, from_preview: PREVIEW_REL, build_id: BUILD, preview_replaced: true }], more: false })?.releases).toHaveLength(1);
+    expect(parseApprovals({ releases: [{ ...base, from_preview: PREVIEW_REL, build_id: null }], more: false })).toBeNull();
+    expect(parseApprovals({ releases: [{ ...base, from_preview: PREVIEW_REL, build_id: "bld_x" }], more: false })).toBeNull();
+    expect(parseApprovals({ releases: [{ ...base, preview_replaced: "yes" }], more: false })).toBeNull();
+  });
+
+  it("passes axe with the preview dialog open", async () => {
+    const user = userEvent.setup();
+    show(read([fromPreview({ preview_replaced: true, storage_warning: true })]));
+    await user.click(screen.getByRole("button", { name: "Approve release of commit a1b2c3d4e5f6" }));
+    const rules = { rules: { "color-contrast": { enabled: false } } };
     expect((await axe.run(await screen.findByRole("alertdialog"), rules)).violations.map((v) => v.id)).toEqual([]);
   });
 });

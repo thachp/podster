@@ -19,6 +19,7 @@ export const WORKROOM_TABS = [
   { segment: "collaboration", label: "Collaboration" },
   { segment: "activity", label: "Activity" },
   { segment: "artifacts", label: "Artifacts" },
+  { segment: "ship", label: "Ship" },
   { segment: "settings", label: "Settings" },
 ] as const;
 

@@ -84,7 +84,7 @@ describe("AppShell", () => {
 
 describe("workroom tabs", () => {
   it("lists them in order, with Settings only for those who may manage", () => {
-    expect(visibleWorkroomTabs(true).map((tab) => tab.label)).toEqual(["Overview", "Tasks", "Team", "Collaboration", "Activity", "Artifacts", "Settings"]);
+    expect(visibleWorkroomTabs(true).map((tab) => tab.label)).toEqual(["Overview", "Tasks", "Team", "Collaboration", "Activity", "Artifacts", "Ship", "Settings"]);
     expect(visibleWorkroomTabs(false).map((tab) => tab.label)).not.toContain("Settings");
   });
 });
